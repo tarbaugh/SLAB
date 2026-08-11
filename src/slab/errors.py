@@ -176,6 +176,10 @@ class AmbiguousHashError(SlabError):
         )
 
 
+class EngineNotAvailableError(SlabError):
+    """A requested calculation engine is unknown, or known but not installed."""
+
+
 class SerializationError(SlabError):
     """A value could not be serialized for tracing/storage, or decoded back."""
 
