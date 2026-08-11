@@ -15,12 +15,17 @@ Examples:
     >>> store.close()
 """
 
+from slab.artifacts import ArtifactStore
 from slab.errors import (
+    AmbiguousHashError,
     AmbiguousRunIdError,
+    ArtifactExistsError,
+    ArtifactNotFoundError,
     IllegalStatusChangeError,
     IllegalTransitionError,
     RunExistsError,
     RunNotFoundError,
+    RunStateError,
     SchemaVersionError,
     SlabError,
     StorageError,
@@ -38,7 +43,8 @@ from slab.lifecycle import (
     validate_status_change,
     validate_transition,
 )
-from slab.models import Run, Transition, utcnow
+from slab.models import ArtifactRef, ArtifactRole, Run, Transition, utcnow
+from slab.retention import DEFAULT_POLICY, GcReport, RetentionPolicy, StateRule, expire_due, gc
 from slab.store import RunStore, SQLiteRunStore
 
 __version__ = "0.1.0"
@@ -46,24 +52,37 @@ __version__ = "0.1.0"
 __all__ = [
     "ALLOWED_STATUS_CHANGES",
     "ALLOWED_TRANSITIONS",
+    "DEFAULT_POLICY",
     "FORCE_TRANSITIONS",
     "TERMINAL_STATES",
+    "AmbiguousHashError",
     "AmbiguousRunIdError",
+    "ArtifactExistsError",
+    "ArtifactNotFoundError",
+    "ArtifactRef",
+    "ArtifactRole",
+    "ArtifactStore",
     "ExecutionStatus",
+    "GcReport",
     "IllegalStatusChangeError",
     "IllegalTransitionError",
     "LifecycleState",
+    "RetentionPolicy",
     "Run",
     "RunExistsError",
     "RunNotFoundError",
+    "RunStateError",
     "RunStore",
     "SQLiteRunStore",
     "SchemaVersionError",
     "SlabError",
+    "StateRule",
     "StorageError",
     "Transition",
     "__version__",
     "can_transition",
+    "expire_due",
+    "gc",
     "is_terminal",
     "requires_force",
     "utcnow",

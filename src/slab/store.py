@@ -24,34 +24,40 @@ from typing import TYPE_CHECKING, Protocol, Self, cast, runtime_checkable
 
 from slab.errors import (
     AmbiguousRunIdError,
+    ArtifactExistsError,
+    ArtifactNotFoundError,
+    IllegalTransitionError,
     RunExistsError,
     RunNotFoundError,
+    RunStateError,
     SchemaVersionError,
     StorageError,
 )
 from slab.lifecycle import (
     ExecutionStatus,
     LifecycleState,
+    is_terminal,
     requires_force,
     validate_status_change,
     validate_transition,
 )
-from slab.models import Run, Transition, utcnow
+from slab.models import ArtifactRef, ArtifactRole, Run, Transition, utcnow
 
 SCHEMA_VERSION = 1
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
-    id          TEXT PRIMARY KEY,
-    name        TEXT NOT NULL DEFAULT '',
-    state       TEXT NOT NULL,
-    status      TEXT NOT NULL,
-    intent      TEXT,
-    meta        TEXT NOT NULL DEFAULT '{}',
-    created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL,
-    started_at  TEXT,
-    finished_at TEXT
+    id               TEXT PRIMARY KEY,
+    name             TEXT NOT NULL DEFAULT '',
+    state            TEXT NOT NULL,
+    status           TEXT NOT NULL,
+    intent           TEXT,
+    meta             TEXT NOT NULL DEFAULT '{}',
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    state_entered_at TEXT NOT NULL,
+    started_at       TEXT,
+    finished_at      TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_runs_state ON runs(state);
 CREATE INDEX IF NOT EXISTS ix_runs_status ON runs(status);
@@ -67,6 +73,19 @@ CREATE TABLE IF NOT EXISTS transitions (
     at          TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_transitions_run_id ON transitions(run_id);
+CREATE TABLE IF NOT EXISTS artifacts (
+    seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id      TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    role        TEXT NOT NULL,
+    hash        TEXT NOT NULL,
+    size_bytes  INTEGER NOT NULL,
+    recipe      TEXT,
+    created_at  TEXT NOT NULL,
+    UNIQUE (run_id, name)
+);
+CREATE INDEX IF NOT EXISTS ix_artifacts_run_id ON artifacts(run_id);
+CREATE INDEX IF NOT EXISTS ix_artifacts_hash ON artifacts(hash);
 """
 
 
@@ -104,6 +123,7 @@ class RunStore(Protocol):
         actor: str = "user",
         reason: str | None = None,
         force: bool = False,
+        expected: LifecycleState | str | None = None,
     ) -> Run:
         """Atomically move a run to a new lifecycle state."""
         ...
@@ -118,6 +138,29 @@ class RunStore(Protocol):
 
     def history(self, run_id: str) -> list[Transition]:
         """Return the run's lifecycle transitions, oldest first."""
+        ...
+
+    def add_artifact(
+        self,
+        run_id: str,
+        *,
+        name: str,
+        role: ArtifactRole | str,
+        hash: str,
+        size_bytes: int,
+        recipe: dict[str, object] | None = None,
+    ) -> ArtifactRef:
+        """Record an artifact reference on a run."""
+        ...
+
+    def list_artifacts(
+        self, run_id: str, *, role: ArtifactRole | str | None = None
+    ) -> list[ArtifactRef]:
+        """List a run's artifact references, oldest first."""
+        ...
+
+    def get_artifact(self, run_id: str, name: str) -> ArtifactRef:
+        """Fetch one of the run's artifact references by name."""
         ...
 
     def close(self) -> None:
@@ -203,7 +246,8 @@ class SQLiteRunStore:
             try:
                 conn.execute(
                     "INSERT INTO runs (id, name, state, status, intent, meta, created_at,"
-                    " updated_at, started_at, finished_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    " updated_at, state_entered_at, started_at, finished_at)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         run.id,
                         run.name,
@@ -213,6 +257,7 @@ class SQLiteRunStore:
                         meta_json,
                         run.created_at.isoformat(),
                         run.updated_at.isoformat(),
+                        run.state_entered_at.isoformat(),
                         _fmt_dt(run.started_at),
                         _fmt_dt(run.finished_at),
                     ),
@@ -229,40 +274,52 @@ class SQLiteRunStore:
         actor: str = "user",
         reason: str | None = None,
         force: bool = False,
+        expected: LifecycleState | str | None = None,
     ) -> Run:
         """Atomically move a run to *to_state*; return the updated snapshot.
 
         The run's current state is re-read inside the transaction and the
         transition validated against it, so racing callers serialize: one wins,
         the rest get :class:`~slab.errors.IllegalTransitionError` describing the
-        *actual* current state.
+        *actual* current state. Pass ``expected`` for compare-and-swap semantics:
+        the transition is refused unless the run is still in that state — the
+        right tool for automated sweeps deciding from a possibly-stale listing.
 
         Every transition is recorded with ``actor``, ``reason``, and a ``forced``
         flag. ``forced`` is true only when the transition needed ``force=True``
         (a force-promotion) — passing ``force=True`` on a normally-legal
-        transition records ``forced=False``.
+        transition records ``forced=False``. The run's ``state_entered_at``
+        clock resets, which is what retention TTLs anchor to.
 
         Examples:
             >>> store = SQLiteRunStore(":memory:")
             >>> r = store.create(Run(name="demo"))
             >>> store.transition(r.id, "verified", actor="checks", reason="fmax<0.05").state.value
             'verified'
-            >>> store.transition(r.id, LifecycleState.PROMOTED).state.value
+            >>> store.transition(r.id, LifecycleState.PROMOTED, expected="verified").state.value
             'promoted'
             >>> [t.to_state.value for t in store.history(r.id)]
             ['verified', 'promoted']
             >>> store.close()
         """
         to = LifecycleState(to_state)
+        want = None if expected is None else LifecycleState(expected)
         with self._txn() as conn:
             rid = self._resolve(run_id)
             row = conn.execute("SELECT state FROM runs WHERE id = ?", (rid,)).fetchone()
             current = LifecycleState(row["state"])
+            if want is not None and current is not want:
+                raise IllegalTransitionError(
+                    current,
+                    to,
+                    detail=f"expected state {want.value!r}, found {current.value!r}",
+                )
             validate_transition(current, to, force=force)
             now = utcnow().isoformat()
             cur = conn.execute(
-                "UPDATE runs SET state = ?, updated_at = ? WHERE id = ? AND state = ?",
-                (to.value, now, rid, current.value),
+                "UPDATE runs SET state = ?, updated_at = ?, state_entered_at = ?"
+                " WHERE id = ? AND state = ?",
+                (to.value, now, now, rid, current.value),
             )
             if cur.rowcount != 1:  # pragma: no cover - unreachable: _txn serializes writers
                 raise StorageError(f"concurrent modification of run {rid}")
@@ -347,7 +404,131 @@ class SQLiteRunStore:
             )
             return self._get_exact(conn, rid)
 
+    def add_artifact(
+        self,
+        run_id: str,
+        *,
+        name: str,
+        role: ArtifactRole | str,
+        hash: str,
+        size_bytes: int,
+        recipe: dict[str, object] | None = None,
+    ) -> ArtifactRef:
+        """Record an artifact reference on a run; return it.
+
+        This records *metadata only* — put the bytes in an
+        :class:`~slab.artifacts.ArtifactStore` first and pass the returned hash.
+        The ``recipe`` (inputs, code and engine versions, parameters) is what
+        makes hash-and-discard honest: enough to recompute the artifact after
+        its bytes are dropped. Names are unique within a run.
+
+        Raises:
+            ArtifactExistsError: The run already has an artifact with this name.
+            RunStateError: The run is in a terminal state (expired/archived).
+            StorageError: ``recipe`` is not JSON-serializable.
+
+        Examples:
+            >>> store = SQLiteRunStore(":memory:")
+            >>> r = store.create(Run(name="demo"))
+            >>> ref = store.add_artifact(
+            ...     r.id, name="relaxed.xyz", role="terminal",
+            ...     hash="ab" * 32, size_bytes=1234,
+            ...     recipe={"task": "relax", "engine": "mace==0.3.5"},
+            ... )
+            >>> ref.role.value
+            'terminal'
+            >>> store.close()
+        """
+        try:
+            recipe_json = None if recipe is None else json.dumps(recipe, sort_keys=True)
+        except TypeError as e:
+            raise StorageError(f"artifact recipe must be JSON-serializable: {e}") from e
+        with self._txn() as conn:
+            rid = self._resolve(run_id)
+            row = conn.execute("SELECT state FROM runs WHERE id = ?", (rid,)).fetchone()
+            state = LifecycleState(row["state"])
+            if is_terminal(state):
+                raise RunStateError(rid, state, "add artifacts to")
+            ref = ArtifactRef(
+                run_id=rid,
+                name=name,
+                role=ArtifactRole(role),
+                hash=hash,
+                size_bytes=size_bytes,
+                recipe=recipe,
+            )
+            try:
+                conn.execute(
+                    "INSERT INTO artifacts (run_id, name, role, hash, size_bytes, recipe,"
+                    " created_at) VALUES (?,?,?,?,?,?,?)",
+                    (
+                        rid,
+                        ref.name,
+                        ref.role.value,
+                        ref.hash,
+                        ref.size_bytes,
+                        recipe_json,
+                        ref.created_at.isoformat(),
+                    ),
+                )
+            except sqlite3.IntegrityError as e:
+                raise ArtifactExistsError(rid, name) from e
+        return ref
+
     # -- reads ------------------------------------------------------------------------
+
+    def list_artifacts(
+        self, run_id: str, *, role: ArtifactRole | str | None = None
+    ) -> list[ArtifactRef]:
+        """List a run's artifact references, oldest first, optionally by role.
+
+        References persist even after their bytes are discarded; check byte
+        availability with ``artifact_store.has(ref.hash)``.
+
+        Examples:
+            >>> store = SQLiteRunStore(":memory:")
+            >>> r = store.create(Run())
+            >>> _ = store.add_artifact(r.id, name="out", role="terminal",
+            ...                        hash="cd" * 32, size_bytes=10)
+            >>> [a.name for a in store.list_artifacts(r.id, role="terminal")]
+            ['out']
+            >>> store.list_artifacts(r.id, role="intermediate")
+            []
+            >>> store.close()
+        """
+        sql = "SELECT * FROM artifacts WHERE run_id = ?"
+        with self._lock:
+            rid = self._resolve(run_id)
+            params: list[object] = [rid]
+            if role is not None:
+                sql += " AND role = ?"
+                params.append(ArtifactRole(role).value)
+            rows = self._conn.execute(sql + " ORDER BY seq", params).fetchall()
+        return [_row_to_artifact(row) for row in rows]
+
+    def get_artifact(self, run_id: str, name: str) -> ArtifactRef:
+        """Fetch one of the run's artifact references by name.
+
+        Raises:
+            ArtifactNotFoundError: The run has no artifact with this name.
+
+        Examples:
+            >>> store = SQLiteRunStore(":memory:")
+            >>> r = store.create(Run())
+            >>> _ = store.add_artifact(r.id, name="bands.json", role="terminal",
+            ...                        hash="ef" * 32, size_bytes=42)
+            >>> store.get_artifact(r.id, "bands.json").size_bytes
+            42
+            >>> store.close()
+        """
+        with self._lock:
+            rid = self._resolve(run_id)
+            row = self._conn.execute(
+                "SELECT * FROM artifacts WHERE run_id = ? AND name = ?", (rid, name)
+            ).fetchone()
+        if row is None:
+            raise ArtifactNotFoundError.for_name(rid, name)
+        return _row_to_artifact(row)
 
     def get(self, run_id: str) -> Run:
         """Fetch a run by full id or unique prefix (git-style).
@@ -520,8 +701,22 @@ def _row_to_run(row: sqlite3.Row) -> Run:
         meta=json.loads(row["meta"]),
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
+        state_entered_at=datetime.fromisoformat(row["state_entered_at"]),
         started_at=_parse_dt(row["started_at"]),
         finished_at=_parse_dt(row["finished_at"]),
+    )
+
+
+def _row_to_artifact(row: sqlite3.Row) -> ArtifactRef:
+    recipe = row["recipe"]
+    return ArtifactRef(
+        run_id=row["run_id"],
+        name=row["name"],
+        role=ArtifactRole(row["role"]),
+        hash=row["hash"],
+        size_bytes=row["size_bytes"],
+        recipe=None if recipe is None else json.loads(recipe),
+        created_at=datetime.fromisoformat(row["created_at"]),
     )
 
 

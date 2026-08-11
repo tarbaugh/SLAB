@@ -8,6 +8,7 @@ rather than updating objects in place.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -72,6 +73,8 @@ class Run(BaseModel):
         intent: Free-text narrative provenance — the stated goal of the run.
         meta: Small JSON-serializable extras; not for bulk data.
         created_at / updated_at: Aware UTC timestamps, maintained by the store.
+        state_entered_at: When the run entered its current lifecycle state —
+            the anchor for retention TTLs (a run's clock restarts on transition).
         started_at / finished_at: Execution timestamps, stamped by the store on
             status changes (a cache-served run may finish without ever starting).
 
@@ -95,18 +98,63 @@ class Run(BaseModel):
     meta: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+    state_entered_at: datetime = Field(default_factory=utcnow)
     started_at: datetime | None = None
     finished_at: datetime | None = None
 
     @model_validator(mode="before")
     @classmethod
     def _sync_timestamps(cls, data: Any) -> Any:
-        """Default ``updated_at`` to ``created_at`` so fresh runs carry identical stamps."""
+        """Default ``updated_at``/``state_entered_at`` to ``created_at`` at birth."""
         if isinstance(data, dict):
             created = data.get("created_at")
             if created is None:
                 created = utcnow()
                 data = {**data, "created_at": created}
-            if data.get("updated_at") is None:
-                data = {**data, "updated_at": created}
+            for key in ("updated_at", "state_entered_at"):
+                if data.get(key) is None:
+                    data = {**data, key: created}
         return data
+
+
+class ArtifactRole(StrEnum):
+    """Role of an artifact within its run — this is what retention tiers on.
+
+    - ``TERMINAL``: a declared final output of the run (relaxed structure, band
+      structure, report). Full bytes are retained for promoted runs.
+    - ``INTERMEDIATE``: a reproducible byproduct (wavefunctions, trajectories,
+      scratch files). Hash + recipe are always kept; bytes are droppable per
+      policy — anything can be recomputed on demand.
+    """
+
+    TERMINAL = "terminal"
+    INTERMEDIATE = "intermediate"
+
+
+class ArtifactRef(BaseModel):
+    """A run's reference to a content-addressed artifact. Immutable.
+
+    The reference (this record, in the run database) and the bytes (in the
+    :class:`~slab.artifacts.ArtifactStore`) have independent lifetimes: dropping
+    bytes per retention policy never deletes the reference, so the hash and the
+    recipe to recompute the artifact survive. Whether bytes are currently
+    available is a property of the artifact store: ``artifact_store.has(ref.hash)``.
+
+    Examples:
+        >>> ref = ArtifactRef(
+        ...     run_id="abc", name="relaxed.xyz", role="terminal",
+        ...     hash="c0ffee" + "0" * 58, size_bytes=1234,
+        ... )
+        >>> ref.role
+        <ArtifactRole.TERMINAL: 'terminal'>
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    run_id: str
+    name: str = Field(min_length=1)
+    role: ArtifactRole
+    hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size_bytes: int = Field(ge=0)
+    recipe: dict[str, Any] | None = None
+    created_at: datetime = Field(default_factory=utcnow)

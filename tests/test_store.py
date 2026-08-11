@@ -5,9 +5,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from slab import (
     AmbiguousRunIdError,
+    ArtifactExistsError,
+    ArtifactNotFoundError,
+    ArtifactRole,
     ExecutionStatus,
     IllegalStatusChangeError,
     IllegalTransitionError,
@@ -15,6 +19,7 @@ from slab import (
     Run,
     RunExistsError,
     RunNotFoundError,
+    RunStateError,
     RunStore,
     SchemaVersionError,
     SQLiteRunStore,
@@ -406,3 +411,124 @@ def test_datetime_roundtrip_microseconds(store: SQLiteRunStore) -> None:
     loaded = store.get(run.id)
     assert loaded.created_at == created
     assert loaded.updated_at == created
+
+
+# -- state_entered_at ------------------------------------------------------------------
+
+
+def test_state_entered_at_born_equal_to_created_at(store: SQLiteRunStore) -> None:
+    run = store.create(Run())
+    assert store.get(run.id).state_entered_at == run.created_at
+
+
+def test_transition_resets_state_clock(store: SQLiteRunStore) -> None:
+    run = store.create(Run(created_at=utcnow() - timedelta(days=10)))
+    updated = store.transition(run.id, V)
+    assert updated.state_entered_at > run.state_entered_at
+    assert updated.state_entered_at == updated.updated_at
+
+
+def test_set_intent_and_status_do_not_touch_state_clock(store: SQLiteRunStore) -> None:
+    run = store.create(Run())
+    store.set_intent(run.id, "note")
+    store.set_status(run.id, ExecutionStatus.RUNNING)
+    assert store.get(run.id).state_entered_at == run.state_entered_at
+
+
+# -- transition expected= guard --------------------------------------------------------
+
+
+def test_transition_with_matching_expected(store: SQLiteRunStore) -> None:
+    run = store.create(Run())
+    assert store.transition(run.id, V, expected=Q).state is V
+    assert store.transition(run.id, P, expected="verified").state is P
+
+
+def test_transition_with_stale_expected_refused(store: SQLiteRunStore) -> None:
+    run = store.create(Run())
+    store.transition(run.id, V)
+    with pytest.raises(IllegalTransitionError, match="expected state 'quarantined'") as excinfo:
+        store.transition(run.id, E, expected=Q)
+    assert excinfo.value.from_state is V  # reports the actual state found
+    assert store.get(run.id).state is V
+    assert len(store.history(run.id)) == 1  # refused attempt left no trace
+
+
+# -- artifact references ---------------------------------------------------------------
+
+H1 = "ab" * 32
+H2 = "cd" * 32
+
+
+def test_add_and_get_artifact_roundtrip(store: SQLiteRunStore) -> None:
+    run = store.create(Run())
+    recipe = {"task": "relax", "engine": "mace==0.3.5", "fmax": 0.05}
+    ref = store.add_artifact(
+        run.id, name="relaxed.xyz", role="terminal", hash=H1, size_bytes=1234, recipe=recipe
+    )
+    assert ref.run_id == run.id
+    assert ref.role is ArtifactRole.TERMINAL
+    loaded = store.get_artifact(run.id, "relaxed.xyz")
+    assert loaded == ref
+    assert loaded.recipe == recipe
+
+
+def test_list_artifacts_ordered_and_filtered(store: SQLiteRunStore) -> None:
+    run = store.create(Run())
+    store.add_artifact(run.id, name="first", role="intermediate", hash=H1, size_bytes=1)
+    store.add_artifact(run.id, name="second", role="terminal", hash=H2, size_bytes=2)
+    assert [a.name for a in store.list_artifacts(run.id)] == ["first", "second"]
+    assert [a.name for a in store.list_artifacts(run.id, role=ArtifactRole.TERMINAL)] == ["second"]
+
+
+def test_artifact_names_unique_per_run_but_not_across_runs(store: SQLiteRunStore) -> None:
+    run_a = store.create(Run())
+    run_b = store.create(Run())
+    store.add_artifact(run_a.id, name="out", role="terminal", hash=H1, size_bytes=1)
+    store.add_artifact(run_b.id, name="out", role="terminal", hash=H1, size_bytes=1)  # fine
+    with pytest.raises(ArtifactExistsError, match="already has an artifact"):
+        store.add_artifact(run_a.id, name="out", role="intermediate", hash=H2, size_bytes=2)
+
+
+def test_add_artifact_to_terminal_run_refused(store: SQLiteRunStore) -> None:
+    run = store.create(Run())
+    store.transition(run.id, E)
+    with pytest.raises(RunStateError, match="expired"):
+        store.add_artifact(run.id, name="late", role="terminal", hash=H1, size_bytes=1)
+
+
+def test_add_artifact_validates_hash_and_role(store: SQLiteRunStore) -> None:
+    run = store.create(Run())
+    with pytest.raises(ValidationError):
+        store.add_artifact(run.id, name="x", role="terminal", hash="nothex", size_bytes=1)
+    with pytest.raises(ValueError, match="ArtifactRole"):
+        store.add_artifact(run.id, name="x", role="scratch", hash=H1, size_bytes=1)
+
+
+def test_add_artifact_rejects_unserializable_recipe(store: SQLiteRunStore) -> None:
+    run = store.create(Run())
+    with pytest.raises(StorageError, match="JSON-serializable"):
+        store.add_artifact(
+            run.id, name="x", role="terminal", hash=H1, size_bytes=1, recipe={"f": object()}
+        )
+
+
+def test_get_artifact_unknown_name(store: SQLiteRunStore) -> None:
+    run = store.create(Run())
+    with pytest.raises(ArtifactNotFoundError, match="no artifact named"):
+        store.get_artifact(run.id, "nope")
+
+
+def test_artifacts_accept_run_prefix(store: SQLiteRunStore) -> None:
+    run = store.create(Run())
+    store.add_artifact(run.id[:8], name="out", role="terminal", hash=H1, size_bytes=1)
+    assert store.get_artifact(run.id[:8], "out").hash == H1
+    assert len(store.list_artifacts(run.id[:8])) == 1
+
+
+def test_artifacts_persist_across_reopen(db_path: Path) -> None:
+    with SQLiteRunStore(db_path) as s1:
+        run = s1.create(Run())
+        s1.add_artifact(run.id, name="out", role="terminal", hash=H1, size_bytes=7)
+    with SQLiteRunStore(db_path) as s2:
+        assert s2.get_artifact(run.id, "out").size_bytes == 7

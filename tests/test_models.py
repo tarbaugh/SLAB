@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 
-from slab import ExecutionStatus, LifecycleState, Run, Transition, utcnow
+from slab import ArtifactRef, ArtifactRole, ExecutionStatus, LifecycleState, Run, Transition, utcnow
 
 
 def test_run_defaults() -> None:
@@ -67,3 +67,33 @@ def test_transition_defaults() -> None:
 def test_utcnow_is_aware_utc() -> None:
     now = utcnow()
     assert now.tzinfo is UTC
+
+
+def test_run_state_entered_at_defaults_to_created_at() -> None:
+    past = datetime(2026, 1, 1, tzinfo=UTC)
+    assert Run(created_at=past).state_entered_at == past
+
+
+def test_artifact_ref_valid() -> None:
+    ref = ArtifactRef(run_id="r", name="out.xyz", role="terminal", hash="ab" * 32, size_bytes=0)
+    assert ref.role is ArtifactRole.TERMINAL
+    assert ref.recipe is None
+
+
+@pytest.mark.parametrize("bad_hash", ["", "ab", "AB" * 32, "g" * 64, "0" * 63])
+def test_artifact_ref_rejects_bad_hashes(bad_hash: str) -> None:
+    with pytest.raises(ValidationError):
+        ArtifactRef(run_id="r", name="x", role="terminal", hash=bad_hash, size_bytes=1)
+
+
+def test_artifact_ref_rejects_empty_name_and_negative_size() -> None:
+    with pytest.raises(ValidationError):
+        ArtifactRef(run_id="r", name="", role="terminal", hash="ab" * 32, size_bytes=1)
+    with pytest.raises(ValidationError):
+        ArtifactRef(run_id="r", name="x", role="terminal", hash="ab" * 32, size_bytes=-1)
+
+
+def test_artifact_ref_is_frozen() -> None:
+    ref = ArtifactRef(run_id="r", name="x", role="intermediate", hash="ab" * 32, size_bytes=1)
+    with pytest.raises(ValidationError):
+        ref.name = "y"  # type: ignore[misc]

@@ -8,7 +8,7 @@ what was attempted, why it was refused, and what would be allowed instead.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 if TYPE_CHECKING:
     from slab.lifecycle import ExecutionStatus, LifecycleState
@@ -99,6 +99,81 @@ class RunExistsError(SlabError):
     def __init__(self, run_id: str) -> None:
         self.run_id = run_id
         super().__init__(f"run {run_id!r} already exists")
+
+
+class RunStateError(SlabError):
+    """An operation that is not allowed in the run's current lifecycle state."""
+
+    def __init__(self, run_id: str, state: LifecycleState, operation: str) -> None:
+        self.run_id = run_id
+        self.state = state
+        self.operation = operation
+        super().__init__(
+            f"cannot {operation} run {run_id!r}: its lifecycle state is {state.value!r}"
+        )
+
+
+class ArtifactNotFoundError(SlabError):
+    """An artifact lookup failed — by content hash, or by name within a run.
+
+    Attributes:
+        digest: The content hash looked up, if the lookup was by hash.
+        run_id / name: The run and artifact name, if the lookup was by name.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        digest: str | None = None,
+        run_id: str | None = None,
+        name: str | None = None,
+    ) -> None:
+        self.digest = digest
+        self.run_id = run_id
+        self.name = name
+        super().__init__(message)
+
+    @classmethod
+    def for_hash(cls, digest: str) -> Self:
+        """Bytes for *digest* are not in the artifact store."""
+        return cls(
+            f"no bytes stored for hash {digest!r} (never stored, or discarded by "
+            f"retention policy; the hash and recipe may still be recorded on runs)",
+            digest=digest,
+        )
+
+    @classmethod
+    def for_name(cls, run_id: str, name: str) -> Self:
+        """Run *run_id* has no artifact named *name*."""
+        return cls(f"run {run_id!r} has no artifact named {name!r}", run_id=run_id, name=name)
+
+
+class ArtifactExistsError(SlabError):
+    """The run already has an artifact with this name."""
+
+    def __init__(self, run_id: str, name: str) -> None:
+        self.run_id = run_id
+        self.name = name
+        super().__init__(f"run {run_id!r} already has an artifact named {name!r}")
+
+
+class AmbiguousHashError(SlabError):
+    """A hash prefix matches more than one stored artifact.
+
+    Attributes:
+        prefix: The prefix that was looked up.
+        matches: Matching content hashes.
+    """
+
+    def __init__(self, prefix: str, matches: Sequence[str]) -> None:
+        self.prefix = prefix
+        self.matches = list(matches)
+        shown = ", ".join(m[:12] for m in self.matches[:5])
+        more = ", ..." if len(self.matches) > 5 else ""
+        super().__init__(
+            f"hash prefix {prefix!r} is ambiguous ({len(self.matches)} matches): {shown}{more}"
+        )
 
 
 class StorageError(SlabError):
