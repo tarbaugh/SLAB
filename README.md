@@ -146,6 +146,32 @@ $ slab show 01kzs2m7s1                      $ slab show 01kzs2mad3   # expired
 Workspace resolution: `-w/--workspace` flag > `$SLAB_WORKSPACE` > `./.slab`.
 Retention policy: `--policy file.json` > `<workspace>/policy.json` > defaults.
 
+## Failure is evidence, not a status
+
+AiiDA-style engines handle errors through predefined protocols (exit codes,
+automated restart handlers). SLAB's user is an LLM agent that can devise a
+*niche* correction — shrink the perturbation, switch the engine, loosen a
+threshold — **if** it can see what actually happened. So SLAB's contract is
+evidence delivery, not error protocol:
+
+- Failed runs and tasks carry a structured `failure` record: exception type,
+  message, and a traceback that keeps the entry point and the failure site but
+  elides deep middles (information-rich, token-bounded).
+- Tasks annotate their exceptions with diagnostics via plain
+  `Exception.add_note` — `relax` notes the completed step count and the last
+  trajectory frame's energy and residual force — and the notes land in the
+  record, separately listed so an agent can act without parsing the traceback.
+- The scratch data that explains a failure survives it: a mid-optimization
+  crash keeps the partial trajectory as a `relax-failed.traj` artifact.
+  Retention makes this free — failed runs sit in quarantine with a TTL, so
+  diagnostics self-clean instead of accumulating forever.
+- Checks store the `observed`/`expected` values their assertions compared, and
+  `slab show --json` / MCP `show_run` return them — the numbers a correction
+  is computed from ("fmax was 0.062 against 0.05" → rerun with more steps).
+
+Listings stay compact (a one-line `error` per run); the full evidence is
+fetched per-run by `show`.
+
 ## Retention policy as data
 
 ```json
@@ -267,7 +293,7 @@ protocol channel.
 MVP vertical slice, working end to end: lifecycle state machine,
 content-addressed artifact store with tiered retention, define-by-run tracing
 with content-hash caching, verification hooks, MACE/ASE relaxation task, CLI,
-MCP server. 450 tests (including every docstring example, executed as
+MCP server. 548 tests (including every docstring example, executed as
 doctests), ~100% coverage on the load-bearing core, mypy `--strict`, plus an
 adversarial multi-agent review pass whose confirmed findings are regression
 tests. The `RunStore` protocol is the seam for Postgres; the backend factory

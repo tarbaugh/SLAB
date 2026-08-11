@@ -77,7 +77,11 @@ class Run(BaseModel):
             the anchor for retention TTLs (a run's clock restarts on transition).
         started_at / finished_at: Execution timestamps, stamped by the store on
             status changes (a cache-served run may finish without ever starting).
-        error: Failure message, recorded when the status is set to ``failed``.
+        error: One-line failure message, recorded when the status is set to
+            ``failed`` — the compact form for listings.
+        failure: Structured failure evidence (exception type, message, trimmed
+            traceback, diagnostic notes — see :func:`slab.errors.failure_record`),
+            recorded alongside ``error``. The full form, fetched by ``show``.
 
     Examples:
         >>> run = Run(name="si-relax", intent="baseline lattice constant")
@@ -103,6 +107,7 @@ class Run(BaseModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     error: str | None = None
+    failure: dict[str, Any] | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -185,6 +190,9 @@ class TaskRecord(BaseModel):
         inputs: Bound argument name -> content hash.
         outputs: ``"return"`` (or ``"return[i]"`` for tuple returns) -> content hash.
         cache_key: Fingerprint of (code identity, engine versions, input hashes).
+        error: One-line failure message for ``failed`` tasks.
+        failure: Structured failure evidence for ``failed`` tasks
+            (see :func:`slab.errors.failure_record`).
 
     Examples:
         >>> rec = TaskRecord(
@@ -209,6 +217,7 @@ class TaskRecord(BaseModel):
     inputs: dict[str, str] = Field(default_factory=dict)
     outputs: dict[str, str] = Field(default_factory=dict)
     error: str | None = None
+    failure: dict[str, Any] | None = None
     started_at: datetime
     finished_at: datetime | None = None
 

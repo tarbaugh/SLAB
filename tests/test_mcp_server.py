@@ -125,3 +125,26 @@ def test_tool_errors_surface_helpfully(root: Path) -> None:
     server = build_server(root)
     with pytest.raises(Exception, match="no run matches"):
         _call(server, "show_run", {"run_id": "zzzz"})
+
+
+def test_failure_evidence_reaches_the_agent(root: Path, tmp_path: Path) -> None:
+    """An agent's debugging loop: launch fails -> the result carries the failure
+    record -> show_run exposes the failed task's evidence too."""
+    script = tmp_path / "boom.py"
+    script.write_text(
+        "from slab import task\n"
+        "@task\ndef explode():\n"
+        "    e = RuntimeError('SCF diverged')\n"
+        "    e.add_note('last residual: 3.2e-2')\n"
+        "    raise e\n"
+        "explode()\n"
+    )
+    server = build_server(root)
+    result = _call(server, "launch_workflow", {"script_path": str(script), "intent": "doomed"})
+    assert result["status"] == "failed"
+    assert result["failure"]["type"] == "RuntimeError"
+    assert "SCF diverged" in result["failure"]["traceback"]
+
+    details = _call(server, "show_run", {"run_id": result["run_id"]})
+    (task_entry,) = details["tasks"]
+    assert task_entry["failure"]["notes"] == ["last residual: 3.2e-2"]

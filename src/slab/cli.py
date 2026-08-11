@@ -108,7 +108,10 @@ def run(
         )
     except (SlabError, FileNotFoundError) as e:
         _fail(str(e))
-    if result.get("traceback"):
+    failure = result.get("failure")
+    if failure:
+        typer.echo(failure["traceback"], err=True)
+    elif result.get("traceback"):
         typer.echo(result["traceback"], err=True, nl=False)
     typer.echo(
         f"run {result['run_id']}  {result['name']}  "
@@ -116,7 +119,9 @@ def run(
         f"checks={result['checks_passed']}/{result['checks_total']} "
         f"tasks={result['tasks_recorded']}"
     )
-    if result["status"] == "failed":
+    # Anything but a clean completion exits nonzero — including a run left at
+    # status 'running' because recording its failure itself failed.
+    if result["status"] != "completed":
         raise typer.Exit(code=1)
 
 
@@ -176,10 +181,18 @@ def show(
 def _render_details(details: dict[str, object]) -> None:
     run = details["run"]
     assert isinstance(run, dict)
+    tasks = details["tasks"]
+    assert isinstance(tasks, list)
     typer.echo(f"run {run['id']}  {run['name']}")
     typer.echo(f"  state:   {run['state']}    status: {run['status']}")
     if run.get("error"):
         typer.echo(f"  error:   {run['error']}")
+    # The run's failure renders here unless a failed task carries the SAME
+    # exception (it propagated; that task renders it below). A task failure
+    # the script caught before failing differently must not hide the run's.
+    run_failure = run.get("failure")
+    if isinstance(run_failure, dict) and not _explained_by_task(run_failure, tasks):
+        _echo_failure(run_failure, indent="    ")
     typer.echo(f"  created: {run['created_at']}")
     if run.get("intent"):
         typer.echo(f"  intent:  {run['intent']}")
@@ -193,8 +206,6 @@ def _render_details(details: dict[str, object]) -> None:
             mark = "+" if c["passed"] else "x"
             typer.echo(f"    [{mark}] {c['name']}: {c['message']}")
 
-    tasks = details["tasks"]
-    assert isinstance(tasks, list)
     if tasks:
         typer.echo("  tasks:")
         for position, t in enumerate(tasks, start=1):
@@ -202,6 +213,8 @@ def _render_details(details: dict[str, object]) -> None:
             duration = "" if t["duration_s"] is None else f"  {t['duration_s']}s"
             error = "" if not t["error"] else f"  error: {t['error']}"
             typer.echo(f"    {position}. {t['name']}  {t['status']}{cached}{duration}{error}")
+            if t.get("failure"):
+                _echo_failure(t["failure"], indent="       ")
 
     artifacts = details["artifacts"]
     assert isinstance(artifacts, list)
@@ -221,6 +234,24 @@ def _render_details(details: dict[str, object]) -> None:
             forced = " (forced)" if h["forced"] else ""
             reason = "" if not h["reason"] else f": {h['reason']}"
             typer.echo(f"    {h['from']} -> {h['to']}{forced}  by {h['actor']}{reason}")
+
+
+def _explained_by_task(run_failure: dict[str, object], tasks: list[dict[str, object]]) -> bool:
+    """True if a failed task carries the same exception as the run failure."""
+    return any(
+        (f := t.get("failure")) is not None
+        and isinstance(f, dict)
+        and f.get("type") == run_failure.get("type")
+        and f.get("message") == run_failure.get("message")
+        for t in tasks
+    )
+
+
+def _echo_failure(failure: object, indent: str) -> None:
+    """Print a failure record's traceback, indented (notes appear at its end)."""
+    assert isinstance(failure, dict)
+    for line in str(failure.get("traceback") or "").splitlines():
+        typer.echo(f"{indent}{line}")
 
 
 @app.command()

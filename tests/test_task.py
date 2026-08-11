@@ -126,9 +126,29 @@ def test_task_failure_recorded_and_raises(ws: Workspace) -> None:
     failed, ok = ws.runs.list_tasks(run.id)
     assert failed.status is ExecutionStatus.FAILED
     assert failed.error == "RuntimeError: SCF diverged"
+    assert failed.failure["type"] == "RuntimeError"
+    assert 'raise RuntimeError("SCF diverged")' in failed.failure["traceback"]
     assert failed.outputs == {}
     assert ok.status is ExecutionStatus.COMPLETED
+    assert ok.failure is None
     assert ws.runs.get(run.id).status is ExecutionStatus.COMPLETED
+
+
+def test_task_failure_notes_reach_the_record(ws: Workspace) -> None:
+    """A task that annotates its exception (add_note) gets the notes stored —
+    the mechanism relax uses to attach last-known-state diagnostics."""
+
+    @task
+    def annotated_explosion() -> None:
+        error = RuntimeError("forces exploded")
+        error.add_note("atom 17: |F| = 812.4 eV/Å")
+        raise error
+
+    with ws.start_run() as run, pytest.raises(RuntimeError):
+        annotated_explosion()
+    (record,) = ws.runs.list_tasks(run.id)
+    assert record.failure["notes"] == ["atom 17: |F| = 812.4 eV/Å"]
+    assert "atom 17" in record.failure["traceback"]  # notes ride the traceback too
 
 
 def test_unserializable_output_fails_the_task(ws: Workspace) -> None:

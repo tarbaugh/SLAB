@@ -368,6 +368,40 @@ def test_illegal_status_change_rejected_and_unchanged(store: SQLiteRunStore) -> 
     assert store.get(run.id).status is ExecutionStatus.COMPLETED
 
 
+def test_failure_record_roundtrips_on_runs_and_tasks(store: SQLiteRunStore) -> None:
+    record = {"type": "RuntimeError", "message": "boom", "traceback": "Traceback...\nboom"}
+    run = store.create(Run())
+    failed = store.set_status(run.id, "failed", error="RuntimeError: boom", failure=record)
+    assert failed.failure == record
+    assert store.get(run.id).failure == record
+
+    live = store.add_task(
+        TaskRecord(
+            run_id=run.id, name="relax", status="running", cache_key="ab" * 32,
+            started_at=utcnow(),
+        )
+    )
+    done = store.update_task(live.seq, status="failed", error="boom", failure=record)
+    assert done.failure == record
+    assert store.list_tasks(run.id)[0].failure == record
+
+
+def test_failure_only_recordable_on_failed(store: SQLiteRunStore) -> None:
+    run = store.create(Run())
+    with pytest.raises(ValueError, match="only recordable"):
+        store.set_status(run.id, "completed", failure={"type": "X"})
+    live = store.add_task(
+        TaskRecord(
+            run_id=run.id, name="t", status="running", cache_key="cd" * 32,
+            started_at=utcnow(),
+        )
+    )
+    with pytest.raises(ValueError, match="only recordable"):
+        store.update_task(live.seq, status="completed", failure={"type": "X"})
+    with pytest.raises(ValueError, match="only recordable"):
+        store.update_task(live.seq, status="completed", error="nope")
+
+
 # -- intent ----------------------------------------------------------------------------
 
 
@@ -402,6 +436,41 @@ def test_reopen_same_version_is_idempotent(db_path: Path) -> None:
         s1.create(Run())
     with SQLiteRunStore(db_path) as s2:
         assert len(s2.list_runs()) == 1
+
+
+def test_migrates_v1_database_in_place(db_path: Path) -> None:
+    """A workspace created before failure records (schema v1) opens cleanly:
+    the migration adds the columns, old rows read back with failure=None."""
+    with SQLiteRunStore(db_path) as s1:
+        run = s1.create(Run(name="pre-migration"))
+        s1.add_task(
+            TaskRecord(
+                run_id=run.id,
+                name="relax",
+                status="completed",
+                cache_key="ab" * 32,
+                started_at=utcnow(),
+            )
+        )
+    # Rewind the database to schema v1 by dropping the v2 columns.
+    conn = sqlite3.connect(db_path)
+    conn.execute("ALTER TABLE runs DROP COLUMN failure")
+    conn.execute("ALTER TABLE tasks DROP COLUMN failure")
+    conn.execute("PRAGMA user_version = 1")
+    conn.close()
+
+    with SQLiteRunStore(db_path) as s2:
+        loaded = s2.get(run.id)
+        assert loaded.name == "pre-migration"
+        assert loaded.failure is None
+        assert s2.list_tasks(run.id)[0].failure is None
+        # and the migrated columns are fully writable
+        failed = s2.set_status(run.id, "running")
+        failed = s2.set_status(run.id, "failed", error="x", failure={"type": "X", "message": "y"})
+        assert failed.failure == {"type": "X", "message": "y"}
+        conn = sqlite3.connect(db_path)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        conn.close()
 
 
 # -- fidelity --------------------------------------------------------------------------

@@ -332,7 +332,7 @@ def test_unknown_name_hints_when_root_unconfigured() -> None:
 
 
 def test_unknown_cluster_surfaces_rootstock_error(rootstock_root: Path) -> None:
-    with pytest.raises(EngineNotAvailableError, match="[Uu]nknown cluster"):
+    with pytest.raises(EngineNotAvailableError, match=r"[Uu]nknown cluster"):
         get_calculator("fake-mace-checkpoint", cluster="not-a-real-cluster")
 
 

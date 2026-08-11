@@ -185,6 +185,110 @@ def test_relax_closes_calculator_even_on_failure(monkeypatch: pytest.MonkeyPatch
     assert closed == [True]
 
 
+# -- relax failure diagnostics ---------------------------------------------------------
+
+
+def _emt_that_fails_after(n_calls: int):  # -> Calculator class instance
+    """An EMT that behaves normally for *n_calls* force evaluations, then dies —
+    a mid-optimization engine failure (SCF divergence, worker crash)."""
+    from ase.calculators.emt import EMT
+
+    class DoomedEMT(EMT):
+        calls = 0
+
+        def calculate(self, *args: object, **kwargs: object) -> None:
+            type(self).calls += 1
+            if type(self).calls > n_calls:
+                raise RuntimeError("SCF diverged")
+            super().calculate(*args, **kwargs)
+
+    return DoomedEMT()
+
+
+def test_failed_relax_keeps_partial_trajectory_and_notes_state(
+    ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The core failure-evidence contract: a mid-optimization crash leaves an
+    agent the partial trajectory and a last-known-state note, not just a
+    one-line error and an empty run."""
+    monkeypatch.setattr(
+        "slab.tasks.get_calculator", lambda engine, **kw: _emt_that_fails_after(3)
+    )
+    with ws.start_run(name="doomed") as run, pytest.raises(
+        RuntimeError, match="SCF diverged"
+    ) as excinfo:
+        relax(_rattled_cu(), engine="emt", label="cu")
+
+    (note,) = excinfo.value.__notes__
+    assert "relax failed after" in note
+    assert "last frame: E=" in note
+    assert "partial trajectory kept as artifact 'cu-failed.traj'" in note
+
+    (traj,) = ws.runs.list_artifacts(run.id)
+    assert traj.name == "cu-failed.traj"
+    assert traj.role is ArtifactRole.INTERMEDIATE
+    assert ws.artifacts.has(traj.hash)
+    # the kept bytes really are a readable trajectory with stored energetics
+    from ase.io import read
+
+    frames = read(ws.artifacts.get(traj.hash), index=":", format="traj")
+    assert len(frames) >= 1
+    assert frames[-1].get_potential_energy() < 0
+
+    # and the tracer folded the note into the failed task's evidence record
+    (record,) = ws.runs.list_tasks(run.id)
+    assert record.status is ExecutionStatus.FAILED
+    assert record.failure["notes"] == [note]
+
+
+def test_failed_relax_outside_a_run_still_notes_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Untraced calls get the note too; there is just no artifact store to keep
+    the trajectory in."""
+    monkeypatch.setattr(
+        "slab.tasks.get_calculator", lambda engine, **kw: _emt_that_fails_after(2)
+    )
+    with pytest.raises(RuntimeError, match="SCF diverged") as excinfo:
+        relax(_rattled_cu(), engine="emt")
+    (note,) = excinfo.value.__notes__
+    assert "relax failed after" in note
+    assert "kept as artifact" not in note
+
+
+def test_failure_on_first_evaluation_is_still_clean(
+    ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dying before any frame exists must not crash the diagnostics path."""
+    monkeypatch.setattr(
+        "slab.tasks.get_calculator", lambda engine, **kw: _emt_that_fails_after(0)
+    )
+    with ws.start_run() as run, pytest.raises(RuntimeError, match="SCF diverged") as excinfo:
+        relax(_rattled_cu(), engine="emt")
+    (note,) = excinfo.value.__notes__
+    assert "relax failed after 0 completed step(s)" in note
+    (record,) = ws.runs.list_tasks(run.id)
+    assert record.failure["type"] == "RuntimeError"
+
+
+def test_diagnostics_failure_never_masks_the_original_error(
+    ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "slab.tasks.get_calculator", lambda engine, **kw: _emt_that_fails_after(2)
+    )
+
+    def keep_explodes(active: object, name: str, path: object) -> str:
+        raise OSError("disk full")
+
+    monkeypatch.setattr("slab.tasks._keep_unique", keep_explodes)
+    with ws.start_run(), pytest.raises(RuntimeError, match="SCF diverged") as excinfo:
+        relax(_rattled_cu(), engine="emt")
+    (note,) = excinfo.value.__notes__
+    assert "diagnostics unavailable" in note
+    assert "disk full" in note
+
+
 def test_registry_version_bump_invalidates_relax_cache(
     ws: Workspace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -289,7 +393,7 @@ def test_relax_provenance_resolved_before_computation(
         return calc
 
     monkeypatch.setattr("slab.tasks.get_calculator", build_then_delete_registry)
-    relaxed, info = relax(_rattled_cu(), engine="emt-cluster", fmax=0.05)
+    _relaxed, info = relax(_rattled_cu(), engine="emt-cluster", fmax=0.05)
     assert info["converged"] is True
     assert info["engine_version"] == "1.0"  # stamped from the pre-run snapshot
     assert info["engine_source"] == "registry:delta"

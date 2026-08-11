@@ -12,6 +12,7 @@ root — use ``from slab.tasks import relax``.
 from __future__ import annotations
 
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +63,15 @@ def relax(
     inspectable while the run is alive, hash-and-discarded once retention
     tiers kick in.
 
+    On failure, the evidence survives instead of vanishing with the scratch
+    directory: the exception is re-raised carrying a diagnostic note
+    (completed steps; the last trajectory frame's energy and residual force)
+    and — inside a run — the partial trajectory is kept as
+    ``{label or 'relax'}-failed.traj``. The tracer stores the note and a
+    trimmed traceback on the failed task record
+    (:func:`slab.errors.failure_record`), so an agent inspecting the run can
+    decide a *specific* correction instead of retrying blind.
+
     Caching boundary for cluster-served MLIPs: ``engine="rootstock"`` results
     are cached under the checkpoint id and options (traced inputs) plus the
     rootstock *client* version — the served environment's internals on the
@@ -105,10 +115,16 @@ def relax(
         with tempfile.TemporaryDirectory(prefix="slab-relax-") as tmp:
             trajectory = Path(tmp) / "relax.traj"
             optimizer = BFGS(system, trajectory=str(trajectory), logfile=None)
-            converged = bool(optimizer.run(fmax=fmax, steps=steps))
-
-            energy = float(system.get_potential_energy())
-            forces = system.get_forces()
+            try:
+                converged = bool(optimizer.run(fmax=fmax, steps=steps))
+                energy = float(system.get_potential_energy())
+                forces = system.get_forces()
+            except Exception as e:
+                # The scratch directory is about to vanish — capture the
+                # evidence first: keep the partial trajectory, note the
+                # last-known state on the exception.
+                _attach_failure_diagnostics(e, optimizer, trajectory, label)
+                raise
             achieved_fmax = float(np.sqrt((forces**2).sum(axis=1).max()))
 
             active = current_run()
@@ -139,14 +155,69 @@ def relax(
     return relaxed, info
 
 
-def _keep_unique(active: Any, name: str, path: Path) -> None:
-    """Store *path* as an intermediate artifact, suffixing the name on collision."""
+def _attach_failure_diagnostics(
+    e: Exception, optimizer: BFGS, trajectory: Path, label: str | None
+) -> None:
+    """Best-effort failure evidence: note the last-known state on *e* and keep
+    the partial trajectory. Never raises — diagnostics must not mask the
+    original failure.
+
+    The note (surfaced by :func:`slab.errors.failure_record`) and the kept
+    trajectory are what turn "it crashed" into a decidable situation: did the
+    structure fly apart, did the energy oscillate, how far did it get.
+    """
+    try:
+        note = f"relax failed after {optimizer.get_number_of_steps()} completed step(s)"
+        last = _last_trajectory_frame(trajectory)
+        if last is not None:
+            note += (
+                f"; trajectory has {last['frames']} frame(s), last frame: "
+                f"E={last['energy']:.6f} eV, max|F|={last['fmax']:.4f} eV/Å"
+            )
+        active = current_run()
+        if active is not None and trajectory.exists() and trajectory.stat().st_size > 0:
+            kept_as = _keep_unique(active, f"{label or 'relax'}-failed.traj", trajectory)
+            note += f"; partial trajectory kept as artifact {kept_as!r}"
+        e.add_note(note)
+    except Exception as diagnostics_error:
+        with suppress(Exception):
+            e.add_note(f"(relax failure diagnostics unavailable: {diagnostics_error})")
+
+
+def _last_trajectory_frame(trajectory: Path) -> dict[str, Any] | None:
+    """Stored energy/forces of the last frame BFGS wrote, or None if unreadable.
+
+    Reads values recorded in the trajectory file only — it must never touch
+    the live (just-failed) calculator.
+    """
+    from typing import cast
+
+    from ase.io import read
+
+    try:
+        frames = cast("list[Atoms]", read(trajectory, index=":"))
+        last = frames[-1]
+        frame_forces = last.get_forces()
+        return {
+            "frames": len(frames),
+            "energy": float(last.get_potential_energy()),
+            "fmax": float(np.sqrt((frame_forces**2).sum(axis=1).max())),
+        }
+    except Exception:  # empty, truncated, or calculator-less trajectory
+        return None
+
+
+def _keep_unique(active: Any, name: str, path: Path) -> str:
+    """Store *path* as an intermediate artifact, suffixing the name on collision.
+
+    Returns the name actually used.
+    """
     stem, dot, suffix = name.rpartition(".")
     for attempt in range(1, 100):
         candidate = name if attempt == 1 else f"{stem}-{attempt}{dot}{suffix}"
         try:
             active.keep(candidate, path, role=ArtifactRole.INTERMEDIATE)
-            return
+            return candidate
         except ArtifactExistsError:
             continue
     raise ArtifactExistsError(active.id, name)  # pragma: no cover - 99 collisions

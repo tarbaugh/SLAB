@@ -23,7 +23,10 @@ call is traced:
 3. A provisional :class:`~slab.models.TaskRecord` (status ``running``) is
    committed *before* the function executes, so the run's input references
    are visible to concurrent retention sweeps for the whole execution; the
-   row is finalized (``completed``/``failed``) when the call returns. The
+   row is finalized (``completed``/``failed``) when the call returns. A
+   failed row records a one-line ``error`` plus a structured ``failure``
+   record — trimmed traceback and any diagnostic notes the task attached
+   via ``Exception.add_note`` (see :func:`slab.errors.failure_record`). The
    return value is serialized and stored — an exact ``tuple`` return is
    stored element-wise (``return[0]``, ``return[1]``, ...) so the common
    ``atoms, info = relax(...)`` pattern leaves per-value hashes; tuple
@@ -50,7 +53,7 @@ from typing import Any, ParamSpec, TypeVar, overload
 
 from slab._version import __version__
 from slab.artifacts import ArtifactStore
-from slab.errors import SerializationError
+from slab.errors import SerializationError, failure_record
 from slab.lifecycle import ExecutionStatus
 from slab.models import TaskRecord, utcnow
 from slab.runtime import ActiveRun, current_run
@@ -220,10 +223,15 @@ def _traced_call(
         result = f(*args, **kwargs)
         outputs = _store_outputs(active.artifacts, result)
     except Exception as e:
+        # The failed record carries the evidence an agent needs to correct and
+        # retry: a one-line error for listings, and a structured failure record
+        # (trimmed traceback + any add_note diagnostics) for show_run.
+        record = failure_record(e)
         active.runs.update_task(
             provisional.seq,
             status=ExecutionStatus.FAILED,
-            error=f"{type(e).__name__}: {e}",
+            error=f"{record['type']}: {record['message']}",
+            failure=record,
             finished_at=utcnow(),
         )
         raise

@@ -1,17 +1,160 @@
-"""Exception types raised by SLAB.
+"""Exception types raised by SLAB, and how failures are reported.
 
 All errors derive from :class:`SlabError`. Messages are written to be actionable
 for the caller — including LLM agents, who read them verbatim — so they state
 what was attempted, why it was refused, and what would be allowed instead.
+
+:func:`failure_record` is the other half of that contract: when a run or task
+*fails*, the evidence (exception, trimmed traceback, diagnostic notes) is
+captured as a size-bounded structure an agent can read to decide a correction,
+instead of a one-line string it can only retry against.
 """
 
 from __future__ import annotations
 
+import traceback as _traceback
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Any, Self
 
 if TYPE_CHECKING:
     from slab.lifecycle import ExecutionStatus, LifecycleState
+
+_TRACEBACK_HEAD = 3  # outermost frames kept per group: where the work entered
+_TRACEBACK_TAIL = 5  # innermost frames kept per group: where it died
+_MAX_MESSAGE_CHARS = 2_000
+_MAX_TRACEBACK_CHARS = 10_000
+_MAX_NOTES = 10
+
+
+def failure_record(exc: BaseException) -> dict[str, Any]:
+    """Structured, size-bounded evidence of a failure.
+
+    Stored on failed runs and task records and surfaced verbatim by
+    ``slab show`` and the MCP ``show_run`` tool. The consumer is an LLM agent
+    deciding what to do next, so the record aims to be information-rich but
+    token-bounded:
+
+    * ``type`` / ``message`` — the exception class name and its message
+      (clipped past 2000 characters).
+    * ``traceback`` — the formatted traceback, chained causes included.
+      Contiguous frame groups keep the first 3 and last 5 frames (the entry
+      point and the failure site) with the middle elided; every non-frame
+      piece (notably the exception message) is clipped at 2000 characters so
+      a giant message can never crowd the frames out; the whole text is
+      capped at 10000 characters, keeping the end (the final exceptions of a
+      long chain).
+    * ``notes`` — ``Exception.add_note`` annotations, present only if any
+      exist; at most 10 are listed. Tasks use notes to attach curated
+      diagnostics (last energy, completed steps — see
+      :func:`slab.tasks.relax`); listing them separately lets a reader act
+      without parsing the traceback at all.
+
+    This function runs inside exception handlers, where raising would mask
+    the very failure being recorded — so it never raises: hostile input
+    (malformed ``__notes__``, a ``__str__`` that throws) degrades to
+    placeholder text, mirroring the stdlib ``traceback`` module's own
+    defenses.
+
+    Examples:
+        >>> try:
+        ...     raise ValueError("SCF failed to converge in 200 iterations")
+        ... except ValueError as e:
+        ...     e.add_note("last SCF residual: 3.2e-2")
+        ...     record = failure_record(e)
+        >>> record["type"], record["message"]
+        ('ValueError', 'SCF failed to converge in 200 iterations')
+        >>> record["notes"]
+        ['last SCF residual: 3.2e-2']
+        >>> record["traceback"].startswith("Traceback (most recent call last)")
+        True
+    """
+    record: dict[str, Any] = {
+        "type": type(exc).__name__,
+        "message": _clip(_safe_str(exc), _MAX_MESSAGE_CHARS),
+        "traceback": _trimmed_traceback(exc),
+    }
+    notes = _exception_notes(exc)
+    if notes:
+        record["notes"] = notes
+    return record
+
+
+def _exception_notes(exc: BaseException) -> list[str]:
+    """Read ``exc.__notes__`` defensively; malformed values degrade, never raise.
+
+    PEP 678 says ``__notes__`` is a sequence of strings, but nothing enforces
+    that — mirror the stdlib ``traceback`` module: a non-sequence (or bare
+    string) becomes a single note, unreadable values become placeholders.
+    """
+    try:
+        raw = getattr(exc, "__notes__", None)
+        if raw is None:
+            return []
+        if isinstance(raw, (str, bytes)) or not isinstance(raw, Sequence):
+            items: list[object] = [raw]
+        else:
+            items = list(raw)
+    except Exception:
+        return ["<__notes__ unreadable>"]
+    notes = [_clip(_safe_str(note), _MAX_MESSAGE_CHARS) for note in items[:_MAX_NOTES]]
+    if len(items) > _MAX_NOTES:
+        notes.append(f"[... {len(items) - _MAX_NOTES} more note(s)]")
+    return notes
+
+
+def _trimmed_traceback(exc: BaseException) -> str:
+    """Format *exc*'s traceback (chain included), size-bounded, never raising."""
+    try:
+        pieces = _traceback.format_exception(exc)
+    except Exception as format_error:
+        return f"<traceback unavailable: {type(format_error).__name__}: {format_error}>"
+    out: list[str] = []
+    frames: list[str] = []
+
+    def flush() -> None:
+        if len(frames) > _TRACEBACK_HEAD + _TRACEBACK_TAIL + 1:
+            elided = len(frames) - _TRACEBACK_HEAD - _TRACEBACK_TAIL
+            out.extend(frames[:_TRACEBACK_HEAD])
+            out.append(f"  [... {elided} frame(s) elided ...]\n")
+            out.extend(frames[-_TRACEBACK_TAIL:])
+        else:
+            out.extend(frames)
+        frames.clear()
+
+    for piece in pieces:
+        if piece.startswith('  File "'):
+            frames.append(_clip_piece(piece))
+        else:
+            flush()
+            out.append(_clip_piece(piece))
+    flush()
+    text = "".join(out).rstrip("\n")
+    if len(text) > _MAX_TRACEBACK_CHARS:
+        text = (
+            f"[traceback truncated to the final {_MAX_TRACEBACK_CHARS} characters]\n"
+            + text[-_MAX_TRACEBACK_CHARS:]
+        )
+    return text
+
+
+def _clip_piece(piece: str) -> str:
+    """Clip one formatted-traceback piece, preserving its trailing newline."""
+    if len(piece) <= _MAX_MESSAGE_CHARS:
+        return piece
+    return _clip(piece.rstrip("\n"), _MAX_MESSAGE_CHARS) + "\n"
+
+
+def _clip(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]} [... {len(text) - limit} characters clipped]"
+
+
+def _safe_str(value: object) -> str:
+    try:
+        return str(value)
+    except Exception:
+        return f"<{type(value).__name__} str() failed>"
 
 
 class SlabError(Exception):

@@ -43,7 +43,7 @@ from slab.lifecycle import (
 )
 from slab.models import ArtifactRef, ArtifactRole, CheckResult, Run, TaskRecord, Transition, utcnow
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS runs (
     state_entered_at TEXT NOT NULL,
     started_at       TEXT,
     finished_at      TEXT,
-    error            TEXT
+    error            TEXT,
+    failure          TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_runs_state ON runs(state);
 CREATE INDEX IF NOT EXISTS ix_runs_status ON runs(status);
@@ -98,6 +99,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     inputs      TEXT NOT NULL,
     outputs     TEXT NOT NULL,
     error       TEXT,
+    failure     TEXT,
     started_at  TEXT NOT NULL,
     finished_at TEXT
 );
@@ -116,6 +118,15 @@ CREATE TABLE IF NOT EXISTS checks (
 );
 CREATE INDEX IF NOT EXISTS ix_checks_run_id ON checks(run_id);
 """
+
+# Statements upgrading an existing database from (version - 1) to version.
+# Fresh databases get _SCHEMA directly and skip these.
+_MIGRATIONS: dict[int, tuple[str, ...]] = {
+    2: (  # structured failure evidence on runs and tasks
+        "ALTER TABLE runs ADD COLUMN failure TEXT",
+        "ALTER TABLE tasks ADD COLUMN failure TEXT",
+    ),
+}
 
 
 @runtime_checkable
@@ -158,7 +169,12 @@ class RunStore(Protocol):
         ...
 
     def set_status(
-        self, run_id: str, status: ExecutionStatus | str, *, error: str | None = None
+        self,
+        run_id: str,
+        status: ExecutionStatus | str,
+        *,
+        error: str | None = None,
+        failure: dict[str, object] | None = None,
     ) -> Run:
         """Change a run's execution status."""
         ...
@@ -182,6 +198,7 @@ class RunStore(Protocol):
         status: ExecutionStatus | str,
         outputs: dict[str, str] | None = None,
         error: str | None = None,
+        failure: dict[str, object] | None = None,
         finished_at: datetime | None = None,
     ) -> TaskRecord:
         """Finalize a provisional (running) task row."""
@@ -309,8 +326,8 @@ class SQLiteRunStore:
             try:
                 conn.execute(
                     "INSERT INTO runs (id, name, state, status, intent, meta, created_at,"
-                    " updated_at, state_entered_at, started_at, finished_at, error)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " updated_at, state_entered_at, started_at, finished_at, error, failure)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         run.id,
                         run.name,
@@ -324,6 +341,7 @@ class SQLiteRunStore:
                         _fmt_dt(run.started_at),
                         _fmt_dt(run.finished_at),
                         run.error,
+                        _fmt_json(run.failure),
                     ),
                 )
             except sqlite3.IntegrityError as e:
@@ -403,33 +421,44 @@ class SQLiteRunStore:
             return self._get_exact(conn, rid)
 
     def set_status(
-        self, run_id: str, status: ExecutionStatus | str, *, error: str | None = None
+        self,
+        run_id: str,
+        status: ExecutionStatus | str,
+        *,
+        error: str | None = None,
+        failure: dict[str, object] | None = None,
     ) -> Run:
         """Change a run's execution status; return the updated snapshot.
 
         Stamps ``started_at`` when entering ``running`` and ``finished_at`` when
         entering ``completed`` or ``failed``. A run served from cache may go
         ``pending -> completed`` directly, finishing without ever starting.
-        Pass ``error`` (only with status ``failed``) to record why.
+        Pass ``error`` (a one-liner) and/or ``failure`` (structured evidence,
+        see :func:`slab.errors.failure_record`) — only with status ``failed`` —
+        to record why.
 
         Raises:
             IllegalStatusChangeError: The change is not permitted
                 (e.g. ``completed -> running``).
-            ValueError: ``error`` was passed with a non-``failed`` status.
+            ValueError: ``error``/``failure`` was passed with a non-``failed``
+                status.
 
         Examples:
             >>> store = SQLiteRunStore(":memory:")
             >>> r = store.create(Run())
             >>> store.set_status(r.id, "running").status.value
             'running'
-            >>> done = store.set_status(r.id, "failed", error="OOM killed")
-            >>> (done.finished_at is not None, done.error)
-            (True, 'OOM killed')
+            >>> done = store.set_status(r.id, "failed", error="OOM killed",
+            ...                         failure={"type": "Killed", "message": "OOM"})
+            >>> (done.finished_at is not None, done.error, done.failure["type"])
+            (True, 'OOM killed', 'Killed')
             >>> store.close()
         """
         new = ExecutionStatus(status)
-        if error is not None and new is not ExecutionStatus.FAILED:
-            raise ValueError("error= is only recordable when setting status to 'failed'")
+        if (error is not None or failure is not None) and new is not ExecutionStatus.FAILED:
+            raise ValueError(
+                "error=/failure= are only recordable when setting status to 'failed'"
+            )
         with self._txn() as conn:
             rid = self._resolve(run_id)
             row = conn.execute(
@@ -452,6 +481,9 @@ class SQLiteRunStore:
             if error is not None:
                 sets.append("error = ?")
                 params.append(error)
+            if failure is not None:
+                sets.append("failure = ?")
+                params.append(_fmt_json(failure))
             params.append(rid)
             conn.execute(f"UPDATE runs SET {', '.join(sets)} WHERE id = ?", params)
             return self._get_exact(conn, rid)
@@ -586,8 +618,8 @@ class SQLiteRunStore:
                 raise RunStateError(rid, state, "record tasks on")
             cursor = conn.execute(
                 "INSERT INTO tasks (run_id, name, status, cache_hit, cache_key, recipe,"
-                " inputs, outputs, error, started_at, finished_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                " inputs, outputs, error, failure, started_at, finished_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     rid,
                     record.name,
@@ -598,6 +630,7 @@ class SQLiteRunStore:
                     json.dumps(record.inputs, sort_keys=True),
                     json.dumps(record.outputs, sort_keys=True),
                     record.error,
+                    _fmt_json(record.failure),
                     record.started_at.isoformat(),
                     _fmt_dt(record.finished_at),
                 ),
@@ -614,13 +647,18 @@ class SQLiteRunStore:
         status: ExecutionStatus | str,
         outputs: dict[str, str] | None = None,
         error: str | None = None,
+        failure: dict[str, object] | None = None,
         finished_at: datetime | None = None,
     ) -> TaskRecord:
         """Finalize a provisional (``running``) task row; return the updated record.
 
+        ``error`` (one-liner) and ``failure`` (structured evidence, see
+        :func:`slab.errors.failure_record`) accompany status ``failed``.
+
         Raises:
             ValueError: No task with this ``seq``, the row is already final,
-                or *status* is not final.
+                *status* is not final, or ``error``/``failure`` accompanies
+                a ``completed`` status.
 
         Examples:
             >>> store = SQLiteRunStore(":memory:")
@@ -641,6 +679,8 @@ class SQLiteRunStore:
                 f"update_task finalizes a task: status must be 'completed' or 'failed',"
                 f" got {final.value!r}"
             )
+        if (error is not None or failure is not None) and final is not ExecutionStatus.FAILED:
+            raise ValueError("error=/failure= are only recordable when finalizing as 'failed'")
         with self._txn() as conn:
             row = conn.execute("SELECT * FROM tasks WHERE seq = ?", (seq,)).fetchone()
             if row is None:
@@ -650,12 +690,13 @@ class SQLiteRunStore:
                     f"task {seq} is already finalized ({row['status']}); tasks finalize once"
                 )
             conn.execute(
-                "UPDATE tasks SET status = ?, outputs = ?, error = ?, finished_at = ?"
-                " WHERE seq = ?",
+                "UPDATE tasks SET status = ?, outputs = ?, error = ?, failure = ?,"
+                " finished_at = ? WHERE seq = ?",
                 (
                     final.value,
                     json.dumps(outputs or {}, sort_keys=True),
                     error,
+                    _fmt_json(failure),
                     _fmt_dt(finished_at),
                     seq,
                 ),
@@ -940,11 +981,17 @@ class SQLiteRunStore:
             version = int(conn.execute("PRAGMA user_version").fetchone()[0])
             if version > SCHEMA_VERSION:
                 raise SchemaVersionError(self._path, found=version, supported=SCHEMA_VERSION)
-            if version < SCHEMA_VERSION:
+            if version == SCHEMA_VERSION:
+                return
+            if version == 0:  # fresh database: current schema directly
                 for statement in _SCHEMA.strip().split(";\n"):
                     if statement.strip():
                         conn.execute(statement)
-                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            else:  # existing database: apply each migration in order
+                for target in range(version + 1, SCHEMA_VERSION + 1):
+                    for statement in _MIGRATIONS[target]:
+                        conn.execute(statement)
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def _resolve(self, run_id: str) -> str:
         """Resolve id-or-prefix to a full id. Caller must hold the lock."""
@@ -978,6 +1025,14 @@ def _parse_dt(value: str | None) -> datetime | None:
     return None if value is None else datetime.fromisoformat(value)
 
 
+def _fmt_json(value: dict[str, object] | None) -> str | None:
+    return None if value is None else json.dumps(value, sort_keys=True, default=repr)
+
+
+def _parse_json(value: str | None) -> dict[str, object] | None:
+    return None if value is None else json.loads(value)
+
+
 def _row_to_run(row: sqlite3.Row) -> Run:
     return Run(
         id=row["id"],
@@ -992,6 +1047,7 @@ def _row_to_run(row: sqlite3.Row) -> Run:
         started_at=_parse_dt(row["started_at"]),
         finished_at=_parse_dt(row["finished_at"]),
         error=row["error"],
+        failure=_parse_json(row["failure"]),
     )
 
 
@@ -1007,6 +1063,7 @@ def _row_to_task(row: sqlite3.Row) -> TaskRecord:
         inputs=json.loads(row["inputs"]),
         outputs=json.loads(row["outputs"]),
         error=row["error"],
+        failure=_parse_json(row["failure"]),
         started_at=datetime.fromisoformat(row["started_at"]),
         finished_at=_parse_dt(row["finished_at"]),
     )

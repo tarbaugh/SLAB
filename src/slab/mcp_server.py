@@ -56,8 +56,14 @@ def build_server(root: Path) -> MCPServer:
     @server.tool()
     def show_run(run_id: str) -> dict[str, Any]:
         """Everything about one run (id or unique prefix): state, intent,
-        check results, traced tasks with recipes, artifacts (and whether their
-        bytes are still stored), and the lifecycle history."""
+        check results with the observed/expected values they compared, traced
+        tasks with recipes, artifacts (and whether their bytes are still
+        stored), and the lifecycle history. Failed runs and tasks carry a
+        'failure' record — exception type, message, trimmed traceback, and
+        diagnostic notes (e.g. relax notes its completed steps and last
+        energy, and keeps the partial trajectory as an artifact) — the
+        evidence for deciding a specific correction instead of retrying
+        blind."""
         with Workspace(root) as ws:
             return _ops.run_details(ws, run_id)
 
@@ -101,7 +107,12 @@ def build_server(root: Path) -> MCPServer:
     ) -> dict[str, Any]:
         """Execute a plain-Python workflow script in a fresh traced run.
         Always pass intent — why this run exists. The result includes the run
-        id, final state (verified if all checks passed), and captured output."""
+        id, final state (verified if all checks passed), and captured output;
+        on failure it includes the structured 'failure' record (traceback and
+        diagnostic notes). If recording the failure itself failed (storage
+        died mid-crash), a raw 'traceback' string appears instead and the run
+        may be left at status 'running'. Use show_run for per-task failure
+        evidence."""
         return _ops.launch_script(root, script_path, name=name, intent=intent, capture_output=True)
 
     @server.tool()

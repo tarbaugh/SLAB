@@ -156,9 +156,39 @@ def test_script_failure_marks_run_failed_and_skips_checks(ws: Workspace) -> None
     final = ws.runs.get(run.id)
     assert final.status is ExecutionStatus.FAILED
     assert final.error == "ValueError: exploded"
+    assert final.failure["type"] == "ValueError"
+    assert 'raise ValueError("exploded")' in final.failure["traceback"]
     assert final.state is Q
     assert ws.runs.list_check_results(run.id) == []
     assert current_run() is None  # context cleaned up despite the exception
+
+
+def test_malformed_notes_never_block_failure_recording(ws: Workspace) -> None:
+    """failure_record runs inside the exception handler: hostile __notes__ must
+    degrade into the record, never crash it (which would leave the run stuck
+    'running' and mask the real exception)."""
+    # no match= here: pytest's own match machinery also chokes on hostile notes
+    with pytest.raises(ValueError), ws.start_run(name="hostile") as run:
+        error = ValueError("bad")
+        error.__notes__ = 123  # type: ignore[attr-defined]
+        raise error
+    final = ws.runs.get(run.id)
+    assert final.status is ExecutionStatus.FAILED
+    assert final.error == "ValueError: bad"
+    assert final.failure["notes"] == ["123"]
+
+
+def test_keyboard_interrupt_records_run_failure(ws: Workspace) -> None:
+    """Ctrl-C during a run still leaves evidence: the run is marked failed with
+    a KeyboardInterrupt failure record. (Task rows catch only Exception, so a
+    task interrupted mid-flight stays 'running' — the expire --include-running
+    recovery path; the run-level record is what says why.)"""
+    with pytest.raises(KeyboardInterrupt), ws.start_run(name="interrupted") as run:
+        raise KeyboardInterrupt
+    final = ws.runs.get(run.id)
+    assert final.status is ExecutionStatus.FAILED
+    assert final.failure["type"] == "KeyboardInterrupt"
+    assert "KeyboardInterrupt" in final.failure["traceback"]
 
 
 def test_nested_runs_rejected(ws: Workspace) -> None:

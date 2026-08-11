@@ -276,8 +276,43 @@ on the run, and gates `quarantined → verified` on *all passed and at least one
 exists*. **A run with no checks stays quarantined**: verification is earned,
 never defaulted. It can still be promoted — via `force=True`, which is
 recorded — so the escape hatch exists but leaves a trace. If the script
-raises, the run is marked `failed` (error recorded), checks are skipped, and
-the exception propagates unchanged.
+raises, the run is marked `failed`, checks are skipped, and the exception
+propagates unchanged.
+
+### 6a. Failure as evidence
+
+The verification story covers "can I trust this result?"; its complement is
+"why is there no result?". Legacy engines answer with predefined error
+*protocols* — AiiDA exit codes routed to restart handlers that apply fixed
+corrections. SLAB's primary user can improvise a correction specific to the
+material system and the actual failure — but only from evidence. So the
+failure surface delivers evidence and stops there:
+
+- **Structured failure records.** A failed run or task stores, next to its
+  one-line `error`, a `failure` record built by `slab.errors.failure_record`:
+  exception type, message, and traceback with chained causes. The record is
+  deliberately token-bounded — messages clip at 2 kchars, deep frame runs keep
+  the entry point and the failure site with the middle elided, the whole text
+  caps at 10 kchars — because a 50-frame torch traceback delivered verbatim
+  buys nothing an agent can act on.
+- **Diagnostics ride the exception.** Tasks annotate failures with plain
+  `Exception.add_note` (PEP 678) — no SLAB API to learn. `relax` notes the
+  completed step count and the last trajectory frame's energy and residual
+  force; the notes land both inside the traceback and as a separate `notes`
+  list, so an agent can read the curated summary without parsing anything.
+- **Scratch data survives the crash.** A mid-optimization failure keeps the
+  partial trajectory as an intermediate artifact (`relax-failed.traj`) —
+  the object that distinguishes "atoms flew apart" from "slow oscillation
+  near convergence". Retention makes this free: failed runs sit in
+  quarantine with a TTL, so failure diagnostics self-clean, where AiiDA's
+  retrieved-files-of-failed-calcs accumulate forever.
+- **Checks report their numbers.** `CheckResult` always stored
+  `observed`/`expected`; `run_details` now surfaces them over the CLI's
+  `--json` and MCP, so "fmax 0.062 vs 0.05" is data, not prose.
+- **Tiered delivery.** `slab list` shows one line per run; the full evidence
+  is fetched per-run by `show`. Best-effort capture never masks the original
+  exception: if keeping diagnostics itself fails, the failure record says so
+  and the real error still propagates.
 
 ## 7. The layers
 

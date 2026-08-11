@@ -418,13 +418,96 @@ def test_show_failed_run_displays_error_and_tasks(root: Path, tmp_path: Path) ->
     )
     launched = runner.invoke(app, ["run", str(script), "-w", str(root)])
     assert launched.exit_code == 1
+    assert "Traceback (most recent call last)" in launched.output  # evidence on stderr
     run_id = launched.output.splitlines()[-1].split()[1]
 
     shown = runner.invoke(app, ["show", run_id, "-w", str(root)])
     assert shown.exit_code == 0
     assert "error:   RuntimeError: late failure" in shown.output
+    # no failed task explains this failure, so the run's own traceback renders
+    # (between the error line and the created line)
+    assert "Traceback (most recent call last)" in shown.output.split("created:")[0]
     assert "tasks:" in shown.output
     assert "1. double  completed" in shown.output
+
+
+def test_run_prints_raw_traceback_when_failure_recording_dies(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The raw-traceback fallback (no failure record exists) must reach the
+    terminal, and the exit code must be nonzero even though the run was never
+    marked failed."""
+    from slab.lifecycle import ExecutionStatus
+    from slab.store import SQLiteRunStore
+
+    real_set_status = SQLiteRunStore.set_status
+
+    def dying_set_status(self, run_id, status, **kwargs):  # type: ignore[no-untyped-def]
+        if ExecutionStatus(status) is ExecutionStatus.FAILED:
+            raise OSError("disk full while recording the failure")
+        return real_set_status(self, run_id, status, **kwargs)
+
+    monkeypatch.setattr(SQLiteRunStore, "set_status", dying_set_status)
+    script = tmp_path / "boom.py"
+    script.write_text("raise RuntimeError('kaboom')\n")
+    result = runner.invoke(app, ["run", str(script), "-w", str(root)])
+    assert result.exit_code == 1
+    assert "kaboom" in result.output
+    assert "disk full" in result.output
+    assert "status=running" in result.output  # honest about the stuck state
+
+
+def test_show_renders_differing_run_failure_despite_failed_task(
+    root: Path, tmp_path: Path
+) -> None:
+    """A task failure the script caught must not hide a different run failure:
+    both tracebacks render, each under its owner."""
+    script = tmp_path / "wf.py"
+    script.write_text(
+        "from slab import task\n"
+        "@task\ndef explode():\n"
+        "    raise RuntimeError('SCF diverged')\n"
+        "try:\n"
+        "    explode()\n"
+        "except RuntimeError:\n"
+        "    pass\n"
+        "raise ValueError('post-processing failed: lattice constant NaN')\n"
+    )
+    launched = runner.invoke(app, ["run", str(script), "-w", str(root)])
+    assert launched.exit_code == 1
+    run_id = launched.output.splitlines()[-1].split()[1]
+
+    shown = runner.invoke(app, ["show", run_id, "-w", str(root)])
+    assert shown.exit_code == 0
+    # run-level ValueError evidence renders up top (before 'created:')...
+    head = shown.output.split("created:")[0]
+    assert "ValueError: post-processing failed" in head
+    assert "Traceback (most recent call last)" in head
+    # ...and the task's own RuntimeError evidence renders under the task
+    assert shown.output.count("Traceback (most recent call last)") == 2
+    assert "RuntimeError: SCF diverged" in shown.output
+
+
+def test_show_failed_task_renders_its_failure_evidence(root: Path, tmp_path: Path) -> None:
+    """Task-level failures render under the task; the run does not repeat them."""
+    script = tmp_path / "wf.py"
+    script.write_text(
+        "from slab import task\n"
+        "@task\ndef explode():\n"
+        "    e = RuntimeError('SCF diverged')\n"
+        "    e.add_note('last residual: 3.2e-2')\n"
+        "    raise e\n"
+        "explode()\n"
+    )
+    launched = runner.invoke(app, ["run", str(script), "-w", str(root)])
+    assert launched.exit_code == 1
+    run_id = launched.output.splitlines()[-1].split()[1]
+
+    shown = runner.invoke(app, ["show", run_id, "-w", str(root)])
+    assert shown.exit_code == 0
+    assert "1. explode  failed" in shown.output
+    assert "last residual: 3.2e-2" in shown.output  # the note reaches the reader
+    assert shown.output.count("Traceback (most recent call last)") == 1  # no duplication
 
 
 def test_gc_rejects_bad_policy_file(root: Path, tmp_path: Path) -> None:

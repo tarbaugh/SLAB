@@ -179,8 +179,13 @@ def run_summary(run: Run) -> dict[str, Any]:
 def run_details(ws: Workspace, run_id: str) -> dict[str, Any]:
     """Everything about one run: fields, checks, tasks, artifacts, history.
 
-    Artifact entries carry ``bytes_available`` — whether the content is still
-    in the artifact store or has been hash-and-discarded.
+    This is the evidence surface for agents (``slab show`` and MCP
+    ``show_run``): failed runs and tasks carry their structured ``failure``
+    record (:func:`slab.errors.failure_record`), and checks carry the
+    ``observed``/``expected`` values their assertions compared — the numbers a
+    correction gets computed from. Artifact entries carry ``bytes_available``
+    — whether the content is still in the artifact store or has been
+    hash-and-discarded.
     """
     run = ws.runs.get(run_id)
     checks = ws.runs.list_check_results(run.id)
@@ -191,6 +196,7 @@ def run_details(ws: Workspace, run_id: str) -> dict[str, Any]:
         "run": run_summary(run)
         | {
             "meta": run.meta,
+            "failure": run.failure,
             "started_at": None if run.started_at is None else run.started_at.isoformat(),
             "finished_at": None if run.finished_at is None else run.finished_at.isoformat(),
         },
@@ -200,6 +206,8 @@ def run_details(ws: Workspace, run_id: str) -> dict[str, Any]:
                 "kind": c.kind,
                 "passed": c.passed,
                 "message": c.message,
+                "observed": c.observed,
+                "expected": c.expected,
             }
             for c in checks
         ],
@@ -210,6 +218,7 @@ def run_details(ws: Workspace, run_id: str) -> dict[str, Any]:
                 "status": t.status.value,
                 "cache_hit": t.cache_hit,
                 "error": t.error,
+                "failure": t.failure,
                 "duration_s": (
                     None
                     if t.finished_at is None
@@ -263,9 +272,12 @@ def launch_script(
     executed with plain ``python`` instead (nesting is refused with a hint).
 
     The result dict carries ``run_id``, final ``state``/``status``, check
-    counts, ``error`` (if the script raised), and — with
-    ``capture_output=True`` — everything the script printed (used by the MCP
-    server, whose stdout is the protocol channel).
+    counts, and — with ``capture_output=True`` — everything the script printed
+    (used by the MCP server, whose stdout is the protocol channel). If the
+    script raised, the run's structured ``failure`` record (trimmed traceback
+    and diagnostic notes, :func:`slab.errors.failure_record`) is included; a
+    raw ``traceback`` is the fallback for failures the run itself never saw
+    (runner machinery).
     """
     script_path = Path(script).resolve()
     if not script_path.exists():
@@ -316,7 +328,11 @@ def launch_script(
             "checks_total": len(checks),
             "tasks_recorded": len(ws.runs.list_tasks(run_id)),
         }
-    if error is not None:
+    if run.failure is not None:
+        result["failure"] = run.failure
+    elif error is not None:
+        # The failure escaped the run context (runner machinery, storage):
+        # report the raw traceback so the evidence still reaches the caller.
         result["traceback"] = error
     if capture_output:
         result["output"] = buffer.getvalue()

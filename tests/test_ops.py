@@ -131,8 +131,16 @@ def test_run_details_shape(root: Path) -> None:
 
         assert details["run"]["name"] == "detailed"
         assert details["run"]["state"] == "verified"
+        assert details["run"]["failure"] is None
         assert details["checks"] == [
-            {"name": "fine", "kind": "custom", "passed": True, "message": "returned True"}
+            {
+                "name": "fine",
+                "kind": "custom",
+                "passed": True,
+                "message": "returned True",
+                "observed": None,
+                "expected": None,
+            }
         ]
         (artifact,) = details["artifacts"]
         assert artifact["role"] == "terminal"
@@ -144,6 +152,43 @@ def test_run_details_shape(root: Path) -> None:
 
         summary = run_summary(ws.runs.get(run.id))
         assert summary["id"] == run.id and summary["status"] == "completed"
+        assert "failure" not in summary  # listings stay compact; show carries evidence
+
+
+def test_run_details_checks_carry_observed_and_expected(root: Path) -> None:
+    """The structured values an agent computes a correction from — not just prose."""
+    from slab import converged
+
+    with Workspace(root) as ws:
+        with ws.start_run(name="measured") as run:
+            run.check(lambda: converged(0.062, below=0.05, label="fmax"), name="forces")
+        (check,) = run_details(ws, run.id)["checks"]
+        assert check["passed"] is False
+        assert check["observed"] == 0.062
+        assert check["expected"] == {"below": 0.05}
+
+
+def test_run_details_surfaces_failure_evidence(root: Path) -> None:
+    """Failed run and failed task both carry their structured failure records."""
+    from slab import task
+
+    @task
+    def explode() -> None:
+        error = RuntimeError("SCF diverged")
+        error.add_note("last SCF residual: 3.2e-2")
+        raise error
+
+    with Workspace(root) as ws:
+        with pytest.raises(RuntimeError), ws.start_run(name="doomed") as run:
+            explode()
+        details = run_details(ws, run.id)
+
+        assert details["run"]["failure"]["type"] == "RuntimeError"
+        (task_entry,) = details["tasks"]
+        assert task_entry["status"] == "failed"
+        assert task_entry["error"] == "RuntimeError: SCF diverged"
+        assert task_entry["failure"]["notes"] == ["last SCF residual: 3.2e-2"]
+        assert "SCF diverged" in task_entry["failure"]["traceback"]
 
 
 # -- launch_script ---------------------------------------------------------------------
@@ -159,6 +204,7 @@ def test_launch_happy_script_verifies(root: Path, tmp_path: Path) -> None:
     assert result["name"] == "wf"
     assert "computed 42" in result["output"]
     assert "traceback" not in result
+    assert "failure" not in result
     with Workspace(root) as ws:
         assert ws.runs.get(result["run_id"]).intent == "smoke"
 
@@ -168,7 +214,9 @@ def test_launch_failing_script_records_failure(root: Path, tmp_path: Path) -> No
     result = launch_script(root, script)
     assert result["status"] == "failed"
     assert result["state"] == "quarantined"
-    assert "kaboom" in result["traceback"]
+    assert result["failure"]["type"] == "RuntimeError"
+    assert "kaboom" in result["failure"]["traceback"]
+    assert "traceback" not in result  # the structured record replaces the raw text
     with Workspace(root) as ws:
         assert ws.runs.get(result["run_id"]).error == "RuntimeError: kaboom"
 
@@ -214,9 +262,36 @@ def test_launch_sys_exit_nonzero_records_failure(root: Path, tmp_path: Path) -> 
     script = _write(tmp_path, "exit2.py", "import sys\nsys.exit(2)\n")
     result = launch_script(root, script)
     assert result["status"] == "failed"
-    assert "sys.exit(2)" in result["traceback"]
+    assert "sys.exit(2)" in result["failure"]["message"]
     with Workspace(root) as ws:
         assert ws.runs.get(result["run_id"]).error == "ScriptExitError: script called sys.exit(2)"
+
+
+def test_launch_machinery_failure_falls_back_to_raw_traceback(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When recording the failure itself fails (storage dies mid-crash), the
+    run never gets a failure record — but the launcher must still deliver the
+    evidence, as a raw traceback covering both the original error and what ate
+    its record. The run honestly stays 'running' (expire --include-running is
+    the recovery path)."""
+    from slab.lifecycle import ExecutionStatus
+    from slab.store import SQLiteRunStore
+
+    real_set_status = SQLiteRunStore.set_status
+
+    def dying_set_status(self, run_id, status, **kwargs):  # type: ignore[no-untyped-def]
+        if ExecutionStatus(status) is ExecutionStatus.FAILED:
+            raise OSError("disk full while recording the failure")
+        return real_set_status(self, run_id, status, **kwargs)
+
+    monkeypatch.setattr(SQLiteRunStore, "set_status", dying_set_status)
+    script = _write(tmp_path, "boom.py", FAILING_SCRIPT)
+    result = launch_script(root, script)
+    assert "failure" not in result
+    assert "kaboom" in result["traceback"]  # the original failure...
+    assert "disk full" in result["traceback"]  # ...and what ate its record
+    assert result["status"] == "running"
 
 
 def test_launch_unwritable_workspace_surfaces_real_cause(root: Path, tmp_path: Path) -> None:

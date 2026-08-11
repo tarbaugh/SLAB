@@ -33,7 +33,12 @@ from typing import TYPE_CHECKING, overload
 
 from slab.artifacts import ArtifactStore
 from slab.checks import Assertion
-from slab.errors import IllegalTransitionError, NestedRunError, NoActiveRunError
+from slab.errors import (
+    IllegalTransitionError,
+    NestedRunError,
+    NoActiveRunError,
+    failure_record,
+)
 from slab.lifecycle import ExecutionStatus, LifecycleState
 from slab.models import ArtifactRef, ArtifactRole, CheckResult, Run
 from slab.retention import DEFAULT_POLICY, GcReport, RetentionPolicy, expire_due, gc
@@ -345,8 +350,10 @@ class Workspace:
         The run is created ``quarantined``/``running``. On normal exit it is
         marked ``completed``, its checks are evaluated, and it becomes
         ``verified`` only if every assertion passed (and at least one exists).
-        On exception it is marked ``failed`` with the error recorded, checks
-        are skipped, and the exception propagates.
+        On exception it is marked ``failed`` — recording a one-line ``error``
+        and a structured failure record (trimmed traceback and diagnostic
+        notes, see :func:`slab.errors.failure_record`) — checks are skipped,
+        and the exception propagates.
 
         Raises:
             NestedRunError: A run is already active in this context.
@@ -370,8 +377,12 @@ class Workspace:
         try:
             yield active
         except BaseException as exc:
+            record = failure_record(exc)
             self.runs.set_status(
-                created.id, ExecutionStatus.FAILED, error=f"{type(exc).__name__}: {exc}"
+                created.id,
+                ExecutionStatus.FAILED,
+                error=f"{record['type']}: {record['message']}",
+                failure=record,
             )
             raise
         else:
