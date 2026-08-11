@@ -48,7 +48,8 @@ def test_default_policy_shape() -> None:
     assert DEFAULT_POLICY.verified.ttl_days == 90
     assert DEFAULT_POLICY.promoted.ttl_days is None
     assert DEFAULT_POLICY.quarantined.keep == frozenset(ArtifactRole)  # alive: keep all
-    assert DEFAULT_POLICY.promoted.keep == frozenset({ArtifactRole.TERMINAL})
+    # promoted keeps declared outputs and recompute roots; intermediates go hash-only
+    assert DEFAULT_POLICY.promoted.keep == frozenset({ArtifactRole.TERMINAL, ArtifactRole.INPUT})
     assert DEFAULT_POLICY.expired.keep == frozenset()
 
 
@@ -156,6 +157,13 @@ def test_expected_guard_used_by_sweep(store: SQLiteRunStore) -> None:
     with pytest.raises(IllegalTransitionError, match="expected state 'quarantined'"):
         store.transition(run.id, E, expected=Q)
     assert store.get(run.id).state is V
+
+
+def test_expiry_never_touches_running_runs(store: SQLiteRunStore) -> None:
+    run = store.create(_aged(400))
+    store.set_status(run.id, "running")
+    assert expire_due(store, DEFAULT_POLICY) == []
+    assert store.get(run.id).state is Q
 
 
 # -- gc --------------------------------------------------------------------------------
@@ -281,3 +289,72 @@ def test_gc_end_to_end_demo_story(store: SQLiteRunStore, cas: ArtifactStore) -> 
     assert report.freed_bytes > 0
     for run in runs:  # every run still answers "what was made, and how?"
         assert {a.name for a in store.list_artifacts(run.id)} == {"relaxed", "traj"}
+
+
+# -- gc over traced task data ----------------------------------------------------------
+
+
+def test_gc_task_data_tiering_for_promoted_run(tmp_path: Path) -> None:
+    """Promoted runs keep recompute roots and declared terminals; the middle drops."""
+    from slab import Workspace, task
+
+    @task
+    def stage_one(x: float) -> float:
+        return x + 1
+
+    @task
+    def stage_two(y: float) -> float:
+        return y * 2
+
+    with Workspace(tmp_path / "ws") as ws:
+        with ws.start_run(name="chain") as run:
+            mid = stage_one(1.0)
+            final = stage_two(mid)
+            ref = run.keep("result", final)
+        ws.runs.transition(run.id, "promoted", force=True)
+
+        first, second = ws.runs.list_tasks(run.id)
+        root_in = first.inputs["x"]  # entered from outside: recompute root
+        mid_hash = first.outputs["return"]  # produced and consumed in-run: intermediate
+        assert second.inputs["y"] == mid_hash
+
+        report = ws.gc()
+        assert mid_hash in report.dropped
+        assert root_in in report.kept  # roots survive: recompute is a real promise
+        assert ref.hash in report.kept  # declared terminal survives
+        assert not ws.artifacts.has(mid_hash)
+        assert ws.artifacts.has(root_in)
+
+
+def test_gc_keeps_all_task_data_while_alive(tmp_path: Path) -> None:
+    from slab import Workspace, task
+
+    @task
+    def stage(x: float) -> float:
+        return x + 1
+
+    with Workspace(tmp_path / "ws") as ws:
+        with ws.start_run() as run:
+            stage(1.0)
+        report = ws.gc()  # run is quarantined: everything stays
+        assert report.dropped == []
+        (record,) = ws.runs.list_tasks(run.id)
+        assert all(ws.artifacts.has(h) for h in record.inputs.values())
+        assert all(ws.artifacts.has(h) for h in record.outputs.values())
+
+
+def test_gc_drops_all_task_data_of_expired_runs(tmp_path: Path) -> None:
+    from slab import Workspace, task
+
+    @task
+    def stage(x: float) -> float:
+        return x + 2
+
+    with Workspace(tmp_path / "ws") as ws:
+        with ws.start_run() as run:
+            stage(1.0)
+        ws.runs.transition(run.id, "expired", actor="system")
+        report = ws.gc()
+        assert set(ws.artifacts.hashes()) == set()
+        assert report.freed_bytes > 0
+        assert len(ws.runs.list_tasks(run.id)) == 1  # records + hashes survive

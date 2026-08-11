@@ -1,0 +1,230 @@
+"""The ``@task`` tracing decorator: plain functions, recorded runs.
+
+Decorating a function changes nothing about how it is called. Outside a run
+context it is exactly the function it was. Inside ``Workspace.start_run`` each
+call is traced:
+
+1. Bound arguments (defaults applied) are serialized, content-hashed, and
+   stored — inputs are part of the recipe, so recompute-on-demand has roots.
+2. A cache key is fingerprinted from the code identity (module, qualname,
+   source hash), resolved engine versions, and the input hashes. If a
+   completed task with the same key exists *and its output bytes are still
+   present*, the stored outputs are returned without executing — restart a
+   crashed script and finished work is skipped. Discarded bytes mean a cache
+   miss and honest recomputation.
+3. Otherwise the function runs. Its return value is serialized and stored —
+   a tuple return is stored element-wise (``return[0]``, ``return[1]``, ...) so
+   the common ``atoms, info = relax(...)`` pattern leaves per-value hashes.
+4. A :class:`~slab.models.TaskRecord` lands on the run either way, carrying
+   the full recipe: inputs, code version, engine versions, parameters.
+
+The DAG is *derived*, not declared: task B consuming task A's output is
+visible because B's input hash equals A's output hash. No graph API to learn,
+nothing to get wrong.
+"""
+
+from __future__ import annotations
+
+import functools
+import hashlib
+import inspect
+import platform
+import textwrap
+from collections.abc import Callable, Sequence
+from importlib import metadata
+from typing import Any, ParamSpec, TypeVar, overload
+
+from slab._version import __version__
+from slab.artifacts import ArtifactStore
+from slab.lifecycle import ExecutionStatus
+from slab.models import TaskRecord, utcnow
+from slab.runtime import ActiveRun, current_run
+from slab.serialize import dumps, fingerprint, loads
+
+P = ParamSpec("P")
+R = TypeVar("R")
+
+_MAX_LITERAL_PARAM = 500  # chars; longer strings are recorded by hash, not verbatim
+
+
+@overload
+def task(fn: Callable[P, R]) -> Callable[P, R]: ...
+@overload
+def task(
+    *, name: str | None = None, engines: str | Sequence[str] = ()
+) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
+def task(
+    fn: Callable[P, R] | None = None,
+    *,
+    name: str | None = None,
+    engines: str | Sequence[str] = (),
+) -> Callable[P, R] | Callable[[Callable[P, R]], Callable[P, R]]:
+    """Make a plain function a traced task, without changing how it is called.
+
+    Args:
+        name: Display name for records (defaults to the function's name).
+        engines: Distribution names whose installed versions should be pinned
+            into the recipe and the cache key (e.g. ``engines=("mace", "ase")``).
+            A version bump of a listed engine invalidates the cache — same
+            inputs through a different engine version is a different result.
+
+    Examples:
+        >>> @task
+        ... def double(x):
+        ...     return 2 * x
+        >>> double(21)  # outside a run: just the function, untraced
+        42
+    """
+
+    def decorate(f: Callable[P, R]) -> Callable[P, R]:
+        signature = inspect.signature(f)
+        task_name = name or f.__name__
+        engine_names = (engines,) if isinstance(engines, str) else tuple(engines)
+        try:
+            source = textwrap.dedent(inspect.getsource(f))
+            code_hash: str | None = hashlib.sha256(source.encode()).hexdigest()
+        except (OSError, TypeError):  # REPL/doctest-defined functions have no source
+            code_hash = None
+
+        @functools.wraps(f)
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+            active = current_run()
+            if active is None:
+                return f(*args, **kwargs)
+            return _traced_call(
+                active, f, signature, task_name, code_hash, engine_names, args, kwargs
+            )
+
+        return wrapper
+
+    return decorate if fn is None else decorate(fn)
+
+
+def _traced_call(
+    active: ActiveRun,
+    f: Callable[P, R],
+    signature: inspect.Signature,
+    task_name: str,
+    code_hash: str | None,
+    engine_names: tuple[str, ...],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> R:
+    bound = signature.bind(*args, **kwargs)
+    bound.apply_defaults()
+
+    input_hashes: dict[str, str] = {}
+    for arg_name, value in bound.arguments.items():
+        payload = dumps(value)  # SerializationError here names a real problem: fix the input
+        input_hashes[arg_name] = active.artifacts.put_bytes(payload)
+
+    engine_versions = {engine: _dist_version(engine) for engine in engine_names}
+    recipe: dict[str, Any] = {
+        "task": task_name,
+        "module": f.__module__,
+        "qualname": f.__qualname__,
+        "code_sha256": code_hash,
+        "engines": engine_versions,
+        "python": platform.python_version(),
+        "slab": __version__,
+        "params": _params_lite(bound.arguments, input_hashes),
+    }
+    cache_key = fingerprint(
+        {
+            "module": f.__module__,
+            "qualname": f.__qualname__,
+            "code": code_hash,
+            "engines": engine_versions,
+            "inputs": input_hashes,
+        }
+    )
+
+    cached = active.runs.find_cached_task(cache_key)
+    if cached is not None and all(active.artifacts.has(h) for h in cached.outputs.values()):
+        now = utcnow()
+        active.runs.add_task(
+            TaskRecord(
+                run_id=active.id,
+                name=task_name,
+                status=ExecutionStatus.COMPLETED,
+                cache_hit=True,
+                cache_key=cache_key,
+                recipe=recipe,
+                inputs=input_hashes,
+                outputs=cached.outputs,
+                started_at=now,
+                finished_at=now,
+            )
+        )
+        return _restore(active.artifacts, cached.outputs)  # type: ignore[return-value]
+
+    started_at = utcnow()
+    try:
+        result = f(*args, **kwargs)
+        outputs = _store_outputs(active.artifacts, result)
+    except Exception as e:
+        active.runs.add_task(
+            TaskRecord(
+                run_id=active.id,
+                name=task_name,
+                status=ExecutionStatus.FAILED,
+                cache_key=cache_key,
+                recipe=recipe,
+                inputs=input_hashes,
+                error=f"{type(e).__name__}: {e}",
+                started_at=started_at,
+                finished_at=utcnow(),
+            )
+        )
+        raise
+    active.runs.add_task(
+        TaskRecord(
+            run_id=active.id,
+            name=task_name,
+            status=ExecutionStatus.COMPLETED,
+            cache_key=cache_key,
+            recipe=recipe,
+            inputs=input_hashes,
+            outputs=outputs,
+            started_at=started_at,
+            finished_at=utcnow(),
+        )
+    )
+    return result
+
+
+def _store_outputs(artifacts: ArtifactStore, result: object) -> dict[str, str]:
+    """Serialize a return value into the CAS; tuples go element-wise."""
+    if isinstance(result, tuple):
+        return {
+            f"return[{i}]": artifacts.put_bytes(dumps(element)) for i, element in enumerate(result)
+        }
+    return {"return": artifacts.put_bytes(dumps(result))}
+
+
+def _restore(artifacts: ArtifactStore, outputs: dict[str, str]) -> object:
+    """Rebuild a return value from stored output blobs."""
+    if set(outputs) == {"return"}:
+        return loads(artifacts.get(outputs["return"]).read_bytes())
+    ordered = sorted(outputs.items(), key=lambda item: int(item[0][7:-1]))
+    return tuple(loads(artifacts.get(digest).read_bytes()) for _, digest in ordered)
+
+
+def _params_lite(arguments: dict[str, Any], input_hashes: dict[str, str]) -> dict[str, Any]:
+    """Human-readable parameters for the recipe: literals verbatim, data by hash."""
+    lite: dict[str, Any] = {}
+    for arg_name, value in arguments.items():
+        is_literal = value is None or isinstance(value, (bool, int, float))
+        if is_literal or (isinstance(value, str) and len(value) <= _MAX_LITERAL_PARAM):
+            lite[arg_name] = value
+        else:
+            lite[arg_name] = {"$hash": input_hashes[arg_name]}
+    return lite
+
+
+def _dist_version(distribution: str) -> str | None:
+    """Installed version of a distribution, or None if it is not installed."""
+    try:
+        return metadata.version(distribution)
+    except metadata.PackageNotFoundError:
+        return None

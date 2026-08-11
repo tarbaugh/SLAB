@@ -16,7 +16,7 @@ import json
 import os
 import sqlite3
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -41,7 +41,7 @@ from slab.lifecycle import (
     validate_status_change,
     validate_transition,
 )
-from slab.models import ArtifactRef, ArtifactRole, Run, Transition, utcnow
+from slab.models import ArtifactRef, ArtifactRole, CheckResult, Run, TaskRecord, Transition, utcnow
 
 SCHEMA_VERSION = 1
 
@@ -57,7 +57,8 @@ CREATE TABLE IF NOT EXISTS runs (
     updated_at       TEXT NOT NULL,
     state_entered_at TEXT NOT NULL,
     started_at       TEXT,
-    finished_at      TEXT
+    finished_at      TEXT,
+    error            TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_runs_state ON runs(state);
 CREATE INDEX IF NOT EXISTS ix_runs_status ON runs(status);
@@ -86,6 +87,34 @@ CREATE TABLE IF NOT EXISTS artifacts (
 );
 CREATE INDEX IF NOT EXISTS ix_artifacts_run_id ON artifacts(run_id);
 CREATE INDEX IF NOT EXISTS ix_artifacts_hash ON artifacts(hash);
+CREATE TABLE IF NOT EXISTS tasks (
+    seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id      TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    status      TEXT NOT NULL,
+    cache_hit   INTEGER NOT NULL DEFAULT 0,
+    cache_key   TEXT NOT NULL,
+    recipe      TEXT NOT NULL,
+    inputs      TEXT NOT NULL,
+    outputs     TEXT NOT NULL,
+    error       TEXT,
+    started_at  TEXT NOT NULL,
+    finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_tasks_run_id ON tasks(run_id);
+CREATE INDEX IF NOT EXISTS ix_tasks_cache_key ON tasks(cache_key);
+CREATE TABLE IF NOT EXISTS checks (
+    seq       INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id    TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    name      TEXT NOT NULL,
+    kind      TEXT NOT NULL,
+    passed    INTEGER NOT NULL,
+    message   TEXT NOT NULL DEFAULT '',
+    observed  TEXT NOT NULL DEFAULT 'null',
+    expected  TEXT NOT NULL DEFAULT 'null',
+    at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_checks_run_id ON checks(run_id);
 """
 
 
@@ -128,7 +157,9 @@ class RunStore(Protocol):
         """Atomically move a run to a new lifecycle state."""
         ...
 
-    def set_status(self, run_id: str, status: ExecutionStatus | str) -> Run:
+    def set_status(
+        self, run_id: str, status: ExecutionStatus | str, *, error: str | None = None
+    ) -> Run:
         """Change a run's execution status."""
         ...
 
@@ -138,6 +169,26 @@ class RunStore(Protocol):
 
     def history(self, run_id: str) -> list[Transition]:
         """Return the run's lifecycle transitions, oldest first."""
+        ...
+
+    def add_task(self, record: TaskRecord) -> TaskRecord:
+        """Record a traced task call on its run."""
+        ...
+
+    def list_tasks(self, run_id: str) -> list[TaskRecord]:
+        """List a run's traced task calls, oldest first."""
+        ...
+
+    def find_cached_task(self, cache_key: str) -> TaskRecord | None:
+        """Return the most recent completed task with this cache key, if any."""
+        ...
+
+    def add_check_results(self, run_id: str, results: Sequence[CheckResult]) -> list[CheckResult]:
+        """Record verification results on a run."""
+        ...
+
+    def list_check_results(self, run_id: str) -> list[CheckResult]:
+        """List a run's verification results, oldest first."""
         ...
 
     def add_artifact(
@@ -246,8 +297,8 @@ class SQLiteRunStore:
             try:
                 conn.execute(
                     "INSERT INTO runs (id, name, state, status, intent, meta, created_at,"
-                    " updated_at, state_entered_at, started_at, finished_at)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    " updated_at, state_entered_at, started_at, finished_at, error)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         run.id,
                         run.name,
@@ -260,6 +311,7 @@ class SQLiteRunStore:
                         run.state_entered_at.isoformat(),
                         _fmt_dt(run.started_at),
                         _fmt_dt(run.finished_at),
+                        run.error,
                     ),
                 )
             except sqlite3.IntegrityError as e:
@@ -338,28 +390,34 @@ class SQLiteRunStore:
             )
             return self._get_exact(conn, rid)
 
-    def set_status(self, run_id: str, status: ExecutionStatus | str) -> Run:
+    def set_status(
+        self, run_id: str, status: ExecutionStatus | str, *, error: str | None = None
+    ) -> Run:
         """Change a run's execution status; return the updated snapshot.
 
         Stamps ``started_at`` when entering ``running`` and ``finished_at`` when
         entering ``completed`` or ``failed``. A run served from cache may go
         ``pending -> completed`` directly, finishing without ever starting.
+        Pass ``error`` (only with status ``failed``) to record why.
 
         Raises:
             IllegalStatusChangeError: The change is not permitted
                 (e.g. ``completed -> running``).
+            ValueError: ``error`` was passed with a non-``failed`` status.
 
         Examples:
             >>> store = SQLiteRunStore(":memory:")
             >>> r = store.create(Run())
             >>> store.set_status(r.id, "running").status.value
             'running'
-            >>> done = store.set_status(r.id, "completed")
-            >>> done.finished_at is not None
-            True
+            >>> done = store.set_status(r.id, "failed", error="OOM killed")
+            >>> (done.finished_at is not None, done.error)
+            (True, 'OOM killed')
             >>> store.close()
         """
         new = ExecutionStatus(status)
+        if error is not None and new is not ExecutionStatus.FAILED:
+            raise ValueError("error= is only recordable when setting status to 'failed'")
         with self._txn() as conn:
             rid = self._resolve(run_id)
             row = conn.execute(
@@ -379,6 +437,9 @@ class SQLiteRunStore:
             ):
                 sets.append("finished_at = ?")
                 params.append(now)
+            if error is not None:
+                sets.append("error = ?")
+                params.append(error)
             params.append(rid)
             conn.execute(f"UPDATE runs SET {', '.join(sets)} WHERE id = ?", params)
             return self._get_exact(conn, rid)
@@ -475,7 +536,162 @@ class SQLiteRunStore:
                 raise ArtifactExistsError(rid, name) from e
         return ref
 
+    def add_task(self, record: TaskRecord) -> TaskRecord:
+        """Record a traced task call; return it with its store-assigned ``seq``.
+
+        Written by the ``@task`` tracer after the call finished (or was served
+        from cache); ``status`` must therefore be ``completed`` or ``failed``.
+
+        Raises:
+            ValueError: The status is not a final one.
+            RunStateError: The run is in a terminal lifecycle state.
+
+        Examples:
+            >>> store = SQLiteRunStore(":memory:")
+            >>> r = store.create(Run())
+            >>> rec = store.add_task(TaskRecord(
+            ...     run_id=r.id, name="relax", status="completed", cache_key="ab" * 32,
+            ...     inputs={"atoms": "cd" * 32}, outputs={"return": "ef" * 32},
+            ...     started_at=utcnow(),
+            ... ))
+            >>> rec.seq > 0
+            True
+            >>> store.close()
+        """
+        if record.status not in (ExecutionStatus.COMPLETED, ExecutionStatus.FAILED):
+            raise ValueError(
+                f"tasks are recorded after the fact: status must be 'completed' or"
+                f" 'failed', got {record.status.value!r}"
+            )
+        with self._txn() as conn:
+            rid = self._resolve(record.run_id)
+            row = conn.execute("SELECT state FROM runs WHERE id = ?", (rid,)).fetchone()
+            state = LifecycleState(row["state"])
+            if is_terminal(state):
+                raise RunStateError(rid, state, "record tasks on")
+            cursor = conn.execute(
+                "INSERT INTO tasks (run_id, name, status, cache_hit, cache_key, recipe,"
+                " inputs, outputs, error, started_at, finished_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    rid,
+                    record.name,
+                    record.status.value,
+                    int(record.cache_hit),
+                    record.cache_key,
+                    json.dumps(record.recipe, sort_keys=True, default=repr),
+                    json.dumps(record.inputs, sort_keys=True),
+                    json.dumps(record.outputs, sort_keys=True),
+                    record.error,
+                    record.started_at.isoformat(),
+                    _fmt_dt(record.finished_at),
+                ),
+            )
+            task_row = conn.execute(
+                "SELECT * FROM tasks WHERE seq = ?", (cursor.lastrowid,)
+            ).fetchone()
+        return _row_to_task(task_row)
+
+    def add_check_results(self, run_id: str, results: Sequence[CheckResult]) -> list[CheckResult]:
+        """Record verification results on a run; return them stamped with its full id.
+
+        Examples:
+            >>> store = SQLiteRunStore(":memory:")
+            >>> r = store.create(Run())
+            >>> _ = store.add_check_results(r.id, [CheckResult(
+            ...     run_id=r.id, name="fmax", kind="converged", passed=True,
+            ...     message="fmax=0.03 < 0.05",
+            ... )])
+            >>> store.list_check_results(r.id)[0].passed
+            True
+            >>> store.close()
+        """
+        with self._txn() as conn:
+            rid = self._resolve(run_id)
+            stamped = [result.model_copy(update={"run_id": rid}) for result in results]
+            for result in stamped:
+                conn.execute(
+                    "INSERT INTO checks (run_id, name, kind, passed, message, observed,"
+                    " expected, at) VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        rid,
+                        result.name,
+                        result.kind,
+                        int(result.passed),
+                        result.message,
+                        json.dumps(result.observed, sort_keys=True, default=repr),
+                        json.dumps(result.expected, sort_keys=True, default=repr),
+                        result.at.isoformat(),
+                    ),
+                )
+        return stamped
+
     # -- reads ------------------------------------------------------------------------
+
+    def list_tasks(self, run_id: str) -> list[TaskRecord]:
+        """List a run's traced task calls, oldest first.
+
+        Examples:
+            >>> store = SQLiteRunStore(":memory:")
+            >>> r = store.create(Run())
+            >>> store.list_tasks(r.id)
+            []
+            >>> store.close()
+        """
+        with self._lock:
+            rid = self._resolve(run_id)
+            rows = self._conn.execute(
+                "SELECT * FROM tasks WHERE run_id = ? ORDER BY seq", (rid,)
+            ).fetchall()
+        return [_row_to_task(row) for row in rows]
+
+    def find_cached_task(self, cache_key: str) -> TaskRecord | None:
+        """Return the most recent *completed* task with this cache key, if any.
+
+        This is the cache lookup the tracer uses: failed attempts never
+        populate the cache, and lookups span all runs in the store.
+
+        Examples:
+            >>> store = SQLiteRunStore(":memory:")
+            >>> store.find_cached_task("ab" * 32) is None
+            True
+            >>> store.close()
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM tasks WHERE cache_key = ? AND status = ? ORDER BY seq DESC LIMIT 1",
+                (cache_key, ExecutionStatus.COMPLETED.value),
+            ).fetchone()
+        return None if row is None else _row_to_task(row)
+
+    def list_check_results(self, run_id: str) -> list[CheckResult]:
+        """List a run's verification results, oldest first.
+
+        Examples:
+            >>> store = SQLiteRunStore(":memory:")
+            >>> r = store.create(Run())
+            >>> store.list_check_results(r.id)
+            []
+            >>> store.close()
+        """
+        with self._lock:
+            rid = self._resolve(run_id)
+            rows = self._conn.execute(
+                "SELECT * FROM checks WHERE run_id = ? ORDER BY seq", (rid,)
+            ).fetchall()
+        return [
+            CheckResult(
+                run_id=row["run_id"],
+                name=row["name"],
+                kind=row["kind"],
+                passed=bool(row["passed"]),
+                message=row["message"],
+                observed=json.loads(row["observed"]),
+                expected=json.loads(row["expected"]),
+                at=datetime.fromisoformat(row["at"]),
+            )
+            for row in rows
+        ]
 
     def list_artifacts(
         self, run_id: str, *, role: ArtifactRole | str | None = None
@@ -703,6 +919,24 @@ def _row_to_run(row: sqlite3.Row) -> Run:
         updated_at=datetime.fromisoformat(row["updated_at"]),
         state_entered_at=datetime.fromisoformat(row["state_entered_at"]),
         started_at=_parse_dt(row["started_at"]),
+        finished_at=_parse_dt(row["finished_at"]),
+        error=row["error"],
+    )
+
+
+def _row_to_task(row: sqlite3.Row) -> TaskRecord:
+    return TaskRecord(
+        run_id=row["run_id"],
+        seq=row["seq"],
+        name=row["name"],
+        status=ExecutionStatus(row["status"]),
+        cache_hit=bool(row["cache_hit"]),
+        cache_key=row["cache_key"],
+        recipe=json.loads(row["recipe"]),
+        inputs=json.loads(row["inputs"]),
+        outputs=json.loads(row["outputs"]),
+        error=row["error"],
+        started_at=datetime.fromisoformat(row["started_at"]),
         finished_at=_parse_dt(row["finished_at"]),
     )
 

@@ -176,6 +176,34 @@ class AmbiguousHashError(SlabError):
         )
 
 
+class SerializationError(SlabError):
+    """A value could not be serialized for tracing/storage, or decoded back."""
+
+
+class NoActiveRunError(SlabError):
+    """A feature that needs an active run was used outside ``Workspace.start_run``."""
+
+    def __init__(
+        self,
+        message: str = (
+            "no active run: this can only be used inside a 'with ws.start_run(...)' block"
+        ),
+    ) -> None:
+        super().__init__(message)
+
+
+class NestedRunError(SlabError):
+    """``start_run`` was called while another run is already active in this context."""
+
+    def __init__(
+        self,
+        message: str = (
+            "a run is already active in this context; nested start_run() is not supported"
+        ),
+    ) -> None:
+        super().__init__(message)
+
+
 class StorageError(SlabError):
     """A storage-layer failure (bad data, I/O, or invariant violation)."""
 

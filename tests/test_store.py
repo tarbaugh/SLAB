@@ -12,6 +12,7 @@ from slab import (
     ArtifactExistsError,
     ArtifactNotFoundError,
     ArtifactRole,
+    CheckResult,
     ExecutionStatus,
     IllegalStatusChangeError,
     IllegalTransitionError,
@@ -24,6 +25,7 @@ from slab import (
     SchemaVersionError,
     SQLiteRunStore,
     StorageError,
+    TaskRecord,
     utcnow,
 )
 
@@ -532,3 +534,122 @@ def test_artifacts_persist_across_reopen(db_path: Path) -> None:
         s1.add_artifact(run.id, name="out", role="terminal", hash=H1, size_bytes=7)
     with SQLiteRunStore(db_path) as s2:
         assert s2.get_artifact(run.id, "out").size_bytes == 7
+
+
+# -- task records ----------------------------------------------------------------------
+
+
+def _task_record(run_id: str, **overrides: object) -> TaskRecord:
+    base: dict[str, object] = {
+        "run_id": run_id,
+        "name": "relax",
+        "status": "completed",
+        "cache_key": "ab" * 32,
+        "recipe": {"module": "wf", "engines": {"mace": "0.3.5"}},
+        "inputs": {"atoms": "cd" * 32},
+        "outputs": {"return": "ef" * 32},
+        "started_at": utcnow(),
+        "finished_at": utcnow(),
+    }
+    base.update(overrides)
+    return TaskRecord.model_validate(base)
+
+
+def test_add_and_list_tasks_roundtrip(store: SQLiteRunStore) -> None:
+    run = store.create(Run())
+    stored = store.add_task(_task_record(run.id))
+    assert stored.seq > 0
+    (loaded,) = store.list_tasks(run.id)
+    assert loaded == stored
+    assert loaded.recipe["engines"] == {"mace": "0.3.5"}
+
+
+def test_tasks_ordered_by_insertion(store: SQLiteRunStore) -> None:
+    run = store.create(Run())
+    store.add_task(_task_record(run.id, name="first"))
+    store.add_task(_task_record(run.id, name="second", cache_key="cd" * 32))
+    assert [t.name for t in store.list_tasks(run.id)] == ["first", "second"]
+
+
+def test_add_task_rejects_non_final_status(store: SQLiteRunStore) -> None:
+    run = store.create(Run())
+    with pytest.raises(ValueError, match="after the fact"):
+        store.add_task(_task_record(run.id, status="running"))
+
+
+def test_add_task_refused_on_terminal_run(store: SQLiteRunStore) -> None:
+    run = store.create(Run())
+    store.transition(run.id, E)
+    with pytest.raises(RunStateError, match="record tasks"):
+        store.add_task(_task_record(run.id))
+
+
+def test_find_cached_task_prefers_latest_completed(store: SQLiteRunStore) -> None:
+    key = "aa" * 32
+    run_a = store.create(Run())
+    run_b = store.create(Run())
+    store.add_task(_task_record(run_a.id, cache_key=key, outputs={"return": "11" * 32}))
+    store.add_task(_task_record(run_b.id, cache_key=key, outputs={"return": "22" * 32}))
+    hit = store.find_cached_task(key)
+    assert hit is not None
+    assert hit.outputs == {"return": "22" * 32}  # latest wins, across runs
+
+
+def test_find_cached_task_ignores_failures(store: SQLiteRunStore) -> None:
+    key = "bb" * 32
+    run = store.create(Run())
+    store.add_task(_task_record(run.id, cache_key=key, status="failed", outputs={}, error="boom"))
+    assert store.find_cached_task(key) is None
+    assert store.find_cached_task("00" * 32) is None
+
+
+# -- check results ---------------------------------------------------------------------
+
+
+def test_check_results_roundtrip(store: SQLiteRunStore) -> None:
+    run = store.create(Run())
+    stored = store.add_check_results(
+        run.id[:8],  # prefix accepted; results stamped with the full id
+        [
+            CheckResult(
+                run_id="ignored",
+                name="fmax",
+                kind="converged",
+                passed=True,
+                message="fmax=0.03 < 0.05",
+                observed=0.03,
+                expected={"below": 0.05},
+            ),
+            CheckResult(run_id="ignored", name="sanity", kind="custom", passed=False),
+        ],
+    )
+    assert all(r.run_id == run.id for r in stored)
+    loaded = store.list_check_results(run.id)
+    assert [(r.name, r.passed) for r in loaded] == [("fmax", True), ("sanity", False)]
+    assert loaded[0].observed == 0.03
+    assert loaded[0].expected == {"below": 0.05}
+
+
+def test_check_results_persist_across_reopen(db_path: Path) -> None:
+    with SQLiteRunStore(db_path) as s1:
+        run = s1.create(Run())
+        s1.add_check_results(run.id, [CheckResult(run_id=run.id, name="ok", passed=True)])
+    with SQLiteRunStore(db_path) as s2:
+        assert s2.list_check_results(run.id)[0].name == "ok"
+
+
+# -- run error field -------------------------------------------------------------------
+
+
+def test_failed_status_records_error(store: SQLiteRunStore) -> None:
+    run = store.create(Run())
+    failed = store.set_status(run.id, "failed", error="OOM killed")
+    assert failed.error == "OOM killed"
+    assert store.get(run.id).error == "OOM killed"
+
+
+def test_error_only_with_failed_status(store: SQLiteRunStore) -> None:
+    run = store.create(Run())
+    with pytest.raises(ValueError, match="failed"):
+        store.set_status(run.id, "running", error="nope")
+    assert store.get(run.id).status is ExecutionStatus.PENDING

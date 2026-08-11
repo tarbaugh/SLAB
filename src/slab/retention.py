@@ -29,7 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from slab.artifacts import ArtifactStore
 from slab.errors import IllegalTransitionError
-from slab.lifecycle import LifecycleState
+from slab.lifecycle import ExecutionStatus, LifecycleState
 from slab.models import ArtifactRole, Run, utcnow
 from slab.store import RunStore
 
@@ -67,7 +67,8 @@ class RetentionPolicy(BaseModel):
     Defaults: quarantined runs expire after 30 days and verified runs after 90
     (only promotion confers permanence); while a run is alive (quarantined or
     verified) all its bytes are kept so it can be inspected; promoted and
-    archived runs keep bytes for ``terminal`` artifacts only; expired runs keep
+    archived runs keep bytes for ``terminal`` artifacts and ``input`` roots
+    (the recompute anchors) but drop ``intermediate`` bytes; expired runs keep
     no bytes. Promoted/archived rules cannot carry a TTL — validation enforces
     the promotion-is-permanent asymmetry.
 
@@ -78,7 +79,7 @@ class RetentionPolicy(BaseModel):
         >>> policy.verified.ttl_days  # other states keep their defaults
         90.0
         >>> sorted(role.value for role in policy.rule_for("promoted").keep)
-        ['terminal']
+        ['input', 'terminal']
         >>> try:
         ...     RetentionPolicy.model_validate({"promoted": {"ttl_days": 365}})
         ... except ValueError:
@@ -90,8 +91,8 @@ class RetentionPolicy(BaseModel):
 
     quarantined: StateRule = StateRule(ttl_days=30)
     verified: StateRule = StateRule(ttl_days=90)
-    promoted: StateRule = StateRule(keep=frozenset({ArtifactRole.TERMINAL}))
-    archived: StateRule = StateRule(keep=frozenset({ArtifactRole.TERMINAL}))
+    promoted: StateRule = StateRule(keep=frozenset({ArtifactRole.TERMINAL, ArtifactRole.INPUT}))
+    archived: StateRule = StateRule(keep=frozenset({ArtifactRole.TERMINAL, ArtifactRole.INPUT}))
     expired: StateRule = StateRule(keep=frozenset())
 
     @model_validator(mode="after")
@@ -176,6 +177,8 @@ def expire_due(
             continue
         cutoff = now - timedelta(days=ttl_days)
         for run in runs.list_runs(state=state):
+            if run.status is ExecutionStatus.RUNNING:
+                continue  # a live process owns this run; never yank state under it
             if run.state_entered_at > cutoff:
                 continue
             try:
@@ -201,6 +204,12 @@ def gc(
     dry_run: bool = False,
 ) -> GcReport:
     """Reclaim artifact bytes that no run's retention rule demands.
+
+    Two kinds of reference are scanned: *declared artifacts* (with their
+    explicit roles) and *traced task data*. Task blobs are classified
+    automatically — outputs are ``intermediate``; inputs are ``intermediate``
+    when produced by another task in the same run, else ``input`` (a recompute
+    root). Everything a task touches is intermediate unless declared terminal.
 
     A blob's bytes are kept if *any* reference demands them — the same hash may
     be a promoted run's terminal output and an expired run's intermediate, and
@@ -231,12 +240,24 @@ def gc(
     """
     demanded: set[str] = set()
     referenced: set[str] = set()
+
+    def note(digest: str, role: ArtifactRole, keep: frozenset[ArtifactRole]) -> None:
+        referenced.add(digest)
+        if role in keep:
+            demanded.add(digest)
+
     for run in runs.list_runs():
-        rule = policy.rule_for(run.state)
+        keep = policy.rule_for(run.state).keep
         for ref in runs.list_artifacts(run.id):
-            referenced.add(ref.hash)
-            if ref.role in rule.keep:
-                demanded.add(ref.hash)
+            note(ref.hash, ref.role, keep)
+        tasks = runs.list_tasks(run.id)
+        produced = {digest for task in tasks for digest in task.outputs.values()}
+        for task in tasks:
+            for digest in task.outputs.values():
+                note(digest, ArtifactRole.INTERMEDIATE, keep)
+            for digest in task.inputs.values():
+                role = ArtifactRole.INTERMEDIATE if digest in produced else ArtifactRole.INPUT
+                note(digest, role, keep)
 
     present = set(artifacts.hashes())
     to_drop = sorted((referenced - demanded) & present)

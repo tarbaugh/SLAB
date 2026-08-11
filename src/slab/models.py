@@ -77,6 +77,7 @@ class Run(BaseModel):
             the anchor for retention TTLs (a run's clock restarts on transition).
         started_at / finished_at: Execution timestamps, stamped by the store on
             status changes (a cache-served run may finish without ever starting).
+        error: Failure message, recorded when the status is set to ``failed``.
 
     Examples:
         >>> run = Run(name="si-relax", intent="baseline lattice constant")
@@ -101,6 +102,7 @@ class Run(BaseModel):
     state_entered_at: datetime = Field(default_factory=utcnow)
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    error: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -125,10 +127,15 @@ class ArtifactRole(StrEnum):
     - ``INTERMEDIATE``: a reproducible byproduct (wavefunctions, trajectories,
       scratch files). Hash + recipe are always kept; bytes are droppable per
       policy — anything can be recomputed on demand.
+    - ``INPUT``: a recompute *root* — data that entered the workflow from
+      outside rather than being produced by a traced task. Kept for promoted
+      runs by default: without the roots, "recompute on demand" would be a
+      dangling promise.
     """
 
     TERMINAL = "terminal"
     INTERMEDIATE = "intermediate"
+    INPUT = "input"
 
 
 class ArtifactRef(BaseModel):
@@ -158,3 +165,75 @@ class ArtifactRef(BaseModel):
     size_bytes: int = Field(ge=0)
     recipe: dict[str, Any] | None = None
     created_at: datetime = Field(default_factory=utcnow)
+
+
+class TaskRecord(BaseModel):
+    """One traced task call inside a run. Immutable.
+
+    Recorded after the fact by the ``@task`` tracer: either the function ran
+    (``completed``/``failed``) or its result was served from cache
+    (``completed`` with ``cache_hit=True``). Input and output values live in
+    the artifact store under the hashes recorded here; the DAG is derived by
+    hash equality — if this task's input hash equals another task's output
+    hash, the data flowed between them.
+
+    Fields:
+        seq: Store-assigned position (global insertion order).
+        name: Task name (function name unless overridden).
+        recipe: How to recompute: module, qualname, code hash, engine
+            versions, python/slab versions, and human-readable params.
+        inputs: Bound argument name -> content hash.
+        outputs: ``"return"`` (or ``"return[i]"`` for tuple returns) -> content hash.
+        cache_key: Fingerprint of (code identity, engine versions, input hashes).
+
+    Examples:
+        >>> rec = TaskRecord(
+        ...     run_id="r", name="relax", status="completed",
+        ...     cache_key="ab" * 32, recipe={"module": "wf"},
+        ...     inputs={"atoms": "cd" * 32}, outputs={"return": "ef" * 32},
+        ...     started_at=utcnow(),
+        ... )
+        >>> rec.cache_hit
+        False
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    run_id: str
+    seq: int = 0
+    name: str = Field(min_length=1)
+    status: ExecutionStatus
+    cache_hit: bool = False
+    cache_key: str = Field(pattern=r"^[0-9a-f]{64}$")
+    recipe: dict[str, Any] = Field(default_factory=dict)
+    inputs: dict[str, str] = Field(default_factory=dict)
+    outputs: dict[str, str] = Field(default_factory=dict)
+    error: str | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+
+
+class CheckResult(BaseModel):
+    """The outcome of one verification assertion, stored on the run.
+
+    Produced when a run's ``@check`` hooks are evaluated at completion. All
+    results passing (and at least one existing) is what gates
+    ``quarantined -> verified``.
+
+    Examples:
+        >>> r = CheckResult(run_id="r", name="forces_converged", kind="converged",
+        ...                 passed=True, message="fmax=0.03 < 0.05")
+        >>> r.passed
+        True
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    run_id: str
+    name: str = Field(min_length=1)
+    kind: str = "custom"
+    passed: bool
+    message: str = ""
+    observed: Any = None
+    expected: Any = None
+    at: datetime = Field(default_factory=utcnow)
