@@ -375,6 +375,23 @@ def test_engines_verify_without_registry(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert "no engine registry configured" in result.output
 
 
+def test_engines_list_shows_rootstock_checkpoints(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pytest.importorskip("rootstock", reason="rootstock extra not installed")
+    root = tmp_path / "rootstock-install"
+    env_dir = root / "envs" / "fake-mace"
+    env_dir.mkdir(parents=True)
+    (env_dir / "env_source.py").write_text('CHECKPOINTS = {"fake-mace-checkpoint": "small"}\n')
+    monkeypatch.delenv("SLAB_ENGINES", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("ROOTSTOCK_ROOT", str(root))
+    result = runner.invoke(app, ["engines", "list"])
+    assert result.exit_code == 0
+    assert "rootstock checkpoints (usable directly as engine=)" in result.output
+    assert "fake-mace: fake-mace-checkpoint" in result.output
+
+
 # -- rendering details -----------------------------------------------------------------
 
 

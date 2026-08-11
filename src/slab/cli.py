@@ -339,14 +339,21 @@ def engines_list(registry_path: _RegistryOpt = None) -> None:
     registry = overview["registry"]
     if registry is None:
         typer.echo("registry: none configured (set $SLAB_ENGINES to a cluster's engines.json)")
-        return
-    where = f" [{registry['cluster']}]" if registry["cluster"] else ""
-    typer.echo(f"registry{where}: {registry['path']}")
-    for name, spec in registry["engines"].items():
-        version = spec["version"] or "unversioned"
-        probe = "probe" if spec["verified_by_probe"] else "no probe"
-        description = f"  {spec['description']}" if spec["description"] else ""
-        typer.echo(f"  {name:<14} {version:<14} {spec['calculator']}  ({probe}){description}")
+    else:
+        where = f" [{registry['cluster']}]" if registry["cluster"] else ""
+        typer.echo(f"registry{where}: {registry['path']}")
+        for name, spec in registry["engines"].items():
+            version = spec["version"] or "unversioned"
+            probe = "probe" if spec["verified_by_probe"] else "no probe"
+            description = f"  {spec['description']}" if spec["description"] else ""
+            typer.echo(f"  {name:<14} {version:<14} {spec['calculator']}  ({probe}){description}")
+    rootstock = overview["rootstock"]
+    if rootstock is not None:
+        typer.echo(f"rootstock checkpoints (usable directly as engine=): {rootstock['root']}")
+        if rootstock.get("error"):
+            typer.echo(f"  error reading install: {rootstock['error']}")
+        for env_name, ids in rootstock["checkpoints"].items():
+            typer.echo(f"  {env_name}: {', '.join(ids)}")
 
 
 @engines_app.command("verify")

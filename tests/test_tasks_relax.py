@@ -281,7 +281,6 @@ def test_relax_provenance_resolved_before_computation(
     )
     monkeypatch.setenv("SLAB_ENGINES", str(registry_path))
 
-
     real_get_calculator = __import__("slab.backends", fromlist=["get_calculator"]).get_calculator
 
     def build_then_delete_registry(engine: str, **kw: object) -> object:

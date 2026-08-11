@@ -23,8 +23,9 @@ EMT_SPEC = {"calculator": "ase.calculators.emt.EMT", "version": "ase-built-in"}
 
 @pytest.fixture(autouse=True)
 def _isolated_discovery(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Keep tests blind to any real $SLAB_ENGINES or ~/.config/slab/engines.json."""
+    """Keep tests blind to any real $SLAB_ENGINES, $ROOTSTOCK_ROOT, or user config."""
     monkeypatch.delenv("SLAB_ENGINES", raising=False)
+    monkeypatch.delenv("ROOTSTOCK_ROOT", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
 
@@ -260,6 +261,143 @@ def test_close_calculator_calls_close_when_present() -> None:
     close_calculator(worker)  # safe twice
     assert worker.closed == 2
     close_calculator(object())  # no close(): a no-op, not an error
+
+
+# -- silent rootstock checkpoint serving -----------------------------------------------
+
+
+@pytest.fixture()
+def rootstock_root(tmp_path: Path) -> Path:
+    """A minimal fake rootstock install: envs/<name>/env_source.py with CHECKPOINTS."""
+    pytest.importorskip("rootstock", reason="rootstock extra not installed")
+    root = tmp_path / "rootstock-install"
+    env_dir = root / "envs" / "fake-mace"
+    env_dir.mkdir(parents=True)
+    (env_dir / "env_source.py").write_text(
+        'CHECKPOINTS = {"fake-mace-checkpoint": "small", "fake-mace-large": "large"}\n'
+    )
+    return root
+
+
+def test_checkpoint_id_is_an_engine_name(
+    rootstock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The requested UX: engine='<checkpoint-id>' and rootstock serves it silently."""
+    monkeypatch.setenv("ROOTSTOCK_ROOT", str(rootstock_root))
+    calc = get_calculator("fake-mace-checkpoint")
+    try:
+        assert type(calc).__name__ == "RootstockCalculator"
+        assert calc.checkpoint == "fake-mace-checkpoint"
+    finally:
+        close_calculator(calc)
+
+
+def test_checkpoint_via_root_option(rootstock_root: Path) -> None:
+    calc = get_calculator("fake-mace-large", root=str(rootstock_root), device="cpu")
+    try:
+        assert calc.checkpoint == "fake-mace-large"
+    finally:
+        close_calculator(calc)
+
+
+def test_registry_alias_beats_checkpoint_id(
+    rootstock_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A maintainer's curated registry alias wins over bare checkpoint resolution."""
+    monkeypatch.setenv("ROOTSTOCK_ROOT", str(rootstock_root))
+    registry = _write_registry(
+        tmp_path / "engines.json", {"engines": {"fake-mace-checkpoint": EMT_SPEC}}
+    )
+    monkeypatch.setenv("SLAB_ENGINES", str(registry))
+    assert type(get_calculator("fake-mace-checkpoint")).__name__ == "EMT"
+
+
+def test_checkpoint_engine_rejects_redundant_checkpoint_option(rootstock_root: Path) -> None:
+    with pytest.raises(EngineNotAvailableError, match="itself a rootstock checkpoint"):
+        get_calculator("fake-mace-checkpoint", root=str(rootstock_root), checkpoint="other")
+
+
+def test_unknown_name_mentions_rootstock_install(
+    rootstock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ROOTSTOCK_ROOT", str(rootstock_root))
+    with pytest.raises(EngineNotAvailableError, match="not declared as a checkpoint"):
+        get_calculator("nope-checkpoint")
+
+
+def test_unknown_name_hints_when_root_unconfigured() -> None:
+    pytest.importorskip("rootstock", reason="rootstock extra not installed")
+    with pytest.raises(EngineNotAvailableError, match="ROOTSTOCK_ROOT"):
+        get_calculator("nope-checkpoint")
+
+
+def test_unknown_cluster_surfaces_rootstock_error(rootstock_root: Path) -> None:
+    with pytest.raises(EngineNotAvailableError, match="[Uu]nknown cluster"):
+        get_calculator("fake-mace-checkpoint", cluster="not-a-real-cluster")
+
+
+def test_describe_checkpoint_engine(rootstock_root: Path) -> None:
+    described = describe_engine("fake-mace-checkpoint", {"root": str(rootstock_root)})
+    assert described["source"] == "rootstock"
+    assert described["checkpoint"] == "fake-mace-checkpoint"
+    assert described["version"]  # the rootstock client version
+
+
+def test_engines_overview_lists_checkpoints(
+    rootstock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from slab._ops import engines_overview
+
+    monkeypatch.setenv("ROOTSTOCK_ROOT", str(rootstock_root))
+    overview = engines_overview()
+    assert overview["rootstock"]["root"] == str(rootstock_root)
+    assert overview["rootstock"]["checkpoints"] == {
+        "fake-mace": ["fake-mace-checkpoint", "fake-mace-large"]
+    }
+
+
+def test_checkpoint_resolution_silent_without_rootstock_package(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the extra, unknown names never mention rootstock — silent serving
+    is opt-in, and laptop users get the plain engine error."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def hide_rootstock(name: str, *args: object, **kwargs: object) -> object:
+        if name.startswith("rootstock"):
+            raise ImportError("No module named 'rootstock'")
+        return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(builtins, "__import__", hide_rootstock)
+    with pytest.raises(EngineNotAvailableError) as excinfo:
+        get_calculator("some-checkpoint-id")
+    assert "rootstock is installed" not in str(excinfo.value)
+
+    from slab._ops import engines_overview
+
+    assert engines_overview()["rootstock"] is None
+
+
+def test_unreadable_rootstock_install_reported_not_crashed(
+    rootstock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os as _os
+
+    envs = rootstock_root / "envs"
+    _os.chmod(envs, 0o000)
+    try:
+        with pytest.raises(EngineNotAvailableError, match="could not read"):
+            get_calculator("fake-mace-checkpoint", root=str(rootstock_root))
+        monkeypatch.setenv("ROOTSTOCK_ROOT", str(rootstock_root))
+        from slab._ops import engines_overview
+
+        overview = engines_overview()
+        assert overview["rootstock"]["error"]
+        assert overview["rootstock"]["checkpoints"] == {}
+    finally:
+        _os.chmod(envs, 0o755)
 
 
 # -- verify ----------------------------------------------------------------------------

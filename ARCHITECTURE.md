@@ -318,17 +318,24 @@ CLI (typer)          MCP server (stdio)      ← two skins, one behavior
 "many MLIPs, conflicting environments, shared HPC clusters" with a shape SLAB
 adopts twice — once by delegation, once by generalization.
 
-**Delegation: the `rootstock` built-in engine.** On a cluster with a
-rootstock install, `engine="rootstock"` with
-`calculator_options={"checkpoint": ..., "cluster": ...}` forwards to
+**Delegation: rootstock serves checkpoint ids silently.** On a cluster with
+a rootstock install, any canonical checkpoint id is directly an engine name:
+`engine="mace-mp-0-medium"` resolves through rootstock (SLAB asks the install
+whether some environment declares the id — the same AST-based, no-import
+resolution rootstock itself uses) and forwards to
 `rootstock.RootstockCalculator`: the MLIP runs in a maintainer-prebuilt,
 verified environment in a worker subprocess (i-PI protocol over a Unix
 socket), and the user's environment carries only a thin client. SLAB does not
 reimplement any of that machinery — checkpoint→environment resolution,
 worker lifecycle, and cache redirection are rootstock's job; SLAB's job is
-that `calculator_options` is a traced input, so the checkpoint id is part of
-the cache key and the recipe for free, and `relax` closes the worker (its
-`close()`) in a `finally`.
+that the engine name and options are traced inputs, so checkpoint identity is
+part of the cache key and the recipe for free, and `relax` closes the worker
+(its `close()`) in a `finally`. Resolution order across all sources is
+built-ins → registry → checkpoint ids: a curated registry alias beats bare
+resolution, and a name that is none of the three fails with an error that
+says which sources were consulted. The explicit `engine="rootstock"` form
+remains for what silent mode cannot express (`:custom` checkpoints with user
+weights).
 
 **Generalization: the engine registry** (`slab.engines`). Four rootstock
 ideas, applied to *all* engines:

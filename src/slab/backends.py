@@ -2,7 +2,7 @@
 
 SLAB never implements physics. Engines are reached through the ASE
 ``Calculator`` contract; this module maps an engine name to a ready calculator
-instance. Two sources feed the mapping:
+instance. Three sources feed the mapping, in resolution order:
 
 * **Built-ins** — engines the ``slab`` package can construct on its own:
   ``mace`` (in-process, via the ``slab[mace]`` extra), ``rootstock`` (an MLIP
@@ -12,10 +12,17 @@ instance. Two sources feed the mapping:
   maintainer declared (``lammps``, ``qe``, ``vasp``, site-specific MLIP
   aliases, ...), resolved rootstock-style: the client only finds the registry
   file; the file says how each engine is built *here*.
+* **Rootstock checkpoint ids, served silently** — any canonical checkpoint id
+  the cluster's rootstock install declares (``mace-mp-0-medium``,
+  ``uma-s-1p1``, ...) works directly as an engine name; rootstock resolves
+  the hosting environment and serves the model. No registry entry needed —
+  the rootstock install *is* the declaration, exactly in the spirit of
+  "the install describes itself".
 
-Built-ins win on name collision; everything else consults the registry.
-Adding a backend means adding a registry entry (or a factory here) — nothing
-in the tracing, lifecycle, or retention layers knows engines exist.
+Registry entries deliberately win over checkpoint ids: a maintainer's curated
+alias (with baked-in device/setup options) beats bare resolution. Adding a
+backend means adding a registry entry (or a factory here) — nothing in the
+tracing, lifecycle, or retention layers knows engines exist.
 
 Engine choices worth knowing:
 
@@ -35,6 +42,7 @@ Engine choices worth knowing:
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Protocol
 
 from slab.engines import EngineRegistry, build_engine, load_registry, registry_engine_names
@@ -65,9 +73,15 @@ def available_engines(registry: EngineRegistry | None = None) -> tuple[str, ...]
 def get_calculator(engine: str, **options: Any) -> Any:
     """Build an ASE calculator for *engine*, forwarding *options* to it.
 
-    Resolution: built-ins first, then the cluster engine registry (discovered
+    Resolution order: built-ins, then the cluster engine registry (discovered
     via ``$SLAB_ENGINES`` / ``~/.config/slab/engines.json`` — see
-    :mod:`slab.engines`). Registry defaults merge under caller options.
+    :mod:`slab.engines`; defaults merge under caller options), then rootstock
+    *checkpoint ids*: any canonical id the cluster's rootstock install
+    declares works directly as the engine name —
+    ``get_calculator("mace-mp-0-medium", cluster="delta")`` serves the MACE
+    model silently from its pre-built environment. The install is found via
+    ``cluster=``/``root=`` options, else rootstock's own defaults
+    (``$ROOTSTOCK_ROOT``, ``~/.config/rootstock/config.toml``).
 
     Raises:
         EngineNotAvailableError: The engine name is unknown here, or its
@@ -95,30 +109,55 @@ def get_calculator(engine: str, **options: Any) -> Any:
     registry = load_registry()
     if registry is not None and normalized in registry.engines:
         return build_engine(normalized, registry.engines[normalized], **options)
+
+    resolution, note = _resolve_rootstock_checkpoint(normalized, options)
+    if resolution is not None:
+        if "checkpoint" in options:
+            raise EngineNotAvailableError(
+                f"engine {engine!r} is itself a rootstock checkpoint id; do not also "
+                f"pass checkpoint={options['checkpoint']!r} in calculator_options"
+            )
+        return _rootstock_calculator(checkpoint=normalized, **options)
+
     known = ", ".join(available_engines(registry))
-    hint = "" if registry is not None else " (no engine registry configured — see $SLAB_ENGINES)"
-    raise EngineNotAvailableError(f"unknown engine {engine!r}; available: {known}{hint}")
+    notes = []
+    if registry is None:
+        notes.append("no engine registry configured — see $SLAB_ENGINES")
+    if note:
+        notes.append(note)
+    detail = f" ({'; '.join(notes)})" if notes else ""
+    raise EngineNotAvailableError(f"unknown engine {engine!r}; available: {known}{detail}")
 
 
-def describe_engine(engine: str) -> dict[str, Any]:
+def describe_engine(
+    engine: str, calculator_options: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Identity of an engine name: where it resolves, what version, what spec.
 
     Used by tasks both as *provenance* (which install produced this result)
-    and as *cache identity*: for registry engines the full spec is included,
-    so any change a maintainer makes to the entry — version, options, env,
+    and as *cache identity*, mirroring :func:`get_calculator`'s resolution
+    order exactly. For registry engines the full spec is included, so any
+    change a maintainer makes to the entry — version, options, env,
     calculator — changes the fingerprint and honestly invalidates cached
     results, not just version bumps.
 
-    For the ``rootstock`` built-in, identity beyond the client library version
-    lives in ``calculator_options`` (checkpoint id, cluster) which are traced
-    inputs already; the served environment's internals (env rebuilds,
-    in-place weight edits on the cluster) are outside what the client can
-    see — rootstock's contract is that checkpoint ids are stable identities.
+    A name that resolves as a rootstock checkpoint id reports
+    ``source="rootstock"`` with the rootstock *client* version. The identity
+    is deliberately the checkpoint id plus client version, not the serving
+    install's path or hosting environment: rootstock's contract is that
+    canonical ids are stable identities, so the same id on another install is
+    the same computation, while cluster-side internals (env rebuilds,
+    in-place weight edits) are invisible to any client.
+
+    Args:
+        calculator_options: The options the calculator would be built with —
+            checkpoint resolution may need ``cluster``/``root`` from them.
 
     Examples:
         >>> describe_engine("emt")["source"]
         'builtin'
     """
+    options = calculator_options or {}
     normalized = engine.strip().lower()
     if normalized in ("emt", "lj", "mace", "rootstock"):
         return {"engine": normalized, "source": "builtin", "version": None}
@@ -132,7 +171,71 @@ def describe_engine(engine: str) -> dict[str, Any]:
             "calculator": spec.calculator,
             "spec": spec.model_dump(mode="json"),
         }
+    resolution, _note = _resolve_rootstock_checkpoint(normalized, options)
+    if resolution is not None:
+        return {
+            "engine": normalized,
+            "source": "rootstock",
+            "version": _dist_version("rootstock"),
+            "checkpoint": normalized,
+        }
     return {"engine": engine, "source": "unknown", "version": None}
+
+
+def _resolve_rootstock_checkpoint(
+    name: str, options: dict[str, Any]
+) -> tuple[dict[str, str] | None, str | None]:
+    """Classify *name* as a rootstock checkpoint id, if an install declares it.
+
+    Returns ``(resolution, note)``: a resolution dict when some installed
+    environment declares the id; otherwise ``None`` plus an optional note
+    explaining why (for error messages). Quietly not-a-checkpoint when the
+    rootstock package is absent — silent serving is opt-in via the extra.
+    """
+    try:
+        from rootstock.clusters import get_cluster
+        from rootstock.config import resolve_default_root
+        from rootstock.environment import CheckpointNotFoundError, resolve_checkpoint
+    except ImportError:
+        return None, None
+    if "root" in options:
+        root = Path(options["root"])
+    elif "cluster" in options:
+        try:
+            root = get_cluster(options["cluster"]).root
+        except ValueError as e:  # unknown cluster: their message lists known ones
+            raise EngineNotAvailableError(str(e)) from e
+    else:
+        root = resolve_default_root()
+    if root is None:
+        return None, (
+            "rootstock is installed but no install root is configured — pass "
+            "calculator_options={'cluster': ...} or set $ROOTSTOCK_ROOT to serve "
+            "checkpoint ids directly"
+        )
+    try:
+        resolved = resolve_checkpoint(root, name, options.get("cluster"))
+    except CheckpointNotFoundError:
+        return None, (
+            f"not declared as a checkpoint by the rootstock install at {root} "
+            f"('slab engines list' shows what is)"
+        )
+    except OSError as e:
+        return None, f"could not read the rootstock install at {root}: {e}"
+    return {
+        "checkpoint": resolved.checkpoint,
+        "env_name": resolved.env_name,
+        "root": str(root),
+    }, None
+
+
+def _dist_version(distribution: str) -> str | None:
+    from importlib import metadata
+
+    try:
+        return metadata.version(distribution)
+    except metadata.PackageNotFoundError:  # pragma: no cover - installed in all test envs
+        return None
 
 
 def close_calculator(calculator: Any) -> None:

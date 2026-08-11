@@ -32,7 +32,9 @@ from slab.tracing import task
 # the cluster registry honestly invalidates cached qe results.
 @task(
     engines=("ase", "mace-torch", "rootstock"),
-    cache_extra=lambda arguments: describe_engine(arguments["engine"]),
+    cache_extra=lambda arguments: describe_engine(
+        arguments["engine"], arguments.get("calculator_options")
+    ),
 )
 def relax(
     atoms: Atoms,
@@ -70,7 +72,11 @@ def relax(
 
     Args:
         atoms: Structure to relax (calculator-free).
-        engine: One of :func:`slab.backends.available_engines`.
+        engine: A built-in engine name, a cluster-registry name, or a
+            rootstock checkpoint id served silently — e.g.
+            ``engine="mace-mp-0-medium"`` with
+            ``calculator_options={"cluster": "delta"}`` runs the MACE model
+            from the cluster's rootstock install with no further ceremony.
         fmax: Convergence target — optimization stops when the largest
             per-atom force magnitude drops below this (eV/Å).
         steps: Maximum optimizer steps.
@@ -90,7 +96,7 @@ def relax(
     # and reused afterwards: a registry edited or deleted mid-run can neither
     # mis-stamp the provenance nor fail a completed optimization. The tracer's
     # cache_extra made the same resolution moments earlier for the cache key.
-    described = describe_engine(engine)
+    described = describe_engine(engine, calculator_options)
     system = atoms.copy()
     calculator = get_calculator(engine, **(calculator_options or {}))
     system.calc = calculator

@@ -115,6 +115,7 @@ def engines_overview(registry_path: str | os.PathLike[str] | None = None) -> dic
     overview: dict[str, Any] = {
         "builtin": list(available_engines(None)),
         "registry": None,
+        "rootstock": None,
     }
     if registry is not None:
         located = find_registry_path(registry_path)
@@ -132,7 +133,33 @@ def engines_overview(registry_path: str | os.PathLike[str] | None = None) -> dic
                 for name, spec in sorted(registry.engines.items())
             },
         }
+    overview["rootstock"] = _rootstock_checkpoints_overview()
     return overview
+
+
+def _rootstock_checkpoints_overview() -> dict[str, Any] | None:
+    """Checkpoint ids the ambient rootstock install declares, or None.
+
+    These ids are usable directly as ``engine=`` names (silent serving); the
+    install is found via rootstock's own defaults ($ROOTSTOCK_ROOT, then
+    ~/.config/rootstock/config.toml).
+    """
+    try:
+        from rootstock.config import resolve_default_root
+        from rootstock.environment import list_declared_checkpoints
+    except ImportError:
+        return None
+    root = resolve_default_root()
+    if root is None:
+        return None
+    try:
+        declared = list_declared_checkpoints(root)
+    except OSError as e:
+        return {"root": str(root), "error": str(e), "checkpoints": {}}
+    return {
+        "root": str(root),
+        "checkpoints": {env: sorted(ids) for env, ids in sorted(declared.items())},
+    }
 
 
 def run_summary(run: Run) -> dict[str, Any]:

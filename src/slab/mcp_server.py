@@ -107,10 +107,12 @@ def build_server(root: Path) -> MCPServer:
     @server.tool()
     def list_engines() -> dict[str, Any]:
         """What calculation engines are available here: slab's built-ins
-        (emt/lj/mace/rootstock) plus everything this cluster's engine registry
-        declares (LAMMPS, QE, VASP, site MLIP aliases, ...), with the
-        maintainer's declared versions. Use these names as the engine=
-        argument of tasks like slab.tasks.relax."""
+        (emt/lj/mace/rootstock), everything this cluster's engine registry
+        declares (LAMMPS, QE, VASP, site MLIP aliases, ...) with the
+        maintainer's declared versions, and — under 'rootstock' — the
+        canonical MLIP checkpoint ids the cluster's rootstock install serves,
+        each usable DIRECTLY as the engine= argument (e.g.
+        engine='mace-mp-0-medium')."""
         return _ops.engines_overview()
 
     return server

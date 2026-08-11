@@ -167,29 +167,38 @@ SLAB manages cluster software the way
 [Garden-AI/rootstock](https://github.com/Garden-AI/rootstock) manages MLIPs,
 and uses rootstock itself for the MLIP case.
 
-**MLIPs via rootstock.** On a cluster with a rootstock install, the
-`rootstock` engine serves any installed checkpoint from its maintainer-built,
-verified environment — your Python environment stays free of torch and model
-packages (`pip install 'slab[rootstock]'` adds only a thin client):
+**MLIPs via rootstock, served silently.** On a cluster with a rootstock
+install, any canonical checkpoint id works *directly as the engine name* —
+rootstock resolves the hosting environment and serves the model, and your
+Python environment stays free of torch and model packages
+(`pip install 'slab[rootstock]'` adds only a thin client):
 
 ```python
 relaxed, info = relax(
     atoms,
-    engine="rootstock",
-    calculator_options={"checkpoint": "mace-mp-0-medium", "cluster": "delta", "device": "cuda"},
+    engine="mace-mp-0-medium",                                # a checkpoint id IS an engine
+    calculator_options={"cluster": "delta", "device": "cuda"},
 )
 ```
 
-Swapping models is a one-line change to `checkpoint` — and because
-`calculator_options` is a traced task input, the checkpoint id is
-automatically part of the cache key and the recipe. The worker subprocess the
-calculator spawns is closed by `relax` when the task finishes.
+Swapping models is a one-word change to `engine` — and because the engine
+name and options are traced task inputs, the checkpoint identity is
+automatically part of the cache key and the recipe. `slab engines list` shows
+every id the install declares. The install is found via `cluster=`/`root=`
+options or rootstock's own defaults (`$ROOTSTOCK_ROOT`,
+`~/.config/rootstock/config.toml`); the worker subprocess is closed by
+`relax` when the task finishes. The explicit `engine="rootstock"` form
+remains for full control (e.g. `checkpoint="uma:custom"` with your own
+`weights=`).
 
 **Everything else via the engine registry.** For LAMMPS, Quantum ESPRESSO,
 VASP, and site-specific MLIP aliases, SLAB generalizes rootstock's pattern:
 the client is only a bootstrap; a *registry file that lives with the cluster*
 declares how each canonical engine name is built here. Workflow code says
 `engine="qe"` and runs unchanged on any cluster whose registry declares `qe`.
+Resolution order is built-ins → registry → rootstock checkpoint ids, so a
+maintainer's curated alias (with baked-in options) always beats bare
+checkpoint resolution.
 
 ```json
 {
