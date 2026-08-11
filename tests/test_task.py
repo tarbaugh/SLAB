@@ -373,6 +373,31 @@ def test_namedtuple_returns_survive_cache_restore(ws: Workspace) -> None:
     assert again.energy == first.energy  # attribute access works on the restore
 
 
+def test_cache_extra_contributes_to_key_and_recipe(ws: Workspace) -> None:
+    """cache_extra captures computation identity that lives outside pip (e.g.
+    a cluster registry's declared engine version): changing it must miss."""
+    CALLS["extra"] = 0
+    environment = {"version": "7.3"}
+
+    @task(cache_extra=lambda arguments: dict(environment))
+    def compute(x: int) -> int:
+        CALLS["extra"] += 1
+        return x * 2
+
+    with ws.start_run() as first:
+        assert compute(5) == 10
+    with ws.start_run():
+        assert compute(5) == 10  # same extra: cache hit
+    assert CALLS["extra"] == 1
+    assert ws.runs.list_tasks(first.id)[0].recipe["extra"] == {"version": "7.3"}
+
+    environment["version"] = "7.4"  # the maintainer bumped the engine
+    with ws.start_run() as third:
+        assert compute(5) == 10
+    assert CALLS["extra"] == 2  # honest recompute, not a stale hit
+    assert ws.runs.list_tasks(third.id)[0].cache_hit is False
+
+
 def test_provisional_row_visible_during_execution(ws: Workspace) -> None:
     """The tracer commits a running row before executing, so a concurrent
     reader (retention, a dashboard) sees the task and its input references."""

@@ -1,0 +1,61 @@
+{
+  "layout_version": 1,
+  "cluster": "delta",
+  "notes": "Example cluster engine registry. A maintainer ships this file at a shared path and exports SLAB_ENGINES from a module file; workflow code then addresses engines by these names on any cluster that declares them. Entries execute as the calling user — trusting this file is trusting the cluster's module farm.",
+  "engines": {
+    "mace-mp": {
+      "calculator": "rootstock.RootstockCalculator",
+      "options": {
+        "cluster": "delta",
+        "checkpoint": "mace-mp-0-medium",
+        "device": "cuda"
+      },
+      "version": "rootstock/mace-mp-0-medium",
+      "description": "MACE-MP served from the cluster's rootstock install (worker in a pre-built env)",
+      "probe": ["rootstock", "list"]
+    },
+    "uma": {
+      "calculator": "rootstock.RootstockCalculator",
+      "options": {
+        "cluster": "delta",
+        "checkpoint": "uma-s-1p1",
+        "device": "cuda",
+        "setup_kwargs": {"task": "omat"}
+      },
+      "version": "rootstock/uma-s-1p1",
+      "description": "FAIRChem UMA via rootstock; task= baked in for materials"
+    },
+    "lammps": {
+      "calculator": "ase.calculators.lammpsrun.LAMMPS",
+      "options": {
+        "command": "lmp",
+        "files": []
+      },
+      "env": {
+        "ASE_LAMMPSRUN_COMMAND": "lmp"
+      },
+      "version": "2024.08.29",
+      "description": "LAMMPS via ASE lammpsrun; pair_style etc. passed per call in calculator_options",
+      "probe": ["lmp", "-h"]
+    },
+    "qe": {
+      "calculator": "ase.calculators.espresso.Espresso",
+      "env": {
+        "ASE_CONFIG_PATH": "/sw/slab/ase-delta.ini"
+      },
+      "version": "7.3.1",
+      "description": "Quantum ESPRESSO pw.x; command and pseudo_dir come from the [espresso] section of the cluster's shared ASE config file (modern ASE >= 3.23 mechanism); pass pseudopotentials per call in calculator_options",
+      "probe": ["pw.x", "-h"]
+    },
+    "vasp": {
+      "calculator": "ase.calculators.vasp.Vasp",
+      "env": {
+        "VASP_PP_PATH": "/sw/vasp/potpaw_PBE.64",
+        "ASE_VASP_COMMAND": "srun vasp_std"
+      },
+      "version": "6.4.3",
+      "description": "VASP (licensed; binary available to authorized groups only)",
+      "probe": ["bash", "-lc", "command -v vasp_std"]
+    }
+  }
+}

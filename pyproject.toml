@@ -20,6 +20,9 @@ dependencies = [
 mace = [
     "mace-torch>=0.3.10",
 ]
+rootstock = [
+    "rootstock>=1.4",
+]
 mcp = [
     "mcp>=1.2",
 ]
@@ -29,6 +32,7 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
     "mcp>=1.2",
+    "rootstock>=1.4",
 ]
 
 [project.scripts]
@@ -57,7 +61,7 @@ files = ["src"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["ase.*", "mace.*", "mcp.server.fastmcp"]
+module = ["ase.*", "mace.*", "rootstock.*", "mcp.server.fastmcp"]
 ignore_missing_imports = true
 
 # These two modules call into ASE, which is only partially typed; everything

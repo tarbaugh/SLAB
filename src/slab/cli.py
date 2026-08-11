@@ -313,6 +313,64 @@ def gc(
         )
 
 
+engines_app = typer.Typer(
+    help="Inspect and verify the cluster engine registry (rootstock-style software management).",
+    no_args_is_help=True,
+)
+app.add_typer(engines_app, name="engines")
+
+_RegistryOpt = Annotated[
+    Path | None,
+    typer.Option(
+        "--registry",
+        help="Engine registry JSON file (default: $SLAB_ENGINES, then ~/.config/slab/).",
+    ),
+]
+
+
+@engines_app.command("list")
+def engines_list(registry_path: _RegistryOpt = None) -> None:
+    """List available engines: built-ins plus everything this cluster declares."""
+    try:
+        overview = _ops.engines_overview(registry_path)
+    except (SlabError, OSError, ValueError) as e:
+        _fail(str(e))
+    typer.echo(f"built-in: {', '.join(overview['builtin'])}")
+    registry = overview["registry"]
+    if registry is None:
+        typer.echo("registry: none configured (set $SLAB_ENGINES to a cluster's engines.json)")
+        return
+    where = f" [{registry['cluster']}]" if registry["cluster"] else ""
+    typer.echo(f"registry{where}: {registry['path']}")
+    for name, spec in registry["engines"].items():
+        version = spec["version"] or "unversioned"
+        probe = "probe" if spec["verified_by_probe"] else "no probe"
+        description = f"  {spec['description']}" if spec["description"] else ""
+        typer.echo(f"  {name:<14} {version:<14} {spec['calculator']}  ({probe}){description}")
+
+
+@engines_app.command("verify")
+def engines_verify(registry_path: _RegistryOpt = None) -> None:
+    """Run every registry engine's probe; exit nonzero if any engine fails."""
+    from slab.engines import load_registry, verify_engines
+
+    try:
+        registry = load_registry(registry_path)
+    except (SlabError, OSError, ValueError) as e:
+        _fail(str(e))
+    if registry is None:
+        _fail("no engine registry configured (set $SLAB_ENGINES or pass --registry)")
+    results = verify_engines(registry)
+    failed = 0
+    for result in results:
+        mark = "+" if result.ok else "x"
+        typer.echo(f"[{mark}] {result.engine}: {result.detail}")
+        failed += 0 if result.ok else 1
+    typer.echo(f"{len(results) - failed}/{len(results)} engines verified")
+    if failed:
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def mcp(
     workspace: _WorkspaceOpt = None,

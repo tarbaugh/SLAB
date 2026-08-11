@@ -11,7 +11,8 @@ call is traced:
    REPL/``exec``-defined functions where source is unavailable), the
    fingerprints of every closure cell value (two functions from the same
    factory with different bound parameters are different computations),
-   resolved engine versions, and the input hashes. If a completed task with
+   resolved engine versions, the task's ``cache_extra`` contribution (see
+   :func:`task`), and the input hashes. If a completed task with
    the same key exists *and its output bytes are still present*, the stored
    outputs are returned without executing — restart a crashed script and
    finished work is skipped. Discarded bytes mean a cache miss and honest
@@ -65,13 +66,17 @@ _MAX_LITERAL_PARAM = 500  # chars; longer strings are recorded by hash, not verb
 def task(fn: Callable[P, R]) -> Callable[P, R]: ...
 @overload
 def task(
-    *, name: str | None = None, engines: str | Sequence[str] = ()
+    *,
+    name: str | None = None,
+    engines: str | Sequence[str] = (),
+    cache_extra: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
 def task(
     fn: Callable[P, R] | None = None,
     *,
     name: str | None = None,
     engines: str | Sequence[str] = (),
+    cache_extra: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> Callable[P, R] | Callable[[Callable[P, R]], Callable[P, R]]:
     """Make a plain function a traced task, without changing how it is called.
 
@@ -81,6 +86,12 @@ def task(
             into the recipe and the cache key (e.g. ``engines=("mace", "ase")``).
             A version bump of a listed engine invalidates the cache — same
             inputs through a different engine version is a different result.
+        cache_extra: Callable receiving the bound arguments (as a dict) at
+            call time, returning a JSON-able dict folded into both the cache
+            key and the recipe. Use it for computation identity that lives
+            outside pip — e.g. the cluster engine registry's declared version
+            for the engine an argument names: bumping the registry version
+            then honestly invalidates the cache.
 
     Examples:
         >>> @task
@@ -114,6 +125,7 @@ def task(
                 code_hash,
                 bytecode_hash,
                 engine_names,
+                cache_extra,
                 args,
                 kwargs,
             )
@@ -131,6 +143,7 @@ def _traced_call(
     code_hash: str | None,
     bytecode_hash: str,
     engine_names: tuple[str, ...],
+    cache_extra: Callable[[dict[str, Any]], dict[str, Any]] | None,
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
 ) -> R:
@@ -143,6 +156,7 @@ def _traced_call(
         input_hashes[arg_name] = active.artifacts.put_bytes(payload)
 
     engine_versions = {engine: _dist_version(engine) for engine in engine_names}
+    extra = dict(cache_extra(dict(bound.arguments))) if cache_extra is not None else {}
     recipe: dict[str, Any] = {
         "task": task_name,
         "module": f.__module__,
@@ -153,6 +167,8 @@ def _traced_call(
         "slab": __version__,
         "params": _params_lite(bound.arguments, input_hashes),
     }
+    if extra:
+        recipe["extra"] = extra
     closure_fp = _closure_fingerprints(f)
     cacheable = closure_fp is not None
     cache_key = fingerprint(
@@ -163,6 +179,7 @@ def _traced_call(
             "bytecode": bytecode_hash,
             "closure": closure_fp if cacheable else f"uncacheable-{os.urandom(16).hex()}",
             "engines": engine_versions,
+            "extra": extra,
             "inputs": input_hashes,
         }
     )

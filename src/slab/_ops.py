@@ -96,6 +96,45 @@ def ttl_override_policy(days: float) -> RetentionPolicy:
     )
 
 
+def engines_overview(registry_path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
+    """What engines exist here: built-ins plus the cluster registry, if any.
+
+    Shared by ``slab engines list`` and the MCP ``list_engines`` tool.
+
+    Examples:
+        >>> import os
+        >>> os.environ.pop("SLAB_ENGINES", None) and None
+        >>> overview = engines_overview()
+        >>> overview["builtin"]
+        ['emt', 'lj', 'mace', 'rootstock']
+    """
+    from slab.backends import available_engines
+    from slab.engines import find_registry_path, load_registry
+
+    registry = load_registry(registry_path)
+    overview: dict[str, Any] = {
+        "builtin": list(available_engines(None)),
+        "registry": None,
+    }
+    if registry is not None:
+        located = find_registry_path(registry_path)
+        overview["registry"] = {
+            "cluster": registry.cluster,
+            "path": None if located is None else str(located),
+            "notes": registry.notes,
+            "engines": {
+                name: {
+                    "calculator": spec.calculator,
+                    "version": spec.version,
+                    "description": spec.description,
+                    "verified_by_probe": spec.probe is not None,
+                }
+                for name, spec in sorted(registry.engines.items())
+            },
+        }
+    return overview
+
+
 def run_summary(run: Run) -> dict[str, Any]:
     """Compact JSON-able view of a run (used by list/promote/launch results)."""
     return {

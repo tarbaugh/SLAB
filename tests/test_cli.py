@@ -299,6 +299,82 @@ def test_mcp_without_package_gives_hint(root: Path, monkeypatch: pytest.MonkeyPa
     assert "pip install 'slab[mcp]'" in result.output
 
 
+# -- engines ---------------------------------------------------------------------------
+
+
+EMT_ENTRY = {
+    "calculator": "ase.calculators.emt.EMT",
+    "version": "ase-built-in",
+    "description": "cluster-declared EMT for tests",
+}
+
+
+def _write_engines(tmp_path: Path, engines: dict, cluster: str = "delta") -> Path:
+    path = tmp_path / "engines.json"
+    path.write_text(json.dumps({"cluster": cluster, "engines": engines}))
+    return path
+
+
+def test_engines_list_without_registry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("SLAB_ENGINES", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    result = runner.invoke(app, ["engines", "list"])
+    assert result.exit_code == 0
+    assert "built-in: emt, lj, mace, rootstock" in result.output
+    assert "none configured" in result.output
+
+
+def test_engines_list_with_registry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    registry = _write_engines(tmp_path, {"emt-cluster": EMT_ENTRY})
+    monkeypatch.setenv("SLAB_ENGINES", str(registry))
+    result = runner.invoke(app, ["engines", "list"])
+    assert result.exit_code == 0
+    assert "registry [delta]" in result.output
+    assert "emt-cluster" in result.output
+    assert "ase-built-in" in result.output
+    assert "cluster-declared EMT" in result.output
+
+
+def test_engines_list_invalid_registry_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    bad = tmp_path / "engines.json"
+    bad.write_text(json.dumps({"engines": {"mace": EMT_ENTRY}}))  # shadows a built-in
+    result = runner.invoke(app, ["engines", "list", "--registry", str(bad)])
+    assert result.exit_code == 1
+    assert "built-in engine name" in result.output
+
+
+def test_engines_verify(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import sys as _sys
+
+    registry = _write_engines(
+        tmp_path,
+        {
+            "good": {**EMT_ENTRY, "probe": [_sys.executable, "-c", "pass"]},
+            "bad": {**EMT_ENTRY, "probe": [_sys.executable, "-c", "raise SystemExit(2)"]},
+        },
+    )
+    result = runner.invoke(app, ["engines", "verify", "--registry", str(registry)])
+    assert result.exit_code == 1
+    assert "[+] good" in result.output
+    assert "[x] bad" in result.output
+    assert "1/2 engines verified" in result.output
+
+    ok_registry = _write_engines(tmp_path, {"good": EMT_ENTRY})
+    ok = runner.invoke(app, ["engines", "verify", "--registry", str(ok_registry)])
+    assert ok.exit_code == 0
+    assert "1/1 engines verified" in ok.output
+
+
+def test_engines_verify_without_registry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("SLAB_ENGINES", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    result = runner.invoke(app, ["engines", "verify"])
+    assert result.exit_code == 1
+    assert "no engine registry configured" in result.output
+
+
 # -- rendering details -----------------------------------------------------------------
 
 

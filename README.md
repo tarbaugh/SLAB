@@ -70,7 +70,8 @@ version, engine versions, parameters) survive on the run forever.
 
 ```bash
 pip install -e .              # core: pydantic + typer + ase
-pip install -e ".[mace]"      # + MACE foundation model (torch)
+pip install -e ".[mace]"      # + MACE foundation model in-process (torch)
+pip install -e ".[rootstock]" # + cluster-served MLIPs (thin client, no torch)
 pip install -e ".[mcp]"       # + MCP server for agents
 pip install -e ".[dev]"       # tests, lint, types
 ```
@@ -139,6 +140,7 @@ $ slab show 01kzs2m7s1                      $ slab show 01kzs2mad3   # expired
 | `slab promote <id> [--reason ...] [--force]` | Make a run permanent. `--force` promotes an unverified run and is recorded as forced. |
 | `slab expire [--older-than 30d] [--include-running]` | Expire unpromoted runs past their TTL (state change only). `0d` = everything unpromoted, now. Runs at status `running` are protected unless `--include-running` (for hard-killed processes that can never advance their own status; they are marked failed first). |
 | `slab gc [--dry-run]` | Drop artifact bytes no retention rule demands. |
+| `slab engines list` / `slab engines verify` | Inspect / smoke-test the cluster engine registry. |
 | `slab mcp` | Serve the workspace to agents over MCP (stdio). |
 
 Workspace resolution: `-w/--workspace` flag > `$SLAB_WORKSPACE` > `./.slab`.
@@ -159,6 +161,75 @@ current state. Roles not listed in `keep` are hash-only. A TTL on `promoted`
 or `archived` is rejected at validation — the asymmetry is enforced, not
 conventional.
 
+## Engines on HPC clusters
+
+SLAB manages cluster software the way
+[Garden-AI/rootstock](https://github.com/Garden-AI/rootstock) manages MLIPs,
+and uses rootstock itself for the MLIP case.
+
+**MLIPs via rootstock.** On a cluster with a rootstock install, the
+`rootstock` engine serves any installed checkpoint from its maintainer-built,
+verified environment — your Python environment stays free of torch and model
+packages (`pip install 'slab[rootstock]'` adds only a thin client):
+
+```python
+relaxed, info = relax(
+    atoms,
+    engine="rootstock",
+    calculator_options={"checkpoint": "mace-mp-0-medium", "cluster": "delta", "device": "cuda"},
+)
+```
+
+Swapping models is a one-line change to `checkpoint` — and because
+`calculator_options` is a traced task input, the checkpoint id is
+automatically part of the cache key and the recipe. The worker subprocess the
+calculator spawns is closed by `relax` when the task finishes.
+
+**Everything else via the engine registry.** For LAMMPS, Quantum ESPRESSO,
+VASP, and site-specific MLIP aliases, SLAB generalizes rootstock's pattern:
+the client is only a bootstrap; a *registry file that lives with the cluster*
+declares how each canonical engine name is built here. Workflow code says
+`engine="qe"` and runs unchanged on any cluster whose registry declares `qe`.
+
+```json
+{
+  "layout_version": 1,
+  "cluster": "delta",
+  "engines": {
+    "mace-mp": {"calculator": "rootstock.RootstockCalculator",
+                 "options": {"cluster": "delta", "checkpoint": "mace-mp-0-medium"}},
+    "qe":      {"calculator": "ase.calculators.espresso.Espresso",
+                 "env": {"ASE_CONFIG_PATH": "/sw/slab/ase-delta.ini"},
+                 "version": "7.3.1", "probe": ["pw.x", "-h"]}
+  }
+}
+```
+
+A maintainer ships this file at a shared path and exports `SLAB_ENGINES` from
+a module file (discovery: explicit path > `$SLAB_ENGINES` >
+`~/.config/slab/engines.json`; see
+[examples/engines.example.json](examples/engines.example.json)). Codes that
+read configuration from ASE's own config file (QE's command and `pseudo_dir`
+on ASE ≥ 3.23) are declared by pointing `ASE_CONFIG_PATH` at the cluster's
+shared `config.ini`, keeping one declaration chain. Every entry
+is a dotted path to an ASE calculator — the ASE `Calculator` contract stays
+SLAB's only engine seam. Declared `version`s land in task recipes as
+provenance *and* in the relax cache key, so bumping `qe` from 7.3 to 7.4 in
+the registry honestly invalidates cached results instead of serving the old
+engine's numbers. Entries that shadow built-in names are rejected loudly; a
+registry with a newer `layout_version` than the client understands refuses
+rather than misreads.
+
+```bash
+slab engines list      # built-ins + everything this cluster declares
+slab engines verify    # run every entry's probe; exit nonzero on failure
+```
+
+Trust model, stated plainly: registry entries execute maintainer-declared
+code and environment variables as the calling user. SLAB isolates
+*configuration*, not *privilege* — trusting a cluster's `engines.json` is
+trusting its module farm, exactly as with rootstock installs.
+
 ## Agent surface (MCP)
 
 ```json
@@ -166,8 +237,8 @@ conventional.
 ```
 
 Tools: `launch_workflow`, `list_runs`, `show_run`, `promote_run`,
-`expire_runs`, `gc` — the same code paths as the CLI, returning structured
-JSON. Script output is captured into the result so prints can't corrupt the
+`expire_runs`, `gc`, `list_engines` — the same code paths as the CLI,
+returning structured JSON. Script output is captured into the result so prints can't corrupt the
 protocol channel.
 
 ## Non-goals

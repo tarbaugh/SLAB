@@ -38,12 +38,12 @@ def test_emt_and_lj_calculators_build() -> None:
 
 
 def test_unknown_engine_lists_options() -> None:
-    with pytest.raises(EngineNotAvailableError, match="emt, lj, mace"):
-        get_calculator("vasp")
+    with pytest.raises(EngineNotAvailableError, match="emt, lj, mace, rootstock"):
+        get_calculator("definitely-unknown-engine")
 
 
 def test_engine_list_is_sorted_and_stable() -> None:
-    assert available_engines() == ("emt", "lj", "mace")
+    assert available_engines() == ("emt", "lj", "mace", "rootstock")
 
 
 def test_mace_missing_gives_install_hint(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -70,6 +70,8 @@ def test_relax_untraced_converges() -> None:
     assert info["converged"] is True
     assert info["fmax"] < 0.05
     assert info["energy_unit"] == "eV"
+    assert info["engine_source"] == "builtin"
+    assert info["engine_version"] is None
     assert info["n_atoms"] == len(atoms) == len(relaxed)
     assert info["steps"] > 0
     # input untouched, output carries results on a serializable calculator
@@ -150,6 +152,148 @@ def test_relax_gc_story(ws: Workspace) -> None:
     assert not ws.artifacts.has(traj.hash)
     restored = loads(ws.artifacts.get(kept.hash).read_bytes())
     assert restored.get_positions() == pytest.approx(relaxed.get_positions())
+
+
+def test_relax_closes_worker_backed_calculators(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Worker-backed engines (rootstock) hold a subprocess; relax must release it."""
+    from ase.calculators.emt import EMT
+
+    closed: list[bool] = []
+
+    class WorkerBackedEMT(EMT):
+        def close(self) -> None:
+            closed.append(True)
+
+    monkeypatch.setattr("slab.tasks.get_calculator", lambda engine, **kw: WorkerBackedEMT())
+    relax(_rattled_cu(), engine="emt", fmax=0.05)
+    assert closed == [True]
+
+
+def test_relax_closes_calculator_even_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    closed: list[bool] = []
+
+    class ExplodingCalculator:
+        def close(self) -> None:
+            closed.append(True)
+
+        def get_potential_energy(self, *a: object, **k: object) -> float:
+            raise RuntimeError("SCF diverged")
+
+    monkeypatch.setattr("slab.tasks.get_calculator", lambda engine, **kw: ExplodingCalculator())
+    with pytest.raises(Exception):  # noqa: B017 - any failure path must still close
+        relax(_rattled_cu(), engine="emt")
+    assert closed == [True]
+
+
+def test_registry_version_bump_invalidates_relax_cache(
+    ws: Workspace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: relax through a registry engine; bumping the registry's
+    declared version must recompute, never serve the old engine's result."""
+    import json
+
+    registry_path = tmp_path / "engines.json"
+
+    def declare(version: str) -> None:
+        registry_path.write_text(
+            json.dumps(
+                {
+                    "cluster": "testcluster",
+                    "engines": {
+                        "emt-cluster": {
+                            "calculator": "ase.calculators.emt.EMT",
+                            "version": version,
+                        }
+                    },
+                }
+            )
+        )
+
+    monkeypatch.setenv("SLAB_ENGINES", str(registry_path))
+    declare("1.0")
+    with ws.start_run() as first:
+        _r1, info1 = relax(_rattled_cu(), engine="emt-cluster")
+    assert info1["engine_source"] == "registry:testcluster"
+    assert info1["engine_version"] == "1.0"
+
+    with ws.start_run() as second:
+        relax(_rattled_cu(), engine="emt-cluster")
+    assert ws.runs.list_tasks(second.id)[0].cache_hit is True  # same version: hit
+
+    declare("2.0")
+    with ws.start_run() as third:
+        _r3, info3 = relax(_rattled_cu(), engine="emt-cluster")
+    assert ws.runs.list_tasks(third.id)[0].cache_hit is False  # bumped: recompute
+    assert info3["engine_version"] == "2.0"
+    assert ws.runs.list_tasks(first.id)[0].recipe["extra"]["version"] == "1.0"
+
+
+def test_registry_spec_edit_invalidates_relax_cache(
+    ws: Workspace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not just version: ANY spec edit (env, options) changes the cache identity."""
+    import json
+
+    registry_path = tmp_path / "engines.json"
+
+    def declare(env: dict) -> None:
+        registry_path.write_text(
+            json.dumps(
+                {
+                    "engines": {
+                        "emt-cluster": {
+                            "calculator": "ase.calculators.emt.EMT",
+                            "version": "1.0",
+                            "env": env,
+                        }
+                    }
+                }
+            )
+        )
+
+    monkeypatch.setenv("SLAB_ENGINES", str(registry_path))
+    declare({})
+    with ws.start_run():
+        relax(_rattled_cu(), engine="emt-cluster")
+    declare({"OMP_NUM_THREADS": "4"})  # maintainer changed the entry, same version
+    with ws.start_run() as second:
+        relax(_rattled_cu(), engine="emt-cluster")
+    assert ws.runs.list_tasks(second.id)[0].cache_hit is False
+
+
+def test_relax_provenance_resolved_before_computation(
+    ws: Workspace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A registry deleted mid-optimization must neither crash a completed relax
+    nor change what gets stamped: identity is captured before the run."""
+    import json
+
+    registry_path = tmp_path / "engines.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "cluster": "delta",
+                "engines": {
+                    "emt-cluster": {"calculator": "ase.calculators.emt.EMT", "version": "1.0"}
+                },
+            }
+        )
+    )
+    monkeypatch.setenv("SLAB_ENGINES", str(registry_path))
+
+
+    real_get_calculator = __import__("slab.backends", fromlist=["get_calculator"]).get_calculator
+
+    def build_then_delete_registry(engine: str, **kw: object) -> object:
+        calc = real_get_calculator(engine, **kw)
+        registry_path.unlink()  # the maintainer pulls the registry mid-run
+        return calc
+
+    monkeypatch.setattr("slab.tasks.get_calculator", build_then_delete_registry)
+    relaxed, info = relax(_rattled_cu(), engine="emt-cluster", fmax=0.05)
+    assert info["converged"] is True
+    assert info["engine_version"] == "1.0"  # stamped from the pre-run snapshot
+    assert info["engine_source"] == "registry:delta"
 
 
 def test_mace_extra_importable_when_installed() -> None:

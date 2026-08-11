@@ -104,6 +104,15 @@ def build_server(root: Path) -> MCPServer:
         id, final state (verified if all checks passed), and captured output."""
         return _ops.launch_script(root, script_path, name=name, intent=intent, capture_output=True)
 
+    @server.tool()
+    def list_engines() -> dict[str, Any]:
+        """What calculation engines are available here: slab's built-ins
+        (emt/lj/mace/rootstock) plus everything this cluster's engine registry
+        declares (LAMMPS, QE, VASP, site MLIP aliases, ...), with the
+        maintainer's declared versions. Use these names as the engine=
+        argument of tasks like slab.tasks.relax."""
+        return _ops.engines_overview()
+
     return server
 
 

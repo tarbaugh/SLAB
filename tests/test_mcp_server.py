@@ -12,7 +12,15 @@ pytest.importorskip("mcp", reason="mcp extra not installed")
 from slab import Workspace
 from slab.mcp_server import build_server
 
-EXPECTED_TOOLS = {"list_runs", "show_run", "promote_run", "expire_runs", "gc", "launch_workflow"}
+EXPECTED_TOOLS = {
+    "list_runs",
+    "show_run",
+    "promote_run",
+    "expire_runs",
+    "gc",
+    "launch_workflow",
+    "list_engines",
+}
 
 
 @pytest.fixture()

@@ -300,8 +300,10 @@ CLI (typer)          MCP server (stdio)      ← two skins, one behavior
   handles) plus one CAS directory. A workspace is a directory; there is no
   daemon and nothing to configure. `RunStore` is a protocol — the Postgres
   seam — and schema versions are tracked via `PRAGMA user_version`.
-- **Engines.** `slab.backends` maps names to ASE calculators. SLAB implements
-  no physics; adding LAMMPS or VASP means adding a factory, and nothing in
+- **Engines.** `slab.backends` maps names to ASE calculators from two
+  sources: built-ins (`mace` in-process, `rootstock` cluster-served, ASE's
+  toys) and the cluster engine registry (§7a). SLAB implements no physics;
+  adding LAMMPS or VASP means adding a registry entry, and nothing in
   tracing, lifecycle, or retention changes. Heavy imports (ASE, torch) are
   quarantined behind `slab.tasks`/`slab.backends` so the core package and CLI
   stay import-light.
@@ -309,6 +311,63 @@ CLI (typer)          MCP server (stdio)      ← two skins, one behavior
   restart come from the cache (§5), not from an executor: rerunning a script
   *is* the resume mechanism. A SLURM executor can slot behind `@task` later
   without changing user code.
+
+### 7a. Engines on clusters: the rootstock pattern, generalized
+
+`Garden-AI/rootstock <https://github.com/Garden-AI/rootstock>`_ solved
+"many MLIPs, conflicting environments, shared HPC clusters" with a shape SLAB
+adopts twice — once by delegation, once by generalization.
+
+**Delegation: the `rootstock` built-in engine.** On a cluster with a
+rootstock install, `engine="rootstock"` with
+`calculator_options={"checkpoint": ..., "cluster": ...}` forwards to
+`rootstock.RootstockCalculator`: the MLIP runs in a maintainer-prebuilt,
+verified environment in a worker subprocess (i-PI protocol over a Unix
+socket), and the user's environment carries only a thin client. SLAB does not
+reimplement any of that machinery — checkpoint→environment resolution,
+worker lifecycle, and cache redirection are rootstock's job; SLAB's job is
+that `calculator_options` is a traced input, so the checkpoint id is part of
+the cache key and the recipe for free, and `relax` closes the worker (its
+`close()`) in a `finally`.
+
+**Generalization: the engine registry** (`slab.engines`). Four rootstock
+ideas, applied to *all* engines:
+
+1. *The client is only a bootstrap.* Rootstock's baked-in table maps cluster
+   name → install root and nothing else; everything about an install is
+   declared by the install (`{root}/layout.json`), because tables baked into
+   pinned clients go stale. SLAB goes one step further: the client bakes in
+   nothing — it discovers a registry *file* (explicit path >
+   `$SLAB_ENGINES` > `~/.config/slab/engines.json`) and the file declares
+   everything: how each engine builds (a dotted path to an ASE calculator),
+   its default options, the environment variables the code needs, the
+   maintainer's declared version, and a verification probe.
+2. *Canonical names, capability resolution.* Workflow code addresses engines
+   by name (`qe`, `lammps`, `mace-mp`); the registry maps names to concrete
+   builds on this cluster. The same script runs on any cluster declaring the
+   names it uses. Collisions with built-in names are refused at validation —
+   ambiguity is never resolved by precedence order.
+3. *Maintainer-verified installs.* `slab engines verify` runs each entry's
+   declared probe (import-checks entries without one); users trust names that
+   verify. Rootstock's richer per-(checkpoint, cluster) verification state —
+   `verified_at > built_at` freshness, nightly smoke jobs — is the natural
+   next step and deliberately not rebuilt here yet.
+4. *An explicit layout contract.* The registry carries `layout_version`; a
+   client that meets a newer version refuses loudly instead of misreading —
+   the same rule the run database applies via `PRAGMA user_version`.
+
+Declared versions flow into provenance *and* into cache identity: `relax`
+records `engine_source`/`engine_version` in its info dict, and its
+`cache_extra` hook (a `@task` option: a callable over the bound arguments
+whose result is folded into both the cache key and the recipe) resolves the
+engine's registry identity at call time — a version bump in the registry is
+a cache miss, never a stale hit. This closes the gap `engines=` pinning
+cannot see: registry engines are not pip distributions.
+
+The trust model is inherited from rootstock and stated rather than implied:
+registry entries execute maintainer-declared code and environment as the
+calling user. SLAB isolates configuration, not privilege; trusting a
+cluster's `engines.json` is trusting its module farm.
 
 ## 8. Agent-native decisions, collected
 
@@ -318,7 +377,7 @@ CLI (typer)          MCP server (stdio)      ← two skins, one behavior
   `illegal lifecycle transition: quarantined -> promoted (promoting an
   unverified run requires force=True)`, with a `force_would_allow` attribute
   so an agent can distinguish "retry with force" from "impossible".
-- **The MCP server is thin by construction** — six tools over the same
+- **The MCP server is thin by construction** — seven tools over the same
   `_ops` functions the CLI calls, so agent and human observations cannot
   drift. Workflow script output is captured into results because stdout is
   the protocol channel.
