@@ -180,6 +180,10 @@ class EngineNotAvailableError(SlabError):
     """A requested calculation engine is unknown, or known but not installed."""
 
 
+class ScriptExitError(SlabError):
+    """A workflow script called ``sys.exit()`` with a nonzero code."""
+
+
 class SerializationError(SlabError):
     """A value could not be serialized for tracing/storage, or decoded back."""
 

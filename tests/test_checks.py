@@ -61,6 +61,28 @@ def test_finite_rejects_non_numeric_and_empty() -> None:
     assert not finite({"a": 1}).passed  # dicts are ambiguous; fail loudly
 
 
+def test_finite_flattens_2d_force_arrays() -> None:
+    np = pytest.importorskip("numpy")
+    forces = np.array([[0.01, 0.02, 0.03], [0.0, 0.01, 0.02]])
+    result = finite(forces, label="forces")
+    assert result.passed
+    assert result.message == "all 6 forces values finite"
+    poisoned = forces.copy()
+    poisoned[1, 2] = np.nan
+    assert not finite(poisoned, label="forces").passed
+
+
+def test_numpy_scalars_are_numbers() -> None:
+    np = pytest.importorskip("numpy")
+    assert converged(np.float32(0.01), below=0.05).passed
+    assert converged(np.float64(0.12), below=0.05).passed is False  # judged, not rejected
+    assert within_bounds(np.int64(5), lo=0, hi=10).passed
+    assert finite(np.float32(1.5)).passed
+    assert not finite(np.float64("nan")).passed
+    # numpy bools are still not numbers
+    assert not converged(np.True_, below=0.05).passed
+
+
 def test_units_annotation_check() -> None:
     assert units("eV", "eV").passed
     assert units("  eV ", "eV").passed  # whitespace-insensitive

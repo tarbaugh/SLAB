@@ -256,6 +256,14 @@ def expire(
     policy_file: Annotated[
         Path | None, typer.Option("--policy", help="Retention policy JSON file.")
     ] = None,
+    include_running: Annotated[
+        bool,
+        typer.Option(
+            "--include-running",
+            help="Also expire overdue runs stuck at status 'running' (a hard-killed "
+            "process never advances its own status). They are marked failed first.",
+        ),
+    ] = False,
 ) -> None:
     """Expire unpromoted runs that outlived their TTL (state change only; see gc)."""
     root = _ops.resolve_root(workspace)
@@ -267,7 +275,7 @@ def expire(
     except (ValueError, OSError) as e:
         _fail(str(e))
     with Workspace(root) as ws:
-        expired = ws.expire_due(policy)
+        expired = ws.expire_due(policy, include_running=include_running)
         for item in expired:
             typer.echo(f"expired {item.id}  {item.name}")
         typer.echo(f"{len(expired)} run(s) expired")

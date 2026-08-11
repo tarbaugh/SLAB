@@ -1,10 +1,11 @@
 """Tests for the @task tracer: recording, hashing, caching, DAG derivation."""
 
+import typing
 from pathlib import Path
 
 import pytest
 
-from slab import ExecutionStatus, SerializationError, Workspace, fingerprint, task
+from slab import ExecutionStatus, SerializationError, Workspace, current_run, fingerprint, task
 
 
 @pytest.fixture()
@@ -179,27 +180,33 @@ def test_params_lite_hashes_bulky_values(ws: Workspace) -> None:
 
 # -- caching ---------------------------------------------------------------------------
 
+# Execution counters live at module level ON PURPOSE: closure cells are part of
+# the cache key (bound parameters change the computation), so a counter inside
+# a closure would invalidate the cache on every call. Globals are documented as
+# outside the key.
+CALLS: dict[str, int] = {}
 
-def make_counted_task():
-    calls = {"n": 0}
+
+def make_counted_task(key: str):
+    CALLS[key] = 0
 
     @task
     def costly(x: float) -> float:
-        calls["n"] += 1
+        CALLS[key] += 1
         return x * 3
 
-    return costly, calls
+    return costly
 
 
 def test_cache_hit_within_and_across_runs(ws: Workspace) -> None:
-    costly, calls = make_counted_task()
+    costly = make_counted_task("hit")
     with ws.start_run(name="first") as first:
         assert costly(2.0) == 6.0
         assert costly(2.0) == 6.0  # same call again: served from cache
     with ws.start_run(name="second") as second:
         assert costly(2.0) == 6.0  # cache spans runs in the workspace
 
-    assert calls["n"] == 1
+    assert CALLS["hit"] == 1
     first_records = ws.runs.list_tasks(first.id)
     assert [r.cache_hit for r in first_records] == [False, True]
     assert first_records[0].outputs == first_records[1].outputs
@@ -208,26 +215,26 @@ def test_cache_hit_within_and_across_runs(ws: Workspace) -> None:
 
 
 def test_cache_misses_on_different_input(ws: Workspace) -> None:
-    costly, calls = make_counted_task()
+    costly = make_counted_task("miss")
     with ws.start_run():
         costly(2.0)
         costly(3.0)
-    assert calls["n"] == 2
+    assert CALLS["miss"] == 2
 
 
 def test_cache_restores_tuple_returns(ws: Workspace) -> None:
-    calls = {"n": 0}
+    CALLS["multi"] = 0
 
     @task
     def multi(x: float) -> tuple[float, dict[str, float]]:
-        calls["n"] += 1
+        CALLS["multi"] += 1
         return x, {"fmax": 0.01}
 
     with ws.start_run():
         first = multi(1.0)
     with ws.start_run():
         again = multi(1.0)
-    assert calls["n"] == 1
+    assert CALLS["multi"] == 1
     assert again == first
     assert isinstance(again, tuple) and isinstance(again[1], dict)
 
@@ -252,12 +259,12 @@ def test_cache_keyed_on_code_not_just_name(ws: Workspace) -> None:
 
 
 def test_failed_tasks_never_populate_the_cache(ws: Workspace) -> None:
-    attempts = {"n": 0}
+    CALLS["flaky"] = 0
 
     @task
     def flaky(x: int) -> int:
-        attempts["n"] += 1
-        if attempts["n"] == 1:
+        CALLS["flaky"] += 1
+        if CALLS["flaky"] == 1:
             raise RuntimeError("transient")
         return x
 
@@ -265,11 +272,11 @@ def test_failed_tasks_never_populate_the_cache(ws: Workspace) -> None:
         with pytest.raises(RuntimeError):
             flaky(1)
         assert flaky(1) == 1  # retried for real, not served from a poisoned cache
-    assert attempts["n"] == 2
+    assert CALLS["flaky"] == 2
 
 
 def test_discarded_bytes_mean_cache_miss_and_recompute(ws: Workspace) -> None:
-    costly, calls = make_counted_task()
+    costly = make_counted_task("discard")
     with ws.start_run() as first:
         costly(2.0)
     (record,) = ws.runs.list_tasks(first.id)
@@ -277,5 +284,108 @@ def test_discarded_bytes_mean_cache_miss_and_recompute(ws: Workspace) -> None:
 
     with ws.start_run():
         assert costly(2.0) == 6.0  # recomputed on demand
-    assert calls["n"] == 2
+    assert CALLS["discard"] == 2
     assert ws.artifacts.has(record.outputs["return"])  # bytes restored
+
+
+# -- cache-key soundness (regression tests from adversarial review) --------------------
+
+
+def _scaler_factory(factor: float):
+    @task(name="scale")
+    def scale(x: float) -> float:
+        return factor * x
+
+    return scale
+
+
+def test_closure_parameterized_tasks_do_not_collide(ws: Workspace) -> None:
+    """Two factory products with different bound parameters are different
+    computations: serving one's cached output for the other would be a wrong
+    scientific result."""
+    with ws.start_run() as first:
+        assert _scaler_factory(2.0)(10.0) == 20.0
+    with ws.start_run() as second:
+        assert _scaler_factory(3.0)(10.0) == 30.0  # not a stale 20.0
+    assert ws.runs.list_tasks(first.id)[0].cache_hit is False
+    assert ws.runs.list_tasks(second.id)[0].cache_hit is False
+    assert ws.runs.list_tasks(first.id)[0].cache_key != ws.runs.list_tasks(second.id)[0].cache_key
+
+
+def test_same_closure_still_hits_cache(ws: Workspace) -> None:
+    with ws.start_run():
+        assert _scaler_factory(2.0)(10.0) == 20.0
+    with ws.start_run() as second:
+        assert _scaler_factory(2.0)(10.0) == 20.0
+    assert ws.runs.list_tasks(second.id)[0].cache_hit is True
+
+
+def test_unserializable_closure_makes_call_uncacheable(ws: Workspace) -> None:
+    CALLS["uncacheable"] = 0
+
+    def apply_factory(fn):
+        @task(name="apply")
+        def apply(x: int) -> int:
+            CALLS["uncacheable"] += 1
+            return fn(x)
+
+        return apply
+
+    bump = apply_factory(lambda v: v + 1)
+    with ws.start_run() as first:
+        assert bump(1) == 2
+    with ws.start_run() as second:
+        assert bump(1) == 2  # computed honestly again, never served from cache
+    assert CALLS["uncacheable"] == 2
+    assert ws.runs.list_tasks(first.id)[0].cache_hit is False
+    assert ws.runs.list_tasks(second.id)[0].cache_hit is False
+
+
+def test_exec_defined_tasks_keyed_by_bytecode(ws: Workspace) -> None:
+    """Source-less functions (REPL/exec) must not collapse to one cache key."""
+    ns1: dict[str, object] = {}
+    exec("def dyn(x):\n    return x + 1", ns1)
+    ns2: dict[str, object] = {}
+    exec("def dyn(x):\n    return x * 100", ns2)
+    v1 = task(ns1["dyn"])  # type: ignore[arg-type]
+    v2 = task(ns2["dyn"])  # type: ignore[arg-type]
+    with ws.start_run():
+        assert v1(5) == 6
+        assert v2(5) == 500  # not a stale 6 from v1's cache entry
+
+
+class RelaxResult(typing.NamedTuple):  # module-level: local classes don't pickle
+    energy: float
+    converged: bool
+
+
+def test_namedtuple_returns_survive_cache_restore(ws: Workspace) -> None:
+    @task
+    def fake_relax(x: float) -> RelaxResult:
+        return RelaxResult(energy=-10.5 * x, converged=True)
+
+    with ws.start_run():
+        first = fake_relax(2.0)
+    with ws.start_run() as second:
+        again = fake_relax(2.0)
+    assert ws.runs.list_tasks(second.id)[0].cache_hit is True
+    assert type(again) is RelaxResult
+    assert again.energy == first.energy  # attribute access works on the restore
+
+
+def test_provisional_row_visible_during_execution(ws: Workspace) -> None:
+    """The tracer commits a running row before executing, so a concurrent
+    reader (retention, a dashboard) sees the task and its input references."""
+    observed: dict[str, object] = {}
+
+    @task
+    def probe(x: int) -> int:
+        rows = ws.runs.list_tasks(current_run().id)  # type: ignore[union-attr]
+        observed["status"] = rows[0].status
+        observed["inputs"] = rows[0].inputs
+        return x
+
+    with ws.start_run():
+        probe(7)
+    assert observed["status"] is ExecutionStatus.RUNNING
+    assert observed["inputs"] == {"x": fingerprint(7)}

@@ -35,8 +35,8 @@ from slab.tasks import relax
 def build_base(engine: str):  # returns ase.Atoms
     if engine == "emt":
         # EMT does not parametrize Si; Cu keeps the no-extra-install path honest.
-        return bulk("Cu", "fcc", a=3.58) * (2, 2, 2)
-    return bulk("Si", "diamond", a=5.43) * (2, 2, 2)
+        return bulk("Cu", "fcc", a=3.58, cubic=True) * (2, 2, 2)  # 32 atoms
+    return bulk("Si", "diamond", a=5.43, cubic=True) * (2, 2, 2)  # 64 atoms
 
 
 def main() -> None:

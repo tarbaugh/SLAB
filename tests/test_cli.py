@@ -68,6 +68,26 @@ def test_run_failing_script_exits_nonzero(root: Path, tmp_path: Path) -> None:
     assert "status=failed" in result.output
 
 
+def test_run_sys_exit_zero_succeeds(root: Path, tmp_path: Path) -> None:
+    script = tmp_path / "exit0.py"
+    script.write_text(
+        "import sys\n\ndef main():\n    return 0\n\n"
+        "if __name__ == '__main__':\n    sys.exit(main())\n"
+    )
+    result = runner.invoke(app, ["run", str(script), "-w", str(root)])
+    assert result.exit_code == 0, result.output
+    assert "status=completed" in result.output
+
+
+def test_run_sys_exit_nonzero_fails_honestly(root: Path, tmp_path: Path) -> None:
+    script = tmp_path / "exit3.py"
+    script.write_text("import sys\nsys.exit(3)\n")
+    result = runner.invoke(app, ["run", str(script), "-w", str(root)])
+    assert result.exit_code == 1
+    assert "status=failed" in result.output
+    assert "sys.exit(3)" in result.output
+
+
 def test_run_missing_script(root: Path) -> None:
     result = runner.invoke(app, ["run", str(root / "ghost.py"), "-w", str(root)])
     assert result.exit_code == 1
@@ -205,6 +225,28 @@ def test_expire_rejects_bad_duration(root: Path) -> None:
     result = runner.invoke(app, ["expire", "-w", str(root), "--older-than", "soon"])
     assert result.exit_code == 1
     assert "cannot parse duration" in result.output
+
+
+def test_expire_include_running_flag(root: Path) -> None:
+    from datetime import timedelta
+
+    from slab import Run, utcnow
+
+    with Workspace(root) as ws:
+        dead = ws.runs.create(Run(name="killed", created_at=utcnow() - timedelta(days=400)))
+        ws.runs.set_status(dead.id, "running")
+
+    default = runner.invoke(app, ["expire", "-w", str(root), "--older-than", "0d"])
+    assert "0 run(s) expired" in default.output  # protected by default
+
+    forced = runner.invoke(
+        app, ["expire", "-w", str(root), "--older-than", "0d", "--include-running"]
+    )
+    assert "1 run(s) expired" in forced.output
+    with Workspace(root) as ws:
+        recovered = ws.runs.get(dead.id)
+        assert recovered.state.value == "expired"
+        assert recovered.status.value == "failed"
 
 
 def test_expire_with_policy_file(root: Path, tmp_path: Path) -> None:

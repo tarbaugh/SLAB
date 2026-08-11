@@ -18,8 +18,8 @@ htmlcov/
 # SLAB runtime state (local run store / artifact store)
 .slab/
 
-# Machine-local Claude Code settings
-.claude/settings.local.json
+# Machine-local Claude Code state (never belongs in the repo or an sdist)
+.claude/
 
 # OS
 .DS_Store

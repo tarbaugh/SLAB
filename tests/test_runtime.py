@@ -209,3 +209,42 @@ def test_verification_yields_to_concurrent_promotion(ws: Workspace) -> None:
     assert final.status is ExecutionStatus.COMPLETED
     (result,) = ws.runs.list_check_results(run.id)
     assert result.passed  # the check evidence is still recorded
+
+
+def test_generator_check_failure_is_recorded_not_raised(ws: Workspace) -> None:
+    """A generator-based check whose body raises must become a failed result —
+    'a crashing check is a failing check, never a crashed run'."""
+    with ws.start_run() as run:  # must NOT raise out of the context
+
+        @check
+        def gen_check():
+            yield converged(0.01, below=0.05)
+            raise AssertionError("boom mid-generator")
+
+    final = ws.runs.get(run.id)
+    assert final.status is ExecutionStatus.COMPLETED
+    assert final.state is Q
+    (result,) = ws.runs.list_check_results(run.id)
+    assert result.passed is False
+    assert "boom mid-generator" in result.message
+
+
+def test_generator_check_success(ws: Workspace) -> None:
+    with ws.start_run() as run:
+
+        @check
+        def gen_check():
+            yield converged(0.01, below=0.05)
+            yield finite([1.0, 2.0])
+
+    assert ws.runs.get(run.id).state is V
+    assert [r.passed for r in ws.runs.list_check_results(run.id)] == [True, True]
+
+
+def test_numpy_bool_check_return_coerced(ws: Workspace) -> None:
+    np = pytest.importorskip("numpy")
+    with ws.start_run() as run:
+        run.check(lambda: np.float64(0.01) < 0.05, name="np_comparison")
+    assert ws.runs.get(run.id).state is V
+    (result,) = ws.runs.list_check_results(run.id)
+    assert result.passed is True

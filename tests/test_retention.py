@@ -358,3 +358,72 @@ def test_gc_drops_all_task_data_of_expired_runs(tmp_path: Path) -> None:
         assert set(ws.artifacts.hashes()) == set()
         assert report.freed_bytes > 0
         assert len(ws.runs.list_tasks(run.id)) == 1  # records + hashes survive
+
+
+def test_gc_fixed_point_task_keeps_external_input(tmp_path: Path) -> None:
+    """A task returning its input unchanged (idempotent relax/canonicalize) must
+    not launder the run's external input into a droppable intermediate."""
+    from slab import Workspace, fingerprint, task
+
+    @task
+    def identity(x: object) -> object:
+        return x
+
+    payload = {"structure": [1.0, 2.0, 3.0]}
+    with Workspace(tmp_path / "ws") as ws:
+        with ws.start_run() as run:
+            identity(payload)
+        ws.runs.transition(run.id, "promoted", force=True)
+        report = ws.gc()
+        root_hash = fingerprint(payload)
+        assert root_hash in report.kept  # recompute root survives
+        assert report.dropped == []
+        assert ws.artifacts.has(root_hash)
+
+
+def test_gc_during_task_execution_keeps_inflight_inputs(tmp_path: Path) -> None:
+    """CAS dedup must not let gc drop bytes an executing run is using: the
+    provisional task row makes in-flight inputs visible and demanded."""
+    from slab import Workspace, dumps, fingerprint, task
+
+    root = tmp_path / "ws"
+    payload = {"structure": [9, 9, 9]}
+    with Workspace(root) as setup:
+        with setup.start_run(name="old-attempt") as old:
+            digest = setup.artifacts.put_bytes(dumps(payload))
+            setup.runs.add_artifact(
+                old.id, name="scratch", role="intermediate", hash=digest, size_bytes=1
+            )
+        setup.runs.transition(old.id, "expired", actor="system")
+
+    seen: dict[str, object] = {}
+
+    @task
+    def slow(structure: object) -> int:
+        with Workspace(root) as inner:  # a concurrent housekeeping sweep
+            report = inner.gc()
+            seen["dropped"] = report.dropped
+            seen["still_there"] = inner.artifacts.has(fingerprint(structure))
+        return 1
+
+    with Workspace(root) as ws, ws.start_run(name="retry"):
+        slow(payload)
+
+    assert seen["still_there"] is True
+    assert fingerprint(payload) not in seen["dropped"]  # type: ignore[operator]
+
+
+def test_expire_include_running_recovers_hard_killed_runs(store: SQLiteRunStore) -> None:
+    """A SIGKILLed process leaves its run at status 'running' forever; the
+    opt-in sweep marks it failed and expires it instead of leaking it."""
+    from slab import ExecutionStatus
+
+    dead = store.create(_aged(400))
+    store.set_status(dead.id, "running")
+
+    assert expire_due(store, DEFAULT_POLICY) == []  # protected by default
+    (expired_run,) = expire_due(store, DEFAULT_POLICY, include_running=True)
+    assert expired_run.id == dead.id
+    assert expired_run.state is E
+    assert expired_run.status is ExecutionStatus.FAILED
+    assert expired_run.error is not None and "presumed dead" in expired_run.error

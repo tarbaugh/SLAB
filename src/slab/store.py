@@ -175,6 +175,18 @@ class RunStore(Protocol):
         """Record a traced task call on its run."""
         ...
 
+    def update_task(
+        self,
+        seq: int,
+        *,
+        status: ExecutionStatus | str,
+        outputs: dict[str, str] | None = None,
+        error: str | None = None,
+        finished_at: datetime | None = None,
+    ) -> TaskRecord:
+        """Finalize a provisional (running) task row."""
+        ...
+
     def list_tasks(self, run_id: str) -> list[TaskRecord]:
         """List a run's traced task calls, oldest first."""
         ...
@@ -539,11 +551,14 @@ class SQLiteRunStore:
     def add_task(self, record: TaskRecord) -> TaskRecord:
         """Record a traced task call; return it with its store-assigned ``seq``.
 
-        Written by the ``@task`` tracer after the call finished (or was served
-        from cache); ``status`` must therefore be ``completed`` or ``failed``.
+        The tracer records a *provisional* row (status ``running``) before a
+        task executes — making the task's input references visible to gc for
+        the whole execution — and finalizes it with :meth:`update_task`.
+        Cache hits and already-finished work are recorded directly as
+        ``completed``/``failed``. ``pending`` rows make no sense here.
 
         Raises:
-            ValueError: The status is not a final one.
+            ValueError: The status is ``pending``.
             RunStateError: The run is in a terminal lifecycle state.
 
         Examples:
@@ -558,10 +573,10 @@ class SQLiteRunStore:
             True
             >>> store.close()
         """
-        if record.status not in (ExecutionStatus.COMPLETED, ExecutionStatus.FAILED):
+        if record.status is ExecutionStatus.PENDING:
             raise ValueError(
-                f"tasks are recorded after the fact: status must be 'completed' or"
-                f" 'failed', got {record.status.value!r}"
+                "tasks are recorded at execution time: status must be 'running',"
+                " 'completed', or 'failed', got 'pending'"
             )
         with self._txn() as conn:
             rid = self._resolve(record.run_id)
@@ -590,6 +605,62 @@ class SQLiteRunStore:
             task_row = conn.execute(
                 "SELECT * FROM tasks WHERE seq = ?", (cursor.lastrowid,)
             ).fetchone()
+        return _row_to_task(task_row)
+
+    def update_task(
+        self,
+        seq: int,
+        *,
+        status: ExecutionStatus | str,
+        outputs: dict[str, str] | None = None,
+        error: str | None = None,
+        finished_at: datetime | None = None,
+    ) -> TaskRecord:
+        """Finalize a provisional (``running``) task row; return the updated record.
+
+        Raises:
+            ValueError: No task with this ``seq``, the row is already final,
+                or *status* is not final.
+
+        Examples:
+            >>> store = SQLiteRunStore(":memory:")
+            >>> r = store.create(Run())
+            >>> live = store.add_task(TaskRecord(
+            ...     run_id=r.id, name="relax", status="running", cache_key="ab" * 32,
+            ...     inputs={"x": "cd" * 32}, started_at=utcnow(),
+            ... ))
+            >>> done = store.update_task(live.seq, status="completed",
+            ...                          outputs={"return": "ef" * 32}, finished_at=utcnow())
+            >>> done.status.value
+            'completed'
+            >>> store.close()
+        """
+        final = ExecutionStatus(status)
+        if final not in (ExecutionStatus.COMPLETED, ExecutionStatus.FAILED):
+            raise ValueError(
+                f"update_task finalizes a task: status must be 'completed' or 'failed',"
+                f" got {final.value!r}"
+            )
+        with self._txn() as conn:
+            row = conn.execute("SELECT * FROM tasks WHERE seq = ?", (seq,)).fetchone()
+            if row is None:
+                raise ValueError(f"no task with seq {seq}")
+            if ExecutionStatus(row["status"]) is not ExecutionStatus.RUNNING:
+                raise ValueError(
+                    f"task {seq} is already finalized ({row['status']}); tasks finalize once"
+                )
+            conn.execute(
+                "UPDATE tasks SET status = ?, outputs = ?, error = ?, finished_at = ?"
+                " WHERE seq = ?",
+                (
+                    final.value,
+                    json.dumps(outputs or {}, sort_keys=True),
+                    error,
+                    _fmt_dt(finished_at),
+                    seq,
+                ),
+            )
+            task_row = conn.execute("SELECT * FROM tasks WHERE seq = ?", (seq,)).fetchone()
         return _row_to_task(task_row)
 
     def add_check_results(self, run_id: str, results: Sequence[CheckResult]) -> list[CheckResult]:

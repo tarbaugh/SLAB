@@ -6,17 +6,28 @@ call is traced:
 
 1. Bound arguments (defaults applied) are serialized, content-hashed, and
    stored — inputs are part of the recipe, so recompute-on-demand has roots.
-2. A cache key is fingerprinted from the code identity (module, qualname,
-   source hash), resolved engine versions, and the input hashes. If a
-   completed task with the same key exists *and its output bytes are still
-   present*, the stored outputs are returned without executing — restart a
-   crashed script and finished work is skipped. Discarded bytes mean a cache
-   miss and honest recomputation.
-3. Otherwise the function runs. Its return value is serialized and stored —
-   a tuple return is stored element-wise (``return[0]``, ``return[1]``, ...) so
-   the common ``atoms, info = relax(...)`` pattern leaves per-value hashes.
-4. A :class:`~slab.models.TaskRecord` lands on the run either way, carrying
-   the full recipe: inputs, code version, engine versions, parameters.
+2. A cache key is fingerprinted from the function's identity and environment:
+   module + qualname, the source hash, a *bytecode* hash (which covers
+   REPL/``exec``-defined functions where source is unavailable), the
+   fingerprints of every closure cell value (two functions from the same
+   factory with different bound parameters are different computations),
+   resolved engine versions, and the input hashes. If a completed task with
+   the same key exists *and its output bytes are still present*, the stored
+   outputs are returned without executing — restart a crashed script and
+   finished work is skipped. Discarded bytes mean a cache miss and honest
+   recomputation. A closure cell that cannot be serialized makes the call
+   *uncacheable* (computed honestly every time) rather than a collision risk.
+   Functions whose behavior depends on mutated globals are outside what the
+   key can see — treat globals as constants or pass them as arguments.
+3. A provisional :class:`~slab.models.TaskRecord` (status ``running``) is
+   committed *before* the function executes, so the run's input references
+   are visible to concurrent retention sweeps for the whole execution; the
+   row is finalized (``completed``/``failed``) when the call returns. The
+   return value is serialized and stored — an exact ``tuple`` return is
+   stored element-wise (``return[0]``, ``return[1]``, ...) so the common
+   ``atoms, info = relax(...)`` pattern leaves per-value hashes; tuple
+   *subclasses* (e.g. NamedTuple) are stored whole so cache restores preserve
+   their type.
 
 The DAG is *derived*, not declared: task B consuming task A's output is
 visible because B's input hash equals A's output hash. No graph API to learn,
@@ -28,14 +39,17 @@ from __future__ import annotations
 import functools
 import hashlib
 import inspect
+import os
 import platform
 import textwrap
+import types
 from collections.abc import Callable, Sequence
 from importlib import metadata
 from typing import Any, ParamSpec, TypeVar, overload
 
 from slab._version import __version__
 from slab.artifacts import ArtifactStore
+from slab.errors import SerializationError
 from slab.lifecycle import ExecutionStatus
 from slab.models import TaskRecord, utcnow
 from slab.runtime import ActiveRun, current_run
@@ -83,8 +97,9 @@ def task(
         try:
             source = textwrap.dedent(inspect.getsource(f))
             code_hash: str | None = hashlib.sha256(source.encode()).hexdigest()
-        except (OSError, TypeError):  # REPL/doctest-defined functions have no source
+        except (OSError, TypeError):  # REPL/exec-defined functions have no source
             code_hash = None
+        bytecode_hash = _code_identity(f.__code__).hexdigest()
 
         @functools.wraps(f)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
@@ -92,7 +107,15 @@ def task(
             if active is None:
                 return f(*args, **kwargs)
             return _traced_call(
-                active, f, signature, task_name, code_hash, engine_names, args, kwargs
+                active,
+                f,
+                signature,
+                task_name,
+                code_hash,
+                bytecode_hash,
+                engine_names,
+                args,
+                kwargs,
             )
 
         return wrapper
@@ -106,6 +129,7 @@ def _traced_call(
     signature: inspect.Signature,
     task_name: str,
     code_hash: str | None,
+    bytecode_hash: str,
     engine_names: tuple[str, ...],
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
@@ -129,17 +153,21 @@ def _traced_call(
         "slab": __version__,
         "params": _params_lite(bound.arguments, input_hashes),
     }
+    closure_fp = _closure_fingerprints(f)
+    cacheable = closure_fp is not None
     cache_key = fingerprint(
         {
             "module": f.__module__,
             "qualname": f.__qualname__,
             "code": code_hash,
+            "bytecode": bytecode_hash,
+            "closure": closure_fp if cacheable else f"uncacheable-{os.urandom(16).hex()}",
             "engines": engine_versions,
             "inputs": input_hashes,
         }
     )
 
-    cached = active.runs.find_cached_task(cache_key)
+    cached = active.runs.find_cached_task(cache_key) if cacheable else None
     if cached is not None and all(active.artifacts.has(h) for h in cached.outputs.values()):
         now = utcnow()
         active.runs.add_task(
@@ -158,44 +186,82 @@ def _traced_call(
         )
         return _restore(active.artifacts, cached.outputs)  # type: ignore[return-value]
 
-    started_at = utcnow()
+    # Provisional row BEFORE execution: the run's input references are visible
+    # to concurrent gc for the whole (possibly very long) execution.
+    provisional = active.runs.add_task(
+        TaskRecord(
+            run_id=active.id,
+            name=task_name,
+            status=ExecutionStatus.RUNNING,
+            cache_key=cache_key,
+            recipe=recipe,
+            inputs=input_hashes,
+            started_at=utcnow(),
+        )
+    )
     try:
         result = f(*args, **kwargs)
         outputs = _store_outputs(active.artifacts, result)
     except Exception as e:
-        active.runs.add_task(
-            TaskRecord(
-                run_id=active.id,
-                name=task_name,
-                status=ExecutionStatus.FAILED,
-                cache_key=cache_key,
-                recipe=recipe,
-                inputs=input_hashes,
-                error=f"{type(e).__name__}: {e}",
-                started_at=started_at,
-                finished_at=utcnow(),
-            )
-        )
-        raise
-    active.runs.add_task(
-        TaskRecord(
-            run_id=active.id,
-            name=task_name,
-            status=ExecutionStatus.COMPLETED,
-            cache_key=cache_key,
-            recipe=recipe,
-            inputs=input_hashes,
-            outputs=outputs,
-            started_at=started_at,
+        active.runs.update_task(
+            provisional.seq,
+            status=ExecutionStatus.FAILED,
+            error=f"{type(e).__name__}: {e}",
             finished_at=utcnow(),
         )
+        raise
+    active.runs.update_task(
+        provisional.seq,
+        status=ExecutionStatus.COMPLETED,
+        outputs=outputs,
+        finished_at=utcnow(),
     )
     return result
 
 
+def _code_identity(code: types.CodeType) -> Any:
+    """Hash of a code object's behavior-bearing parts (stable across processes).
+
+    Covers bytecode, constants (nested code objects recursively), and the
+    global names the code references — so exec/REPL-defined functions with no
+    retrievable source still get distinct identities when their bodies differ.
+    """
+    hasher = hashlib.sha256()
+    hasher.update(code.co_code)
+    for const in code.co_consts:
+        if isinstance(const, types.CodeType):
+            hasher.update(_code_identity(const).digest())
+        else:
+            hasher.update(repr(const).encode())
+        hasher.update(b"\x00")
+    hasher.update(" ".join(code.co_names).encode())
+    return hasher
+
+
+def _closure_fingerprints(f: Callable[..., Any]) -> list[str] | None:
+    """Fingerprint each closure cell value, or None if any is unserializable.
+
+    None means "uncacheable": a factory-made task whose bound state cannot be
+    hashed must compute honestly every time — a collision would silently serve
+    a wrong result, the one failure direction the cache must never take.
+    """
+    cells = f.__closure__ or ()
+    fingerprints: list[str] = []
+    for cell in cells:
+        try:
+            fingerprints.append(fingerprint(cell.cell_contents))
+        except (SerializationError, ValueError):
+            return None
+    return fingerprints
+
+
 def _store_outputs(artifacts: ArtifactStore, result: object) -> dict[str, str]:
-    """Serialize a return value into the CAS; tuples go element-wise."""
-    if isinstance(result, tuple):
+    """Serialize a return value into the CAS; exact tuples go element-wise.
+
+    Tuple *subclasses* (NamedTuple etc.) are stored whole so a cache restore
+    reproduces the original type, not a bare tuple.
+    """
+    if type(result) is tuple:
         return {
             f"return[{i}]": artifacts.put_bytes(dumps(element)) for i, element in enumerate(result)
         }

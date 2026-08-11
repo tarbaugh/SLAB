@@ -37,6 +37,9 @@ slab = "slab.cli:app"
 [tool.hatch.build.targets.wheel]
 packages = ["src/slab"]
 
+[tool.hatch.build.targets.sdist]
+exclude = [".claude"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"

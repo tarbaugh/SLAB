@@ -22,13 +22,14 @@ out, only explicitly archived.
 
 from __future__ import annotations
 
+from contextlib import suppress
 from datetime import datetime, timedelta
 from typing import cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from slab.artifacts import ArtifactStore
-from slab.errors import IllegalTransitionError
+from slab.errors import IllegalStatusChangeError, IllegalTransitionError
 from slab.lifecycle import ExecutionStatus, LifecycleState
 from slab.models import ArtifactRole, Run, utcnow
 from slab.store import RunStore
@@ -149,6 +150,7 @@ def expire_due(
     *,
     now: datetime | None = None,
     actor: str = "system",
+    include_running: bool = False,
 ) -> list[Run]:
     """Expire every run that has exceeded its state's TTL; return them.
 
@@ -156,6 +158,13 @@ def expire_due(
     promoted data is structurally out of reach. Each expiry is compare-and-swap
     guarded: a run that changes state mid-sweep (e.g. gets promoted) is skipped
     silently rather than expired from stale information.
+
+    Runs whose status is ``running`` are skipped by default — a live process
+    owns them and expiry must never yank state from under it. But a hard-killed
+    process (SIGKILL, OOM, power loss) leaves its run at ``running`` forever
+    with no one to advance it; pass ``include_running=True`` when you know
+    those processes are dead: overdue running runs are first marked ``failed``
+    (with an explanatory error) and then expired.
 
     Examples:
         >>> from datetime import timedelta
@@ -177,10 +186,17 @@ def expire_due(
             continue
         cutoff = now - timedelta(days=ttl_days)
         for run in runs.list_runs(state=state):
-            if run.status is ExecutionStatus.RUNNING:
-                continue  # a live process owns this run; never yank state under it
             if run.state_entered_at > cutoff:
                 continue
+            if run.status is ExecutionStatus.RUNNING:
+                if not include_running:
+                    continue  # a live process owns this run; never yank state under it
+                with suppress(IllegalStatusChangeError):  # it may finish mid-sweep; fine
+                    runs.set_status(
+                        run.id,
+                        ExecutionStatus.FAILED,
+                        error="presumed dead: expired by sweep while status was 'running'",
+                    )
             try:
                 expired.append(
                     runs.transition(
@@ -250,14 +266,19 @@ def gc(
         keep = policy.rule_for(run.state).keep
         for ref in runs.list_artifacts(run.id):
             note(ref.hash, ref.role, keep)
-        tasks = runs.list_tasks(run.id)
-        produced = {digest for task in tasks for digest in task.outputs.values()}
-        for task in tasks:
-            for digest in task.outputs.values():
-                note(digest, ArtifactRole.INTERMEDIATE, keep)
+        # Inputs are classified against what EARLIER tasks produced, in seq
+        # order, before the consuming task's own outputs are added. Otherwise a
+        # fixed-point task (output bytes == input bytes: an idempotent relax or
+        # canonicalize) would launder the run's external input into an
+        # "intermediate" and gc would destroy the recompute root.
+        produced: set[str] = set()
+        for task in runs.list_tasks(run.id):
             for digest in task.inputs.values():
                 role = ArtifactRole.INTERMEDIATE if digest in produced else ArtifactRole.INPUT
                 note(digest, role, keep)
+            for digest in task.outputs.values():
+                note(digest, ArtifactRole.INTERMEDIATE, keep)
+                produced.add(digest)
 
     present = set(artifacts.hashes())
     to_drop = sorted((referenced - demanded) & present)

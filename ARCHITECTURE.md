@@ -90,7 +90,12 @@ Mechanics worth knowing:
   serialize, and the loser gets an error naming the actual current state.
 - `transition(..., expected="quarantined")` provides compare-and-swap. The TTL
   sweep uses it so a run promoted mid-sweep can never be expired from stale
-  information; the sweep also skips runs whose status is `running`.
+  information. The sweep also skips runs whose status is `running` — but only
+  a run's own process ever advances its status, so a hard kill (SIGKILL, OOM,
+  power loss) would leave a run protected forever. `expire --include-running`
+  is the explicit recovery: when the operator knows those processes are dead,
+  overdue running runs are marked `failed` (with an explanatory error) and
+  then expired, so the documented age-out holds even for crashed hosts.
 
 ## 3. Promotion over deletion: the asymmetry argument
 
@@ -166,10 +171,24 @@ out for free:
 - A hash shared between a promoted run's terminal and an expired run's
   intermediate survives — any demand keeps the blob, and content addressing
   already deduplicated it.
-- Unreferenced blobs (a `put` that never became a reference — possibly an
-  in-flight run) are *reported as orphans, never deleted*.
+- Unreferenced blobs (a `put` that never became a reference) are *reported as
+  orphans, never deleted*.
 - Blobs a rule demands but that are absent are reported as `missing`:
   out-of-band deletion becomes visible instead of silent.
+- In-flight work is protected by construction, not by luck: the tracer
+  commits a provisional task record (status `running`, inputs included)
+  *before* executing, so a long-running task's input references are visible
+  to a concurrent gc even when the same bytes are also referenced by an
+  expired run (content addressing deduplicates across runs — orphan
+  protection alone would not see the collision). The remaining unprotected
+  window is the milliseconds between storing a finished task's outputs and
+  committing them, not the task's wall time.
+- Input classification is order-aware: a value counts as `intermediate` only
+  if an *earlier* task in the run produced it. Without that ordering, a
+  fixed-point task (an idempotent relax or canonicalize whose output bytes
+  equal its input bytes) would launder the run's external input into a
+  droppable intermediate and gc would destroy the recompute root, leaving a
+  circular recipe.
 
 Housekeeping is deliberately two-phase — `expire` changes states (cheap,
 reviewable), `gc` deletes bytes (not reversible). Policies are plain data:
@@ -186,17 +205,30 @@ function; outside a run context it *is* the plain function. Inside
 
 1. Bound arguments (defaults applied) are serialized, hashed, and **stored**
    (inputs are part of the recipe — §4).
-2. A cache key is fingerprinted from code identity (module, qualname, source
-   hash), resolved engine versions, and input hashes. A completed task with
-   the same key whose output bytes still exist short-circuits execution —
-   rerun a crashed script and finished work is skipped, visibly
-   (`cache_hit=True` rows are recorded). Bytes discarded by retention mean an
-   honest cache miss and recomputation. Failed tasks never populate the cache.
-3. Otherwise the function runs; the return value is stored (tuples
-   element-wise, so `atoms, info = relax(...)` leaves per-value hashes); a
-   `TaskRecord` lands on the run with the full recipe: inputs, code version,
-   engine versions (`@task(engines=("mace-torch",))` pins installed versions
-   into both recipe and cache key), python/slab versions, and human-readable
+2. A cache key is fingerprinted from the function's identity and environment:
+   module + qualname, the source hash, a *bytecode* hash (constants and
+   referenced names included — REPL- and `exec`-defined functions with no
+   retrievable source still get distinct identities), the fingerprint of
+   every **closure cell** value (two functions from the same factory with
+   different bound parameters are different computations), resolved engine
+   versions, and the input hashes. A completed task with the same key whose
+   output bytes still exist short-circuits execution — rerun a crashed script
+   and finished work is skipped, visibly (`cache_hit=True` rows are
+   recorded). Bytes discarded by retention mean an honest cache miss and
+   recomputation. Failed tasks never populate the cache, and a closure cell
+   that cannot be serialized makes the call *uncacheable* — computed honestly
+   every time — rather than a collision risk. The key's honest boundary:
+   globals are not fingerprinted. A task whose behavior depends on module
+   state mutated between calls can be served a stale cached result — treat
+   globals as constants, or pass them as arguments.
+3. Otherwise the function runs — after a provisional `TaskRecord` (status
+   `running`) is committed, so retention sees the work in flight (§4). The
+   return value is stored (exact tuples element-wise, so
+   `atoms, info = relax(...)` leaves per-value hashes; tuple subclasses like
+   NamedTuple are stored whole so cache restores preserve their type), and
+   the record is finalized with the full recipe: inputs, code version, engine
+   versions (`@task(engines=("mace-torch",))` pins installed versions into
+   both recipe and cache key), python/slab versions, and human-readable
    parameters.
 
 **The DAG is derived, not declared.** Task B consuming task A's output is
@@ -213,7 +245,8 @@ Serialization is tiered like everything else: JSON-faithful values get
 canonical JSON (sorted keys — equal dicts hash equally), `bytes` pass through
 raw, everything else is pickled; a 2-byte tag makes each blob self-describing.
 Encoding instability can only cause a spurious cache *miss*, never a wrong
-cache hit — the failure direction is chosen, not accidental.
+cache hit — within the key's stated boundary above, the failure direction is
+chosen, not accidental.
 
 ## 6. Verification hooks as the contract
 

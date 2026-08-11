@@ -21,7 +21,8 @@ Vocabulary:
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
+import numbers
+from collections.abc import Iterable, Iterator
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
@@ -46,10 +47,25 @@ class Assertion(BaseModel):
 
 
 def _as_number(value: object) -> float | None:
-    """Coerce to float for checking; bools and non-numbers are None."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    """Coerce to float for checking; bools and non-numbers are None.
+
+    ``numbers.Real`` admits numpy scalars (``np.float32``, ``np.int64``, ...)
+    — routine outputs of ML potentials — not just builtin int/float.
+    """
+    if isinstance(value, bool) or type(value).__name__ in ("bool_",):
         return None
-    return float(value)
+    if isinstance(value, numbers.Real):
+        return float(value)
+    return None
+
+
+def _flatten(observed: object) -> Iterator[object]:
+    """Yield scalars from arbitrarily nested sequences ((N,3) force arrays etc.)."""
+    if isinstance(observed, Iterable) and not isinstance(observed, (str, bytes, dict)):
+        for item in observed:
+            yield from _flatten(item)
+    else:
+        yield observed
 
 
 def _require_number(value: object, what: str) -> float:
@@ -141,16 +157,18 @@ def finite(observed: object, *, label: str = "value") -> Assertion:
     Catches the NaN/inf class of silent corruption (exploded dynamics,
     diverged SCF) before it propagates.
 
+    Nested sequences are flattened recursively, so an ``(N, 3)`` force array
+    checks every component.
+
     Examples:
         >>> finite([1.0, 2.5, -3.0], label="forces").message
         'all 3 forces values finite'
+        >>> finite([[0.01, 0.02, 0.03], [0.0, 0.01, 0.02]], label="forces").message
+        'all 6 forces values finite'
         >>> finite(float("inf")).passed
         False
     """
-    if isinstance(observed, Iterable) and not isinstance(observed, (str, bytes, dict)):
-        values = list(observed)
-    else:
-        values = [observed]
+    values = list(_flatten(observed))
     if not values:
         return Assertion(
             kind="finite", passed=False, message=f"{label} is empty", observed=[], expected="finite"

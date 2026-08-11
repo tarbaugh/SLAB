@@ -194,3 +194,57 @@ def test_launch_name_override(root: Path, tmp_path: Path) -> None:
     script = _write(tmp_path, "wf.py", "x = 1\n")
     result = launch_script(root, script, name="custom-name")
     assert result["name"] == "custom-name"
+
+
+def test_launch_sys_exit_zero_is_normal_completion(root: Path, tmp_path: Path) -> None:
+    """The `sys.exit(main())` idiom with a zero code is everyday Python."""
+    script = _write(
+        tmp_path,
+        "exit0.py",
+        "import sys\n\ndef main():\n    print('did work')\n    return 0\n\n"
+        "if __name__ == '__main__':\n    sys.exit(main())\n",
+    )
+    result = launch_script(root, script, capture_output=True)
+    assert result["status"] == "completed"
+    assert "traceback" not in result
+    assert "did work" in result["output"]
+
+
+def test_launch_sys_exit_nonzero_records_failure(root: Path, tmp_path: Path) -> None:
+    script = _write(tmp_path, "exit2.py", "import sys\nsys.exit(2)\n")
+    result = launch_script(root, script)
+    assert result["status"] == "failed"
+    assert "sys.exit(2)" in result["traceback"]
+    with Workspace(root) as ws:
+        assert ws.runs.get(result["run_id"]).error == "ScriptExitError: script called sys.exit(2)"
+
+
+def test_launch_unwritable_workspace_surfaces_real_cause(root: Path, tmp_path: Path) -> None:
+    """Storage failures must name the storage problem, not crash obscurely."""
+    from slab import StorageError
+
+    script = _write(tmp_path, "wf.py", "x = 1\n")
+    launch_script(root, script)  # create the workspace normally first
+    db = root / "runs.db"
+    db.chmod(0o444)
+    try:
+        with pytest.raises(StorageError) as excinfo:
+            launch_script(root, script)
+        assert "readonly" in str(excinfo.value).lower()
+    finally:
+        db.chmod(0o644)
+
+
+def test_capture_includes_check_time_prints(root: Path, tmp_path: Path) -> None:
+    """Checks evaluate at context exit; their prints must still be captured —
+    under MCP, stdout is the protocol channel."""
+    script = _write(
+        tmp_path,
+        "noisy.py",
+        "from slab import check\n"
+        "print('BODY-PRINT')\n"
+        "@check\ndef noisy_check():\n    print('CHECK-PRINT')\n    return True\n",
+    )
+    result = launch_script(root, script, capture_output=True)
+    assert "BODY-PRINT" in result["output"]
+    assert "CHECK-PRINT" in result["output"]

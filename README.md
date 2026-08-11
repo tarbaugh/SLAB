@@ -91,13 +91,13 @@ python examples/demo.py --engine emt   # EMT + Cu: no extras, runs in seconds
 
 ```text
 workspace: .slab   engine: mace   system: Si x 64 atoms
-  run 01kzs0en5y  E = -85.905208 eV  fmax = 0.0450  steps =  4  -> verified
-  run 01kzs0er2e  E = -85.906516 eV  fmax = 0.0497  steps = 11  -> verified
-  run 01kzs0erjh  E = -85.905218 eV  fmax = 0.0497  steps = 14  -> verified
-  run 01kzs0es4w  E = -85.906204 eV  fmax = 0.0458  steps = 15  -> verified
-  run 01kzs0esre  E = -85.904782 eV  fmax = 0.0461  steps = 16  -> verified
+  run 01kzs2m7s1  E = -343.628458 eV  fmax = 0.0382  steps = 10  -> verified
+  run 01kzs2mad3  E = -343.626565 eV  fmax = 0.0442  steps = 14  -> verified
+  run 01kzs2mbwn  E = -343.628352 eV  fmax = 0.0417  steps = 19  -> verified
+  run 01kzs2mdw7  E = -343.626973 eV  fmax = 0.0472  steps = 20  -> verified
+  run 01kzs2mfwn  E = -343.626718 eV  fmax = 0.0450  steps = 21  -> verified
 
-lowest energy: run 01kzs0er2e  (E = -85.906516 eV)
+lowest energy: run 01kzs2m7s1  (E = -343.628458 eV)
 ```
 
 Each variant is its own run with a stated intent; the convergence checks
@@ -105,14 +105,14 @@ passed, so all five landed `verified`. Nothing is permanent yet — that
 decision happens now, *after* the results exist:
 
 ```bash
-$ slab promote 01kzs0er2e --reason "lowest energy of 5 variants"
-promoted 01kzs0er2ebvvwxhrfmqybq2fp  si-relax-1
+$ slab promote 01kzs2m7s1 --reason "lowest energy of 5 variants"
+promoted 01kzs2m7s1gd2dr127x58azfqk  si-relax-0
 
 $ slab expire --older-than 0d
 4 run(s) expired
 
 $ slab gc
-dropped 31 blob(s), freeing 121331 bytes; 8 kept
+dropped 31 blob(s), freeing 444075 bytes; 8 kept
 ```
 
 The archive now contains exactly one run's terminal artifacts (plus its
@@ -120,11 +120,11 @@ recompute roots); everything else is a hash-and-recipe skeleton that remains
 fully queryable:
 
 ```text
-$ slab show 01kzs0er2e                      $ slab show 01kzs0en5y   # expired
+$ slab show 01kzs2m7s1                      $ slab show 01kzs2mad3   # expired
   state:   promoted                           state:   expired
   checks:  3/3 passed                         checks:  3/3 passed
   artifacts:                                  artifacts:
-    variant-1.traj  ...  hash-only              variant-0.traj  ...  hash-only
+    variant-0.traj  ...  hash-only              variant-1.traj  ...  hash-only
     relaxed.xyz     ...  bytes                  relaxed.xyz     ...  hash-only
     result          ...  bytes                  result          ...  hash-only
 ```
@@ -137,7 +137,7 @@ $ slab show 01kzs0er2e                      $ slab show 01kzs0en5y   # expired
 | `slab list [--state S] [--status S] [-q]` | List runs, newest first. |
 | `slab show <id> [--json]` | One run: state, intent, checks, tasks, artifacts, history. Ids accept unique prefixes, git-style. |
 | `slab promote <id> [--reason ...] [--force]` | Make a run permanent. `--force` promotes an unverified run and is recorded as forced. |
-| `slab expire [--older-than 30d]` | Expire unpromoted runs past their TTL (state change only). `0d` = everything unpromoted, now. |
+| `slab expire [--older-than 30d] [--include-running]` | Expire unpromoted runs past their TTL (state change only). `0d` = everything unpromoted, now. Runs at status `running` are protected unless `--include-running` (for hard-killed processes that can never advance their own status; they are marked failed first). |
 | `slab gc [--dry-run]` | Drop artifact bytes no retention rule demands. |
 | `slab mcp` | Serve the workspace to agents over MCP (stdio). |
 
@@ -187,9 +187,11 @@ protocol channel.
 MVP vertical slice, working end to end: lifecycle state machine,
 content-addressed artifact store with tiered retention, define-by-run tracing
 with content-hash caching, verification hooks, MACE/ASE relaxation task, CLI,
-MCP server. 430+ tests, ~100% coverage on the load-bearing core, mypy
-`--strict`. The `RunStore` protocol is the seam for Postgres; the backend
-factory is the seam for more engines.
+MCP server. 450 tests (including every docstring example, executed as
+doctests), ~100% coverage on the load-bearing core, mypy `--strict`, plus an
+adversarial multi-agent review pass whose confirmed findings are regression
+tests. The `RunStore` protocol is the seam for Postgres; the backend factory
+is the seam for more engines.
 
 ## Development
 

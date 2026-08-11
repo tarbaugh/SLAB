@@ -14,11 +14,11 @@ import re
 import runpy
 import sys
 import traceback
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any
 
-from slab.errors import NestedRunError, SlabError
+from slab.errors import NestedRunError, ScriptExitError, SlabError, StorageError
 from slab.models import Run
 from slab.retention import DEFAULT_POLICY, RetentionPolicy
 from slab.runtime import Workspace
@@ -210,15 +210,23 @@ def launch_script(
     sys.argv = [str(script_path), *argv]
     sys.path.insert(0, str(script_path.parent))
     error: str | None = None
-    with Workspace(root) as ws:
+    run_id: str | None = None
+    try:
+        workspace = Workspace(root)
+    except Exception as e:
+        raise StorageError(f"cannot open workspace at {root}: {e}") from e
+    with workspace as ws:
         try:
-            with ws.start_run(name=name or script_path.stem, intent=intent) as active:
-                run_id = active.id
+            # capture wraps the whole run context: @check hooks evaluate at
+            # context exit, and their prints must not reach the real stdout
+            # (under MCP, stdout is the protocol channel).
+            with ExitStack() as stack:
                 if capture_output:
-                    with redirect_stdout(buffer), redirect_stderr(buffer):
-                        runpy.run_path(str(script_path), run_name="__main__")
-                else:
-                    runpy.run_path(str(script_path), run_name="__main__")
+                    stack.enter_context(redirect_stdout(buffer))
+                    stack.enter_context(redirect_stderr(buffer))
+                with ws.start_run(name=name or script_path.stem, intent=intent) as active:
+                    run_id = active.id
+                    _execute_script(script_path)
         except NestedRunError:
             raise SlabError(
                 f"{script_path.name} manages its own runs (it calls start_run); "
@@ -230,6 +238,10 @@ def launch_script(
             sys.argv = old_argv
             sys.path.remove(str(script_path.parent))
 
+        if run_id is None:
+            # The run never started (unwritable database, storage failure...):
+            # surface the real cause instead of pretending a run exists.
+            raise StorageError(f"could not start a run for {script_path.name}:\n{error}")
         run = ws.runs.get(run_id)
         checks = ws.runs.list_check_results(run_id)
         result: dict[str, Any] = run_summary(run) | {
@@ -243,3 +255,13 @@ def launch_script(
     if capture_output:
         result["output"] = buffer.getvalue()
     return result
+
+
+def _execute_script(script_path: Path) -> None:
+    """runpy the script, taming SystemExit: the `sys.exit(main())` idiom is
+    everyday Python and must not escape into typer or the MCP task group."""
+    try:
+        runpy.run_path(str(script_path), run_name="__main__")
+    except SystemExit as e:
+        if e.code not in (None, 0):
+            raise ScriptExitError(f"script called sys.exit({e.code!r})") from None

@@ -73,16 +73,18 @@ def build_server(root: Path) -> MCPServer:
             return _ops.run_summary(run)
 
     @server.tool()
-    def expire_runs(older_than: str | None = None) -> dict[str, Any]:
+    def expire_runs(older_than: str | None = None, include_running: bool = False) -> dict[str, Any]:
         """Expire unpromoted runs past their TTL (state change only; gc drops
         bytes). older_than like '30d'/'12h' overrides the policy; '0d' expires
-        everything unpromoted immediately."""
+        everything unpromoted immediately. Runs stuck at status 'running'
+        (hard-killed processes) are skipped unless include_running=True, which
+        marks them failed first."""
         if older_than is not None:
             policy = _ops.ttl_override_policy(_ops.parse_duration_days(older_than))
         else:
             policy = _ops.load_policy(root)
         with Workspace(root) as ws:
-            expired = ws.expire_due(policy)
+            expired = ws.expire_due(policy, include_running=include_running)
             return {"expired": [_ops.run_summary(r) for r in expired], "count": len(expired)}
 
     @server.tool()

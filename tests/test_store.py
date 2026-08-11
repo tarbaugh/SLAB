@@ -571,10 +571,40 @@ def test_tasks_ordered_by_insertion(store: SQLiteRunStore) -> None:
     assert [t.name for t in store.list_tasks(run.id)] == ["first", "second"]
 
 
-def test_add_task_rejects_non_final_status(store: SQLiteRunStore) -> None:
+def test_add_task_rejects_pending_status(store: SQLiteRunStore) -> None:
     run = store.create(Run())
-    with pytest.raises(ValueError, match="after the fact"):
-        store.add_task(_task_record(run.id, status="running"))
+    with pytest.raises(ValueError, match="at execution time"):
+        store.add_task(_task_record(run.id, status="pending"))
+
+
+def test_provisional_task_lifecycle(store: SQLiteRunStore) -> None:
+    run = store.create(Run())
+    live = store.add_task(_task_record(run.id, status="running", outputs={}, finished_at=None))
+    assert live.status is ExecutionStatus.RUNNING
+    assert live.finished_at is None
+
+    done = store.update_task(
+        live.seq, status="completed", outputs={"return": "ef" * 32}, finished_at=utcnow()
+    )
+    assert done.status is ExecutionStatus.COMPLETED
+    assert done.outputs == {"return": "ef" * 32}
+    assert done.finished_at is not None
+    (loaded,) = store.list_tasks(run.id)
+    assert loaded == done
+
+
+def test_update_task_guards(store: SQLiteRunStore) -> None:
+    run = store.create(Run())
+    live = store.add_task(_task_record(run.id, status="running", outputs={}, finished_at=None))
+    with pytest.raises(ValueError, match="must be 'completed' or 'failed'"):
+        store.update_task(live.seq, status="running")
+    with pytest.raises(ValueError, match="no task with seq"):
+        store.update_task(999_999, status="completed")
+    store.update_task(live.seq, status="failed", error="boom", finished_at=utcnow())
+    with pytest.raises(ValueError, match="already finalized"):
+        store.update_task(live.seq, status="completed")
+    (loaded,) = store.list_tasks(run.id)
+    assert loaded.error == "boom"
 
 
 def test_add_task_refused_on_terminal_run(store: SQLiteRunStore) -> None:

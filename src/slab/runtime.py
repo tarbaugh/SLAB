@@ -191,6 +191,13 @@ def _evaluate_check(run_id: str, name: str, fn: _CheckFn) -> list[CheckResult]:
     """Run one check function and coerce whatever it produces into results."""
     try:
         outcome = fn()
+        # A generator-based check has not executed yet — its body runs during
+        # materialization, so that must sit inside the same coercion or an
+        # assert inside the generator would crash the (already completed) run.
+        if isinstance(outcome, Iterable) and not isinstance(
+            outcome, (str, bytes, dict, bool, Assertion, list, tuple)
+        ):
+            outcome = list(outcome)
     except AssertionError as e:
         message = str(e) or "assertion failed"
         return [CheckResult(run_id=run_id, name=name, kind="assert", passed=False, message=message)]
@@ -198,6 +205,7 @@ def _evaluate_check(run_id: str, name: str, fn: _CheckFn) -> list[CheckResult]:
         message = f"check raised {type(e).__name__}: {e}"
         return [CheckResult(run_id=run_id, name=name, kind="error", passed=False, message=message)]
 
+    outcome = _coerce_foreign_bool(outcome)
     if outcome is None:
         return [
             CheckResult(
@@ -260,6 +268,18 @@ def _evaluate_check(run_id: str, name: str, fn: _CheckFn) -> list[CheckResult]:
             ),
         )
     ]
+
+
+def _coerce_foreign_bool(outcome: object) -> object:
+    """Turn numpy's bool scalars (np.True_/np.False_) into plain bools.
+
+    Checks comparing numpy values naturally return them; without coercion they
+    would land in the unsupported-type branch and fail a healthy run.
+    """
+    kind = type(outcome)
+    if kind.__module__ == "numpy" and kind.__name__ in ("bool_", "bool"):
+        return bool(outcome)
+    return outcome
 
 
 def _from_assertion(run_id: str, name: str, assertion: Assertion) -> CheckResult:
@@ -361,7 +381,11 @@ class Workspace:
             _CURRENT.reset(token)
 
     def expire_due(
-        self, policy: RetentionPolicy = DEFAULT_POLICY, *, now: datetime | None = None
+        self,
+        policy: RetentionPolicy = DEFAULT_POLICY,
+        *,
+        now: datetime | None = None,
+        include_running: bool = False,
     ) -> list[Run]:
         """Run the TTL sweep on this workspace (see :func:`slab.retention.expire_due`).
 
@@ -372,7 +396,7 @@ class Workspace:
             []
             >>> ws.close()
         """
-        return expire_due(self.runs, policy, now=now)
+        return expire_due(self.runs, policy, now=now, include_running=include_running)
 
     def gc(self, policy: RetentionPolicy = DEFAULT_POLICY, *, dry_run: bool = False) -> GcReport:
         """Reclaim undemanded artifact bytes (see :func:`slab.retention.gc`).
