@@ -197,11 +197,11 @@ def _render_details(details: dict[str, object]) -> None:
     assert isinstance(tasks, list)
     if tasks:
         typer.echo("  tasks:")
-        for t in tasks:
+        for position, t in enumerate(tasks, start=1):
             cached = " (cached)" if t["cache_hit"] else ""
             duration = "" if t["duration_s"] is None else f"  {t['duration_s']}s"
             error = "" if not t["error"] else f"  error: {t['error']}"
-            typer.echo(f"    {t['seq']}. {t['name']}  {t['status']}{cached}{duration}{error}")
+            typer.echo(f"    {position}. {t['name']}  {t['status']}{cached}{duration}{error}")
 
     artifacts = details["artifacts"]
     assert isinstance(artifacts, list)
