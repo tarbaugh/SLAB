@@ -21,7 +21,13 @@ from ase import Atoms
 from ase.calculators.singlepoint import SinglePointCalculator
 from ase.optimize import BFGS
 
-from slab.backends import close_calculator, describe_engine, get_calculator
+from slab.backends import (
+    close_calculator,
+    collect_engine_outputs,
+    collect_failure_evidence,
+    describe_engine,
+    get_calculator,
+)
 from slab.errors import ArtifactExistsError
 from slab.models import ArtifactRole
 from slab.runtime import current_run
@@ -61,14 +67,19 @@ def relax(
     Inside a run context, the full optimization trajectory is additionally
     stored as an *intermediate* artifact named ``{label or 'relax'}.traj`` —
     inspectable while the run is alive, hash-and-discarded once retention
-    tiers kick in.
+    tiers kick in. File-IO engines contribute their primary output the same
+    way: with ``engine="qe"``, the final SCF's ``espresso.pwo`` is kept as
+    ``{label or 'relax'}.pwo``.
 
     On failure, the evidence survives instead of vanishing with the scratch
-    directory: the exception is re-raised carrying a diagnostic note
-    (completed steps; the last trajectory frame's energy and residual force)
-    and — inside a run — the partial trajectory is kept as
-    ``{label or 'relax'}-failed.traj``. The tracer stores the note and a
-    trimmed traceback on the failed task record
+    directories: the exception is re-raised carrying diagnostic notes
+    (completed steps; the last trajectory frame's energy and residual force;
+    for file-IO engines, the engine's own error report — e.g. ``pw.x``'s
+    ``Error in routine ...`` message) and — inside a run — the partial
+    trajectory is kept as ``{label or 'relax'}-failed.traj``, alongside the
+    engine's input/output/``CRASH`` files as
+    ``{label or 'relax'}-failed.{pwi,pwo,crash}``. The tracer stores the
+    notes and a trimmed traceback on the failed task record
     (:func:`slab.errors.failure_record`), so an agent inspecting the run can
     decide a *specific* correction instead of retrying blind.
 
@@ -120,16 +131,21 @@ def relax(
                 energy = float(system.get_potential_energy())
                 forces = system.get_forces()
             except Exception as e:
-                # The scratch directory is about to vanish — capture the
-                # evidence first: keep the partial trajectory, note the
-                # last-known state on the exception.
-                _attach_failure_diagnostics(e, optimizer, trajectory, label)
+                # The scratch directories are about to vanish — capture the
+                # evidence first: keep the partial trajectory and the engine's
+                # own files, note the last-known state on the exception.
+                _attach_failure_diagnostics(e, optimizer, trajectory, label, calculator)
                 raise
             achieved_fmax = float(np.sqrt((forces**2).sum(axis=1).max()))
 
             active = current_run()
             if active is not None:
                 _keep_unique(active, f"{label or 'relax'}.traj", trajectory)
+                # File-IO engines (qe) leave their primary output behind —
+                # for pw.x the final SCF's espresso.pwo. Keep it as an
+                # intermediate before close_calculator removes the scratch.
+                for suffix, produced in collect_engine_outputs(calculator):
+                    _keep_unique(active, f"{label or 'relax'}.{suffix}", produced)
     finally:
         # Worker-backed engines (rootstock) hold a subprocess; release it even
         # when the optimization raises.
@@ -156,15 +172,15 @@ def relax(
 
 
 def _attach_failure_diagnostics(
-    e: Exception, optimizer: BFGS, trajectory: Path, label: str | None
+    e: Exception, optimizer: BFGS, trajectory: Path, label: str | None, calculator: Any
 ) -> None:
-    """Best-effort failure evidence: note the last-known state on *e* and keep
-    the partial trajectory. Never raises — diagnostics must not mask the
-    original failure.
+    """Best-effort failure evidence: note the last-known state on *e*, keep
+    the partial trajectory, and fold in whatever the engine itself left
+    behind. Never raises — diagnostics must not mask the original failure.
 
-    The note (surfaced by :func:`slab.errors.failure_record`) and the kept
-    trajectory are what turn "it crashed" into a decidable situation: did the
-    structure fly apart, did the energy oscillate, how far did it get.
+    The notes (surfaced by :func:`slab.errors.failure_record`) and the kept
+    files are what turn "it crashed" into a decidable situation: did the
+    structure fly apart, did the SCF diverge, what did ``pw.x`` actually say.
     """
     try:
         note = f"relax failed after {optimizer.get_number_of_steps()} completed step(s)"
@@ -182,6 +198,32 @@ def _attach_failure_diagnostics(
     except Exception as diagnostics_error:
         with suppress(Exception):
             e.add_note(f"(relax failure diagnostics unavailable: {diagnostics_error})")
+    _attach_engine_evidence(e, calculator, label)
+
+
+def _attach_engine_evidence(e: Exception, calculator: Any, label: str | None) -> None:
+    """File-IO engines tell their failure story in files (``espresso.pwo``,
+    ``CRASH``), not in the exception — which is a bare ``CalledProcessError``.
+    Note the story on *e* and, inside a run, keep the files before the
+    engine's scratch directory vanishes. Never raises.
+    """
+    try:
+        notes, evidence_files = collect_failure_evidence(calculator)
+        # Parsed evidence attaches before any storage happens: a failing
+        # artifact store (disk full) must not cost the already-extracted
+        # engine error message.
+        for note in notes:
+            e.add_note(note)
+        active = current_run()
+        if active is not None and evidence_files:
+            kept = [
+                _keep_unique(active, f"{label or 'relax'}-failed.{suffix}", path)
+                for suffix, path in evidence_files
+            ]
+            e.add_note("engine files kept as artifacts: " + ", ".join(repr(k) for k in kept))
+    except Exception as diagnostics_error:
+        with suppress(Exception):
+            e.add_note(f"(engine failure evidence unavailable: {diagnostics_error})")
 
 
 def _last_trajectory_frame(trajectory: Path) -> dict[str, Any] | None:

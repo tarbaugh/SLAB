@@ -145,6 +145,41 @@ input". Diagnostics capture is best-effort and never masks the original
 error — if keeping the trajectory itself fails (disk full), the note says so
 and the original exception still propagates.
 
+## When the engine writes files
+
+In-process engines fail as Python exceptions with meaningful messages.
+File-IO engines ([Quantum ESPRESSO](engines.md#quantum-espresso)) fail as a
+bare `CalledProcessError: ... returned non-zero exit status 2` — `pw.x`
+wrote the actual story to files in a scratch directory that is about to
+vanish. So the failure path reads the story back out: QE's fenced
+`Error in routine ...` block (or, when there is no block, flagged stop lines
+and the output tail, plus stderr) becomes notes, and the engine's
+input/output/`CRASH` files are kept as artifacts. A missing pseudopotential
+file, captured from a real run (paths shortened):
+
+<!-- no-verify -->
+```text
+notes:
+- relax failed after 0 completed step(s)
+- engine error (espresso.pwo): Error in routine readpp (1):
+  file /opt/pseudos/sssp/DoesNotExist.UPF not found
+- engine stderr tail (espresso.err): STOP 1
+- engine files kept as artifacts: 'si-failed.pwi', 'si-failed.pwo', 'si-failed.err'
+```
+
+And the classic — an SCF that cannot converge (here capped at one iteration),
+which QE reports *without* a fenced error block:
+
+<!-- no-verify -->
+```text
+- engine output flagged (espresso.pwo): convergence NOT achieved after   1 iterations: stopping
+```
+
+"Exit status 2" invites a blind retry; "smearing is needed" or "convergence
+NOT achieved" is a correction an agent can actually compute. The kept
+`si-failed.pwi` is the exact input that crashed — reproducible outside SLAB
+with nothing but `pw.x`.
+
 ## Checks as correction inputs
 
 A run that *completes* but fails [verification](verification.md) is the other

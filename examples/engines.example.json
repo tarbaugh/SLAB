@@ -38,13 +38,13 @@
       "description": "LAMMPS via ASE lammpsrun; pair_style etc. passed per call in calculator_options",
       "probe": ["lmp", "-h"]
     },
-    "qe": {
+    "qe-delta": {
       "calculator": "ase.calculators.espresso.Espresso",
       "env": {
         "ASE_CONFIG_PATH": "/sw/slab/ase-delta.ini"
       },
       "version": "7.3.1",
-      "description": "Quantum ESPRESSO pw.x; command and pseudo_dir come from the [espresso] section of the cluster's shared ASE config file (modern ASE >= 3.23 mechanism); pass pseudopotentials per call in calculator_options",
+      "description": "Quantum ESPRESSO pw.x with this cluster's command and pseudo_dir baked in via the shared ASE config file. Plain engine='qe' is a slab built-in (and registry entries may not shadow it) — declare a distinct alias like this one to pin a curated site setup.",
       "probe": ["pw.x", "-h"]
     },
     "vasp": {

@@ -1,9 +1,9 @@
 # Engines
 
-SLAB implements no physics. Every engine — EMT toy, in-process MACE, LAMMPS on a
-cluster, an MLIP served from a rootstock install — is reached through exactly one
-seam: the ASE `Calculator` contract. This page walks that seam from laptop
-built-ins to cluster registries.
+SLAB implements no physics. Every engine — EMT toy, in-process MACE, a `pw.x`
+binary, LAMMPS on a cluster, an MLIP served from a rootstock install — is
+reached through exactly one seam: the ASE `Calculator` contract. This page
+walks that seam from laptop built-ins to cluster registries.
 
 ## One seam, three sources
 
@@ -11,7 +11,8 @@ built-ins to cluster registries.
 calculator. Three sources feed the mapping, tried in order:
 
 1. **Built-ins** — `emt`, `lj` (ASE toys), `mace` (in-process, `slab[mace]`),
-   `rootstock` (cluster-served MLIPs, `slab[rootstock]`).
+   `qe` (Quantum ESPRESSO's `pw.x`, no extra needed), `rootstock`
+   (cluster-served MLIPs, `slab[rootstock]`).
 2. **The cluster engine registry** — names a cluster maintainer declared in an
    `engines.json` that lives with the install (`qe`, `lammps`, `vasp`, curated
    MLIP aliases).
@@ -37,7 +38,7 @@ print(type(calc).__name__)
 ```
 
 ```text
-('emt', 'lj', 'mace', 'rootstock')
+('emt', 'lj', 'mace', 'qe', 'rootstock')
 EMT
 ```
 
@@ -84,13 +85,78 @@ relaxed, info = relax(
     `model="small"`, `device="cpu"`, `default_dtype="float64"`. First use
     downloads the checkpoint to `~/.cache/mace`.
 
+## Quantum ESPRESSO
+
+`qe` is a built-in: it drives `pw.x` through ASE's file-IO calculator, so it
+works wherever the executable and pseudopotentials exist — a laptop build or a
+cluster module, no extra to install. Two options locate the code: `command`
+and `pseudo_dir` (or configure an `[espresso]` section in ASE's own config
+file once and pass neither). Everything else is standard `Espresso` options,
+forwarded verbatim. `resolve_pseudopotentials` maps elements to `.upf` files
+in a directory and refuses ambiguity rather than guessing — *which*
+pseudopotential to use is a science decision:
+
+<!-- no-verify -->
+```python
+from slab.backends import resolve_pseudopotentials
+from slab.tasks import relax
+
+pseudos = resolve_pseudopotentials(atoms, "/opt/pseudos/sssp")  # {'Si': 'Si.pz-vbc.UPF'}
+relaxed, info = relax(
+    atoms,
+    engine="qe",
+    fmax=0.05,
+    label="si",
+    calculator_options={
+        "command": "pw.x",                    # or "mpirun -np 8 pw.x"
+        "pseudo_dir": "/opt/pseudos/sssp",
+        "pseudopotentials": pseudos,
+        "input_data": {"system": {"ecutwfc": 40.0}},
+        "kpts": (2, 2, 2),
+    },
+)
+print(info["engine_version"], info["converged"], info["steps"])
+```
+
+<!-- no-verify -->
+```text
+7.4.1 True 2
+```
+
+The details that keep runs honest and directories clean:
+
+- **Scratch, not cwd.** Each calculation runs in a slab-managed temporary
+  directory, removed when the task finishes; pass `directory=` to manage the
+  files yourself. Inside a run, the final SCF's `espresso.pwo` is kept as an
+  intermediate artifact (`si.pwo` here) next to the trajectory — ASE reruns
+  `pw.x` for every force evaluation, overwriting its output, so what survives
+  is the last step's.
+- **The `pw.x` identity is detected and cached against.** SLAB probes the
+  binary (once per executable — memoized on its path and mtime, under a
+  timeout), parses the `Program PWSCF v.7.4.1` banner, and folds the version
+  plus the resolved command and `pseudo_dir` into provenance
+  (`info["engine_version"]`) and the cache key: upgrading the executable or
+  switching pseudopotential libraries honestly invalidates cached results.
+  Pseudo file *contents* are not hashed — the directory path is the identity.
+- **Forces default on.** `pw.x` omits forces unless `tprnfor` is set, and
+  SLAB's tasks drive optimizers with forces — so the factory sets it (an
+  explicit `tprnfor` in `input_data` still wins).
+- **Failure speaks QE.** A crashed `pw.x` is a bare `CalledProcessError` in
+  Python; the evidence — QE's own `Error in routine ...` message, the kept
+  input/output/`CRASH` files — lands in the failure record. See
+  [Debugging failures](debugging-failures.md#when-the-engine-writes-files).
+
+A cluster's *curated* QE setup (fixed module, shared pseudo library, MPI
+launcher) still belongs in the registry below, under a distinct alias like
+`qe-delta` — entries may not shadow built-in names.
+
 ## The cluster engine registry
 
-For LAMMPS, Quantum ESPRESSO, VASP, and site-specific MLIP aliases, SLAB
-generalizes rootstock's management pattern: the client is only a bootstrap, and
-a JSON file that lives with the cluster declares how each canonical name is
-built *here*. Workflow code says `engine="qe"` and runs unchanged on any
-cluster whose registry declares `qe`.
+For LAMMPS, VASP, site-specific MLIP aliases, and curated site setups of the
+built-in engines, SLAB generalizes rootstock's management pattern: the client
+is only a bootstrap, and a JSON file that lives with the cluster declares how
+each canonical name is built *here*. Workflow code says `engine="lammps"` and
+runs unchanged on any cluster whose registry declares `lammps`.
 
 ```json
 {
@@ -103,7 +169,7 @@ cluster whose registry declares `qe`.
       "version": "rootstock/mace-mp-0-medium",
       "probe": ["rootstock", "list"]
     },
-    "qe": {
+    "qe-delta": {
       "calculator": "ase.calculators.espresso.Espresso",
       "env": {"ASE_CONFIG_PATH": "/sw/slab/ase-delta.ini"},
       "version": "7.3.1",
@@ -165,14 +231,14 @@ print(info["engine"], info["engine_source"], info["engine_version"])
 ```
 
 ```text
-('emt', 'lj', 'mace', 'rootstock', 'emt-cluster')
+('emt', 'lj', 'mace', 'qe', 'rootstock', 'emt-cluster')
 emt-cluster registry:laptop 1.0
 ```
 
 The declared `version` lands in the task recipe as provenance *and* in the
-cache key. When a maintainer bumps `qe` from 7.3 to 7.4, cached results are
-honestly invalidated instead of the old engine's numbers being served — and not
-just versions: any spec edit (options, env, calculator) changes the
+cache key. When a maintainer bumps `qe-delta` from 7.3 to 7.4, cached results
+are honestly invalidated instead of the old engine's numbers being served —
+and not just versions: any spec edit (options, env, calculator) changes the
 fingerprint. Watch it happen:
 
 ```python

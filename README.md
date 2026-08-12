@@ -221,14 +221,49 @@ options or rootstock's own defaults (`$ROOTSTOCK_ROOT`,
 remains for full control (e.g. `checkpoint="uma:custom"` with your own
 `weights=`).
 
-**Everything else via the engine registry.** For LAMMPS, Quantum ESPRESSO,
-VASP, and site-specific MLIP aliases, SLAB generalizes rootstock's pattern:
-the client is only a bootstrap; a *registry file that lives with the cluster*
-declares how each canonical engine name is built here. Workflow code says
-`engine="qe"` and runs unchanged on any cluster whose registry declares `qe`.
-Resolution order is built-ins → registry → rootstock checkpoint ids, so a
-maintainer's curated alias (with baked-in options) always beats bare
-checkpoint resolution.
+**Quantum ESPRESSO, built in.** `engine="qe"` drives `pw.x` through ASE's
+file-IO calculator wherever the executable and pseudopotentials exist — no
+extra required. Point it at the code (or configure ASE's own config file
+once); everything else is standard `Espresso` options, and
+`resolve_pseudopotentials` maps elements to `.upf` files, refusing ambiguity
+rather than guessing:
+
+```python
+from slab.backends import resolve_pseudopotentials
+
+relaxed, info = relax(
+    atoms,
+    engine="qe",
+    calculator_options={
+        "command": "mpirun -np 8 pw.x",
+        "pseudo_dir": "/opt/pseudos/sssp",
+        "pseudopotentials": resolve_pseudopotentials(atoms, "/opt/pseudos/sssp"),
+        "input_data": {"system": {"ecutwfc": 50.0}},
+        "kpts": (4, 4, 4),
+    },
+)
+```
+
+Each calculation runs in a slab-managed scratch directory (never your cwd);
+the final SCF's `espresso.pwo` is kept as an intermediate artifact; and the
+detected `pw.x` version — with the resolved command and `pseudo_dir` — lands
+in the recipe *and* the cache key, so upgrading the executable or switching
+pseudopotential libraries honestly invalidates cached results. When `pw.x` fails, the
+failure record speaks QE: the `Error in routine ...` block (or the
+`convergence NOT achieved` stop line) is parsed out of the output into the
+exception notes, and the input/output/`CRASH` files are kept as artifacts.
+Force printing (`tprnfor`) defaults on — slab's tasks drive optimizers with
+forces.
+
+**Everything else via the engine registry.** For LAMMPS, VASP, site-specific
+MLIP aliases, and site-curated QE setups, SLAB generalizes rootstock's
+pattern: the client is only a bootstrap; a *registry file that lives with the
+cluster* declares how each canonical engine name is built here. Workflow code
+says `engine="lammps"` and runs unchanged on any cluster whose registry
+declares `lammps`. Resolution order is built-ins → registry → rootstock
+checkpoint ids, so a maintainer's curated alias (with baked-in options)
+always beats bare checkpoint resolution — though entries may not shadow
+built-in names (`qe`, `mace`, ...); site aliases pick distinct names.
 
 ```json
 {
@@ -237,7 +272,7 @@ checkpoint resolution.
   "engines": {
     "mace-mp": {"calculator": "rootstock.RootstockCalculator",
                  "options": {"cluster": "delta", "checkpoint": "mace-mp-0-medium"}},
-    "qe":      {"calculator": "ase.calculators.espresso.Espresso",
+    "qe-delta": {"calculator": "ase.calculators.espresso.Espresso",
                  "env": {"ASE_CONFIG_PATH": "/sw/slab/ase-delta.ini"},
                  "version": "7.3.1", "probe": ["pw.x", "-h"]}
   }
@@ -253,9 +288,9 @@ on ASE ≥ 3.23) are declared by pointing `ASE_CONFIG_PATH` at the cluster's
 shared `config.ini`, keeping one declaration chain. Every entry
 is a dotted path to an ASE calculator — the ASE `Calculator` contract stays
 SLAB's only engine seam. Declared `version`s land in task recipes as
-provenance *and* in the relax cache key, so bumping `qe` from 7.3 to 7.4 in
-the registry honestly invalidates cached results instead of serving the old
-engine's numbers. Entries that shadow built-in names are rejected loudly; a
+provenance *and* in the relax cache key, so bumping `qe-delta` from 7.3 to
+7.4 in the registry honestly invalidates cached results instead of serving
+the old engine's numbers. Entries that shadow built-in names are rejected loudly; a
 registry with a newer `layout_version` than the client understands refuses
 rather than misreads.
 
@@ -297,7 +332,7 @@ protocol channel.
 MVP vertical slice, working end to end: lifecycle state machine,
 content-addressed artifact store with tiered retention, define-by-run tracing
 with content-hash caching, verification hooks, MACE/ASE relaxation task, CLI,
-MCP server. 548 tests (including every docstring example, executed as
+MCP server. 580 tests (including every docstring example, executed as
 doctests), ~100% coverage on the load-bearing core, mypy `--strict`, plus an
 adversarial multi-agent review pass whose confirmed findings are regression
 tests. The `RunStore` protocol is the seam for Postgres; the backend factory

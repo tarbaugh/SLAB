@@ -39,7 +39,7 @@ Seven tools, each a thin wrapper over the operations layer:
 
 **`show_run(run_id)`** is the evidence surface. Beyond the run's fields it returns check results *with the observed/expected values their assertions compared*, traced tasks with recipes and cache-hit flags, artifacts annotated with `bytes_available` (still stored, or hash-and-discarded), and the full lifecycle history. Failed runs and tasks carry a `failure` record — exception type, message, trimmed traceback, and diagnostic notes — the input for deciding a specific correction instead of retrying blind. Ids accept unique prefixes, git-style, here and in `promote_run`.
 
-**`list_engines()`** answers "what can I compute with, here": SLAB's built-ins (`emt`/`lj`/`mace`/`rootstock`), everything the cluster's engine registry declares (with the maintainer's declared versions and whether a probe verifies each entry), and — under `rootstock` — the canonical MLIP checkpoint ids the local rootstock install serves, each usable directly as the `engine=` argument. See [Engines](engines.md) for the resolution order behind this.
+**`list_engines()`** answers "what can I compute with, here": SLAB's built-ins (`emt`/`lj`/`mace`/`qe`/`rootstock`), everything the cluster's engine registry declares (with the maintainer's declared versions and whether a probe verifies each entry), and — under `rootstock` — the canonical MLIP checkpoint ids the local rootstock install serves, each usable directly as the `engine=` argument. See [Engines](engines.md) for the resolution order behind this.
 
 ## A session: fail, inspect, correct, promote
 

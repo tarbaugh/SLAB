@@ -39,11 +39,14 @@ def _write_registry(path: Path, payload: dict) -> Path:
 
 def test_registry_shape_and_defaults() -> None:
     registry = EngineRegistry.model_validate(
-        {"cluster": "delta", "engines": {"qe": {"calculator": "ase.calculators.espresso.Espresso"}}}
+        {
+            "cluster": "delta",
+            "engines": {"qe-delta": {"calculator": "ase.calculators.espresso.Espresso"}},
+        }
     )
     assert registry.layout_version == 1
-    assert registry.engines["qe"].kind == "ase"
-    assert registry.engines["qe"].options == {}
+    assert registry.engines["qe-delta"].kind == "ase"
+    assert registry.engines["qe-delta"].options == {}
 
 
 def test_registry_refuses_newer_layout() -> None:
@@ -51,9 +54,10 @@ def test_registry_refuses_newer_layout() -> None:
         EngineRegistry.model_validate({"layout_version": 99, "engines": {}})
 
 
-def test_registry_refuses_builtin_shadowing() -> None:
+@pytest.mark.parametrize("shadowing", ["mace", "qe"])
+def test_registry_refuses_builtin_shadowing(shadowing: str) -> None:
     with pytest.raises(ValidationError, match="mace-mp"):
-        EngineRegistry.model_validate({"engines": {"mace": EMT_SPEC}})
+        EngineRegistry.model_validate({"engines": {shadowing: EMT_SPEC}})
 
 
 @pytest.mark.parametrize("sneaky", ["MACE", "Emt", "rootstock ", " lj", "EMT"])
@@ -84,7 +88,7 @@ def test_spec_refuses_unknown_kind_and_fields() -> None:
 def test_example_registry_file_is_valid() -> None:
     payload = json.loads(Path("examples/engines.example.json").read_text())
     registry = EngineRegistry.model_validate(payload)
-    assert {"mace-mp", "uma", "lammps", "qe", "vasp"} <= set(registry.engines)
+    assert {"mace-mp", "uma", "lammps", "qe-delta", "vasp"} <= set(registry.engines)
 
 
 # -- discovery -------------------------------------------------------------------------
@@ -121,7 +125,7 @@ def test_missing_explicit_or_env_path_is_loud(
 
 
 def test_invalid_registry_is_loud_never_empty(tmp_path: Path) -> None:
-    bad = _write_registry(tmp_path / "bad.json", {"engines": {"qe": {}}})  # no calculator
+    bad = _write_registry(tmp_path / "bad.json", {"engines": {"vasp": {}}})  # no calculator
     with pytest.raises(ValidationError):
         load_registry(bad)
 
@@ -196,7 +200,14 @@ def test_get_calculator_resolves_registry_engine(
     )
     monkeypatch.setenv("SLAB_ENGINES", str(registry))
     assert type(get_calculator("emt-cluster")).__name__ == "EMT"
-    assert available_engines(load_registry()) == ("emt", "lj", "mace", "rootstock", "emt-cluster")
+    assert available_engines(load_registry()) == (
+        "emt",
+        "lj",
+        "mace",
+        "qe",
+        "rootstock",
+        "emt-cluster",
+    )
 
 
 def test_unknown_engine_lists_builtin_and_registry(
@@ -217,15 +228,15 @@ def test_describe_engine_provenance(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert describe_engine("emt") == {"engine": "emt", "source": "builtin", "version": None}
     registry = _write_registry(
         tmp_path / "engines.json",
-        {"cluster": "delta", "engines": {"qe": {**EMT_SPEC, "version": "7.3.1"}}},
+        {"cluster": "delta", "engines": {"qe-delta": {**EMT_SPEC, "version": "7.3.1"}}},
     )
     monkeypatch.setenv("SLAB_ENGINES", str(registry))
-    described = describe_engine("qe")
+    described = describe_engine("qe-delta")
     assert described["source"] == "registry:delta"
     assert described["version"] == "7.3.1"
     # full spec is part of the identity: options/env edits change the fingerprint
     assert described["spec"]["calculator"] == EMT_SPEC["calculator"]
-    assert describe_engine("QE ")["source"] == "registry:delta"  # normalized lookup
+    assert describe_engine("QE-Delta ")["source"] == "registry:delta"  # normalized lookup
     assert describe_engine("nope")["source"] == "unknown"
 
 

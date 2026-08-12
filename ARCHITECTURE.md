@@ -306,6 +306,15 @@ failure surface delivers evidence and stops there:
   near convergence". Retention makes this free: failed runs sit in
   quarantine with a TTL, so failure diagnostics self-clean, where AiiDA's
   retrieved-files-of-failed-calcs accumulate forever.
+- **File-IO engines testify in their own words.** A crashed `pw.x` surfaces
+  in Python as a bare `CalledProcessError`; the story is in the files it
+  wrote. The failure path parses QE's fenced `Error in routine ...` block
+  out of the output (falling back to flagged stop lines like
+  `convergence NOT achieved`, then the output tail, plus any stderr), notes
+  it on the exception, and keeps the engine's input, output, and `CRASH`
+  files as intermediate artifacts (`relax-failed.{pwi,pwo,crash}`) alongside
+  the trajectory. "Exit status 2" becomes "charge is wrong: smearing is
+  needed" — the difference between retrying blind and fixing the input.
 - **Checks report their numbers.** `CheckResult` always stored
   `observed`/`expected`; `run_details` now surfaces them over the CLI's
   `--json` and MCP, so "fmax 0.062 vs 0.05" is data, not prose.
@@ -327,7 +336,7 @@ CLI (typer)          MCP server (stdio)      ← two skins, one behavior
               |                                 tasks, checks, artifact refs
    ArtifactStore (CAS)                        ← bytes, content-addressed
               |
-   backends.get_calculator("mace"|"emt")      ← ASE Calculator seam
+   backends.get_calculator("mace"|"qe"|"emt") ← ASE Calculator seam
 ```
 
 - **Storage.** One SQLite file (WAL, `BEGIN IMMEDIATE` writes, in-transaction
@@ -336,10 +345,11 @@ CLI (typer)          MCP server (stdio)      ← two skins, one behavior
   daemon and nothing to configure. `RunStore` is a protocol — the Postgres
   seam — and schema versions are tracked via `PRAGMA user_version`.
 - **Engines.** `slab.backends` maps names to ASE calculators from two
-  sources: built-ins (`mace` in-process, `rootstock` cluster-served, ASE's
-  toys) and the cluster engine registry (§7a). SLAB implements no physics;
-  adding LAMMPS or VASP means adding a registry entry, and nothing in
-  tracing, lifecycle, or retention changes. Heavy imports (ASE, torch) are
+  sources: built-ins (`mace` in-process, `qe` driving `pw.x` through ASE's
+  file-IO calculator, `rootstock` cluster-served, ASE's toys) and the
+  cluster engine registry (§7a). SLAB implements no physics; adding LAMMPS
+  or VASP means adding a registry entry, and nothing in tracing, lifecycle,
+  or retention changes. Heavy imports (ASE, torch) are
   quarantined behind `slab.tasks`/`slab.backends` so the core package and CLI
   stay import-light.
 - **Local-first execution.** The MVP runs tasks in-process. Checkpointing and
@@ -385,7 +395,7 @@ ideas, applied to *all* engines:
    its default options, the environment variables the code needs, the
    maintainer's declared version, and a verification probe.
 2. *Canonical names, capability resolution.* Workflow code addresses engines
-   by name (`qe`, `lammps`, `mace-mp`); the registry maps names to concrete
+   by name (`lammps`, `vasp`, `mace-mp`); the registry maps names to concrete
    builds on this cluster. The same script runs on any cluster declaring the
    names it uses. Collisions with built-in names are refused at validation —
    ambiguity is never resolved by precedence order.
