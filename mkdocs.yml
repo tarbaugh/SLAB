@@ -50,6 +50,7 @@ nav:
       - Verification checks: tutorials/verification.md
       - Caching & resume: tutorials/caching-and-resume.md
       - Engines: tutorials/engines.md
+      - Protocols & pseudopotentials: tutorials/protocols-and-pseudos.md
       - Debugging failures: tutorials/debugging-failures.md
       - Agents over MCP: tutorials/agents-mcp.md
   - Architecture: architecture.md

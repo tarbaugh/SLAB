@@ -97,8 +97,10 @@ def ttl_override_policy(days: float) -> RetentionPolicy:
 
 
 def engines_overview(registry_path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
-    """What engines exist here: built-ins plus the cluster registry, if any.
+    """What can be computed here: engines, QE protocols, pseudo families.
 
+    Built-ins plus the cluster registry, rootstock checkpoint ids, the named
+    QE input protocols, and the installed pseudopotential family names.
     Shared by ``slab engines list`` and the MCP ``list_engines`` tool.
 
     Examples:
@@ -134,6 +136,16 @@ def engines_overview(registry_path: str | os.PathLike[str] | None = None) -> dic
             },
         }
     overview["rootstock"] = _rootstock_checkpoints_overview()
+    from slab.protocols import available_protocols
+
+    overview["qe_protocols"] = list(available_protocols())
+    try:
+        from slab.pseudos import list_families
+
+        overview["pseudo_families"] = [family.name for family, _ in list_families()]
+    except SlabError as e:  # corrupt family: report, don't hide the engines
+        overview["pseudo_families"] = []
+        overview["pseudo_families_error"] = str(e)
     return overview
 
 

@@ -385,6 +385,14 @@ def engines_list(registry_path: _RegistryOpt = None) -> None:
             typer.echo(f"  error reading install: {rootstock['error']}")
         for env_name, ids in rootstock["checkpoints"].items():
             typer.echo(f"  {env_name}: {', '.join(ids)}")
+    typer.echo(f"qe protocols: {', '.join(overview['qe_protocols'])} ('slab protocols show')")
+    families = overview["pseudo_families"]
+    if overview.get("pseudo_families_error"):
+        typer.echo(f"pseudo families: error — {overview['pseudo_families_error']}")
+    elif families:
+        typer.echo(f"pseudo families: {', '.join(families)}")
+    else:
+        typer.echo("pseudo families: none installed ('slab pseudos install sssp' fetches one)")
 
 
 @engines_app.command("verify")
@@ -407,6 +415,123 @@ def engines_verify(registry_path: _RegistryOpt = None) -> None:
     typer.echo(f"{len(results) - failed}/{len(results)} engines verified")
     if failed:
         raise typer.Exit(code=1)
+
+
+pseudos_app = typer.Typer(
+    help="Install and inspect pseudopotential families (aiida-pseudo's pattern).",
+    no_args_is_help=True,
+)
+app.add_typer(pseudos_app, name="pseudos")
+
+
+@pseudos_app.command("install")
+def pseudos_install(
+    kind: Annotated[str, typer.Argument(help="Family kind; only 'sssp' installs today.")] = "sssp",
+    version: Annotated[
+        str, typer.Option("--version", "-v", help="SSSP version, e.g. 1.3.")
+    ] = "1.3",
+    functional: Annotated[
+        str, typer.Option("--functional", "-x", help="XC functional: PBE or PBEsol.")
+    ] = "PBEsol",
+    precision: Annotated[
+        str, typer.Option("--precision", "-p", help="SSSP variant: efficiency or precision.")
+    ] = "efficiency",
+    force: Annotated[bool, typer.Option("--force", help="Replace an existing install.")] = False,
+) -> None:
+    """Download and verify a pseudopotential family from its official archive."""
+    from slab.pseudos import family_digest, install_sssp
+
+    if kind.strip().lower() != "sssp":
+        _fail(
+            f"only 'sssp' families install today, not {kind!r} (PseudoDojo is served over "
+            f"unverified HTTP upstream; point pseudo_dir= at your own files instead)"
+        )
+    typer.echo(f"downloading SSSP {version} {functional} {precision} from Materials Cloud ...")
+    try:
+        family, directory = install_sssp(
+            version=version, functional=functional, precision=precision, force=force
+        )
+    except SlabError as e:
+        _fail(str(e))
+    typer.echo(
+        f"installed {family.name} ({len(family.elements)} elements, "
+        f"digest {family_digest(family)}) at {directory}"
+    )
+
+
+@pseudos_app.command("list")
+def pseudos_list() -> None:
+    """List installed pseudopotential families."""
+    from slab.pseudos import family_digest, list_families, pseudos_root
+
+    try:
+        families = list_families()
+    except SlabError as e:
+        _fail(str(e))
+    typer.echo(f"root: {pseudos_root()}")
+    if not families:
+        typer.echo("no families installed ('slab pseudos install sssp' fetches one)")
+        return
+    for family, directory in families:
+        typer.echo(
+            f"  {family.name:<34} {len(family.elements):>3} elements  "
+            f"digest {family_digest(family)}  {directory}"
+        )
+
+
+@pseudos_app.command("verify")
+def pseudos_verify(
+    name: Annotated[str, typer.Argument(help="Installed family name (version prefix ok).")],
+) -> None:
+    """Re-hash a family's files against its manifest; exit nonzero on mismatch."""
+    from slab.pseudos import find_family, verify_family
+
+    try:
+        family, directory = find_family(name)
+    except SlabError as e:
+        _fail(str(e))
+    problems = verify_family(family, directory)
+    for problem in problems:
+        typer.echo(f"[x] {problem}")
+    if problems:
+        raise typer.Exit(code=1)
+    typer.echo(f"[+] {family.name}: all {len(family.elements)} files match their checksums")
+
+
+protocols_app = typer.Typer(
+    help="Named QE input protocols (adapted from aiida-quantumespresso).",
+    no_args_is_help=True,
+)
+app.add_typer(protocols_app, name="protocols")
+
+
+@protocols_app.command("list")
+def protocols_list() -> None:
+    """List the named protocols and what they trade off."""
+    from slab.protocols import available_protocols, get_protocol
+
+    for name in available_protocols():
+        protocol = get_protocol(name)
+        typer.echo(f"{name:<10} {protocol.description}")
+
+
+@protocols_app.command("show")
+def protocols_show(
+    name: Annotated[str, typer.Argument(help="fast, balanced, or stringent.")],
+    as_json: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    """Show one protocol's data (QE-native units) and derived values."""
+    from slab.protocols import protocol_details
+
+    try:
+        details = protocol_details(name)
+    except SlabError as e:
+        _fail(str(e))
+    if as_json:
+        typer.echo(json.dumps(details, indent=1, sort_keys=True))
+        return
+    for key in sorted(details):
+        typer.echo(f"{key}: {details[key]}")
 
 
 @app.command()

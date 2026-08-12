@@ -112,9 +112,11 @@ content-addressed store.
 MVP vertical slice, working end to end: lifecycle state machine,
 content-addressed artifact store with tiered retention, define-by-run tracing
 with content-hash caching, verification hooks, MACE/ASE/Quantum ESPRESSO
-relaxation task, CLI, MCP server. 580 tests (every docstring example runs as
-a doctest), ~100% coverage on the load-bearing core, mypy `--strict`, plus
+relaxation task, AiiDA-style input protocols and SSSP pseudopotential
+families, CLI, MCP server. 630+ tests (every docstring example runs as a
+doctest), ~100% coverage on the load-bearing core, mypy `--strict`, plus
 adversarial multi-agent review passes whose confirmed findings are regression
-tests — and the QE engine is verified against a real `pw.x` 7.4.1.
+tests — the QE engine is verified against a real `pw.x` 7.4.1, and the
+balanced protocol against a real SSSP install.
 
 MIT licensed.

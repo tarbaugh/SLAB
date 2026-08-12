@@ -408,6 +408,36 @@ ideas, applied to *all* engines:
    client that meets a newer version refuses loudly instead of misreading —
    the same rule the run database applies via `PRAGMA user_version`.
 
+### 7b. Protocols and pseudopotential families: curated physics, explicitly
+
+Choosing cutoffs, k-meshes, and smearing is physics, and SLAB implements no
+physics — but *refusing to help* would just push users toward folklore. The
+resolution, adopted from the AiiDA ecosystem, is curated policy-as-data
+applied only by name:
+
+- **Pseudopotential families** (`slab.pseudos`, aiida-pseudo's pattern): a
+  family is one file per element plus per-element recommended cutoffs,
+  installed once from the official Materials Cloud SSSP archive with every
+  file verified against published MD5 checksums (one mismatch aborts the
+  install — nothing half-lands). Families are addressed by name with
+  git-style version prefixes (`SSSP/1.3/...` finds `1.3.0`; ambiguity is
+  refused), and their cache identity is a digest over the per-element
+  checksums — content, not location. PseudoDojo is deliberately not served:
+  its archives travel over unverified HTTP upstream, and slab does not
+  download physics inputs on a channel it cannot authenticate.
+- **Named input protocols** (`slab.protocols`, aiida-quantumespresso's
+  `fast`/`balanced`/`stringent`, values from v4.10 in a versioned JSON data
+  file): an explicit, atoms-aware call expands a protocol into concrete
+  `calculator_options` — element-wise-max cutoffs from the family, a
+  Monkhorst-Pack mesh from `kpoints_distance`, cold smearing for metals
+  (fixed occupations for declared insulators), thresholds scaled per atom.
+  Nothing in the engine layer defaults to a protocol; the word "balanced"
+  never reaches the tracer — only the expanded numbers do, so the cache
+  identity is the physics itself and a data-file retune cannot re-serve
+  stale results under a new meaning. AiiDA's pre-rename protocol names are
+  refused with a pointer, not aliased: the rename came with retuned values,
+  and serving different numbers under an old name would be a silent guess.
+
 Declared versions flow into provenance *and* into cache identity: `relax`
 records `engine_source`/`engine_version` in its info dict, and its
 `cache_extra` hook (a `@task` option: a callable over the bound arguments

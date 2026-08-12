@@ -33,13 +33,13 @@ Seven tools, each a thin wrapper over the operations layer:
 | `promote_run` | Make a run permanent (`verified -> promoted`), with a recorded reason. |
 | `expire_runs` | Expire unpromoted runs past their TTL; `older_than="0d"` means everything, now. |
 | `gc` | Drop artifact bytes no retention rule demands (`dry_run=True` only reports). |
-| `list_engines` | Built-in engines, the cluster registry's declarations, rootstock checkpoint ids. |
+| `list_engines` | Built-in engines, the cluster registry's declarations, rootstock checkpoint ids, QE protocols, installed pseudo families. |
 
 **`launch_workflow(script_path, name=None, intent=None)`** runs a zero-ceremony script — bare `@task` calls and `@check` declarations, no `Workspace` or `start_run` of its own — inside a fresh run that lands in quarantine. The result carries the `run_id`, final `state` (`verified` if all checks passed), check counts, and the captured `output`. On failure it includes the structured `failure` record; if even recording the failure failed (storage died mid-crash), a raw `traceback` string appears instead. Always pass `intent` — why this run exists.
 
 **`show_run(run_id)`** is the evidence surface. Beyond the run's fields it returns check results *with the observed/expected values their assertions compared*, traced tasks with recipes and cache-hit flags, artifacts annotated with `bytes_available` (still stored, or hash-and-discarded), and the full lifecycle history. Failed runs and tasks carry a `failure` record — exception type, message, trimmed traceback, and diagnostic notes — the input for deciding a specific correction instead of retrying blind. Ids accept unique prefixes, git-style, here and in `promote_run`.
 
-**`list_engines()`** answers "what can I compute with, here": SLAB's built-ins (`emt`/`lj`/`mace`/`qe`/`rootstock`), everything the cluster's engine registry declares (with the maintainer's declared versions and whether a probe verifies each entry), and — under `rootstock` — the canonical MLIP checkpoint ids the local rootstock install serves, each usable directly as the `engine=` argument. See [Engines](engines.md) for the resolution order behind this.
+**`list_engines()`** answers "what can I compute with, here": SLAB's built-ins (`emt`/`lj`/`mace`/`qe`/`rootstock`), everything the cluster's engine registry declares (with the maintainer's declared versions and whether a probe verifies each entry), and — under `rootstock` — the canonical MLIP checkpoint ids the local rootstock install serves, each usable directly as the `engine=` argument. It also lists the named QE input protocols (`qe_protocols`) and the installed pseudopotential families (`pseudo_families`) — see [Engines](engines.md) and [Protocols & pseudopotentials](protocols-and-pseudos.md).
 
 ## A session: fail, inspect, correct, promote
 

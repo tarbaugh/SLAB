@@ -248,7 +248,34 @@ Each calculation runs in a slab-managed scratch directory (never your cwd);
 the final SCF's `espresso.pwo` is kept as an intermediate artifact; and the
 detected `pw.x` version — with the resolved command and `pseudo_dir` — lands
 in the recipe *and* the cache key, so upgrading the executable or switching
-pseudopotential libraries honestly invalidates cached results. When `pw.x` fails, the
+pseudopotential libraries honestly invalidates cached results.
+
+**Protocols and pseudopotential families, adopted from AiiDA.** Two more
+pieces of the AiiDA ecosystem, reimplemented as policy-as-data.
+`slab pseudos install sssp` fetches a pseudopotential family from the
+official Materials Cloud archive ([aiida-pseudo](https://github.com/aiidateam/aiida-pseudo)'s
+pattern), verifying every file against the published checksums; installed
+families are addressed by name (`pseudo_family="SSSP/1.3/PBEsol/efficiency"`)
+and their cache identity is a digest of their contents, not a path. On top,
+the named input protocols from
+[aiida-quantumespresso](https://aiida-quantumespresso.readthedocs.io/en/stable/topics/protocol.html)
+— `fast`, `balanced`, `stringent` — expand a structure into concrete,
+curated pw.x inputs (family-recommended cutoffs, k-mesh from a reciprocal
+spacing, cold smearing, per-atom-scaled thresholds):
+
+```python
+from slab.protocols import qe_protocol_options
+
+options = qe_protocol_options(atoms, protocol="balanced")   # explicit, never a default
+relaxed, info = relax(atoms, engine="qe", calculator_options=options)
+```
+
+A protocol is only ever applied by name, explicitly, and the *expanded
+numbers* — not the name — are what the tracer hashes: retuning the protocol
+data file can never silently re-serve stale cached results. Protocol values
+live in a versioned data file (adapted from aiida-quantumespresso v4.10,
+MIT); AiiDA's pre-rename names (`moderate`/`precise`) are refused with a
+pointer rather than aliased, because the rename came with retuned values. When `pw.x` fails, the
 failure record speaks QE: the `Error in routine ...` block (or the
 `convergence NOT achieved` stop line) is parsed out of the output into the
 exception notes, and the input/output/`CRASH` files are kept as artifacts.

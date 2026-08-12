@@ -146,6 +146,14 @@ The details that keep runs honest and directories clean:
   input/output/`CRASH` files — lands in the failure record. See
   [Debugging failures](debugging-failures.md#when-the-engine-writes-files).
 
+Two adopted AiiDA patterns take the ceremony out of the options above:
+installable **pseudopotential families** (`slab pseudos install sssp`, then
+`pseudo_family="SSSP/1.3/PBEsol/efficiency"` replaces
+`pseudo_dir`+`pseudopotentials`) and named **input protocols**
+(`qe_protocol_options(atoms, protocol="balanced")` expands to curated
+cutoffs, k-mesh, smearing, and thresholds). Both are their own story:
+[Protocols & pseudopotentials](protocols-and-pseudos.md).
+
 A cluster's *curated* QE setup (fixed module, shared pseudo library, MPI
 launcher) still belongs in the registry below, under a distinct alias like
 `qe-delta` — entries may not shadow built-in names.

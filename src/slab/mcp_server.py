@@ -117,14 +117,18 @@ def build_server(root: Path) -> MCPServer:
 
     @server.tool()
     def list_engines() -> dict[str, Any]:
-        """What calculation engines are available here: slab's built-ins
+        """What can be computed here: slab's built-in engines
         (emt/lj/mace/qe/rootstock — qe drives pw.x and needs only the
         executable plus pseudopotentials), everything this cluster's engine
         registry declares (LAMMPS, VASP, site aliases, ...) with the
         maintainer's declared versions, and — under 'rootstock' — the
         canonical MLIP checkpoint ids the cluster's rootstock install serves,
         each usable DIRECTLY as the engine= argument (e.g.
-        engine='mace-mp-0-medium')."""
+        engine='mace-mp-0-medium'). Also lists 'qe_protocols' (named QE input
+        protocols: fast/balanced/stringent; expand one with
+        slab.protocols.qe_protocol_options(atoms, protocol=...) inside a
+        workflow script) and 'pseudo_families' (installed pseudopotential
+        families, usable as calculator_options={'pseudo_family': ...})."""
         return _ops.engines_overview()
 
     return server

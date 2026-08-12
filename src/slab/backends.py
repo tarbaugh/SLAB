@@ -41,8 +41,13 @@ Engine choices worth knowing:
 * ``qe`` — Quantum ESPRESSO ``pw.x`` through ``ase.calculators.espresso``.
   Where the code lives comes from ``command=`` + ``pseudo_dir=`` in
   ``calculator_options`` (or a ready ``profile=``, or ASE's own config file);
-  everything else (``pseudopotentials=``, ``input_data=``, ``kpts=``, ...) is
-  forwarded to the ``Espresso`` calculator verbatim. Unless ``directory=`` is
+  pseudopotentials can alternatively come from an installed family —
+  ``pseudo_family="SSSP/1.3/PBEsol/efficiency"`` resolves the directory and
+  the element->file mapping from :mod:`slab.pseudos` (and named input
+  *protocols* expand to full options via
+  :func:`slab.protocols.qe_protocol_options`); everything else
+  (``pseudopotentials=``, ``input_data=``, ``kpts=``, ...) is forwarded to
+  the ``Espresso`` calculator verbatim. Unless ``directory=`` is
   given, each calculation runs in a slab-managed scratch directory that
   :func:`close_calculator` removes — capture evidence first (relax does:
   the last ``espresso.pwo`` is kept as an intermediate artifact on success,
@@ -187,16 +192,31 @@ def describe_engine(
         # libraries honestly invalidates cached results — including when the
         # location comes from ASE's config file rather than traced options.
         # Undetectable version (missing binary, unparseable banner) degrades
-        # to None. Pseudo file *contents* are not hashed; the directory path
-        # is the identity.
+        # to None. For a bare pseudo_dir the directory *path* is the
+        # identity (file contents are not hashed); a pseudo_family upgrades
+        # this to content-derived identity — the family name plus a digest
+        # of its per-element checksums, portable across machines and roots.
+        # An unknown family raises here, loudly: a name that cannot resolve
+        # must never produce a cache key.
         command, pseudo_dir = _qe_locator(options)
-        return {
+        identity = {
             "engine": "qe",
             "source": "builtin",
             "version": _qe_version(options),
             "command": command,
             "pseudo_dir": pseudo_dir,
         }
+        if "pseudo_family" in options:
+            from slab.pseudos import family_digest, find_family
+
+            family, _family_path = find_family(str(options["pseudo_family"]))
+            # Family identity is name + content digest ONLY — the local
+            # install path is deliberately dropped, so the same family bytes
+            # hash identically on any machine and under any root.
+            identity["pseudo_dir"] = None
+            identity["pseudo_family"] = family.name
+            identity["pseudo_family_digest"] = family_digest(family)
+        return identity
     registry = load_registry()
     if registry is not None and normalized in registry.engines:
         spec = registry.engines[normalized]
@@ -519,11 +539,24 @@ def _qe_calculator(**options: Any) -> Any:
     profile = options.pop("profile", None)
     command = options.pop("command", None)
     pseudo_dir = options.pop("pseudo_dir", None)
+    pseudo_family = options.pop("pseudo_family", None)
     directory = options.pop("directory", None)
     if profile is not None and (command is not None or pseudo_dir is not None):
         raise EngineNotAvailableError(
             "engine 'qe': pass either profile= or command=/pseudo_dir=, not both"
         )
+    if pseudo_family is not None:
+        if pseudo_dir is not None or profile is not None:
+            raise EngineNotAvailableError(
+                "engine 'qe': pass either pseudo_family= or pseudo_dir=/profile=, not both"
+            )
+        from slab.pseudos import family_pseudos, find_family
+
+        family, family_path = find_family(str(pseudo_family))
+        pseudo_dir = family_path
+        # The family knows its files: default the element->filename mapping
+        # (write_espresso_in only consults the species actually present).
+        options.setdefault("pseudopotentials", family_pseudos(family))
     if profile is None and (command is not None or pseudo_dir is not None):
         if pseudo_dir is None:
             raise EngineNotAvailableError(
