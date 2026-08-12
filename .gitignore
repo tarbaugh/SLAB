@@ -15,6 +15,9 @@ build/
 .coverage
 htmlcov/
 
+# MkDocs build output
+site/
+
 # SLAB runtime state (local run store / artifact store)
 .slab/
 

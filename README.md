@@ -2,6 +2,10 @@
 
 Agent-native workflow orchestration for atomistic materials modeling.
 
+**Documentation: [tarbaugh.github.io/SLAB](https://tarbaugh.github.io/SLAB/)** —
+overview, tutorials (every code block executed against the real API), and the
+architecture document.
+
 **Runs are born ephemeral and promoted to permanent — never born permanent and
 deleted.** Workflows are plain imperative Python; the graph is traced, never
 declared. Machine-checkable verification hooks gate what "verified" means, and

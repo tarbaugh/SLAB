@@ -1,0 +1,55 @@
+site_name: SLAB
+site_description: >-
+  Simplest Layer for Atomistic Backends — agent-native workflow orchestration
+  for atomistic materials modeling.
+site_url: https://tarbaugh.github.io/SLAB/
+repo_url: https://github.com/tarbaugh/SLAB
+repo_name: tarbaugh/SLAB
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: deep orange
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: deep orange
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.footer
+    - content.code.copy
+    - content.action.edit
+    - toc.integrate
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - toc:
+      permalink: true
+
+nav:
+  - Overview: index.md
+  - Tutorials:
+      - Quickstart: tutorials/quickstart.md
+      - Lifecycle & retention: tutorials/lifecycle-and-retention.md
+      - Verification checks: tutorials/verification.md
+      - Caching & resume: tutorials/caching-and-resume.md
+      - Engines: tutorials/engines.md
+      - Debugging failures: tutorials/debugging-failures.md
+      - Agents over MCP: tutorials/agents-mcp.md
+  - Architecture: architecture.md

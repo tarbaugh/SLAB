@@ -349,7 +349,7 @@ CLI (typer)          MCP server (stdio)      ← two skins, one behavior
 
 ### 7a. Engines on clusters: the rootstock pattern, generalized
 
-`Garden-AI/rootstock <https://github.com/Garden-AI/rootstock>`_ solved
+[Garden-AI/rootstock](https://github.com/Garden-AI/rootstock) solved
 "many MLIPs, conflicting environments, shared HPC clusters" with a shape SLAB
 adopts twice — once by delegation, once by generalization.
 
