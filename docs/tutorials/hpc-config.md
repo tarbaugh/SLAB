@@ -75,12 +75,41 @@ gres = "gpu:a100:4"
 qos = "gpu"
 setup = ["module load cuda/12.4"]     # runs after the [hpc] setup lines
 sbatch_extra = ["--exclusive"]        # raw directives the schema does not model
+
+[agent]
+model = "meta-models/Muse-Glimmer-30B"
+context_window = 131072
+
+[agent.serve]                          # how to start that model on a GPU node
+partition = "gpu"
+time_limit = "08:00:00"
+tool_call_parser = "llama4_pythonic"   # vLLM's, and model-specific
+args = ["--tensor-parallel-size 4", "--max-model-len 131072"]
+setup = ["source ~/venvs/vllm/bin/activate"]
 ```
 
-The `[agent]` section configures the resident agent the same way — which
-provider and model it talks to, and (via `compute_profile`) how big a
-calculation it should reach for on this machine. See
+The `[agent]` section configures the resident agent the same way — which model
+it talks to, and (via `compute_profile`) how big a calculation it should reach
+for on this machine. See
 [Mason](mason.md#compute-budget-sizing-the-physics-to-the-machine).
+
+Notice that `[agent]` has no `endpoint`. The agent's model server runs on
+whichever GPU node the scheduler hands out, so its URL does not exist until the
+job starts — `[agent.serve]` declares the launch and the job records the URL it
+landed on. Everything is `[hpc.partitions]` reuse: a serve job is an ordinary
+batch job that happens to run a server.
+
+```bash
+slab mason serve render          # the script, before you trust it
+slab mason serve start --wait    # submit, then follow it to a live endpoint
+slab mason serve status          # record + job state + a live probe
+slab mason serve stop            # cancel and clear the record
+```
+
+`[agent.serve]` values are shell for the *compute node*, so no variable in them
+is expanded at load — `setup = ["source $SCRATCH/venvs/vllm/bin/activate"]`
+reaches the node verbatim. The full walkthrough is in
+[Mason on the cluster](mason.md#on-the-cluster-end-to-end).
 
 Configuration supplies *defaults that resolve into explicit values* — it
 never reaches a cache key itself. The `qe` engine's cache identity records
@@ -144,6 +173,10 @@ reason; an unknown is never dressed up as a known.
    `setenv SLAB_SITE_CONFIG /sw/slab/config.toml`.
 4. Users check their view with `slab config show` and
    `slab engines list` — which now also reports the cluster's partitions.
+5. If users will run the resident agent, add `[agent.serve]` (a GPU partition
+   and the `tool_call_parser` your vLLM build registers) so nobody has to
+   rediscover the serving recipe. `slab mason doctor` is how they confirm the
+   parser name was right.
 
 Users then override per project in `slab.toml`, and nothing about a
 cluster is baked into anyone's Python.

@@ -88,6 +88,9 @@ class MasonSession:
         self.compute_profile = self.agent.compute_profile or (
             "cluster" if self.hpc.partitions else "laptop"
         )
+        self.endpoint = ""
+        self.endpoint_origin = ""
+        self.resolve_endpoint()
         self.notebook_path = self.cwd / "NOTEBOOK.md"
         self.plan_path = self.cwd / "PLAN.md"
         self.read_files: set[Path] = set()
@@ -96,6 +99,28 @@ class MasonSession:
         self.sessions_dir = self.workspace_root / "mason" / "sessions"
         stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         self.transcript_path = self.sessions_dir / f"{stamp}-{os.getpid()}.jsonl"
+
+    # -- where the model lives ------------------------------------------------
+
+    def resolve_endpoint(self, override: str | None = None) -> None:
+        """Settle which endpoint this session talks to, and remember why.
+
+        A ``--endpoint`` flag outranks everything; otherwise the answer comes
+        from :func:`slab.mason.serve.discover_endpoint` — config, then the
+        record a running server job wrote, then the provider's default. Call
+        again after changing ``provider`` or ``model``: which server is the
+        right one depends on both.
+        """
+        from slab.mason.serve import discover_endpoint
+
+        if override:
+            self.agent = self.agent.model_copy(update={"endpoint": override})
+            self.endpoint, self.endpoint_origin = override, "--endpoint"
+            return
+        endpoint, origin = discover_endpoint(self.agent, self.workspace_root)
+        if endpoint != self.agent.resolved_endpoint:
+            self.agent = self.agent.model_copy(update={"endpoint": endpoint})
+        self.endpoint, self.endpoint_origin = endpoint, origin
 
     # -- permission gate ------------------------------------------------------
 

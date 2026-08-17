@@ -525,6 +525,19 @@ SLAB-shaped:
   `calculator_options`, so an audit reads the actual cutoffs, not a profile
   name. Faster reasoning and smaller calculations are separate levers, and
   SLAB keeps them separate.
+- **The model's endpoint is discovered, not configured.** On a cluster the
+  agent's own server is a batch job on a node the scheduler chooses, so its
+  URL does not exist at configuration time; writing one down is a guess that
+  goes stale at the next allocation. `[agent.serve]` declares the *launch*
+  (partition, port, vLLM flags — reusing the same `[hpc.partitions]` the
+  physics jobs use, because a serve job is an ordinary job that happens to
+  run a server), and the job's first act is to record its own endpoint in
+  the workspace, with an exit trap that deletes the record. The asymmetry is
+  deliberate and matches the lifecycle argument: a *missing* record degrades
+  to a loud fallback, while a *stale* one would silently answer for a dead
+  node. An explicitly written `[agent] endpoint` always outranks discovery,
+  and every surface reports which of the two it used — the same
+  origin-tracking habit as `slab config show`.
 
 ## 8. Agent-native decisions, collected
 

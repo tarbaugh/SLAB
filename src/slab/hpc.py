@@ -137,6 +137,8 @@ def render_sbatch(
     config: HpcConfig | None = None,
     time_limit: str | None = None,
     output: str | None = None,
+    prologue: Iterable[str] = (),
+    use_launcher: bool = True,
 ) -> str:
     """A complete sbatch script for *command* on the given partition.
 
@@ -147,6 +149,13 @@ def render_sbatch(
     ``<job_name>-%j.out`` (SLURM merges stderr into it when no separate
     error file is asked for). The result is pure text — render it, read it,
     then submit it.
+
+    *prologue* lines run after the setup lines and before the command —
+    where a caller puts bookkeeping the job must do for itself. Passing
+    ``use_launcher=False`` suppresses the partition's launcher prefix, for
+    payloads that must run in the batch script's own shell rather than as a
+    parallel step (a single-node inference server, notably: it has to stay
+    on the node whose hostname the prologue announced).
 
     Examples:
         >>> from slab.config import HpcConfig
@@ -202,8 +211,9 @@ def render_sbatch(
     body = ["", "set -euo pipefail", ""]
     body.extend(hpc.setup)
     body.extend(spec.setup)
-    payload = f"{spec.launcher} {command}" if spec.launcher else command
-    body.append(payload)
+    body.extend(prologue)
+    launcher = spec.launcher if use_launcher else None
+    body.append(f"{launcher} {command}" if launcher else command)
     return "\n".join(lines + body)
 
 

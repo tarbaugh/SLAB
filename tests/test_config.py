@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -9,8 +10,14 @@ from typer.testing import CliRunner
 
 from slab.cli import app
 from slab.config import (
+    CONFIG_TEMPLATE,
+    AgentConfig,
     ConfigError,
     HpcConfig,
+    Partition,
+    PathsConfig,
+    QeEngineConfig,
+    ServeConfig,
     SlabConfig,
     config_value,
     find_config_files,
@@ -226,6 +233,49 @@ def test_template_round_trips_through_the_loader(tmp_path: Path) -> None:
     config = load_config(tmp_path)  # commented template = defaults only
     assert config.schema_version == 1
     assert config == SlabConfig()
+
+
+def test_template_declares_no_table_twice_even_in_comments(tmp_path: Path) -> None:
+    """Uncommenting a template line must never yield a duplicate-table error.
+
+    A commented alternative like ``# [agent]`` reads as an invitation, and
+    accepting it produced 'Cannot declare (agent,) twice' — so the template
+    puts alternatives inside the one table they belong to.
+    """
+    target = tmp_path / "slab.toml"
+    write_template(target)
+    headers = re.findall(
+        r"^\s*#?\s*(\[[a-z0-9_.\"]+\])\s*$", target.read_text(), flags=re.MULTILINE
+    )
+    duplicated = {name for name in headers if headers.count(name) > 1}
+    assert not duplicated, f"template declares {duplicated} more than once"
+
+
+def test_every_key_the_template_shows_is_a_key_the_schema_accepts() -> None:
+    """The template is documentation; a stale key in it teaches a load error."""
+    models = {
+        "": SlabConfig,
+        "[paths]": PathsConfig,
+        "[engines.qe]": QeEngineConfig,
+        "[hpc]": HpcConfig,
+        "[hpc.partitions.cpu]": Partition,
+        "[hpc.partitions.gpu]": Partition,
+        "[agent]": AgentConfig,
+        "[agent.serve]": ServeConfig,
+    }
+    table = ""
+    unknown: list[str] = []
+    for line in CONFIG_TEMPLATE.splitlines():
+        bare = line.lstrip("# ").rstrip()
+        if re.fullmatch(r"\[[a-z0-9_.]+\]", bare):
+            assert bare in models, f"template shows an untested table {bare}"
+            table = bare
+            continue
+        key = re.match(r"^([a-z_]+) = ", bare)
+        # The Anthropic alternative lives inside [agent] by design.
+        if key and key.group(1) not in models[table].model_fields:
+            unknown.append(f"{table} {key.group(1)}")
+    assert not unknown, f"template names keys the schema does not have: {unknown}"
 
 
 def test_template_refuses_overwrite_without_force(tmp_path: Path) -> None:

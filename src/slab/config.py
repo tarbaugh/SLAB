@@ -176,14 +176,50 @@ class HpcConfig(BaseModel):
         return target, self.partitions[target]
 
 
+class ServeConfig(BaseModel):
+    """How to stand the agent's own model server up on this cluster (``[agent.serve]``).
+
+    Mason talks to an OpenAI-compatible endpoint. On a laptop that endpoint is
+    Ollama at a fixed localhost URL; on a cluster it is a server *you* start,
+    on a GPU node the scheduler picks — so the URL cannot be written in a
+    config file. This section declares the launch (which partition, which
+    port, which flags); the node and the URL are discovered at run time from
+    the record the job writes (:mod:`slab.mason.serve`).
+
+    ``command`` is the escape hatch for a server this schema does not model;
+    it may reference ``$port``, which the rendered script binds. Everything
+    here is shell for the *compute node*, so no variable is expanded at load.
+
+    Examples:
+        >>> ServeConfig(partition="gpu", tool_call_parser="llama4_pythonic").port
+        8000
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    partition: str | None = None
+    time_limit: str | None = None
+    port: int = Field(default=8000, ge=1024, le=65535)
+    job_name: str = "mason-serve"
+    tool_call_parser: str | None = None
+    args: tuple[str, ...] = ()
+    setup: tuple[str, ...] = ()
+    command: str | None = None
+    ready_timeout_s: float = Field(default=1800.0, gt=0)
+
+
 class AgentConfig(BaseModel):
     """The resident research agent's model connection and budgets (``[agent]``).
 
     Two providers, one harness. ``provider = "openai"`` (the default) talks to
     any OpenAI-compatible ``/v1`` server — vLLM on a compute node, Ollama on a
-    laptop — and keeps working where compute nodes have no internet.
-    ``provider = "anthropic"`` talks to the Claude Messages API, which is the
-    faster path when the bottleneck is reasoning rather than physics.
+    laptop — and keeps working where compute nodes have no internet, which is
+    the normal HPC case. ``provider = "anthropic"`` talks to the Claude
+    Messages API, which needs reachable internet and *billed API access* (a
+    Claude subscription is a separate product and does not grant it).
+
+    ``endpoint`` may be left unset on a cluster: :func:`slab.mason.serve.
+    discover_endpoint` reads the URL from the running server job's record.
 
     ``api_key_env`` names an environment variable holding the key; the key
     itself never belongs in a config file (config files get committed and
@@ -216,6 +252,7 @@ class AgentConfig(BaseModel):
     tool_protocol: Literal["native", "fenced"] = "native"
     approval: Literal["ask", "auto"] = "ask"
     shell_allowlist: tuple[str, ...] = ()
+    serve: ServeConfig = ServeConfig()
 
     @property
     def resolved_endpoint(self) -> str:
@@ -530,8 +567,9 @@ schema_version = 1
 
 [agent]
 # provider = "openai"                       # "openai" = any OpenAI-compatible server; "anthropic"
-# endpoint = "http://gpu-node-01:8000/v1"   # vLLM/Ollama URL (default per provider)
 # model = "meta-models/Muse-Glimmer-30B"    # as the server names it ('slab mason doctor' lists)
+# endpoint = "http://gpu-node-01:8000/v1"   # leave unset on a cluster: 'slab mason serve'
+#                                           # records the URL of the node it landed on
 # api_key_env = "SLAB_AGENT_API_KEY"        # NAME of the env var holding the key, never the key
 # context_window = 131072                   # tokens the endpoint actually serves
 # compact_at = 0.7                          # compact history at this fraction of the window
@@ -539,19 +577,33 @@ schema_version = 1
 # approval = "ask"                          # "ask" gates mutating tools; "auto" trusts them
 # shell_allowlist = ["git status", "ls"]    # command prefixes that never need approval
 # tool_protocol = "native"                  # "fenced" for servers without a tool-call parser
-# compute_profile = "laptop"                # laptop | workstation | cluster — how big a
+# compute_profile = "cluster"               # laptop | workstation | cluster — how big a
 #                                           # calculation the agent should reach for
 #                                           # (default: cluster if [hpc] partitions exist)
 
-# Claude instead of a locally served model — faster reasoning while you keep the
-# physics small. temperature does not apply here (current Claude models reject
-# sampling parameters); use effort instead.
-# [agent]
+# -- Claude instead of a locally served model. Still the [agent] table above:
+# uncomment these keys there, do not add a second [agent] header. Needs reachable
+# internet and billed API access — a Claude subscription is a separate product and
+# does not grant it, and compute nodes are frequently firewalled. temperature does
+# not apply here (current Claude models reject sampling parameters); use effort.
 # provider = "anthropic"
 # model = "claude-opus-5"
 # api_key_env = "ANTHROPIC_API_KEY"         # the default for this provider
 # effort = "medium"                         # low | medium | high | xhigh | max
 # max_reply_tokens = 16000                  # bounds thinking AND reply together
+
+# How 'slab mason serve' starts that server as a batch job. The GPU node is the
+# scheduler's choice, so the endpoint URL is discovered, never configured.
+[agent.serve]
+# partition = "gpu"                         # a partition from [hpc.partitions]
+# time_limit = "08:00:00"                   # serve jobs are long-lived
+# port = 8000
+# tool_call_parser = "llama4_pythonic"      # vLLM's --tool-call-parser: model-specific,
+#                                           # and required for native tool calls
+#                                           # ('vllm serve --help' lists your build's)
+# args = ["--tensor-parallel-size 4", "--max-model-len 131072"]   # extra vllm flags
+# setup = ["source ~/venvs/vllm/bin/activate"]                    # before the server starts
+# command = "..."                           # a server this schema does not model; may use $port
 '''
 
 

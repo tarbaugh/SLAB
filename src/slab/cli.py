@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Annotated, Any, NoReturn
 import typer
 
 if TYPE_CHECKING:
+    from slab.config import AgentConfig, HpcConfig
     from slab.mason.session import MasonSession
 
 from slab import _ops
@@ -775,19 +776,24 @@ def _mason_session(
     updates: dict[str, object] = {}
     if model is not None:
         updates["model"] = model
-    if endpoint is not None:
-        updates["endpoint"] = endpoint
     if provider is not None:
         updates["provider"] = provider
     if max_turns is not None:
         updates["max_turns"] = max_turns
     if updates:
         session.agent = session.agent.model_copy(update=updates)
+    # After a provider change, which endpoint is right changes too; a
+    # --endpoint flag outranks both the config and any discovered server.
+    if updates or endpoint is not None:
+        session.resolve_endpoint(endpoint)
     return session
 
 
 _ModelOpt = Annotated[str | None, typer.Option("--model", help="Override [agent] model.")]
-_EndpointOpt = Annotated[str | None, typer.Option("--endpoint", help="Override [agent] endpoint.")]
+_EndpointOpt = Annotated[
+    str | None,
+    typer.Option("--endpoint", help="Override [agent] endpoint and any served endpoint."),
+]
 _AutoOpt = Annotated[
     bool, typer.Option("--auto", help="Approve every tool call (batch/HPC use).")
 ]
@@ -825,8 +831,10 @@ def mason_chat(
         mason = Mason(session, resume_from=resume_from)
     except SlabError as e:
         _fail(str(e))
-    agent = session.agent
-    typer.echo(f"mason ready: {agent.model} at {agent.resolved_endpoint}")
+    typer.echo(
+        f"mason ready: {session.agent.model} at {session.endpoint} "
+        f"[{session.endpoint_origin}]"
+    )
     typer.echo(f"workspace {session.workspace_root}; notebook {session.notebook_path}")
     while True:
         try:
@@ -905,8 +913,150 @@ def mason_run(
         raise typer.Exit(code=1)
 
 
+serve_app = typer.Typer(
+    help="The agent's model server as a batch job: render, start, watch, stop.",
+    no_args_is_help=True,
+)
+mason_app.add_typer(serve_app, name="serve")
+
+_PartitionOpt = Annotated[
+    str | None, typer.Option("--partition", "-p", help="Partition (default: [agent.serve]'s).")
+]
+_PortOpt = Annotated[int | None, typer.Option("--port", help="Override [agent.serve] port.")]
+_TimeOpt = Annotated[str | None, typer.Option("--time", help="Override the job's time limit.")]
+
+
+def _serve_inputs(workspace: Path | None) -> tuple[AgentConfig, HpcConfig, Path]:
+    from slab.config import load_config
+
+    config = load_config()
+    return config.agent, config.hpc, _ops.resolve_root(workspace)
+
+
+@serve_app.command("render")
+def mason_serve_render(
+    workspace: _WorkspaceOpt = None,
+    partition: _PartitionOpt = None,
+    port: _PortOpt = None,
+    time_limit: _TimeOpt = None,
+) -> None:
+    """Print the batch script 'serve start' would submit — read it first."""
+    from slab.mason.serve import render_serve_script
+
+    try:
+        agent, hpc, root = _serve_inputs(workspace)
+        script = render_serve_script(
+            agent, hpc, root, partition=partition, port=port, time_limit=time_limit
+        )
+    except SlabError as e:
+        _fail(str(e))
+    typer.echo(script)
+
+
+@serve_app.command("start")
+def mason_serve_start(
+    workspace: _WorkspaceOpt = None,
+    partition: _PartitionOpt = None,
+    port: _PortOpt = None,
+    time_limit: _TimeOpt = None,
+    wait: Annotated[
+        bool, typer.Option("--wait", help="Block until the endpoint answers (or time out).")
+    ] = False,
+) -> None:
+    """Submit the model server as a batch job; it records the URL it lands on."""
+    from slab.mason.serve import start, wait_for_record, wait_until_ready
+
+    try:
+        agent, hpc, root = _serve_inputs(workspace)
+        job = start(agent, hpc, root, partition=partition, port=port, time_limit=time_limit)
+    except SlabError as e:
+        _fail(str(e))
+    typer.echo(f"submitted job {job.job_id} ({job.job_name}) to {job.partition}")
+    typer.echo(f"script: {job.script_path}")
+    if not wait:
+        typer.echo(
+            "the endpoint appears once the model finishes loading; "
+            "watch it with 'slab mason serve status'"
+        )
+        return
+    budget = agent.serve.ready_timeout_s
+    typer.echo(f"waiting for the queue, then for the model to load (up to {budget:.0f}s each)...")
+    try:
+        record = wait_for_record(root, job.job_id, timeout_s=budget)
+        typer.echo(f"node {record.node or 'unnamed'} announced {record.endpoint}; loading...")
+        names = wait_until_ready(record.endpoint, timeout_s=budget)
+    except SlabError as e:
+        _fail(str(e))
+    typer.echo(f"[+] {record.endpoint} answers; serving: {', '.join(names) or 'none'}")
+
+
+@serve_app.command("status")
+def mason_serve_status(
+    workspace: _WorkspaceOpt = None,
+) -> None:
+    """What the recorded server is: endpoint, job state, and a live probe."""
+    from slab.mason.serve import describe
+
+    try:
+        agent, _hpc, root = _serve_inputs(workspace)
+        for line in describe(agent, root):
+            typer.echo(line)
+    except SlabError as e:
+        _fail(str(e))
+
+
+@serve_app.command("stop")
+def mason_serve_stop(
+    workspace: _WorkspaceOpt = None,
+) -> None:
+    """Cancel the recorded server job and remove its endpoint record."""
+    from slab.mason.serve import stop
+
+    try:
+        _agent, _hpc, root = _serve_inputs(workspace)
+        typer.echo(stop(root))
+    except SlabError as e:
+        _fail(str(e))
+
+
+def _serve_hint(agent: AgentConfig, root: Path, origin: str) -> list[str]:
+    """Why an unreachable endpoint might be unreachable, when we can tell."""
+    from slab.hpc import job_state
+    from slab.mason.serve import read_record
+
+    if agent.provider != "openai":
+        return []
+    try:
+        record = read_record(root)
+    except SlabError as e:
+        return [f"    (the endpoint record is unreadable: {e})"]
+    if record is None:
+        # A one-shot --endpoint meant that server, so 'start your own' is noise.
+        # A *configured* endpoint that no longer answers is the opposite case:
+        # it is usually last allocation's node, and serve start is the fix.
+        if origin == "--endpoint":
+            return []
+        return [
+            "    no server is recorded here; start one with 'slab mason serve start' "
+            "(or point [agent] endpoint at a server you started yourself)"
+        ]
+    if not record.job_id:
+        return [f"    a record exists ({record.endpoint}) but names no job to ask about"]
+    try:
+        status = job_state(record.job_id)
+    except SlabError as e:
+        return [f"    job {record.job_id}: state unknown — {e}"]
+    if status.state.is_terminal:
+        return [
+            f"    job {record.job_id} ended as {status.state.value}; the record is "
+            f"stale — 'slab mason serve stop' clears it"
+        ]
+    return [f"    job {record.job_id} is {status.state.value}; the model may still be loading"]
+
+
 @mason_app.command("doctor")
 def mason_doctor(
+    workspace: _WorkspaceOpt = None,
     model: _ModelOpt = None,
     endpoint: _EndpointOpt = None,
     provider: _ProviderOpt = None,
@@ -914,19 +1064,26 @@ def mason_doctor(
     """Check the model endpoint: reachable, model served, tool calls parsed."""
     from slab.config import load_config
     from slab.mason.client import ChatClient, LlmError
+    from slab.mason.serve import discover_endpoint
 
     try:
         agent = load_config().agent
+        root = _ops.resolve_root(workspace)
     except SlabError as e:
         _fail(str(e))
     if provider is not None:
         agent = agent.model_copy(update={"provider": provider})
     if endpoint is not None:
         agent = agent.model_copy(update={"endpoint": endpoint})
-    resolved_endpoint = agent.resolved_endpoint
+    try:
+        resolved_endpoint, origin = discover_endpoint(agent, root)
+    except SlabError as e:
+        _fail(str(e))
+    if endpoint is not None:
+        origin = "--endpoint"
     resolved_model = model or agent.model
     typer.echo(f"provider: {agent.provider}")
-    typer.echo(f"endpoint: {resolved_endpoint}")
+    typer.echo(f"endpoint: {resolved_endpoint}  [{origin}]")
     typer.echo(f"model:    {resolved_model or '(not configured)'}")
     client: Any
     if agent.provider == "anthropic":
@@ -948,6 +1105,8 @@ def mason_doctor(
         typer.echo(f"[+] endpoint answers; {len(names)} model(s) served")
     except LlmError as e:
         typer.echo(f"[x] endpoint: {e}")
+        for line in _serve_hint(agent, root, origin):
+            typer.echo(line)
         raise typer.Exit(code=1) from None
     if resolved_model is None:
         typer.echo(f"[x] no model configured; served here: {', '.join(names) or 'none'}")

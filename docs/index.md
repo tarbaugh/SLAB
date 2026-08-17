@@ -111,7 +111,7 @@ layered TOML file ([HPC configuration](tutorials/hpc-config.md)).
   agent as a set of MCP tools.
 - **[Mason, the resident agent](tutorials/mason.md)** — a built-in
   Claude-Code-class harness for open models, tuned for long research
-  projects.
+  projects, with its model server started as a batch job.
 
 ## Status
 
@@ -120,8 +120,9 @@ content-addressed artifact store with tiered retention, define-by-run tracing
 with content-hash caching, verification hooks, MACE/ASE/Quantum ESPRESSO
 relaxation task, AiiDA-style input protocols and SSSP pseudopotential
 families, layered HPC configuration with a SLURM submission layer, the Mason
-agent harness for open models and Claude alike, CLI, MCP server. 820+ tests (every docstring
-example runs as a doctest), ~96% coverage, mypy `--strict`, plus adversarial
+agent harness (open models self-served on a GPU node, or Claude) with its model
+server as a batch job, CLI, MCP server. 870+ tests (every docstring example
+runs as a doctest), ~96% coverage, mypy `--strict`, plus adversarial
 multi-agent review passes whose confirmed findings are regression tests — the
 QE engine is verified against a real `pw.x` 7.4.1, the balanced protocol
 against a real SSSP install, and Mason against a real Llama 3.1 served by

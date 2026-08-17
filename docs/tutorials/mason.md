@@ -1,33 +1,147 @@
 # Mason: the resident research agent
 
-*The mason works the slab.* Mason is a Claude-Code-class agent harness
-built into SLAB and tuned for one job: long-running atomistic research
-projects on your own hardware, driven by **open-weight models** — Meta's
-[Muse Glimmer](https://huggingface.co/meta-models/Muse-Glimmer-30B) or
-Llama on a laptop via Ollama, anything vLLM serves on a compute node. No
-SDK, no API subscription: a stdlib HTTP client against the
-OpenAI-compatible surface every serious open-model server speaks.
+*The mason works the slab.* Mason is a Claude-Code-class agent harness built
+into SLAB and tuned for one job: long-running atomistic research projects on
+**your own hardware**, driven by **open-weight models** — Meta's
+[Muse Glimmer](https://huggingface.co/meta-models/Muse-Glimmer-30B) on a
+cluster GPU node, Llama on a laptop via Ollama, anything vLLM serves. No SDK
+and no API subscription: a stdlib HTTP client against the OpenAI-compatible
+surface every serious open-model server speaks.
 
-It also speaks the [Anthropic Messages
-API](#claude-for-the-thinking-small-physics-for-the-laptop), so you can put
-Claude behind the same harness when you want faster, stronger reasoning
-while iterating — without giving up the open-model path that works on an
-offline compute node.
+That is deliberate rather than merely frugal. HPC compute nodes are frequently
+firewalled off the internet, where a hosted API is simply unreachable; the GPUs
+you already have an allocation on are free at the margin; and an agent loop
+that runs overnight is exactly the workload you do not want metered. Mason also
+speaks the [Anthropic Messages API](#claude-behind-the-same-harness), but that
+is the alternative, not the plan.
 
-What makes it a *research* agent rather than a generic coder is the floor
-it stands on: calculations run as SLAB workflow scripts through
-`slab_launch`, so every number Mason reports traces to a run id, its
-recipe, and its `@check` assertions. An unverified number is a rumor, and
-the system prompt says so.
+What makes it a *research* agent rather than a generic coder is the floor it
+stands on: calculations run as SLAB workflow scripts through `slab_launch`, so
+every number Mason reports traces to a run id, its recipe, and its `@check`
+assertions. An unverified number is a rumor, and the system prompt says so.
 
-## Quickstart (laptop, Ollama)
+## On the cluster, end to end
+
+Describe the machine once (see
+[Configuring SLAB for your HPC](hpc-config.md)):
+
+```toml
+schema_version = 1
+
+[paths]
+workspace = "/scratch/${USER}/slab-workspace"
+
+[hpc]
+cluster = "delta"
+account = "abc-123"
+default_partition = "cpu"
+
+[hpc.partitions.cpu]
+time_limit = "24:00:00"
+ntasks_per_node = 64
+launcher = "srun"
+
+[hpc.partitions.gpu]
+time_limit = "12:00:00"
+gres = "gpu:a100:4"
+
+[agent]
+model = "meta-models/Muse-Glimmer-30B"
+context_window = 131072          # match the server's --max-model-len
+
+[agent.serve]
+partition = "gpu"
+time_limit = "08:00:00"
+tool_call_parser = "llama4_pythonic"
+args = ["--tensor-parallel-size 4", "--max-model-len 131072"]
+setup = ["source ~/venvs/vllm/bin/activate"]
+```
+
+Note what is *not* there: an `endpoint`. The GPU node is the scheduler's
+choice, so the URL cannot be written down in advance — it is discovered.
+
+```bash
+slab mason serve render     # read the batch script before trusting it
+slab mason serve start --wait
+slab mason doctor
+slab mason chat
+```
+
+`serve start` submits the server as an ordinary batch job. Its first act on the
+node is to write its own endpoint into `<workspace>/mason/endpoint.json`, and
+to delete that record when the server exits — so a dead node can never keep
+answering for a live one. `--wait` follows the job to a live endpoint, and
+gives up early if the job dies instead of burning the whole timeout:
+
+<!-- no-verify -->
+```text
+$ slab mason serve start --wait
+submitted job 4242314 (mason-serve) to gpu
+script: /scratch/tom/slab-workspace/mason/mason-serve-4242314.sbatch
+waiting for the endpoint (up to 1800s)...
+node gpu-07.delta.internal announced http://gpu-07.delta.internal:8000/v1; loading...
+[+] http://gpu-07.delta.internal:8000/v1 answers; serving: meta-models/Muse-Glimmer-30B
+```
+
+Everything downstream then finds the model without being told, and says where
+it found it:
+
+<!-- no-verify -->
+```text
+$ slab mason doctor
+provider: openai
+endpoint: http://gpu-07.delta.internal:8000/v1  [job 4242314 on gpu-07.delta.internal]
+model:    meta-models/Muse-Glimmer-30B
+[+] endpoint answers; 1 model(s) served
+[+] model 'meta-models/Muse-Glimmer-30B' is served
+[+] native tool calls work
+```
+
+That last line is the one to care about. `--tool-call-parser` names a
+model-specific parser that your vLLM build either registers or does not, and a
+wrong name produces a server that runs and answers but never calls a tool.
+Mason will not guess it for you: rendering a default vLLM command without
+`tool_call_parser` set is refused, and the refusal names all three ways out
+(set the parser, switch to the fenced text protocol, or give an explicit
+`command`). The doctor's probe is the empirical check that the name was right.
+
+`slab mason serve status` reports the record, the job's state, and a live
+probe; `slab mason serve stop` cancels the job and clears the record. When you
+want to point Mason at a server you started yourself, `[agent] endpoint` or
+`--endpoint` outranks any discovered record — a written-down endpoint is never
+overridden by a background job.
+
+### Where the endpoint comes from
+
+Four sources, highest first:
+
+| source | when |
+|---|---|
+| `--endpoint` | one command, overriding everything |
+| `[agent] endpoint` | you run your own server, or a persistent one exists |
+| the serve record | a `slab mason serve` job is running for this workspace |
+| the provider default | `http://localhost:11434/v1` (Ollama), or the Claude API |
+
+The record is the only coupling between the login node and the compute node,
+which assumes the workspace sits on a shared filesystem — the normal
+arrangement (`/scratch/$USER/...`). When it does not hold, the symptom is
+honest: no record, and the endpoint falls back to the default rather than
+silently pointing somewhere wrong.
+
+A serve job is a job: it has a wall clock, and when it expires the agent's
+model disappears mid-session. Give it a generous `[agent.serve] time_limit`,
+and remember that Mason's memory is files — `NOTEBOOK.md`, `PLAN.md`, and the
+transcript survive the server, so `slab mason chat --resume` after restarting
+the server picks the project back up.
+
+## A smaller loop, on a laptop
+
+The same harness runs against Ollama with no cluster in sight, which is how to
+try it in two minutes:
 
 ```bash
 ollama pull llama3.1:8b        # or any tool-calling model
 ```
-
-Point `[agent]` at it in `slab.toml` (see
-[Configuring SLAB for your HPC](hpc-config.md)):
 
 ```toml
 [agent]
@@ -35,29 +149,12 @@ endpoint = "http://localhost:11434/v1"
 model = "llama3.1:8b"
 ```
 
-Check the plumbing, then talk to it:
-
 ```bash
 slab mason doctor
-slab mason chat
+slab mason run "..." --auto
 ```
 
-`doctor` verifies the three things that actually go wrong: the endpoint
-answers, the model is served, and tool calls come back parsed. Captured
-against a real local Ollama:
-
-<!-- no-verify -->
-```text
-endpoint: http://localhost:11434/v1
-model:    llama3.1:8b
-[+] endpoint answers; 2 model(s) served
-[+] model 'llama3.1:8b' is served
-[+] native tool calls work
-```
-
-For an autonomous goal, `slab mason run` loops until the model calls
-`finish`, answers in text, or a harness limit stops it. A real session —
-Llama 3.1 8B, locally, unedited:
+A real session — Llama 3.1 8B, locally, unedited:
 
 <!-- no-verify -->
 ```text
@@ -82,75 +179,27 @@ run 01m06tadrfzwg799ecqevcwff7  workflow
 ```
 
 The script it wrote is in the project directory, the energy matches an
-independent EMT evaluation to machine precision, and the run's provenance
-is ordinary SLAB provenance — nothing about the result knows an LLM was
-involved.
-
-## Claude for the thinking, small physics for the laptop
-
-Mason's loop is provider-agnostic, so the same harness — same tools, same
-notebook, same verification gates — runs on the Anthropic Messages API when
-the bottleneck is reasoning rather than physics. This is the fast path for
-developing on a laptop: switch the model, and keep the calculations small
-enough that your own machine can run them.
-
-```toml
-[agent]
-provider = "anthropic"
-model = "claude-opus-5"
-api_key_env = "ANTHROPIC_API_KEY"   # the default for this provider
-effort = "medium"                   # low | medium | high | xhigh | max
-compute_profile = "laptop"
-```
-
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-slab mason doctor --provider anthropic
-slab mason run "..." --auto
-```
-
-Three things differ from the open-model path, and Mason handles all three
-for you: sampling parameters are never sent (current Claude models reject
-`temperature` outright, so **`[agent] temperature` applies to the
-OpenAI-compatible provider only** — `effort` is the equivalent knob);
-`max_tokens` is required and bounds *thinking plus reply* together, so a
-truncated turn is reported rather than passed off as a finished answer; and
-Mason's stable system prompt is sent with a cache breakpoint, so the prefix
-is served from Anthropic's prompt cache turn after turn.
-
-**Keep the open-model path.** HPC compute nodes are frequently firewalled off
-the internet, where `api.anthropic.com` is simply unreachable and a locally
-served model is the only option — and the GPUs you already own are free at the
-margin, which matters for a loop that runs overnight. The split that works:
-Claude while you iterate, open weights for the long unattended grind.
-
-One caveat worth stating: developing exclusively against Claude lets the
-open-model path rot silently. Every open-model bug fixed so far — llama-style
-tool JSON leaking into message text, useless missing-argument errors, Python
-written with literal `\n` — is something Claude would never have done. Keep
-the gated `SLAB_TEST_LLM` test as the acceptance gate before Mason changes
-land.
+independent EMT evaluation to machine precision, and the run's provenance is
+ordinary SLAB provenance — nothing about the result knows an LLM was involved.
 
 ## Compute budget: sizing the physics to the machine
 
-Faster reasoning does not make a DFT relaxation faster. The other half of a
-quick local loop is telling the agent how big a calculation it may reach
-for — `[agent] compute_profile`, one of `laptop`, `workstation`, or
-`cluster`. Unset, it is derived: a config that declares SLURM partitions is a
-cluster; anything else is treated as a laptop (the conservative guess, since
-over-sizing a calculation wastes hours while under-sizing wastes minutes).
+`[agent] compute_profile` — one of `laptop`, `workstation`, `cluster` — tells
+the agent how big a calculation it may reach for. Unset, it is derived: a
+config that declares SLURM partitions is a cluster, anything else is treated as
+a laptop (the conservative guess, since over-sizing a calculation wastes hours
+while under-sizing wastes minutes).
 
-The `laptop` profile puts concrete limits in the system prompt: prefer
-`emt`/`lj` and small MACE models, single-digit atoms for DFT, the `fast`
-protocol rather than `balanced` or `stringent`, picosecond MD on small cells,
-and say so before launching anything expected to run past ten minutes.
-
-It also carries an honesty requirement, because this is where a fast loop can
-quietly produce a wrong impression: **laptop settings are smoke-test settings,
-and saying so is part of the result.** Mason is instructed to record the
-accuracy caveat in the run's `intent`, in the notebook entry, and in its final
-report — a number produced at laptop settings is evidence that the workflow
-runs, not a production result.
+The `cluster` profile allows production settings: the `balanced` protocol by
+default, `stringent` when a result must be publishable, and anything past a few
+minutes submitted through `submit_job` rather than run on the login node. The
+`laptop` profile puts hard limits in the prompt instead — prefer `emt`/`lj` and
+small MACE models, single-digit atoms for DFT, the `fast` protocol, picosecond
+MD, ask before anything expected to run past ten minutes — plus an honesty
+requirement, because this is where a fast loop can quietly produce a wrong
+impression: **laptop settings are smoke-test settings, and saying so is part of
+the result.** Mason records that caveat in the run's `intent`, in the notebook
+entry, and in its final report.
 
 The profile shapes what the agent *chooses*; it changes no physics on its own.
 Every choice it leads to still lands in explicit, traced `calculator_options`
@@ -159,9 +208,8 @@ than a profile name.
 
 ## The tool surface
 
-Few, orthogonal tools with crisp machine-checkable failure modes (the
-SWE-agent lesson: interface design drives agent performance more than
-model choice):
+Few, orthogonal tools with crisp machine-checkable failure modes (the SWE-agent
+lesson: interface design drives agent performance more than model choice):
 
 | tool | contract |
 |---|---|
@@ -175,119 +223,147 @@ model choice):
 | `notebook`, `plan` | the memory instruments (below) |
 | `finish` | end the task with a report citing run ids |
 
-Every tool failure is returned as the tool *result* — evidence the model
-reads — never an exception that kills the loop. Mutating tools pass
-through an approval gate: interactively Mason asks; `--auto` (or
-`[agent] approval = "auto"`) trusts them; `shell_allowlist` prefixes
-auto-approve at word boundaries, and a command containing shell control
-operators (`;`, `|`, `&`, redirection...) never auto-approves.
+Every tool failure is returned as the tool *result* — evidence the model reads
+— never an exception that kills the loop. Mutating tools pass through an
+approval gate: interactively Mason asks; `--auto` (or `[agent] approval =
+"auto"`) trusts them; `shell_allowlist` prefixes auto-approve at word
+boundaries, and a command containing shell control operators (`;`, `|`, `&`,
+redirection...) never auto-approves.
 
 ## Memory that outlives the context window
 
-Long projects die of context, not of model quality — models degrade well
-before their window fills (Chroma's "context rot" measurements), and no
-window survives weeks. Mason's memory is **files in the project
-directory**, under version control, readable by humans:
+Long projects die of context, not of model quality — models degrade well before
+their window fills (Chroma's "context rot" measurements), and no window
+survives weeks. Mason's memory is **files in the project directory**, under
+version control, readable by humans:
 
-* **`NOTEBOOK.md`** — an append-only lab notebook. Decisions, verified
-  results with run ids, diagnosed failures; written for a colleague who
-  has read none of the conversation.
+* **`NOTEBOOK.md`** — an append-only lab notebook. Decisions, verified results
+  with run ids, diagnosed failures; written for a colleague who has read none
+  of the conversation.
 * **`PLAN.md`** — the living plan, rewritten by the `plan` tool as
-  understanding changes. The tool echoes the full plan back into context
-  (the "recitation" trick that holds long goals stable).
-* **`.slab/mason/sessions/*.jsonl`** — append-only transcripts: every
-  message, tool result, compaction, and token count. `slab mason chat
-  --resume` replays the newest one.
-* **`AGENTS.md`** — the cross-tool conventions standard; if the project
-  has one, it enters the system prompt every session.
+  understanding changes. The tool echoes the full plan back into context (the
+  "recitation" trick that holds long goals stable).
+* **`.slab/mason/sessions/*.jsonl`** — append-only transcripts: every message,
+  tool result, compaction, and token count. `slab mason chat --resume` replays
+  the newest one.
+* **`AGENTS.md`** — the cross-tool conventions standard; if the project has
+  one, it enters the system prompt every session.
 
-When the conversation approaches the budget (`compact_at` ×
-`context_window`, default 70%), the middle of the history is folded into a
-structured summary — state, verified results, failures observed,
-decisions, open questions — the summary is *also written to the notebook*,
-and the system context is rebuilt fresh so the current plan and notebook
-re-enter updated. A context-overflow answer from the server forces the
-same compaction immediately. Failures are deliberately carried forward:
-evidence of what went wrong is what keeps a model from repeating it.
+When the conversation approaches the budget (`compact_at` × `context_window`,
+default 70%), the middle of the history is folded into a structured summary —
+state, verified results, failures observed, decisions, open questions — the
+summary is *also written to the notebook*, and the system context is rebuilt
+fresh so the current plan and notebook re-enter updated. A context-overflow
+answer from the server forces the same compaction immediately. Failures are
+deliberately carried forward: evidence of what went wrong is what keeps a model
+from repeating it.
 
 ## Open-model realism
 
 Open-weight tool calling is uneven, and the harness plans for it:
 
-* **Native tool calls** are the default (`vllm serve ... --enable-auto-tool-choice
-  --tool-call-parser <family>`; Ollama parses natively).
-* **`tool_protocol = "fenced"`** switches to a plain-text protocol — one
-  fenced ````tool`` block per message — for servers with no tool-call
-  parser at all (the mini-swe-agent lesson: a text protocol is the great
-  equalizer).
+* **Native tool calls** are the default (`vllm serve ...
+  --enable-auto-tool-choice --tool-call-parser <family>`, which is what
+  `slab mason serve` renders; Ollama parses natively).
+* **`tool_protocol = "fenced"`** switches to a plain-text protocol — one fenced
+  ````tool```` block per message — for servers with no tool-call parser at all
+  (the mini-swe-agent lesson: a text protocol is the great equalizer). Set it
+  and `serve` stops passing the parser flags.
 * Either way, the loop also catches the llama-style
-  `{"name": ..., "parameters": {...}}` that models leak into message text
-  even when served with a parser, and runs it. A well-shaped call naming a
-  hallucinated tool gets the tool catalog back as its answer instead of a
-  dead end. Malformed JSON arguments come back as a repair prompt.
+  `{"name": ..., "parameters": {...}}` that models leak into message text even
+  when served with a parser, and runs it. A well-shaped call naming a
+  hallucinated tool gets the tool catalog back as its answer instead of a dead
+  end. Malformed JSON arguments come back as a repair prompt.
 
-Every one of those recoveries was exercised by a real model during
-development, not imagined. `tool_choice` is never sent (Ollama ignores
-it), and nothing is constrained-decoded — harness-side validation with
-repair re-prompts costs less than the documented tool-call suppression
-that strict constrained decoding causes on open models.
+Every one of those recoveries was exercised by a real model during development,
+not imagined. `tool_choice` is never sent (Ollama ignores it), and nothing is
+constrained-decoded — harness-side validation with repair re-prompts costs less
+than the documented tool-call suppression that strict constrained decoding
+causes on open models.
 
-Model sizing, honestly: 8B-class models (the quickstart) handle scripted,
-well-specified goals and need explicit sequencing in prompts; research
-judgment wants the strongest model your hardware serves —
-Muse-Glimmer-30B-class on a workstation GPU, `gpt-oss-120b`,
-GLM/Qwen3-class MoEs, or DeepSeek V4-Flash on a multi-GPU node.
+One failure mode is worth naming because it is invisible: a small model can run
+a calculation correctly, verify it, cite the right run id — and then **mistype
+the number in its prose**. Observed here, with Llama 3.1 8B: a run whose
+recorded energy was `-0.0015020475862299598` eV was reported as "-0.15 eV". The
+run was genuinely `verified` and its value matched an independent EMT
+evaluation exactly; only the sentence was wrong. This is why traceability, not
+model accuracy, is what SLAB guarantees — `slab show <run id>` had the right
+number the whole time. The prompt now requires numbers to be *copied* from run
+output rather than retyped, which fixed it on the same model and goal, but the
+audit trail is the actual defense. Prefer the largest model your hardware
+serves for anything you intend to quote.
 
-## On the cluster
+Model sizing, honestly: 8B-class models (the laptop loop above) handle
+scripted, well-specified goals and need explicit sequencing in prompts;
+research judgment wants the strongest model your allocation serves —
+Muse-Glimmer-30B-class on a single GPU node, `gpt-oss-120b`, GLM/Qwen3-class
+MoEs, or DeepSeek V4-Flash across several.
 
-Serve a model on a GPU node, point the config at it, and let long
-calculations go through the scheduler:
+Mason's prompts are layered for prefix caching (static core → per-session
+environment → append-only conversation), so a long session reuses the server's
+KV cache turn after turn.
 
-```bash
-vllm serve meta-models/Muse-Glimmer-30B \
-    --enable-auto-tool-choice --tool-call-parser llama4_pythonic \
-    --enable-prefix-caching
-```
+## Claude behind the same harness
+
+The loop is provider-agnostic, so the same tools, notebook, and verification
+gates run against the Anthropic Messages API:
 
 ```toml
 [agent]
-endpoint = "http://gpu-node-01:8000/v1"
-model = "meta-models/Muse-Glimmer-30B"
+provider = "anthropic"
+model = "claude-opus-5"
+api_key_env = "ANTHROPIC_API_KEY"   # the default for this provider
+effort = "medium"                   # low | medium | high | xhigh | max
+compute_profile = "laptop"          # keep the physics small while iterating
 ```
 
-Mason's prompts are layered for prefix caching (static core → per-session
-environment → append-only conversation), so a long session reuses the
-server's KV cache turn after turn. With `[hpc]` partitions configured, the
-`submit_job` tool appears and the system prompt teaches the split: quick
-things in-process, anything long as `slab run workflow.py` under sbatch,
-polled with `job_status` — never busy-waited.
+Three things differ from the open-model path, and Mason handles all three:
+sampling parameters are never sent (current Claude models reject `temperature`
+outright, so **`[agent] temperature` applies to the OpenAI-compatible provider
+only** — `effort` is the equivalent knob); `max_tokens` is required and bounds
+*thinking plus reply* together, so a truncated turn is reported rather than
+passed off as a finished answer; and the stable system prompt is sent with a
+cache breakpoint.
+
+Two caveats, both load-bearing:
+
+**This path needs billed API access, which a Claude subscription does not
+include.** Claude.ai and Claude Code subscriptions are separate products from
+API credit; `$ANTHROPIC_API_KEY` has to come from an API account with billing
+enabled. If `slab mason doctor --provider anthropic` reports an authentication
+failure on a valid-looking key, that is usually why.
+
+**Developing exclusively against Claude lets the open-model path rot
+silently.** Every open-model bug fixed so far — llama-style tool JSON leaking
+into message text, useless missing-argument errors, Python written with literal
+`\n` — is something Claude would never have done. Keep the gated
+`SLAB_TEST_LLM` test as the acceptance gate before Mason changes land.
 
 ## Harness discipline, in code
 
-The limits live in the harness because prompts don't enforce invariants:
-a `max_turns` model-call budget per goal, an abort after five consecutive
+The limits live in the harness because prompts don't enforce invariants: a
+`max_turns` model-call budget per goal, an abort after five consecutive
 harness-level tool failures (with the evidence left in place), bounded
 diagnose-then-retry expectations in the prompt, and required-argument
-validation that answers with the tool's schema instead of a stack trace.
-Token usage is accounted per turn from the server's own numbers and
-recorded in the transcript.
+validation that answers with the tool's schema instead of a stack trace. Token
+usage is accounted per turn from the server's own numbers and recorded in the
+transcript.
 
 ## Design provenance
 
-Mason is a deliberate distillation of the 2024–2026 agent-harness
-literature onto SLAB's philosophy; the load-bearing choices and their
-sources:
+Mason is a deliberate distillation of the 2024–2026 agent-harness literature
+onto SLAB's philosophy; the load-bearing choices and their sources:
 
 * **Single ReAct-style loop** ([Yao et al. 2022, arXiv:2210.03629](https://arxiv.org/abs/2210.03629)),
-  no default multi-agent orchestration — orchestrator-worker systems pay
-  off on breadth-first search, not tightly interdependent research work,
-  at ~15× token cost ([Anthropic, *Building a multi-agent research
+  no default multi-agent orchestration — orchestrator-worker systems pay off on
+  breadth-first search, not tightly interdependent research work, at ~15× token
+  cost ([Anthropic, *Building a multi-agent research
   system*](https://www.anthropic.com/engineering/multi-agent-research-system)).
 * **Compaction + structured note-taking + file memory** as the three
-  context-pollution countermeasures ([Anthropic, *Effective context
-  engineering for AI agents*](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents));
-  compaction triggers well below the window because degradation starts
-  early ([Chroma, *Context Rot*](https://research.trychroma.com/context-rot));
+  context-pollution countermeasures ([Anthropic, *Effective context engineering
+  for AI agents*](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents));
+  compaction triggers well below the window because degradation starts early
+  ([Chroma, *Context Rot*](https://research.trychroma.com/context-rot));
   condensation measurably *improves* task success, not just cost
   ([OpenHands condenser](https://openhands.dev/blog/openhands-context-condensensation-for-more-efficient-ai-agents)).
 * **Progress files, plans, and git as the recovery substrate** for
@@ -295,43 +371,59 @@ sources:
   agents*](https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents));
   OS-style externalized memory tiers trace to MemGPT
   ([arXiv:2310.08560](https://arxiv.org/abs/2310.08560)).
-* **Append-only, cache-stable context; recitation; keep failures in
-  context** ([Manus, *Context engineering for AI
+* **Append-only, cache-stable context; recitation; keep failures in context**
+  ([Manus, *Context engineering for AI
   agents*](https://manus.im/blog/Context-Engineering-for-AI-Agents-Lessons-from-Building-Manus)).
-* **Small tool set with crisp failure modes** — agent-computer interface
-  design drives performance ([SWE-agent,
+* **Small tool set with crisp failure modes** — agent-computer interface design
+  drives performance ([SWE-agent,
   arXiv:2405.15793](https://arxiv.org/abs/2405.15793)); the fenced text
   protocol follows
-  [mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent)'s result
-  that a ~100-line bash-only loop stays competitive.
+  [mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent)'s result that a
+  ~100-line bash-only loop stays competitive.
 * **Verbal self-reflection after failures** (Reflexion,
   [arXiv:2303.11366](https://arxiv.org/abs/2303.11366)) — Mason's
-  diagnose-before-retry rule; deterministic checks before any
-  model-judged verification, which is SLAB's `@check` philosophy anyway.
-* **Fixed tool libraries + human checkpoints** outperform full autonomy
-  in scientific-agent studies (Agent Laboratory,
-  [arXiv:2501.04227](https://arxiv.org/abs/2501.04227)) — hence the
-  approval gate and the promotion step staying human.
+  diagnose-before-retry rule; deterministic checks before any model-judged
+  verification, which is SLAB's `@check` philosophy anyway.
+* **Fixed tool libraries + human checkpoints** outperform full autonomy in
+  scientific-agent studies (Agent Laboratory,
+  [arXiv:2501.04227](https://arxiv.org/abs/2501.04227)) — hence the approval
+  gate and the promotion step staying human.
 
-The roadmap direction — folding sub-trajectories at workflow-step
-boundaries rather than summarizing linearly — follows the context-folding
-line ([arXiv:2510.11967](https://arxiv.org/abs/2510.11967),
+The roadmap direction — folding sub-trajectories at workflow-step boundaries
+rather than summarizing linearly — follows the context-folding line
+([arXiv:2510.11967](https://arxiv.org/abs/2510.11967),
 [arXiv:2510.24699](https://arxiv.org/abs/2510.24699)).
 
 ## Limitations, honestly stated
 
-Mason is single-loop: no subagents yet. It does not stream tokens (an
-agent loop consumes whole turns). Its judgment is the served model's —
-SLAB guarantees that what Mason *reports* is traceable and verified, not
-that its research taste is good. And the approval gate is a workflow
-control for your own account on your own machine, not a security sandbox:
-`--auto` means what it says.
+Mason is single-loop: no subagents yet. It does not stream tokens (an agent
+loop consumes whole turns). Its judgment is the served model's — SLAB
+guarantees that what Mason *reports* is traceable and verified, not that its
+research taste is good. And the approval gate is a workflow control for your
+own account on your own machine, not a security sandbox: `--auto` means what
+it says.
 
-The Anthropic provider is verified against a mock server that reproduces the
-documented Messages wire shape — including a Cu relaxation driven end to end
-through it, reaching `verified` — but has not yet been exercised against the
-live API, which needs a key this development machine does not have. The
-gated test is written and waiting:
+What has and has not been exercised against reality, precisely:
+
+* **Verified against a real model.** The full loop against Llama 3.1 8B served
+  by Ollama: an autonomous Cu relaxation reaching `verified`, whose reported
+  energy matches an independent EMT evaluation exactly.
+* **Verified without a cluster.** The serve path's rendered script is executed
+  by `bash` in the test suite with a stub server on PATH, proving the record it
+  writes is readable and that the exit trap clears it; discovery, waiting,
+  `status`/`stop`, and a complete goal driven through a *discovered* endpoint
+  all run against a live local server. Discovery was also exercised
+  hand-to-hand against a real Ollama: a record written where a serve job would
+  write one, then `doctor`, `serve status`, and two autonomous Al relaxations
+  that reached `verified` — with no `endpoint` configured anywhere. What no test
+  here can cover is a real `sbatch` on a real GPU node; the first
+  `slab mason serve start` on your cluster is that test, which is why
+  `serve render` exists.
+* **Not verified against the live API.** The Anthropic provider is tested
+  against a mock reproducing the documented Messages wire shape (including a Cu
+  relaxation driven end to end through it), but no live call has been made — the
+  development machine has no billed API access. The gated test is written and
+  waiting:
 
 <!-- no-verify -->
 ```bash

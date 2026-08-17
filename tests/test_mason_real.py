@@ -57,6 +57,46 @@ def test_real_model_reads_a_file_and_answers(tmp_path: Path) -> None:
     assert any(event["type"] == "usage" for event in events)
 
 
+def test_real_model_is_reached_through_a_served_record(tmp_path: Path) -> None:
+    """The cluster path, minus the cluster: no endpoint configured anywhere.
+
+    A serve job's only output that the client depends on is the record it
+    writes. Writing one by hand and getting a real model to answer through it
+    is the closest a laptop can come to the cluster handshake.
+    """
+    from slab.mason.serve import discover_endpoint, record_path
+
+    assert ENDPOINT and MODEL  # guarded by pytestmark
+    root = tmp_path / ".slab"
+    record = record_path(root)
+    record.parent.mkdir(parents=True)
+    record.write_text(
+        json.dumps(
+            {
+                "endpoint": ENDPOINT,
+                "model": MODEL,
+                "job_id": "8675309",
+                "node": "test-node",
+                "port": 0,
+            }
+        )
+    )
+    (tmp_path / "data.txt").write_text("the secret word is perovskite\n")
+    # No [agent] endpoint: the record is the only route to the server.
+    config = SlabConfig.model_validate(
+        {"agent": {"model": MODEL, "max_turns": 6, "temperature": 0.0}}
+    )
+    assert discover_endpoint(config.agent, root) == (ENDPOINT, "job 8675309 on test-node")
+    session = MasonSession(tmp_path, workspace_root=root, config=config, auto_approve=True)
+    assert session.endpoint == ENDPOINT
+    result = Mason(session).run_turn(
+        "Use the read_file tool on data.txt. You may not call finish until "
+        "read_file has returned. Then call finish reporting the secret word verbatim."
+    )
+    assert result.stop_reason in ("answer", "finish")
+    assert "perovskite" in result.text.lower()
+
+
 ANTHROPIC_MODEL = os.environ.get("SLAB_TEST_ANTHROPIC_MODEL", "claude-opus-5")
 
 

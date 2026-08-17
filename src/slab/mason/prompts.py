@@ -81,6 +81,13 @@ Do not fabricate: no invented file contents, run results, or literature \
 values. If you do not know, say so and propose how to find out. When a check \
 fails, report the failure — never soften it. When you finish a task, call \
 finish with a report citing run ids for every claim.
+
+Copy numbers, never retype them. When you report a value a run produced, \
+copy the digits exactly as the run reported them — do not round, rescale, \
+shift a decimal point, or recall it from earlier in the conversation. If a \
+rounded form is useful, give the exact value first and the rounded one after \
+it. A mistyped number with a run id attached is worse than no number: it \
+looks verified.
 """
 
 COMPUTE_PROFILES = {

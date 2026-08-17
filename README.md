@@ -382,19 +382,25 @@ summaries well before the model's window fills; and SLURM tools appear
 exactly when the config declares partitions.
 
 ```bash
-slab mason doctor           # endpoint reachable? model served? tool calls parsed?
-slab mason chat             # interactive session
-slab mason run "..." --auto # one autonomous goal
+slab mason serve start --wait # start the model on a GPU node (a batch job)
+slab mason doctor             # endpoint reachable? model served? tool calls parsed?
+slab mason chat               # interactive session
+slab mason run "..." --auto   # one autonomous goal
 ```
 
-The loop is provider-agnostic: `[agent] provider = "anthropic"` puts Claude
-behind the same harness when you want faster reasoning while iterating, and
-the open-model path stays first-class for offline compute nodes and for the
-long unattended grind. `[agent] compute_profile` (`laptop`/`workstation`/
-`cluster`, derived from your SLURM config when unset) is the other half of a
-quick local loop — it tells the agent how big a calculation it may reach for,
-and requires it to state plainly when a number is a laptop-sized smoke test
-rather than a production result.
+On a cluster the endpoint is **discovered, not configured**: the GPU node is
+the scheduler's choice, so `[agent.serve]` declares the launch (partition,
+port, vLLM flags) and the job records the URL it landed on — deleting that
+record when the server exits, so a dead node never keeps answering for a live
+one. A written-down `[agent] endpoint` always outranks it.
+
+`[agent] compute_profile` (`laptop`/`workstation`/`cluster`, derived from your
+SLURM config when unset) tells the agent how big a calculation it may reach
+for, and requires it to state plainly when a number is a laptop-sized smoke
+test rather than a production result. The loop is also provider-agnostic:
+`[agent] provider = "anthropic"` puts Claude behind the same harness where
+there is internet and billed API access (a Claude subscription is a separate
+product and does not include it).
 
 Verified against a real Llama 3.1 8B via Ollama: an autonomous bulk-Cu
 relaxation whose reported energy matches an independent calculation exactly,
@@ -424,13 +430,14 @@ content-addressed artifact store with tiered retention, define-by-run tracing
 with content-hash caching, verification hooks, MACE/ASE/Quantum ESPRESSO
 relaxation task, AiiDA-style protocols and SSSP pseudopotential families,
 layered HPC configuration with a SLURM submission layer, the Mason agent
-harness for open models and Claude alike, CLI, MCP server. 820+ tests (including every
-docstring example, executed as doctests), ~96% coverage, mypy `--strict`,
-plus adversarial multi-agent review passes whose confirmed findings are
-regression tests — the QE engine verified against a real `pw.x` 7.4.1, the
-balanced protocol against a real SSSP install, Mason against a real Llama
-via Ollama. The `RunStore` protocol is the seam for Postgres; the backend
-factory is the seam for more engines.
+harness (open models self-served on a GPU node, or Claude) with its model
+server as a batch job, CLI, MCP server. 870+ tests (including every docstring
+example, executed as doctests), ~96% coverage, mypy `--strict`, plus
+adversarial multi-agent review passes whose confirmed findings are regression
+tests — the QE engine verified against a real `pw.x` 7.4.1, the balanced
+protocol against a real SSSP install, Mason against a real Llama via Ollama.
+The `RunStore` protocol is the seam for Postgres; the backend factory is the
+seam for more engines.
 
 ## Development
 
