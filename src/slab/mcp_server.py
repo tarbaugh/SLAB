@@ -118,9 +118,11 @@ def build_server(root: Path) -> MCPServer:
     @server.tool()
     def list_engines() -> dict[str, Any]:
         """What can be computed here: slab's built-in engines
-        (emt/lj/mace/qe/rootstock — qe drives pw.x and needs only the
-        executable plus pseudopotentials), everything this cluster's engine
-        registry declares (LAMMPS, VASP, site aliases, ...) with the
+        (emt/lammps/lj/mace/qe/rootstock — qe drives pw.x and needs only the
+        executable plus pseudopotentials; lammps drives lmp and needs the
+        executable plus your pair_style/pair_coeff/files potential options),
+        everything this cluster's engine registry declares (VASP, site
+        aliases, ...) with the
         maintainer's declared versions, and — under 'rootstock' — the
         canonical MLIP checkpoint ids the cluster's rootstock install serves,
         each usable DIRECTLY as the engine= argument (e.g.

@@ -217,6 +217,17 @@ def test_qe_version_probe_is_memoized_until_the_binary_changes(tmp_path: Path) -
     assert counter.read_text().count("x") == 2
 
 
+def test_qe_command_none_means_absent_in_the_locator(tmp_path: Path) -> None:
+    """{'command': None} (a JSON null) must resolve like an absent key, not
+    stamp the literal string 'None' into the cache identity while the
+    factory quietly resolves a real binary from the config."""
+    from slab.backends import _qe_locator
+
+    command, _pseudo_dir = _qe_locator({"command": None})
+    assert command == "pw.x"
+    assert describe_engine("qe", {"command": None})["command"] == "pw.x"
+
+
 def test_qe_version_prefers_profile_command(tmp_path: Path) -> None:
     script = _script(tmp_path / "pw.x", 'echo "     Program PWSCF v.8.8.8 starts"\n')
     profile = SimpleNamespace(command=str(script))

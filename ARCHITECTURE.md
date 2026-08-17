@@ -345,11 +345,11 @@ CLI (typer)          MCP server (stdio)      ← two skins, one behavior
   daemon and nothing to configure. `RunStore` is a protocol — the Postgres
   seam — and schema versions are tracked via `PRAGMA user_version`.
 - **Engines.** `slab.backends` maps names to ASE calculators from two
-  sources: built-ins (`mace` in-process, `qe` driving `pw.x` through ASE's
-  file-IO calculator, `rootstock` cluster-served, ASE's toys) and the
-  cluster engine registry (§7a). SLAB implements no physics; adding LAMMPS
-  or VASP means adding a registry entry, and nothing in tracing, lifecycle,
-  or retention changes. Heavy imports (ASE, torch) are
+  sources: built-ins (`mace` in-process, `qe` driving `pw.x` and `lammps`
+  driving `lmp` through ASE's file-IO calculators, `rootstock`
+  cluster-served, ASE's toys) and the cluster engine registry (§7a). SLAB
+  implements no physics; adding VASP means adding a registry entry, and
+  nothing in tracing, lifecycle, or retention changes. Heavy imports (ASE, torch) are
   quarantined behind `slab.tasks`/`slab.backends` so the core package and CLI
   stay import-light.
 - **Local-first execution.** The MVP runs tasks in-process. Checkpointing and
@@ -395,8 +395,8 @@ ideas, applied to *all* engines:
    its default options, the environment variables the code needs, the
    maintainer's declared version, and a verification probe.
 2. *Canonical names, capability resolution.* Workflow code addresses engines
-   by name (`lammps`, `vasp`, `mace-mp`); the registry maps names to concrete
-   builds on this cluster. The same script runs on any cluster declaring the
+   by name (`vasp`, `mace-mp`, `qe-delta`); the registry maps names to
+   concrete builds on this cluster. The same script runs on any cluster declaring the
    names it uses. Collisions with built-in names are refused at validation —
    ambiguity is never resolved by precedence order.
 3. *Maintainer-verified installs.* `slab engines verify` runs each entry's

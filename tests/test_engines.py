@@ -54,7 +54,7 @@ def test_registry_refuses_newer_layout() -> None:
         EngineRegistry.model_validate({"layout_version": 99, "engines": {}})
 
 
-@pytest.mark.parametrize("shadowing", ["mace", "qe"])
+@pytest.mark.parametrize("shadowing", ["mace", "qe", "lammps"])
 def test_registry_refuses_builtin_shadowing(shadowing: str) -> None:
     with pytest.raises(ValidationError, match="mace-mp"):
         EngineRegistry.model_validate({"engines": {shadowing: EMT_SPEC}})
@@ -89,7 +89,7 @@ def test_example_registry_file_is_valid() -> None:
     repo_root = Path(__file__).resolve().parent.parent  # cwd-independent
     payload = json.loads((repo_root / "examples" / "engines.example.json").read_text())
     registry = EngineRegistry.model_validate(payload)
-    assert {"mace-mp", "uma", "lammps", "qe-delta", "vasp"} <= set(registry.engines)
+    assert {"mace-mp", "uma", "lammps-delta", "qe-delta", "vasp"} <= set(registry.engines)
 
 
 # -- discovery -------------------------------------------------------------------------
@@ -203,6 +203,7 @@ def test_get_calculator_resolves_registry_engine(
     assert type(get_calculator("emt-cluster")).__name__ == "EMT"
     assert available_engines(load_registry()) == (
         "emt",
+        "lammps",
         "lj",
         "mace",
         "qe",

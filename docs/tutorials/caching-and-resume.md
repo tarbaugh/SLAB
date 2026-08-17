@@ -162,9 +162,10 @@ and returning a dict folded into the key. `relax` wires
 `cache_extra=describe_engine`: at call time it resolves what the `engine`
 argument actually names — a built-in, a cluster-registry entry with its full
 spec, or a rootstock checkpoint — and folds that into the key. A maintainer
-bumping `qe` from 7.3 to 7.4 in the cluster's registry file honestly
-invalidates every cached `qe` relax, as does *any* spec edit (options, env,
-calculator path). See [Engines](engines.md) for the registry itself.
+bumping a `qe-delta` site alias from 7.3 to 7.4 in the cluster's registry
+file honestly invalidates every cached relax that used it, as does *any*
+spec edit (options, env, calculator path). See [Engines](engines.md) for
+the registry itself.
 
 ```python
 from ase.build import bulk

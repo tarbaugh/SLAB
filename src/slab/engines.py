@@ -9,7 +9,7 @@ wholesale for *all* engines (LAMMPS, Quantum ESPRESSO, VASP, MLIPs):
    clients. The client merely *finds* a registry file; everything else is
    declared by the file, which lives with the install and travels with it.
 2. **Canonical names, capability resolution.** Workflow code says
-   ``engine="lammps"`` or ``engine="vasp"``; the registry maps the name to a
+   ``engine="vasp"`` or ``engine="mace-mp"``; the registry maps the name to a
    concrete, maintainer-verified way of building an ASE calculator on *this*
    cluster. The same workflow script runs unchanged on any cluster whose
    registry declares the names it uses.
@@ -73,7 +73,7 @@ LAYOUT_VERSION = 1
 REGISTRY_ENV_VAR = "SLAB_ENGINES"
 _USER_REGISTRY = Path("~/.config/slab/engines.json")
 _PROBE_TIMEOUT_S = 120
-_BUILTIN_ENGINES = ("emt", "lj", "mace", "qe", "rootstock")
+_BUILTIN_ENGINES = ("emt", "lammps", "lj", "mace", "qe", "rootstock")
 
 
 class EngineSpec(BaseModel):

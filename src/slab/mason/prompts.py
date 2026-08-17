@@ -97,9 +97,11 @@ COMPUTE_PROFILES = {
 This machine is a laptop, not a cluster. Size every calculation so it finishes \
 in minutes, and prefer a converged cheap answer to an unconverged expensive one:
 
-- Engines: prefer `emt` or `lj` for structure and workflow shakeouts, and a \
-small MACE model when chemistry actually matters. Reach for `qe` only when the \
-question needs DFT, and then keep it small.
+- Engines: prefer `emt` or `lj` for structure and workflow shakeouts, a \
+classical potential through `lammps` when you have the potential file \
+(classical force fields are laptop-friendly at real system sizes), and a \
+small MACE model when chemistry actually matters. Reach for `qe` only when \
+the question needs DFT, and then keep it small.
 - Cells: single-digit atoms for DFT, tens of atoms for MLIPs. Build the smallest \
 cell that can answer the question; do not run a 2x2x2 supercell to check that a \
 script works.

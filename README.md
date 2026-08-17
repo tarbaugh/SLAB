@@ -282,15 +282,31 @@ exception notes, and the input/output/`CRASH` files are kept as artifacts.
 Force printing (`tprnfor`) defaults on — slab's tasks drive optimizers with
 forces.
 
-**Everything else via the engine registry.** For LAMMPS, VASP, site-specific
-MLIP aliases, and site-curated QE setups, SLAB generalizes rootstock's
-pattern: the client is only a bootstrap; a *registry file that lives with the
-cluster* declares how each canonical engine name is built here. Workflow code
-says `engine="lammps"` and runs unchanged on any cluster whose registry
-declares `lammps`. Resolution order is built-ins → registry → rootstock
-checkpoint ids, so a maintainer's curated alias (with baked-in options)
-always beats bare checkpoint resolution — though entries may not shadow
-built-in names (`qe`, `mace`, ...); site aliases pick distinct names.
+**LAMMPS as a built-in.** `engine="lammps"` drives the `lmp` binary through
+ASE's `lammpsrun` calculator on the same terms: just the executable
+(`command=`, `[engines.lammps]` in the slab config, or
+`$ASE_LAMMPSRUN_COMMAND`) plus your potential. The potential is *required* —
+`pair_style`/`pair_coeff` have no default, because ASE's silent fallback is a
+dimensionless `lj/cut` toy that would return numbers meaning nothing, and
+which potential describes a system is a science decision. `files=` entries
+are staged into the slab-managed scratch and bare-basename `pair_coeff`
+references resolve to the staged copies, so options work from any cwd. When
+`lmp` fails, the failure record speaks LAMMPS: the real `ERROR: ...` line
+dies inside a `lammpsrun` reader thread (Python sees only "Failed to
+retrieve any thermo_style-output"), so slab parses it out of the retained
+log — with one line of preceding context — and keeps the input/log/data
+files as artifacts.
+
+**Everything else via the engine registry.** For VASP, site-specific
+MLIP aliases, and site-curated QE or LAMMPS setups, SLAB generalizes
+rootstock's pattern: the client is only a bootstrap; a *registry file that
+lives with the cluster* declares how each canonical engine name is built
+here. Workflow code says `engine="vasp"` and runs unchanged on any cluster
+whose registry declares `vasp`. Resolution order is built-ins → registry →
+rootstock checkpoint ids, so a maintainer's curated alias (with baked-in
+options) always beats bare checkpoint resolution — though entries may not
+shadow built-in names (`qe`, `lammps`, `mace`, ...); site aliases pick
+distinct names.
 
 ```json
 {

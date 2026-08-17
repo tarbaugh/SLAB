@@ -320,7 +320,7 @@ def test_engines_list_without_registry(monkeypatch: pytest.MonkeyPatch, tmp_path
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     result = runner.invoke(app, ["engines", "list"])
     assert result.exit_code == 0
-    assert "built-in: emt, lj, mace, qe, rootstock" in result.output
+    assert "built-in: emt, lammps, lj, mace, qe, rootstock" in result.output
     assert "none configured" in result.output
 
 

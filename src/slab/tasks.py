@@ -69,16 +69,18 @@ def relax(
     inspectable while the run is alive, hash-and-discarded once retention
     tiers kick in. File-IO engines contribute their primary output the same
     way: with ``engine="qe"``, the final SCF's ``espresso.pwo`` is kept as
-    ``{label or 'relax'}.pwo``.
+    ``{label or 'relax'}.pwo``; with ``engine="lammps"``, the final force
+    evaluation's log (thermo table included) as ``{label or 'relax'}.log``.
 
     On failure, the evidence survives instead of vanishing with the scratch
     directories: the exception is re-raised carrying diagnostic notes
     (completed steps; the last trajectory frame's energy and residual force;
-    for file-IO engines, the engine's own error report — e.g. ``pw.x``'s
-    ``Error in routine ...`` message) and — inside a run — the partial
-    trajectory is kept as ``{label or 'relax'}-failed.traj``, alongside the
-    engine's input/output/``CRASH`` files as
-    ``{label or 'relax'}-failed.{pwi,pwo,crash}``. The tracer stores the
+    for file-IO engines, the engine's own error report — ``pw.x``'s
+    ``Error in routine ...`` message, LAMMPS's ``ERROR: ...`` log line) and —
+    inside a run — the partial trajectory is kept as
+    ``{label or 'relax'}-failed.traj``, alongside the engine's own files as
+    ``{label or 'relax'}-failed.{pwi,pwo,crash}`` (qe) or
+    ``{label or 'relax'}-failed.{in,log,data}`` (lammps). The tracer stores the
     notes and a trimmed traceback on the failed task record
     (:func:`slab.errors.failure_record`), so an agent inspecting the run can
     decide a *specific* correction instead of retrying blind.

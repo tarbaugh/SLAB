@@ -73,12 +73,27 @@ class QeEngineConfig(BaseModel):
     pseudo_dir: str | None = None
 
 
+class LammpsEngineConfig(BaseModel):
+    """Defaults for the built-in ``lammps`` engine (``[engines.lammps]``).
+
+    Only the machine fact lives here — how to invoke the binary. The
+    interatomic potential (``pair_style``/``pair_coeff``/``files``) is a
+    science decision passed per call in ``calculator_options``, never a
+    machine default.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    command: str | None = None
+
+
 class EnginesConfig(BaseModel):
     """Per-engine defaults (``[engines]``)."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     qe: QeEngineConfig = QeEngineConfig()
+    lammps: LammpsEngineConfig = LammpsEngineConfig()
 
 
 class PathsConfig(BaseModel):
@@ -541,6 +556,9 @@ schema_version = 1
 [engines.qe]
 # command = "srun pw.x"                # how to invoke pw.x on this machine
 # pseudo_dir = "/shared/sw/pseudos"    # used when no pseudo_family is given
+
+[engines.lammps]
+# command = "srun lmp"                 # how to invoke LAMMPS on this machine
 
 [hpc]
 # cluster = "delta"

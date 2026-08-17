@@ -25,17 +25,14 @@
       "version": "rootstock/uma-s-1p1",
       "description": "FAIRChem UMA via rootstock; task= baked in for materials"
     },
-    "lammps": {
+    "lammps-delta": {
       "calculator": "ase.calculators.lammpsrun.LAMMPS",
       "options": {
-        "command": "lmp",
+        "command": "srun lmp",
         "files": []
       },
-      "env": {
-        "ASE_LAMMPSRUN_COMMAND": "lmp"
-      },
-      "version": "2024.08.29",
-      "description": "LAMMPS via ASE lammpsrun; pair_style etc. passed per call in calculator_options",
+      "version": "2025.07.22",
+      "description": "LAMMPS with this cluster's launcher baked in; pair_style etc. passed per call in calculator_options. Plain engine='lammps' is a slab built-in (and registry entries may not shadow it) — declare a distinct alias like this one to pin a curated site setup.",
       "probe": ["lmp", "-h"]
     },
     "qe-delta": {

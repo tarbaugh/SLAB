@@ -1,0 +1,77 @@
+log /dev/stdout
+clear
+variable dump_file string "/private/tmp/claude-501/-Users-tom-SLAB/9ddf51e2-f38d-49bb-a498-9747b26b8c1a/scratchpad/lammps-record/scratch/trj_lammps000005nqosgvc7"
+variable data_file string "/private/tmp/claude-501/-Users-tom-SLAB/9ddf51e2-f38d-49bb-a498-9747b26b8c1a/scratchpad/lammps-record/scratch/data_lammps0000055bfpdhdz"
+atom_style atomic
+units metal
+boundary p p p
+box tilt large
+
+The 'box' command has been removed and will be ignored
+
+atom_modify sort 0 0.0
+
+read_data /private/tmp/claude-501/-Users-tom-SLAB/9ddf51e2-f38d-49bb-a498-9747b26b8c1a/scratchpad/lammps-record/scratch/data_lammps0000055bfpdhdz
+Reading data file ...
+  triclinic box = (0 0 0) to (5.112382 4.4274527 4.1742424) with tilt (2.556191 2.556191 1.4758176)
+WARNING: Triclinic box skew is large. LAMMPS will run inefficiently. (src/src/domain.cpp:221)
+  1 by 1 by 1 MPI processor grid
+  reading atoms ...
+  8 atoms
+  read_data CPU = 0.000 seconds
+
+### interactions
+pair_style eam
+pair_coeff 1 1 /private/tmp/claude-501/-Users-tom-SLAB/9ddf51e2-f38d-49bb-a498-9747b26b8c1a/scratchpad/lammps-record/scratch/Cu_u3.eam
+Reading eam potential file /private/tmp/claude-501/-Users-tom-SLAB/9ddf51e2-f38d-49bb-a498-9747b26b8c1a/scratchpad/lammps-record/scratch/Cu_u3.eam with DATE: 2007-06-11
+mass 1 63.546000
+
+### run
+fix fix_nve all nve
+dump dump_all all custom 1 /private/tmp/claude-501/-Users-tom-SLAB/9ddf51e2-f38d-49bb-a498-9747b26b8c1a/scratchpad/lammps-record/scratch/trj_lammps000005nqosgvc7 id type x y z vx vy vz fx fy fz
+thermo_style custom step temp press cpu pxx pyy pzz pxy pxz pyz ke pe etotal vol lx ly lz atoms
+thermo_modify flush yes format float %23.16g
+thermo 1
+run 0
+Neighbor list info ...
+  update: every = 1 steps, delay = 0 steps, check = yes
+  max neighbors/atom: 2000, page size: 100000
+  master list distance cutoff = 6.95
+  ghost atom cutoff = 6.95
+  binsize = 3.475, bins = 3 2 2
+  1 neighbor lists, perpetual/occasional/extra = 1 0 0
+  (1) pair eam, perpetual
+      attributes: half, newton on
+      pair build: half/bin/atomonly/newton/tri
+      stencil: half/bin/3d/tri
+      bin: standard
+Per MPI rank memory allocation (min/avg/max) = 3.212 | 3.212 | 3.212 Mbytes
+   Step          Temp          Press           CPU            Pxx            Pyy            Pzz            Pxy            Pxz            Pyz           KinEng         PotEng         TotEng         Volume           Lx             Ly             Lz          Atoms   
+         0                        0       17.45234162594413                       0       9.543547546904843       14.42912264807565        28.3843546828519      -1.410250266340206      -7.621943711376248      -20.20772546969806                       0      -28.31961276572313      -28.31961276572313       94.48326675000003       5.112382027978739       4.427452710080595       4.174242446240995          8 
+Loop time of 2.92e-07 on 1 procs for 0 steps with 8 atoms
+
+0.0% CPU use with 1 MPI tasks x no OpenMP threads
+
+MPI task timing breakdown:
+Section |  min time  |  avg time  |  max time  |%varavg| %total
+---------------------------------------------------------------
+Pair    | 0          | 0          | 0          |   0.0 |  0.00
+Neigh   | 0          | 0          | 0          |   0.0 |  0.00
+Comm    | 0          | 0          | 0          |   0.0 |  0.00
+Output  | 0          | 0          | 0          |   0.0 |  0.00
+Modify  | 0          | 0          | 0          |   0.0 |  0.00
+Other   |            | 2.92e-07   |            |       |100.00
+
+Nlocal:              8 ave           8 max           8 min
+Histogram: 1 0 0 0 0 0 0 0 0 0
+Nghost:            721 ave         721 max         721 min
+Histogram: 1 0 0 0 0 0 0 0 0 0
+Neighs:            536 ave         536 max         536 min
+Histogram: 1 0 0 0 0 0 0 0 0 0
+
+Total # of neighbors = 536
+Ave neighs/atom = 67
+Neighbor list builds = 0
+Dangerous builds = 0
+print "__end_of_ase_invoked_calculation__"
+__end_of_ase_invoked_calculation__

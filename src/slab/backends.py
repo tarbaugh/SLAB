@@ -7,13 +7,16 @@ instance. Three sources feed the mapping, in resolution order:
 * **Built-ins** — engines the ``slab`` package can construct on its own:
   ``mace`` (in-process, via the ``slab[mace]`` extra), ``qe`` (Quantum
   ESPRESSO's ``pw.x`` via ASE's file-IO calculator — no extra needed, just
-  the executable and pseudopotentials), ``rootstock`` (an MLIP served from a
-  cluster's pre-built rootstock install, via the ``slab[rootstock]`` extra),
-  and ASE's ``emt``/``lj`` toys for tests.
+  the executable and pseudopotentials), ``lammps`` (the ``lmp`` binary via
+  ASE's ``lammpsrun`` calculator — likewise just the executable plus your
+  potential files), ``rootstock`` (an MLIP served from a cluster's pre-built
+  rootstock install, via the ``slab[rootstock]`` extra), and ASE's
+  ``emt``/``lj`` toys for tests.
 * **The cluster engine registry** (:mod:`slab.engines`) — names a cluster
-  maintainer declared (``lammps``, ``qe``, ``vasp``, site-specific MLIP
-  aliases, ...), resolved rootstock-style: the client only finds the registry
-  file; the file says how each engine is built *here*.
+  maintainer declared (``vasp``, curated site aliases like ``qe-delta`` or
+  ``lammps-delta``, site-specific MLIP aliases, ...), resolved
+  rootstock-style: the client only finds the registry file; the file says
+  how each engine is built *here*.
 * **Rootstock checkpoint ids, served silently** — any canonical checkpoint id
   the cluster's rootstock install declares (``mace-mp-0-medium``,
   ``uma-s-1p1``, ...) works directly as an engine name; rootstock resolves
@@ -38,6 +41,25 @@ Engine choices worth knowing:
 * ``mace`` — the MACE foundation model in-process; options are forwarded to
   ``mace.calculators.mace_mp`` (``model=``, ``device=``, ...). First use
   downloads the checkpoint to ``~/.cache/mace``.
+* ``lammps`` — the LAMMPS binary through ``ase.calculators.lammpsrun``. The
+  command comes from ``command=`` in ``calculator_options`` (or
+  ``[engines.lammps]`` in the slab config, or ``$ASE_LAMMPSRUN_COMMAND``,
+  defaulting to ``lmp``). The *interatomic potential* is required:
+  ``pair_style=`` and ``pair_coeff=`` (plus ``files=`` for potential files)
+  must be passed explicitly — ASE's silent fallback is a dimensionless
+  ``lj/cut`` toy that would "work" for any material, and which potential to
+  use is a science decision. ``files=`` entries are staged into the scratch
+  and bare-basename references to them in ``pair_coeff`` resolve to the
+  staged copies, so ``files=["/pots/Cu_u3.eam"]`` with
+  ``pair_coeff=["1 1 Cu_u3.eam"]`` works from any cwd. Everything else
+  (``units=``, ``specorder=``, ``masses=``, ...) is forwarded to the
+  ``LAMMPS`` calculator verbatim.
+  Unless ``tmp_dir=`` is given, each calculator runs in a slab-managed
+  scratch directory that :func:`close_calculator` removes — the scratch is
+  what makes failure evidence exist at all: LAMMPS's real error message
+  (``ERROR: ...``) surfaces in Python only as a bare
+  ``RuntimeError: Failed to retrieve any thermo_style-output`` or an exit
+  code, while the story lives in the log file the scratch retains.
 * ``qe`` — Quantum ESPRESSO ``pw.x`` through ``ase.calculators.espresso``.
   Where the code lives comes from ``command=`` + ``pseudo_dir=`` in
   ``calculator_options`` (or a ready ``profile=``, or ASE's own config file);
@@ -61,6 +83,7 @@ from __future__ import annotations
 
 import functools
 import os
+import re
 import shlex
 import shutil
 import tempfile
@@ -85,9 +108,9 @@ def available_engines(registry: EngineRegistry | None = None) -> tuple[str, ...]
 
     Examples:
         >>> available_engines()
-        ('emt', 'lj', 'mace', 'qe', 'rootstock')
+        ('emt', 'lammps', 'lj', 'mace', 'qe', 'rootstock')
     """
-    builtin = ("emt", "lj", "mace", "qe", "rootstock")
+    builtin = ("emt", "lammps", "lj", "mace", "qe", "rootstock")
     extra = tuple(name for name in registry_engine_names(registry) if name not in builtin)
     return builtin + extra
 
@@ -125,6 +148,8 @@ def get_calculator(engine: str, **options: Any) -> Any:
         return LennardJones(**options)
     if normalized == "mace":
         return _mace_calculator(**options)
+    if normalized == "lammps":
+        return _lammps_calculator(**options)
     if normalized == "qe":
         return _qe_calculator(**options)
     if normalized == "rootstock":
@@ -185,6 +210,25 @@ def describe_engine(
     normalized = engine.strip().lower()
     if normalized in ("emt", "lj", "mace", "rootstock"):
         return {"engine": normalized, "source": "builtin", "version": None}
+    if normalized == "lammps":
+        # The detected LAMMPS version and the resolved command are the cache
+        # identity, mirroring qe: upgrading the binary or pointing at a
+        # different one honestly invalidates cached results. Potential file
+        # *paths* are identity too, resolved: a relative files= entry (or a
+        # ~) names different bytes from a different cwd, so the resolved
+        # absolute paths are stamped here — the traced options alone carry
+        # only the literal relative string. File *contents* are not hashed,
+        # exactly like a bare pseudo_dir.
+        identity: dict[str, Any] = {
+            "engine": "lammps",
+            "source": "builtin",
+            "version": _lammps_version(options),
+            "command": _lammps_locator(options),
+        }
+        sources = _lammps_file_sources(options)
+        if sources is not None:
+            identity["files"] = [str(source) for source in sources]
+        return identity
     if normalized == "qe":
         # The detected pw.x version, the resolved command, and the resolved
         # pseudo_dir are all part of the cache key: upgrading the executable,
@@ -298,9 +342,12 @@ def close_calculator(calculator: Any) -> None:
     """Release a calculator's resources, if it holds any.
 
     Worker-backed calculators (rootstock spawns a subprocess per instance)
-    expose ``close()``; in-process ones don't. File-IO calculators built with
-    a slab-managed scratch directory (``qe`` without an explicit
-    ``directory=``) have that scratch removed here — capture any evidence you
+    expose ``close()``; in-process ones don't; calculators with no ``close``
+    of their own get a ``_slab_close`` hook from their factory (``lammps``
+    keeps a persistent ``lmp`` subprocess that would otherwise leak).
+    File-IO calculators built with a slab-managed scratch directory (``qe``
+    without an explicit ``directory=``, ``lammps`` without an explicit
+    ``tmp_dir=``) have that scratch removed here — capture any evidence you
     need first (:func:`collect_engine_outputs`,
     :func:`collect_failure_evidence`); :func:`slab.tasks.relax` does both.
     Safe on all calculators, and safe to call twice.
@@ -308,6 +355,9 @@ def close_calculator(calculator: Any) -> None:
     Examples:
         >>> close_calculator(get_calculator("emt"))  # no-op for in-process engines
     """
+    closer = getattr(calculator, "_slab_close", None)
+    if callable(closer):
+        closer()
     close = getattr(calculator, "close", None)
     if callable(close):
         close()
@@ -378,15 +428,25 @@ def collect_engine_outputs(calculator: Any) -> list[tuple[str, Path]]:
     """Primary output files a file-IO calculator produced, as ``(suffix, path)``.
 
     For ``qe`` this is the *last* SCF's ``espresso.pwo`` (ASE reruns ``pw.x``
-    in the same directory for every force evaluation, overwriting the file) —
+    in the same directory for every force evaluation, overwriting the file);
+    for ``lammps`` the last force evaluation's log (thermo table included) —
     the natural artifact to keep after a successful task. In-process
     calculators (emt, mace, ...) write no files: empty list. Never raises.
+
+    Both engine shapes are duck-typed (``template``/``directory`` for
+    ASE's GenericFileIO calculators, ``name == "lammpsrun"`` plus a
+    ``tmp_dir`` for LAMMPS), so registry-built calculators of the same
+    shapes get the same treatment as the built-ins.
 
     Examples:
         >>> collect_engine_outputs(get_calculator("emt"))
         []
     """
     try:
+        lammps_dir = _lammpsrun_dir(calculator)
+        if lammps_dir is not None:
+            log = _latest_lammps_file(lammps_dir, "log_")
+            return [] if log is None else [("log", log)]
         template = getattr(calculator, "template", None)
         directory = getattr(calculator, "directory", None)
         name = getattr(template, "outputname", None)
@@ -403,17 +463,22 @@ def collect_engine_outputs(calculator: Any) -> list[tuple[str, Path]]:
 def collect_failure_evidence(calculator: Any) -> tuple[list[str], list[tuple[str, Path]]]:
     """What a failed file-IO engine left behind: notes plus files worth keeping.
 
-    A crashed ``pw.x`` surfaces in Python as a bare
-    ``CalledProcessError: ... returned non-zero exit status`` — the actual
-    story is in the files it wrote. Returns ``(notes, files)``:
+    A crashed engine surfaces in Python as a bare
+    ``CalledProcessError: ... returned non-zero exit status`` (``pw.x``) or a
+    ``RuntimeError: Failed to retrieve any thermo_style-output`` (LAMMPS,
+    whose real ``ERROR: ...`` line dies in a reader thread) — the actual
+    story is in the files the engine wrote. Returns ``(notes, files)``:
 
-    * *notes* — short strings for ``Exception.add_note``: the parsed
-      ``Error in routine ...`` block(s) from the output file (QE fences them
-      in ``%%%%`` lines), falling back to the ``CRASH`` file, falling back to
-      the output tail; plus the stderr tail when non-empty.
+    * *notes* — short strings for ``Exception.add_note``: for ``qe`` the
+      parsed ``Error in routine ...`` block(s) from the output file (QE
+      fences them in ``%%%%`` lines), falling back to the ``CRASH`` file,
+      falling back to the output tail, plus the stderr tail when non-empty;
+      for ``lammps`` the ``ERROR`` line(s) from the log with one line of
+      preceding context (the echoed command or the last thermo row before
+      death), with the same flagged-lines-then-tail fallback.
     * *files* — ``(suffix, path)`` pairs of the engine's input, output,
-      stderr, and ``CRASH`` files that exist and are non-empty, for keeping
-      as artifacts before the scratch directory vanishes.
+      stderr, and ``CRASH``/data files that exist and are non-empty, for
+      keeping as artifacts before the scratch directory vanishes.
 
     Both empty for in-process calculators. Best-effort: never raises (it runs
     inside exception handlers).
@@ -425,6 +490,9 @@ def collect_failure_evidence(calculator: Any) -> tuple[list[str], list[tuple[str
     notes: list[str] = []
     files: list[tuple[str, Path]] = []
     try:
+        lammps_dir = _lammpsrun_dir(calculator)
+        if lammps_dir is not None:
+            return _lammps_failure_evidence(lammps_dir)
         template = getattr(calculator, "template", None)
         directory = getattr(calculator, "directory", None)
         if template is None or directory is None:
@@ -530,6 +598,355 @@ def _error_blocks(text: str) -> list[str]:
 def _file_suffix(name: str) -> str:
     """Artifact-name suffix for an engine file: extension, else the lowercased name."""
     return Path(name).suffix.lstrip(".").lower() or Path(name).name.lower()
+
+
+def _lammps_calculator(**options: Any) -> Any:
+    from ase.calculators.lammpsrun import LAMMPS
+
+    command = options.pop("command", None)
+    tmp_dir = options.pop("tmp_dir", None)
+    # The potential is required, loudly. ASE's lammpsrun silently defaults to
+    # pair_style "lj/cut 2.5" with pair_coeff "* * 1 1" — a dimensionless toy
+    # that would "run" for any material and return numbers meaning nothing.
+    # Which potential describes a system is a science decision, exactly like
+    # which pseudopotential (resolve_pseudopotentials refuses ambiguity for
+    # the same reason).
+    if "pair_style" not in options or "pair_coeff" not in options:
+        raise EngineNotAvailableError(
+            "engine 'lammps' requires an interatomic potential: pass both "
+            "pair_style= and pair_coeff= in calculator_options (plus files= "
+            "for potential files), e.g. {'pair_style': 'eam/alloy', "
+            "'pair_coeff': ['* * Cu.eam.alloy Cu'], "
+            "'files': ['/path/to/Cu.eam.alloy']} — without them ASE would "
+            "silently fall back to a dimensionless lj/cut toy potential"
+        )
+    command = str(command) if command is not None else (_lammps_setting("command") or "lmp")
+    executable_argv = shlex.split(command)
+    if not executable_argv or shutil.which(executable_argv[0]) is None:
+        raise EngineNotAvailableError(
+            f"engine 'lammps' resolved command {command!r}, but "
+            f"{executable_argv[0] if executable_argv else command!r} is not on "
+            f"PATH — install LAMMPS (or module-load it), pass "
+            f"calculator_options={{'command': '/path/to/lmp', ...}}, or set "
+            f"command under [engines.lammps] in the slab config"
+        )
+    # No tmp_dir= means a slab-managed scratch, and the scratch is what makes
+    # evidence possible: lammpsrun only *retains* the input/log/data files
+    # when a tmp_dir is supplied — with its own auto-created directory the log
+    # is a consumed pipe and a crash leaves nothing to read.
+    scratch: Path | None = None
+    if tmp_dir is None:
+        scratch = Path(tempfile.mkdtemp(prefix="slab-lammps-"))
+        tmp_dir = scratch
+    try:
+        # Stage against the realpath — lammpsrun realpaths tmp_dir itself, so
+        # this keeps one canonical directory across the staged references,
+        # the calculator's parameters, and the files it writes.
+        options = _stage_lammps_files(options, Path(os.path.realpath(tmp_dir)))
+        calculator: Any = LAMMPS(command=command, tmp_dir=str(tmp_dir), **options)
+    except Exception:
+        if scratch is not None:
+            shutil.rmtree(scratch, ignore_errors=True)
+        raise
+    if scratch is not None:
+        calculator._slab_scratch = scratch
+    # lammpsrun keeps a persistent lmp subprocess (keep_alive=True) but has no
+    # close(); its _lmp_end is the idempotent terminator close_calculator
+    # needs, exposed through the generic _slab_close hook.
+    calculator._slab_close = calculator._lmp_end
+    return calculator
+
+
+def _stage_lammps_files(options: dict[str, Any], tmp_dir: Path) -> dict[str, Any]:
+    """Make ``files=`` cwd-independent: absolute sources, staged references.
+
+    ASE's documented usage — ``files=["Cu_u3.eam"]`` with
+    ``pair_coeff=["1 1 Cu_u3.eam"]`` — is a trap on its own: lammpsrun
+    copies the files into its working directory, but the spawned ``lmp``
+    inherits the *caller's* cwd, so the bare name in ``pair_coeff`` only
+    resolves when the caller happens to sit next to the potential file. A
+    traced task must not depend on where it was launched from, so slab makes
+    the copy meaningful: each ``files`` entry is absolutized (against the
+    caller's cwd, where the user wrote it), and any ``pair_coeff`` token
+    that exactly equals a declared file's basename is rewritten to the
+    staged copy's path in *tmp_dir*. The declaration in ``files`` is the
+    authorization — absolute references and ordinary coefficients are never
+    touched. Two entries sharing a basename would silently overwrite each
+    other's copy, so that is refused.
+
+    Returns a new options dict; the caller's dict and lists are traced task
+    inputs and are never mutated.
+    """
+    rewritten = dict(options)
+    # A single string is one coefficient line, not a character sequence —
+    # normalized here unconditionally, because ASE's input writer iterates
+    # pair_coeff and would emit one garbage line per character.
+    pair_coeff = options.get("pair_coeff")
+    if isinstance(pair_coeff, str):
+        rewritten["pair_coeff"] = [pair_coeff]
+        pair_coeff = rewritten["pair_coeff"]
+    sources = _lammps_file_sources(options)
+    if sources is None:
+        return rewritten
+    names = [source.name for source in sources]
+    # The staging directory collapses names — and does so case-insensitively
+    # on macOS's default filesystem, so the guard is case-insensitive too:
+    # refusing a legal pair on Linux beats a silent overwrite on a Mac.
+    lowered = [name.lower() for name in names]
+    duplicates = sorted({name for name in names if lowered.count(name.lower()) > 1})
+    if duplicates:
+        raise EngineNotAvailableError(
+            f"engine 'lammps': files= entries share basename(s) {duplicates} "
+            f"(compared case-insensitively); they would overwrite each other "
+            f"in the staging directory — rename the files or merge the potentials"
+        )
+    staged = {source.name: str(tmp_dir / source.name) for source in sources}
+    rewritten["files"] = [str(source) for source in sources]
+    if isinstance(pair_coeff, (list, tuple)):
+        tokens = {token for line in pair_coeff for token in str(line).split()}
+        ambiguous = sorted(name for name in staged if name in tokens and _is_element_symbol(name))
+        if ambiguous:
+            # 'pair_coeff * * alloy.eam Cu' ends in element names; a staged
+            # file named exactly 'Cu' makes the token undecidable — file
+            # reference or element? Refused, never guessed.
+            raise EngineNotAvailableError(
+                f"engine 'lammps': files= entr{'ies' if len(ambiguous) > 1 else 'y'} "
+                f"named {ambiguous} appear in pair_coeff, but the name is also a "
+                f"chemical element symbol — slab cannot tell a staged-file "
+                f"reference from an element token; rename the file (e.g. add an "
+                f"extension) or reference it by absolute path"
+            )
+        rewritten["pair_coeff"] = [
+            " ".join(staged.get(token, token) for token in str(line).split())
+            for line in pair_coeff
+        ]
+    return rewritten
+
+
+def _lammps_file_sources(options: dict[str, Any]) -> list[Path] | None:
+    """The ``files=`` entries as absolute paths, or None when unset.
+
+    A single string is one file, not a character sequence. Relative entries
+    resolve against the caller's cwd — at *call* time, which is also when
+    :func:`describe_engine` stamps them into the cache identity, so the same
+    relative string in a different cwd is honestly a different computation.
+    """
+    files = options.get("files")
+    if not files:
+        return None
+    if isinstance(files, (str, os.PathLike)):
+        files = [files]
+    sources = [Path(str(entry)).expanduser() for entry in files]
+    return [source if source.is_absolute() else Path.cwd() / source for source in sources]
+
+
+def _is_element_symbol(name: str) -> bool:
+    from ase.data import chemical_symbols
+
+    return name in chemical_symbols
+
+
+def _lammps_locator(options: dict[str, Any]) -> str:
+    """The command ``engine="lammps"`` would run.
+
+    Mirrors the calculator's own resolution — explicit option > the slab
+    config > ASE's ``$ASE_LAMMPSRUN_COMMAND`` convention > bare ``lmp`` — so
+    cache identity and version detection always describe the binary that
+    actually runs. An explicit ``command=None`` (a JSON ``null``, an
+    ``os.environ.get`` miss) means *absent* here exactly as it does in the
+    factory — key presence must not fork the two resolutions. Never raises.
+    """
+    try:
+        command = options.get("command")
+        if command is not None:
+            return str(command)
+        return _lammps_setting("command") or "lmp"
+    except Exception:  # pragma: no cover - defensive: hostile option values
+        return "lmp"
+
+
+def _lammps_version(options: dict[str, Any]) -> str | None:
+    """Version of the LAMMPS that ``engine="lammps"`` would run, or None.
+
+    Parses the ``Large-scale Atomic/Molecular Massively Parallel Simulator -
+    <version>`` banner of ``<command> -h``. Any failure degrades to None:
+    this runs inside cache-key construction and must never raise.
+    """
+    try:
+        command = _lammps_locator(options)
+        identity = _executable_identity(command)
+        if identity is None:
+            return None
+        return _probe_lammps_version(command, *identity)
+    except Exception:  # pragma: no cover - defensive: lru_cache internals
+        return None
+
+
+@functools.lru_cache(maxsize=64)
+def _probe_lammps_version(command: str, executable: str, mtime_ns: int) -> str | None:
+    """Run ``<command> -h`` once and parse the LAMMPS version banner.
+
+    ``-h`` is required — LAMMPS without arguments blocks reading stdin.
+    Runs in a private temp dir under a hard timeout (a command like
+    ``srun lmp`` could otherwise block inside cache-key construction).
+    Every failure path returns None. ``executable`` and ``mtime_ns`` exist
+    to key the memo cache, exactly like the qe probe: one spawn per binary
+    identity, and a replaced binary is re-probed.
+    """
+    del executable, mtime_ns
+    try:
+        import subprocess
+
+        with tempfile.TemporaryDirectory(prefix="slab-lammps-version-") as probe_dir:
+            completed = subprocess.run(
+                [*shlex.split(command), "-h"],
+                cwd=probe_dir,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=_VERSION_PROBE_TIMEOUT_S,
+                check=False,
+            )
+        match = _LAMMPS_BANNER.search(completed.stdout)
+        return match.group(1).strip() if match else None
+    except Exception:
+        return None
+
+
+_LAMMPS_BANNER = re.compile(r"Massively Parallel Simulator\s*-\s*(.+)")
+
+
+def _lammps_setting(key: str) -> str | None:
+    """``[engines.lammps]`` from the slab config, else ASE's own convention.
+
+    The slab config outranks ASE's (it is the file cluster maintainers
+    ship); ASE's convention for lammpsrun is the ``ASE_LAMMPSRUN_COMMAND``
+    key, honored from the ``[environment]`` section of ASE's config file and
+    from the environment — the same order ASE itself uses.
+    """
+    from slab.config import config_value
+
+    value = config_value(f"engines.lammps.{key}")
+    if value is not None:
+        return str(value)
+    if key != "command":
+        return None
+    try:
+        from ase.config import cfg
+
+        if cfg.parser.has_section("environment"):
+            configured = cfg.parser["environment"].get("ASE_LAMMPSRUN_COMMAND")
+            if configured:
+                return str(configured)
+    except Exception:  # pragma: no cover - defensive: malformed ASE config
+        pass
+    return os.environ.get("ASE_LAMMPSRUN_COMMAND") or None
+
+
+def _lammpsrun_dir(calculator: Any) -> Path | None:
+    """The working directory of a lammpsrun-shaped calculator, or None.
+
+    Duck-typed like the GenericFileIO probe in the collectors: any
+    ``ase.calculators.lammpsrun.LAMMPS`` qualifies — built by the ``lammps``
+    engine or by a registry entry — so both get the same evidence handling.
+    (A registry-built one without ``tmp_dir`` retains no files; the
+    collectors then honestly find nothing.)
+    """
+    if getattr(calculator, "name", None) != "lammpsrun":
+        return None
+    parameters = getattr(calculator, "parameters", None)
+    if not isinstance(parameters, dict):
+        return None
+    tmp_dir = parameters.get("tmp_dir")
+    if not isinstance(tmp_dir, (str, os.PathLike)):
+        return None
+    path = Path(tmp_dir)
+    return path if path.is_dir() else None
+
+
+def _latest_lammps_file(directory: Path, prefix: str, *, min_size: int = 1) -> Path | None:
+    """The newest ``{prefix}*`` file of at least *min_size* bytes, or None.
+
+    lammpsrun names its per-invocation files ``in_``/``log_``/``data_`` plus
+    the label, a call counter, and a random suffix; the last force
+    evaluation's files are the newest. Modification time decides (the
+    counter is embedded mid-name), with the name as a deterministic
+    tiebreak. (The name tiebreak trusts lammpsrun's six-digit zero padding;
+    a calculator past 999999 force evaluations *and* an exact
+    nanosecond-mtime tie would sort wrongly — noted, not defended.) A file
+    deleted while this scans is skipped, never an error: the collectors run
+    inside exception handlers.
+    """
+    candidates: list[tuple[int, str, Path]] = []
+    for path in directory.glob(prefix + "*"):
+        try:
+            stat = path.stat()
+        except OSError:  # racing deletion between glob and stat
+            continue
+        if not path.is_file() or stat.st_size < min_size:
+            continue
+        candidates.append((stat.st_mtime_ns, path.name, path))
+    if not candidates:
+        return None
+    return max(candidates)[2]
+
+
+def _lammps_failure_evidence(directory: Path) -> tuple[list[str], list[tuple[str, Path]]]:
+    """Notes and files for a failed lammpsrun calculator's scratch directory.
+
+    The log is the story: LAMMPS prints ``ERROR: ...`` (with the source
+    location) into it, and ``-echo log`` echoes the input commands, so the
+    line preceding the first error is either the command that died or the
+    last thermo row before the run blew up — both worth one note. The dump
+    file is deliberately not kept (binary, and the partial ASE trajectory
+    already is).
+
+    The *newest* log decides, even when empty: a log that exists but holds
+    nothing means the process died before writing (out of memory, a
+    scheduler kill) — that fact is the note, and no older evaluation's
+    healthy log is kept in its place, because evidence from the wrong
+    evaluation is worse than none. A log that cannot be read costs only its
+    notes, never the already-found files; nothing here raises.
+    """
+    notes: list[str] = []
+    files = [
+        (suffix, path)
+        for prefix, suffix in (("in_", "in"), ("data_", "data"))
+        if (path := _latest_lammps_file(directory, prefix)) is not None
+    ]
+    log = _latest_lammps_file(directory, "log_", min_size=0)
+    if log is None:
+        return notes, files
+    try:
+        if log.stat().st_size == 0:
+            notes.append(
+                f"engine log ({log.name}) is empty — the process died before "
+                f"writing anything (killed? out of memory? walltime?)"
+            )
+            return notes, files
+        files.append(("log", log))
+        lines = [
+            line.strip() for line in log.read_text(errors="replace").splitlines() if line.strip()
+        ]
+        errors = [line for line in lines if "ERROR" in line]
+        if errors:
+            notes.append(f"engine error ({log.name}): " + " | ".join(errors[:3]))
+            first = lines.index(errors[0])
+            if first > 0:
+                notes.append(f"engine log context ({log.name}): {lines[first - 1]}")
+        else:
+            flagged = [
+                line
+                for line in lines
+                if any(marker in line.lower() for marker in _FAILURE_MARKERS)
+            ]
+            if flagged:
+                notes.append(f"engine output flagged ({log.name}): " + " | ".join(flagged[-3:]))
+            elif lines:
+                notes.append(f"engine output tail ({log.name}): " + " | ".join(lines[-3:]))
+    except Exception:  # unreadable or vanished log: the found files still stand
+        notes.append(f"engine log ({log.name}) could not be read")
+    return notes, files
 
 
 def _qe_calculator(**options: Any) -> Any:
@@ -638,7 +1055,11 @@ def _qe_locator(options: dict[str, Any]) -> tuple[str, str | None]:
         if profile is not None:
             pseudo = getattr(profile, "pseudo_dir", None)
             return str(profile.command), None if pseudo is None else str(pseudo)
-        if "command" in options:
+        # An explicit command=None means absent, exactly as the factory
+        # treats it — key presence must not fork the two resolutions (a
+        # stamped command of the literal string 'None' would cache under an
+        # identity no binary matches).
+        if options.get("command") is not None:
             command = str(options["command"])
         else:
             command = _qe_setting("command") or "pw.x"
@@ -664,11 +1085,11 @@ def _qe_version(options: dict[str, Any]) -> str | None:
         return None
 
 
-def _banner_version(command: str) -> str | None:
-    """Version banner of *command*, memoized on the executable's identity.
+def _executable_identity(command: str) -> tuple[str, int] | None:
+    """``(resolved executable, mtime_ns)`` of a command line, or None.
 
-    The probe result is cached per ``(command, resolved executable, mtime)``:
-    the binary is spawned once, not on every task call — and replacing the
+    The identity that keys the memoized version probes: the binary is
+    spawned once per identity, not on every task call — and replacing the
     executable (an upgrade, a module swap changing a symlink target) changes
     the mtime and forces a fresh probe, so long-lived processes (the MCP
     server) still see version bumps.
@@ -681,7 +1102,15 @@ def _banner_version(command: str) -> str | None:
         mtime_ns = os.stat(executable).st_mtime_ns
     except OSError:  # pragma: no cover - raced deletion between which and stat
         mtime_ns = -1
-    return _probe_banner_version(command, executable, mtime_ns)
+    return executable, mtime_ns
+
+
+def _banner_version(command: str) -> str | None:
+    """pw.x's version banner for *command*, memoized on the executable's identity."""
+    identity = _executable_identity(command)
+    if identity is None:
+        return None
+    return _probe_banner_version(command, *identity)
 
 
 @functools.lru_cache(maxsize=64)

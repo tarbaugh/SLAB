@@ -117,14 +117,15 @@ layered TOML file ([HPC configuration](tutorials/hpc-config.md)).
 
 MVP vertical slice, working end to end: lifecycle state machine,
 content-addressed artifact store with tiered retention, define-by-run tracing
-with content-hash caching, verification hooks, MACE/ASE/Quantum ESPRESSO
-relaxation task, AiiDA-style input protocols and SSSP pseudopotential
-families, layered HPC configuration with a SLURM submission layer, the Mason
-agent harness (open models self-served on a GPU node, or Claude) with its model
-server as a batch job, CLI, MCP server. 870+ tests (every docstring example
-runs as a doctest), ~96% coverage, mypy `--strict`, plus adversarial
-multi-agent review passes whose confirmed findings are regression tests — the
-QE engine is verified against a real `pw.x` 7.4.1, the balanced protocol
+with content-hash caching, verification hooks, MACE/ASE/Quantum
+ESPRESSO/LAMMPS relaxation task, AiiDA-style input protocols and SSSP
+pseudopotential families, layered HPC configuration with a SLURM submission
+layer, the Mason agent harness (open models self-served on a GPU node, or
+Claude) with its model server as a batch job, CLI, MCP server. 900+ tests
+(every docstring example runs as a doctest), ~96% coverage, mypy `--strict`,
+plus adversarial multi-agent review passes whose confirmed findings are
+regression tests — the QE engine is verified against a real `pw.x` 7.4.1,
+the LAMMPS engine against a real `lmp` (22 Jul 2025), the balanced protocol
 against a real SSSP install, and Mason against a real Llama 3.1 served by
 Ollama (an autonomous relax whose reported energy matches an independent
 calculation exactly).

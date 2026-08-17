@@ -38,12 +38,12 @@ def test_emt_and_lj_calculators_build() -> None:
 
 
 def test_unknown_engine_lists_options() -> None:
-    with pytest.raises(EngineNotAvailableError, match="emt, lj, mace, qe, rootstock"):
+    with pytest.raises(EngineNotAvailableError, match="emt, lammps, lj, mace, qe, rootstock"):
         get_calculator("definitely-unknown-engine")
 
 
 def test_engine_list_is_sorted_and_stable() -> None:
-    assert available_engines() == ("emt", "lj", "mace", "qe", "rootstock")
+    assert available_engines() == ("emt", "lammps", "lj", "mace", "qe", "rootstock")
 
 
 def test_mace_missing_gives_install_hint(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -148,14 +148,34 @@ and the original exception still propagates.
 ## When the engine writes files
 
 In-process engines fail as Python exceptions with meaningful messages.
-File-IO engines ([Quantum ESPRESSO](engines.md#quantum-espresso)) fail as a
-bare `CalledProcessError: ... returned non-zero exit status 2` — `pw.x`
-wrote the actual story to files in a scratch directory that is about to
-vanish. So the failure path reads the story back out: QE's fenced
-`Error in routine ...` block (or, when there is no block, flagged stop lines
-and the output tail, plus stderr) becomes notes, and the engine's
-input/output/`CRASH` files are kept as artifacts. A missing pseudopotential
-file, captured from a real run (paths shortened):
+File-IO engines fail with the story somewhere else entirely.
+[Quantum ESPRESSO](engines.md#quantum-espresso) fails as a bare
+`CalledProcessError: ... returned non-zero exit status 2` — `pw.x` wrote the
+actual story to files in a scratch directory that is about to vanish.
+[LAMMPS](engines.md#lammps) is one step worse: `lammpsrun` raises the real
+`ERROR: ...` inside a reader *thread*, where no caller can catch it, and
+Python sees only `RuntimeError: Failed to retrieve any thermo_style-output`.
+So the failure path reads the story back out of the retained files: QE's
+fenced `Error in routine ...` block (or, when there is no block, flagged
+stop lines and the output tail, plus stderr) becomes notes, and the engine's
+input/output/`CRASH` files are kept as artifacts; LAMMPS's `ERROR` line(s)
+become notes with one line of preceding context — the echoed command that
+died, or the last thermo row before a blow-up — and the input/log/data files
+are kept. A LAMMPS potential file that cannot be opened, captured from a
+real run:
+
+<!-- no-verify -->
+```text
+notes:
+- relax failed after 0 completed step(s)
+- engine error (log_lammps00000113gc6gof): ERROR on proc 0: cannot open
+  eam potential file Cu_u3.eam: No such file or directory
+  (src/src/potential_file_reader.cpp:58)
+- engine log context (log_lammps00000113gc6gof): pair_coeff 1 1 Cu_u3.eam
+```
+
+And a missing pseudopotential file, captured from a real `pw.x` run (paths
+shortened):
 
 <!-- no-verify -->
 ```text

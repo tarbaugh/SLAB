@@ -11,11 +11,12 @@ walks that seam from laptop built-ins to cluster registries.
 calculator. Three sources feed the mapping, tried in order:
 
 1. **Built-ins** — `emt`, `lj` (ASE toys), `mace` (in-process, `slab[mace]`),
-   `qe` (Quantum ESPRESSO's `pw.x`, no extra needed), `rootstock`
-   (cluster-served MLIPs, `slab[rootstock]`).
+   `qe` (Quantum ESPRESSO's `pw.x`, no extra needed), `lammps` (the `lmp`
+   binary, likewise no extra), `rootstock` (cluster-served MLIPs,
+   `slab[rootstock]`).
 2. **The cluster engine registry** — names a cluster maintainer declared in an
-   `engines.json` that lives with the install (`qe`, `lammps`, `vasp`, curated
-   MLIP aliases).
+   `engines.json` that lives with the install (`vasp`, curated site aliases
+   like `qe-delta`, MLIP aliases).
 3. **Rootstock checkpoint ids, served silently** — any canonical id a cluster's
    rootstock install declares works directly as an engine name, no registry
    entry needed.
@@ -38,7 +39,7 @@ print(type(calc).__name__)
 ```
 
 ```text
-('emt', 'lj', 'mace', 'qe', 'rootstock')
+('emt', 'lammps', 'lj', 'mace', 'qe', 'rootstock')
 EMT
 ```
 
@@ -158,13 +159,83 @@ A cluster's *curated* QE setup (fixed module, shared pseudo library, MPI
 launcher) still belongs in the registry below, under a distinct alias like
 `qe-delta` — entries may not shadow built-in names.
 
+## LAMMPS
+
+`lammps` is a built-in on the same terms as `qe`: it drives the `lmp` binary
+through ASE's `lammpsrun` calculator, so it works wherever the executable
+exists — no extra to install. One option locates the code: `command` (or set
+it once under `[engines.lammps]` in the slab config, or export
+`$ASE_LAMMPSRUN_COMMAND`; bare `lmp` is the default). The *interatomic
+potential* has no default at all: `pair_style` and `pair_coeff` are required,
+and a `lammps` engine without them is refused. That refusal is deliberate —
+ASE's own fallback is a dimensionless `lj/cut` toy that would happily "relax"
+any material and return numbers meaning nothing, and *which* potential
+describes a system is a science decision, exactly like which pseudopotential.
+
+<!-- no-verify -->
+```python
+relaxed, info = relax(
+    atoms,
+    engine="lammps",
+    fmax=0.05,
+    label="cu",
+    calculator_options={
+        "command": "lmp",                     # or "mpirun -np 8 lmp"
+        "pair_style": "eam",
+        "pair_coeff": ["1 1 Cu_u3.eam"],
+        "files": ["/opt/potentials/Cu_u3.eam"],
+    },
+)
+print(info["engine_version"], info["converged"], info["energy"])
+```
+
+<!-- no-verify -->
+```text
+22 Jul 2025 - Update 4 True -28.31961277087714
+```
+
+The details that keep runs honest and directories clean:
+
+- **Scratch, not cwd — and staged potentials.** Each calculator runs in a
+  slab-managed scratch directory, removed when the task finishes (pass
+  `tmp_dir=` to manage the files yourself). `files=` entries are staged into
+  that scratch and bare-basename references to them in `pair_coeff` are
+  rewritten to the staged copies — so the options above work from any cwd.
+  (Stock `lammpsrun` resolves that bare `Cu_u3.eam` against the *caller's*
+  cwd, which a traced task must never depend on.) Inside a run, the final
+  force evaluation's log — thermo table included — is kept as an intermediate
+  artifact (`cu.log` here) next to the trajectory.
+- **The `lmp` identity is detected and cached against.** SLAB probes
+  `<command> -h` (once per executable — memoized on its path and mtime, under
+  a timeout), parses the `Large-scale Atomic/Molecular Massively Parallel
+  Simulator - 22 Jul 2025` banner, and folds the version plus the resolved
+  command into provenance and the cache key. Potential file *contents* are
+  not hashed — their paths, riding in the traced options, are the identity.
+- **Units come back converted.** Whatever `units=` the potential requires
+  (`metal`, `real`, ...), ASE converts results to eV and eV/Å — `relax`'s
+  `energy_unit` stays `"eV"`.
+- **Failure speaks LAMMPS — because the scratch exists.** A crashed `lmp`
+  surfaces in Python as a useless
+  `RuntimeError: Failed to retrieve any thermo_style-output`: the real
+  `ERROR: Unrecognized pair style 'eam/aloy' (src/force.cpp:275)` is raised
+  inside a `lammpsrun` reader *thread*, where no caller can catch it. The log
+  file is the only place the story survives, and stock `lammpsrun` retains
+  files only when given a working directory — which is exactly what the
+  slab-managed scratch provides. The failure record gets the `ERROR` line(s),
+  one line of preceding context (the echoed command that died, or the last
+  thermo row before a blow-up), and the kept `-failed.{in,log,data}` files.
+  See [Debugging failures](debugging-failures.md#when-the-engine-writes-files).
+
+A cluster's curated LAMMPS setup (fixed module, MPI launcher) belongs in the
+registry below under a distinct alias like `lammps-delta`, the same as QE.
+
 ## The cluster engine registry
 
-For LAMMPS, VASP, site-specific MLIP aliases, and curated site setups of the
-built-in engines, SLAB generalizes rootstock's management pattern: the client
-is only a bootstrap, and a JSON file that lives with the cluster declares how
-each canonical name is built *here*. Workflow code says `engine="lammps"` and
-runs unchanged on any cluster whose registry declares `lammps`.
+For VASP, site-specific MLIP aliases, and curated site setups of the built-in
+engines, SLAB generalizes rootstock's management pattern: the client is only
+a bootstrap, and a JSON file that lives with the cluster declares how each
+canonical name is built *here*. Workflow code says `engine="vasp"` and runs
+unchanged on any cluster whose registry declares `vasp`.
 
 ```json
 {
@@ -239,7 +310,7 @@ print(info["engine"], info["engine_source"], info["engine_version"])
 ```
 
 ```text
-('emt', 'lj', 'mace', 'qe', 'rootstock', 'emt-cluster')
+('emt', 'lammps', 'lj', 'mace', 'qe', 'rootstock', 'emt-cluster')
 emt-cluster registry:laptop 1.0
 ```
 
