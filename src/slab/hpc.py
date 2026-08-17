@@ -239,7 +239,14 @@ def _is_driver_payload(command: str) -> bool:
         argv = shlex.split(command)
     except ValueError:
         return False
-    return bool(argv) and Path(argv[0]).name == "slab"
+    for token in argv:
+        # Env assignments legitimately prefix shell payloads
+        # (OMP_NUM_THREADS=4 slab run ...); the driver check must see
+        # through them or the launcher sneaks back onto the driver.
+        if re.fullmatch(r"\w+=\S*", token):
+            continue
+        return Path(token).name == "slab"
+    return False
 
 
 def submit(

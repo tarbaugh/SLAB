@@ -396,3 +396,8 @@ def test_driver_payload_is_never_launched() -> None:
     assert "launcher omitted" in script
     engine_script = render_sbatch("pw.x -in si.pwi", job_name="pw", config=hpc)
     assert "srun pw.x -in si.pwi" in engine_script  # engines still get the launcher
+    # An env assignment prefixing the payload must not hide the driver.
+    prefixed = render_sbatch("OMP_NUM_THREADS=4 slab run relax.py", job_name="env", config=hpc)
+    assert "\nOMP_NUM_THREADS=4 slab run relax.py" in prefixed
+    assert "srun OMP_NUM_THREADS" not in prefixed
+    assert "launcher omitted" in prefixed
