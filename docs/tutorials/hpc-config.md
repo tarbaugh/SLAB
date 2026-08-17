@@ -25,6 +25,13 @@ slab config init          # writes ./slab.toml
 slab config init --user   # writes ~/.config/slab/config.toml
 ```
 
+The same template is committed at
+[`templates/slab.toml`](https://github.com/tarbaugh/SLAB/tree/main/templates),
+next to an engine-registry counterpart (`templates/engines.json`) — copy,
+fill in the blanks, keep local. A SLAB checkout gitignores every file named
+`slab.toml` or `engines.json` (only the templates themselves are exempt), so
+a filled-in machine file kept next to the code never leaves the cluster.
+
 `slab config show` prints the merged result **with each value's origin**,
 so "why is it using that partition?" is a one-command question:
 
@@ -167,8 +174,8 @@ reason; an unknown is never dressed up as a known.
 
 1. Install SLAB into a shared environment.
 2. Write `/sw/slab/config.toml` (paths, `[engines.qe]`, `[hpc]`
-   partitions) and, optionally, `/sw/slab/engines.json`
-   (see [Engines](engines.md)).
+   partitions) and, optionally, `/sw/slab/engines.json` — starting from
+   the files in `templates/` (see [Engines](engines.md) for the registry).
 3. Export from the module file:
    `setenv SLAB_SITE_CONFIG /sw/slab/config.toml`.
 4. Users check their view with `slab config show` and

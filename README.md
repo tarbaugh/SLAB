@@ -355,6 +355,10 @@ module file), a *user* file (`~/.config/slab/config.toml`), and a *project*
 `slab.toml` — merged key-by-key, project winning, explicit environment
 variables above all of it. `slab config init` writes a commented template;
 `slab config show` prints the merged result with each value's origin.
+Fill-in-the-blank templates for the config file and the engine registry
+live in [`templates/`](templates/) — and a checkout gitignores every
+`slab.toml` and `engines.json`, so filled-in machine facts (accounts,
+partitions, paths) never end up in a commit.
 
 One file declares paths (workspace, pseudopotential root, engine registry),
 `[engines.qe]` defaults (`command = "srun pw.x"`), and `[hpc]` SLURM

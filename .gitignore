@@ -21,6 +21,13 @@ site/
 # SLAB runtime state (local run store / artifact store)
 .slab/
 
+# Filled-in machine configuration — cluster facts stay on the cluster.
+# The committed fill-in-the-blank sources live in templates/ and are exempt.
+slab.toml
+engines.json
+!templates/slab.toml
+!templates/engines.json
+
 # Machine-local Claude Code state (never belongs in the repo or an sdist)
 .claude/
 

@@ -280,6 +280,17 @@ def test_every_key_the_template_shows_is_a_key_the_schema_accepts() -> None:
     assert not unknown, f"template names keys the schema does not have: {unknown}"
 
 
+def test_committed_template_file_is_the_config_template() -> None:
+    """templates/slab.toml is byte-for-byte what 'slab config init' writes.
+
+    The committed fill-in-the-blank file and the CLI's template must never
+    drift: both claim to show every key the schema accepts.
+    """
+    repo_root = Path(__file__).resolve().parent.parent  # cwd-independent
+    committed = (repo_root / "templates" / "slab.toml").read_text(encoding="utf-8")
+    assert committed == CONFIG_TEMPLATE
+
+
 def test_template_refuses_overwrite_without_force(tmp_path: Path) -> None:
     target = tmp_path / "slab.toml"
     write_template(target)

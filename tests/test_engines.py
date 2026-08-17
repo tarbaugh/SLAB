@@ -92,6 +92,14 @@ def test_example_registry_file_is_valid() -> None:
     assert {"mace-mp", "uma", "lammps-delta", "qe-delta", "vasp"} <= set(registry.engines)
 
 
+def test_template_registry_file_is_valid() -> None:
+    """templates/engines.json must satisfy the schema its copies will be held to."""
+    repo_root = Path(__file__).resolve().parent.parent  # cwd-independent
+    payload = json.loads((repo_root / "templates" / "engines.json").read_text())
+    registry = EngineRegistry.model_validate(payload)
+    assert {"vasp", "qe-mycluster"} <= set(registry.engines)
+
+
 # -- discovery -------------------------------------------------------------------------
 
 
