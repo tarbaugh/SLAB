@@ -30,20 +30,30 @@ _EFFECTIVELY_NOW = 1e-9  # ~90µs in days: "--older-than 0d" means "everything, 
 
 
 def resolve_root(explicit: str | os.PathLike[str] | None) -> Path:
-    """Workspace root: explicit flag, else $SLAB_WORKSPACE, else ``./.slab``.
+    """Workspace root: explicit flag > $SLAB_WORKSPACE > config > ``./.slab``.
+
+    The config layer is ``[paths] workspace`` in :mod:`slab.config`.
 
     Examples:
         >>> resolve_root("/tmp/ws")
         PosixPath('/tmp/ws')
-        >>> import os
+        >>> import os, tempfile
         >>> os.environ.pop("SLAB_WORKSPACE", None) and None
+        >>> os.environ.pop("SLAB_CONFIG", None) and None
+        >>> os.environ.pop("SLAB_SITE_CONFIG", None) and None
+        >>> os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp()
         >>> resolve_root(None)
         PosixPath('.slab')
     """
     if explicit is not None:
         return Path(explicit)
     from_env = os.environ.get("SLAB_WORKSPACE")
-    return Path(from_env) if from_env else Path(DEFAULT_ROOT)
+    if from_env:
+        return Path(from_env)
+    from slab.config import config_value
+
+    configured = config_value("paths.workspace")
+    return Path(configured) if configured else Path(DEFAULT_ROOT)
 
 
 def parse_duration_days(text: str) -> float:
@@ -146,7 +156,33 @@ def engines_overview(registry_path: str | os.PathLike[str] | None = None) -> dic
     except SlabError as e:  # corrupt family: report, don't hide the engines
         overview["pseudo_families"] = []
         overview["pseudo_families_error"] = str(e)
+    overview["hpc"] = _hpc_overview(overview)
     return overview
+
+
+def _hpc_overview(overview: dict[str, Any]) -> dict[str, Any] | None:
+    """The [hpc] config section as capability data, or None off-cluster."""
+    from slab.config import load_config
+
+    try:
+        hpc = load_config().hpc
+    except SlabError as e:  # broken config: report, don't hide the engines
+        overview["hpc_error"] = str(e)
+        return None
+    if not hpc.partitions:
+        return None
+    return {
+        "cluster": hpc.cluster,
+        "default_partition": hpc.default_partition,
+        "partitions": {
+            name: {
+                "description": spec.description,
+                "time_limit": spec.time_limit,
+                "gres": spec.gres,
+            }
+            for name, spec in sorted(hpc.partitions.items())
+        },
+    }
 
 
 def _rootstock_checkpoints_overview() -> dict[str, Any] | None:

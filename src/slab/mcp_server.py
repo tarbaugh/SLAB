@@ -127,8 +127,10 @@ def build_server(root: Path) -> MCPServer:
         engine='mace-mp-0-medium'). Also lists 'qe_protocols' (named QE input
         protocols: fast/balanced/stringent; expand one with
         slab.protocols.qe_protocol_options(atoms, protocol=...) inside a
-        workflow script) and 'pseudo_families' (installed pseudopotential
-        families, usable as calculator_options={'pseudo_family': ...})."""
+        workflow script), 'pseudo_families' (installed pseudopotential
+        families, usable as calculator_options={'pseudo_family': ...}), and
+        'hpc' (this machine's configured SLURM cluster and partitions, or
+        null off-cluster; jobs submit via 'slab hpc submit')."""
         return _ops.engines_overview()
 
     return server

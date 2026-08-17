@@ -51,6 +51,8 @@ nav:
       - Caching & resume: tutorials/caching-and-resume.md
       - Engines: tutorials/engines.md
       - Protocols & pseudopotentials: tutorials/protocols-and-pseudos.md
+      - HPC configuration & SLURM: tutorials/hpc-config.md
       - Debugging failures: tutorials/debugging-failures.md
       - Agents over MCP: tutorials/agents-mcp.md
+      - Mason, the resident agent: tutorials/mason.md
   - Architecture: architecture.md

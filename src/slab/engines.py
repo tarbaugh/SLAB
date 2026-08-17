@@ -21,10 +21,12 @@ wholesale for *all* engines (LAMMPS, Quantum ESPRESSO, VASP, MLIPs):
    understands says so and stops instead of misreading.
 
 The registry is one JSON file of :class:`EngineRegistry` shape. Discovery
-order: an explicit path, else ``$SLAB_ENGINES``, else
+order: an explicit path, else ``$SLAB_ENGINES``, else ``[paths] engines``
+from the slab config (:mod:`slab.config`), else
 ``~/.config/slab/engines.json``. Cluster maintainers typically ship the file
-at a shared path and export ``SLAB_ENGINES`` from a module file, mirroring
-rootstock's ``ROOTSTOCK_ROOT``.
+at a shared path and point at it from the site config (or export
+``SLAB_ENGINES`` from a module file, mirroring rootstock's
+``ROOTSTOCK_ROOT``).
 
 Every entry builds an ASE calculator from a dotted path — the ASE
 ``Calculator`` contract is SLAB's engine seam, and that includes rootstock
@@ -198,6 +200,16 @@ def find_registry_path(explicit: str | os.PathLike[str] | None = None) -> Path |
         path = Path(from_env).expanduser()
         if not path.exists():
             raise FileNotFoundError(f"${REGISTRY_ENV_VAR} points to {path}, which does not exist")
+        return path
+    from slab.config import config_value
+
+    configured = config_value("paths.engines")
+    if configured:
+        path = Path(str(configured)).expanduser()
+        if not path.exists():
+            raise FileNotFoundError(
+                f"[paths] engines in the slab config points to {path}, which does not exist"
+            )
         return path
     user_path = _USER_REGISTRY.expanduser()
     return user_path if user_path.exists() else None

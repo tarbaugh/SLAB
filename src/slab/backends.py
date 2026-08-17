@@ -557,15 +557,20 @@ def _qe_calculator(**options: Any) -> Any:
         # The family knows its files: default the element->filename mapping
         # (write_espresso_in only consults the species actually present).
         options.setdefault("pseudopotentials", family_pseudos(family))
+    if profile is None and pseudo_dir is None:
+        # Machine defaults: the slab config's [engines.qe], then ASE's own
+        # [espresso] section — one slab.toml can configure a whole cluster.
+        pseudo_dir = _qe_setting("pseudo_dir")
     if profile is None and (command is not None or pseudo_dir is not None):
         if pseudo_dir is None:
             raise EngineNotAvailableError(
-                "engine 'qe': command= also needs pseudo_dir= (the directory "
-                "holding your .upf pseudopotential files)"
+                "engine 'qe': a command alone is not enough — also set pseudo_dir "
+                "(the directory holding your .upf pseudopotential files), as an "
+                "option or under [engines.qe] in the slab config"
             )
         # Same fallback chain _qe_locator uses, so the stamped identity is
         # always the binary that actually ran.
-        command = command or _qe_configured("command") or "pw.x"
+        command = command or _qe_setting("command") or "pw.x"
         profile = EspressoProfile(command=command, pseudo_dir=str(Path(pseudo_dir).expanduser()))
 
     # Force printing defaults on: pw.x omits forces unless tprnfor is set,
@@ -605,9 +610,11 @@ def _qe_calculator(**options: Any) -> Any:
             shutil.rmtree(scratch, ignore_errors=True)
         raise EngineNotAvailableError(
             "engine 'qe' is not configured: pass calculator_options="
-            "{'command': 'pw.x', 'pseudo_dir': '/path/to/pseudos', ...} or add "
-            "an [espresso] section (command, pseudo_dir) to your ASE config "
-            "file (~/.config/ase/config.ini or $ASE_CONFIG_PATH)"
+            "{'command': 'pw.x', 'pseudo_dir': '/path/to/pseudos', ...}, set "
+            "command/pseudo_dir under [engines.qe] in the slab config "
+            "('slab config init' writes a template), or add an [espresso] "
+            "section to your ASE config file (~/.config/ase/config.ini or "
+            "$ASE_CONFIG_PATH)"
         ) from e
     except Exception:
         if scratch is not None:
@@ -622,9 +629,9 @@ def _qe_locator(options: dict[str, Any]) -> tuple[str, str | None]:
     """``(command, pseudo_dir)`` that ``engine="qe"`` would resolve to.
 
     Mirrors the calculator's own resolution — ``profile=`` > explicit
-    options > the ASE config file > bare ``pw.x`` — so cache identity and
-    version detection always describe the binary and pseudopotential
-    directory that actually run. Never raises.
+    options > the slab config > the ASE config file > bare ``pw.x`` — so
+    cache identity and version detection always describe the binary and
+    pseudopotential directory that actually run. Never raises.
     """
     try:
         profile = options.get("profile")
@@ -634,10 +641,10 @@ def _qe_locator(options: dict[str, Any]) -> tuple[str, str | None]:
         if "command" in options:
             command = str(options["command"])
         else:
-            command = _qe_configured("command") or "pw.x"
+            command = _qe_setting("command") or "pw.x"
         pseudo_dir = options.get("pseudo_dir")
         if pseudo_dir is None:
-            pseudo_dir = _qe_configured("pseudo_dir")
+            pseudo_dir = _qe_setting("pseudo_dir")
         return command, None if pseudo_dir is None else str(Path(pseudo_dir).expanduser())
     except Exception:  # pragma: no cover - defensive: hostile profile attrs
         return "pw.x", None
@@ -723,6 +730,21 @@ def _qe_configured(key: str) -> str | None:
     except Exception:  # pragma: no cover - defensive: malformed ASE config
         return None
     return None
+
+
+def _qe_setting(key: str) -> str | None:
+    """``[engines.qe]`` from the slab config, else ASE's ``[espresso]`` section.
+
+    The slab config outranks ASE's: it is the file cluster maintainers ship.
+    A *broken* slab config file raises (loud beats quiet); an absent one
+    falls through.
+    """
+    from slab.config import config_value
+
+    value = config_value(f"engines.qe.{key}")
+    if value is not None:
+        return str(value)
+    return _qe_configured(key)
 
 
 def _mace_calculator(**options: Any) -> Any:

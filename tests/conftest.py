@@ -1,12 +1,64 @@
 import hashlib
 import json
+import threading
 from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from slab import SQLiteRunStore
 from slab.pseudos import PseudoFamily, family_dir_name
+
+
+class LlmScript:
+    """What the fake OpenAI-compatible server should answer, and what it saw."""
+
+    def __init__(self) -> None:
+        self.responses: list[tuple[int, dict[str, Any]]] = []
+        self.requests: list[dict[str, Any]] = []
+        self.get_response: tuple[int, dict[str, Any]] = (200, {"data": []})
+
+
+class _LlmHandler(BaseHTTPRequestHandler):
+    script: LlmScript
+
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length", "0"))
+        body = json.loads(self.rfile.read(length)) if length else {}
+        body["_auth"] = self.headers.get("Authorization")
+        self.script.requests.append(body)
+        status, payload = (
+            self.script.responses.pop(0) if self.script.responses else (500, {"error": "empty"})
+        )
+        self._answer(status, payload)
+
+    def do_GET(self) -> None:
+        self._answer(*self.script.get_response)
+
+    def _answer(self, status: int, payload: dict[str, Any]) -> None:
+        raw = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def log_message(self, *args: object) -> None:  # keep test output quiet
+        pass
+
+
+@pytest.fixture()
+def llm_server() -> Iterator[tuple[str, LlmScript]]:
+    """A live local OpenAI-compatible server driven by a per-test script."""
+    script = LlmScript()
+    handler = type("Handler", (_LlmHandler,), {"script": script})
+    httpd = HTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{httpd.server_port}/v1", script
+    httpd.shutdown()
 
 
 def _upf_bytes(symbol: str) -> bytes:

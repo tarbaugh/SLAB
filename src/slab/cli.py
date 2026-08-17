@@ -11,9 +11,12 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, NoReturn
+from typing import TYPE_CHECKING, Annotated, NoReturn
 
 import typer
+
+if TYPE_CHECKING:
+    from slab.mason.session import MasonSession
 
 from slab import _ops
 from slab._version import __version__
@@ -40,7 +43,10 @@ _WorkspaceOpt = Annotated[
 
 
 def _open(workspace: Path | None) -> Workspace:
-    return Workspace(_ops.resolve_root(workspace))
+    try:
+        return Workspace(_ops.resolve_root(workspace))
+    except SlabError as e:  # e.g. a broken config file resolving the root
+        _fail(str(e))
 
 
 def _fail(message: str) -> NoReturn:
@@ -297,13 +303,13 @@ def expire(
     ] = False,
 ) -> None:
     """Expire unpromoted runs that outlived their TTL (state change only; see gc)."""
-    root = _ops.resolve_root(workspace)
     try:
+        root = _ops.resolve_root(workspace)
         if older_than is not None:
             policy = _ops.ttl_override_policy(_ops.parse_duration_days(older_than))
         else:
             policy = _ops.load_policy(root, policy_file)
-    except (ValueError, OSError) as e:
+    except (SlabError, ValueError, OSError) as e:
         _fail(str(e))
     with Workspace(root) as ws:
         expired = ws.expire_due(policy, include_running=include_running)
@@ -323,10 +329,10 @@ def gc(
     ] = None,
 ) -> None:
     """Drop artifact bytes no retention rule demands (hashes and recipes survive)."""
-    root = _ops.resolve_root(workspace)
     try:
+        root = _ops.resolve_root(workspace)
         policy = _ops.load_policy(root, policy_file)
-    except (ValueError, OSError) as e:
+    except (SlabError, ValueError, OSError) as e:
         _fail(str(e))
     with Workspace(root) as ws:
         report = ws.gc(policy, dry_run=dry_run)
@@ -393,6 +399,16 @@ def engines_list(registry_path: _RegistryOpt = None) -> None:
         typer.echo(f"pseudo families: {', '.join(families)}")
     else:
         typer.echo("pseudo families: none installed ('slab pseudos install sssp' fetches one)")
+    hpc = overview.get("hpc")
+    if overview.get("hpc_error"):
+        typer.echo(f"hpc partitions: error — {overview['hpc_error']}")
+    elif hpc:
+        cluster = f" [{hpc['cluster']}]" if hpc["cluster"] else ""
+        default = f" (default {hpc['default_partition']})" if hpc["default_partition"] else ""
+        typer.echo(
+            f"hpc partitions{cluster}: {', '.join(hpc['partitions'])}{default} "
+            f"('slab hpc partitions')"
+        )
 
 
 @engines_app.command("verify")
@@ -498,6 +514,201 @@ def pseudos_verify(
     typer.echo(f"[+] {family.name}: all {len(family.elements)} files match their checksums")
 
 
+hpc_app = typer.Typer(
+    help="SLURM plumbing driven by the [hpc] section of the slab config.",
+    no_args_is_help=True,
+)
+app.add_typer(hpc_app, name="hpc")
+
+
+@hpc_app.command("partitions")
+def hpc_partitions() -> None:
+    """List the partitions this machine's config declares."""
+    from slab.config import load_config
+
+    try:
+        hpc = load_config().hpc
+    except SlabError as e:
+        _fail(str(e))
+    if not hpc.partitions:
+        typer.echo(
+            "no partitions declared (add [hpc.partitions.NAME] tables to the slab "
+            "config; 'slab config init' shows the shape)"
+        )
+        return
+    if hpc.cluster:
+        typer.echo(f"cluster: {hpc.cluster}")
+    for name in sorted(hpc.partitions):
+        spec = hpc.partitions[name]
+        default = " (default)" if name == hpc.default_partition else ""
+        time_limit = spec.time_limit or "no time limit set"
+        extras = ", ".join(
+            piece
+            for piece in (spec.gres, spec.mem and f"mem {spec.mem}", spec.qos and f"qos {spec.qos}")
+            if piece
+        )
+        detail = f"  {extras}" if extras else ""
+        description = f"  {spec.description}" if spec.description else ""
+        typer.echo(f"  {name:<12}{default:<10} {time_limit}{detail}{description}")
+
+
+@hpc_app.command("render")
+def hpc_render(
+    command: Annotated[str, typer.Argument(help="Command the job runs, e.g. 'slab run relax.py'.")],
+    name: Annotated[str, typer.Option("--name", "-n", help="Job name.")] = "slab-job",
+    partition: Annotated[
+        str | None, typer.Option("--partition", "-p", help="Partition (default: config's).")
+    ] = None,
+    time_limit: Annotated[
+        str | None, typer.Option("--time", help="Override the partition's time limit.")
+    ] = None,
+) -> None:
+    """Render the sbatch script that submit would use — read before trusting."""
+    from slab.hpc import render_sbatch
+
+    try:
+        script = render_sbatch(command, job_name=name, partition=partition, time_limit=time_limit)
+    except SlabError as e:
+        _fail(str(e))
+    typer.echo(script)
+
+
+@hpc_app.command("submit")
+def hpc_submit(
+    command: Annotated[str, typer.Argument(help="Command the job runs, e.g. 'slab run relax.py'.")],
+    name: Annotated[str, typer.Option("--name", "-n", help="Job name.")] = "slab-job",
+    partition: Annotated[
+        str | None, typer.Option("--partition", "-p", help="Partition (default: config's).")
+    ] = None,
+    time_limit: Annotated[
+        str | None, typer.Option("--time", help="Override the partition's time limit.")
+    ] = None,
+    directory: Annotated[
+        Path | None, typer.Option("--dir", help="Where the job runs (default: cwd).")
+    ] = None,
+) -> None:
+    """Render and submit a job; the exact script is kept next to its outputs."""
+    from slab.config import load_config
+    from slab.hpc import render_sbatch, submit
+
+    try:
+        hpc = load_config().hpc
+        resolved, _spec = hpc.resolve_partition(partition)
+        script = render_sbatch(
+            command, job_name=name, partition=resolved, config=hpc, time_limit=time_limit
+        )
+        job = submit(script, job_name=name, partition=resolved, directory=directory)
+    except SlabError as e:
+        _fail(str(e))
+    typer.echo(f"submitted job {job.job_id} ({job.job_name}) to {job.partition}")
+    typer.echo(f"script: {job.script_path}")
+
+
+@hpc_app.command("status")
+def hpc_status(
+    job_id: Annotated[str, typer.Argument(help="SLURM job id.")],
+) -> None:
+    """One job's state (squeue first, sacct fallback)."""
+    from slab.hpc import job_state
+
+    try:
+        status = job_state(job_id)
+    except SlabError as e:
+        _fail(str(e))
+    raw = f"  ({status.raw})" if status.raw and status.raw != status.state.value.upper() else ""
+    detail = f"  {status.detail}" if status.detail else ""
+    typer.echo(f"job {status.job_id}: {status.state.value}{raw}{detail}")
+
+
+@hpc_app.command("cancel")
+def hpc_cancel(
+    job_id: Annotated[str, typer.Argument(help="SLURM job id.")],
+) -> None:
+    """Cancel a job (idempotent: cancelling a finished job is a no-op)."""
+    from slab.hpc import cancel
+
+    try:
+        cancel(job_id)
+    except SlabError as e:
+        _fail(str(e))
+    typer.echo(f"cancel requested for job {job_id}")
+
+
+config_app = typer.Typer(
+    help="Layered TOML configuration: site, user, and project files merged key-by-key.",
+    no_args_is_help=True,
+)
+app.add_typer(config_app, name="config")
+
+
+@config_app.command("show")
+def config_show(
+    as_json: Annotated[bool, typer.Option("--json", help="Emit machine-readable JSON.")] = False,
+) -> None:
+    """Show the merged configuration and which file each value came from."""
+    from slab.config import find_config_files, load_config_with_origins
+
+    try:
+        files = find_config_files()
+        merged, origins = load_config_with_origins()
+    except SlabError as e:
+        _fail(str(e))
+    if as_json:
+        typer.echo(
+            json.dumps(
+                {
+                    "files": [{"layer": layer, "path": str(path)} for layer, path in files],
+                    "config": merged.model_dump(mode="json"),
+                    "origins": origins,
+                },
+                indent=2,
+            )
+        )
+        return
+    if not files:
+        typer.echo(
+            "no config files found (site: $SLAB_SITE_CONFIG, user: "
+            "~/.config/slab/config.toml, project: ./slab.toml or $SLAB_CONFIG); "
+            "'slab config init' writes a template"
+        )
+        return
+    for layer, path in files:
+        typer.echo(f"{layer}: {path}")
+    for dotted in sorted(origins):
+        value = _dig(merged, dotted)
+        typer.echo(f"  {dotted} = {value!r}  [{origins[dotted]}]")
+    typer.echo("unset keys use built-in defaults ('slab config init' shows them all)")
+
+
+def _dig(model: object, dotted: str) -> object:
+    """Fetch a dotted key path off the validated config model."""
+    node = model
+    for part in dotted.split("."):
+        node = node.get(part) if isinstance(node, dict) else getattr(node, part, None)
+    return node
+
+
+@config_app.command("init")
+def config_init(
+    path: Annotated[
+        Path, typer.Argument(help="Where to write the template (default ./slab.toml).")
+    ] = Path("slab.toml"),
+    user: Annotated[
+        bool, typer.Option("--user", help="Write the user-layer file (~/.config/slab/) instead.")
+    ] = False,
+    force: Annotated[bool, typer.Option("--force", help="Replace an existing file.")] = False,
+) -> None:
+    """Write a fully commented configuration template."""
+    from slab.config import user_config_path, write_template
+
+    target = user_config_path() if user else path
+    try:
+        written = write_template(target, force=force)
+    except SlabError as e:
+        _fail(str(e))
+    typer.echo(f"wrote {written}")
+
+
 protocols_app = typer.Typer(
     help="Named QE input protocols (adapted from aiida-quantumespresso).",
     no_args_is_help=True,
@@ -534,6 +745,209 @@ def protocols_show(
         typer.echo(f"{key}: {details[key]}")
 
 
+mason_app = typer.Typer(
+    help="Mason, the resident research agent — a coding-agent harness for open models.",
+    no_args_is_help=True,
+)
+app.add_typer(mason_app, name="mason")
+
+
+def _ask_approval(tool_name: str, preview: str) -> bool:
+    typer.echo(f"\n[approval] {tool_name}: {preview}")
+    return typer.confirm("allow?", default=False)
+
+
+def _mason_session(
+    workspace: Path | None,
+    *,
+    auto: bool,
+    model: str | None,
+    endpoint: str | None,
+    max_turns: int | None = None,
+) -> MasonSession:
+    from slab.mason import MasonSession
+
+    session = MasonSession(
+        workspace_root=_ops.resolve_root(workspace), approver=_ask_approval, auto_approve=auto
+    )
+    updates: dict[str, object] = {}
+    if model is not None:
+        updates["model"] = model
+    if endpoint is not None:
+        updates["endpoint"] = endpoint
+    if max_turns is not None:
+        updates["max_turns"] = max_turns
+    if updates:
+        session.agent = session.agent.model_copy(update=updates)
+    return session
+
+
+_ModelOpt = Annotated[str | None, typer.Option("--model", help="Override [agent] model.")]
+_EndpointOpt = Annotated[str | None, typer.Option("--endpoint", help="Override [agent] endpoint.")]
+_AutoOpt = Annotated[
+    bool, typer.Option("--auto", help="Approve every tool call (batch/HPC use).")
+]
+
+
+@mason_app.command("chat")
+def mason_chat(
+    workspace: _WorkspaceOpt = None,
+    auto: _AutoOpt = False,
+    model: _ModelOpt = None,
+    endpoint: _EndpointOpt = None,
+    resume: Annotated[
+        bool, typer.Option("--resume", help="Continue the newest session in this workspace.")
+    ] = False,
+) -> None:
+    """Interactive session ( /quit to leave, /status for token counts )."""
+    from slab.mason import Mason
+
+    try:
+        session = _mason_session(workspace, auto=auto, model=model, endpoint=endpoint)
+        resume_from = None
+        if resume:
+            latest = session.latest_transcript()
+            if latest is None:
+                _fail("nothing to resume: no session transcripts in this workspace")
+            resume_from = session.load_messages(latest)
+            typer.echo(f"resuming {latest.name} ({len(resume_from)} messages)")
+        mason = Mason(session, resume_from=resume_from)
+    except SlabError as e:
+        _fail(str(e))
+    agent = session.agent
+    typer.echo(f"mason ready: {agent.model} at {agent.endpoint}")
+    typer.echo(f"workspace {session.workspace_root}; notebook {session.notebook_path}")
+    while True:
+        try:
+            text = input("\nmason> ").strip()
+        except (EOFError, KeyboardInterrupt):  # pragma: no cover - terminal signals
+            typer.echo("")
+            break
+        if not text:
+            continue
+        if text in ("/quit", "/exit"):
+            break
+        if text == "/status":
+            typer.echo(
+                f"tokens: {session.prompt_tokens} prompt, "
+                f"{session.completion_tokens} completion; "
+                f"transcript {session.transcript_path}"
+            )
+            continue
+        if text == "/compact":
+            mason._compact()
+            typer.echo("history compacted; summary appended to the notebook")
+            continue
+        try:
+            result = mason.run_turn(text)
+        except KeyboardInterrupt:  # pragma: no cover - terminal signals
+            typer.echo("\n[turn interrupted; state kept]")
+            continue
+        except SlabError as e:
+            typer.echo(f"error: {e}", err=True)
+            continue
+        typer.echo(f"\n{result.text}")
+        if result.stop_reason not in ("answer", "finish"):
+            typer.echo(f"[stopped: {result.stop_reason} after {result.steps} steps]", err=True)
+
+
+@mason_app.command("run")
+def mason_run(
+    goal: Annotated[str, typer.Argument(help="The research goal for this run.")],
+    workspace: _WorkspaceOpt = None,
+    auto: _AutoOpt = False,
+    model: _ModelOpt = None,
+    endpoint: _EndpointOpt = None,
+    max_turns: Annotated[
+        int | None, typer.Option("--max-turns", help="Model-call budget for this goal.")
+    ] = None,
+) -> None:
+    """One autonomous goal: loop until finish, an answer, or a harness stop.
+
+    Without --auto, mutating tools are refused (there is no one to ask);
+    reads still work, so inspection goals run safely by default.
+    """
+    from slab.mason import Mason
+
+    try:
+        session = _mason_session(
+            workspace, auto=auto, model=model, endpoint=endpoint, max_turns=max_turns
+        )
+        mason = Mason(session)
+        result = mason.run_turn(goal)
+    except SlabError as e:
+        _fail(str(e))
+    typer.echo(result.text)
+    typer.echo(
+        f"[{result.stop_reason} after {result.steps} step(s); "
+        f"tokens {session.prompt_tokens}+{session.completion_tokens}; "
+        f"transcript {session.transcript_path}]",
+        err=True,
+    )
+    if result.stop_reason not in ("answer", "finish"):
+        raise typer.Exit(code=1)
+
+
+@mason_app.command("doctor")
+def mason_doctor(
+    model: _ModelOpt = None,
+    endpoint: _EndpointOpt = None,
+) -> None:
+    """Check the model endpoint: reachable, model served, tool calls parsed."""
+    from slab.config import load_config
+    from slab.mason.client import ChatClient, LlmError
+
+    try:
+        agent = load_config().agent
+    except SlabError as e:
+        _fail(str(e))
+    resolved_endpoint = endpoint or agent.endpoint
+    resolved_model = model or agent.model
+    typer.echo(f"endpoint: {resolved_endpoint}")
+    typer.echo(f"model:    {resolved_model or '(not configured)'}")
+    client = ChatClient(resolved_endpoint, resolved_model or "unconfigured", timeout_s=60.0)
+    failed = 0
+    try:
+        names = client.model_names()
+        typer.echo(f"[+] endpoint answers; {len(names)} model(s) served")
+    except LlmError as e:
+        typer.echo(f"[x] endpoint: {e}")
+        raise typer.Exit(code=1) from None
+    if resolved_model is None:
+        typer.echo(f"[x] no model configured; served here: {', '.join(names) or 'none'}")
+        raise typer.Exit(code=1)
+    if resolved_model in names:
+        typer.echo(f"[+] model {resolved_model!r} is served")
+    else:
+        failed += 1
+        typer.echo(f"[x] model {resolved_model!r} not served; available: {', '.join(names)}")
+    ping = {
+        "type": "function",
+        "function": {
+            "name": "ping",
+            "description": "Reply with a pong.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    }
+    try:
+        reply = client.chat(
+            [{"role": "user", "content": "Call the ping tool now."}], tools=[ping]
+        )
+        if reply.tool_calls:
+            typer.echo("[+] native tool calls work")
+        else:
+            failed += 1
+            typer.echo(
+                "[x] the model answered without a tool call — the server may lack a "
+                "tool-call parser; try [agent] tool_protocol = \"fenced\""
+            )
+    except LlmError as e:
+        failed += 1
+        typer.echo(f"[x] tool-call probe: {e}")
+    if failed:
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def mcp(
     workspace: _WorkspaceOpt = None,
@@ -543,7 +957,11 @@ def mcp(
         from slab.mcp_server import serve
     except ImportError:
         _fail("the MCP server needs the mcp package: pip install 'slab[mcp]'")
-    serve(_ops.resolve_root(workspace))  # pragma: no cover - blocks on stdio
+    try:
+        root = _ops.resolve_root(workspace)
+    except SlabError as e:
+        _fail(str(e))
+    serve(root)  # pragma: no cover - blocks on stdio
 
 
 def main() -> None:  # pragma: no cover - console-script shim

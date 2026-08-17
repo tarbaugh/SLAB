@@ -451,6 +451,66 @@ registry entries execute maintainer-declared code and environment as the
 calling user. SLAB isolates configuration, not privilege; trusting a
 cluster's `engines.json` is trusting its module farm.
 
+### 7c. Layered configuration and the thin scheduler
+
+Machine-specific facts — paths, the right `pw.x`, SLURM partitions, the
+resident agent's endpoint — are **policy-as-data** in three merged TOML
+layers (`slab.config`): site (`$SLAB_SITE_CONFIG`, shipped by cluster
+maintainers from module files, the `$SLAB_ENGINES` pattern generalized),
+user (`~/.config/slab/config.toml`), project (`./slab.toml` or
+`$SLAB_CONFIG`). Higher layers override key-by-key; the explicit
+environment (`$SLAB_WORKSPACE`, `$SLAB_PSEUDOS`, `$SLAB_ENGINES`) and
+explicit arguments stay above every file. Each merged value remembers the
+file that said it — `slab config show` answers "why this value?" with an
+origin per key. Unknown keys refuse with the file named; `${VAR}` in path
+values expands, and an unset variable refuses rather than becoming a
+literal directory name.
+
+The invariant that keeps configuration honest: **config never reaches a
+cache key.** It supplies defaults that resolve into explicit values — a
+command, a pseudo directory — and the resolved values are what recipes and
+cache identities record. Retuning a file can never silently re-serve old
+physics under a new meaning; that property is inherited from the same
+decision in the protocols layer (§7b).
+
+The `[hpc]` partitions drive `slab.hpc`, a deliberately *thin* scheduler
+layer: render an sbatch script (only declared fields become directives —
+no silent resource defaults), submit with `--parsable`, poll `squeue` with
+an `sacct` fallback onto a seven-state enum (raw SLURM state preserved as
+evidence; the unanswerable reported `undetermined`, never guessed), cancel
+idempotently. There is no remote state machine — the payload is typically
+`slab run workflow.py`, so runs, caching, and verification stay in the
+workspace wherever the process executes.
+
+### 7d. Mason: the harness above the layer
+
+`slab.mason` is the complement of the MCP server: MCP serves *external*
+agents a workspace; Mason is the *resident* agent — a Claude-Code-class
+harness for open-weight models (stdlib client over the OpenAI-compatible
+API; vLLM, Ollama) tuned for long research projects. Its load-bearing
+choices are distilled from the 2024-2026 harness literature and cited in
+the Mason tutorial (docs/tutorials/mason.md); the ones that are
+SLAB-shaped:
+
+- **Physics through `slab_launch` only.** The agent writes workflow
+  scripts and runs them as traced, check-gated runs; every reported number
+  carries a run id an auditor can `slab show`. The harness does not grant
+  the model a faster, unprovenanced path to a calculator.
+- **Memory is files in the project** — an append-only `NOTEBOOK.md`, a
+  living `PLAN.md`, append-only JSONL transcripts. Compaction summaries
+  are written into the notebook, so what the agent learned survives its
+  context window and lands in version control as scientific provenance.
+- **Invariants live in harness code, not prompt text**: model-call budgets,
+  a consecutive-failure abort with the evidence kept, required-argument
+  validation that answers with the tool's schema, an exact-match edit
+  contract with a read-before-edit guard, an immediate syntax check after
+  Python writes, and an approval gate whose shell allowlist matches at
+  word boundaries and never auto-approves control operators.
+- **Open-model realism.** Native tool calls, a fenced text protocol for
+  parserless servers, and a repair path for the llama-style JSON that
+  models leak into plain text — each recovery observed against a real
+  model during development, not imagined.
+
 ## 8. Agent-native decisions, collected
 
 - **Run ids are ULIDs** (26 chars, time-ordered) and every surface accepts

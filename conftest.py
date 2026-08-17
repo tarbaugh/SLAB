@@ -1,0 +1,33 @@
+"""Root conftest: every test — including ``src/`` doctests — runs config-blind.
+
+Configuration discovery reads the environment, ``~/.config``, and the
+*current directory* (``./slab.toml``). Without isolation here, a developer
+who follows the HPC tutorial and runs ``slab config init`` in this checkout
+would change what the test suite resolves — workspace roots, pseudo roots,
+the ``qe`` command. This conftest sits at the repository root so it covers
+``tests/`` and the doctests collected from ``src/slab/`` alike (a fixture in
+``tests/conftest.py`` reaches only the former).
+"""
+
+from pathlib import Path
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolated_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Neutralize all three config layers plus the workspace override.
+
+    Tests that exercise configuration set these up themselves (writing a
+    ``slab.toml`` into ``tmp_path`` and chdir-ing there, or pointing
+    ``$SLAB_CONFIG`` at a file).
+    """
+    monkeypatch.delenv("SLAB_CONFIG", raising=False)
+    monkeypatch.delenv("SLAB_SITE_CONFIG", raising=False)
+    monkeypatch.delenv("SLAB_WORKSPACE", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config-isolated"))
+    # The project layer is discovered from the working directory, so the
+    # default cwd must be a directory with no slab.toml in it.
+    neutral = tmp_path / "cwd-isolated"
+    neutral.mkdir(exist_ok=True)
+    monkeypatch.chdir(neutral)

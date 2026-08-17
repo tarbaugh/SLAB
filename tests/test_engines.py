@@ -86,7 +86,8 @@ def test_spec_refuses_unknown_kind_and_fields() -> None:
 
 
 def test_example_registry_file_is_valid() -> None:
-    payload = json.loads(Path("examples/engines.example.json").read_text())
+    repo_root = Path(__file__).resolve().parent.parent  # cwd-independent
+    payload = json.loads((repo_root / "examples" / "engines.example.json").read_text())
     registry = EngineRegistry.model_validate(payload)
     assert {"mace-mp", "uma", "lammps", "qe-delta", "vasp"} <= set(registry.engines)
 

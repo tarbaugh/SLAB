@@ -129,15 +129,21 @@ class PseudoFamilyError(SlabError):
 def pseudos_root(root: str | os.PathLike[str] | None = None) -> Path:
     """The directory families install into.
 
-    Resolution: explicit *root* > ``$SLAB_PSEUDOS`` >
-    ``$XDG_DATA_HOME/slab/pseudos`` > ``~/.local/share/slab/pseudos``.
-    The directory need not exist yet (install creates it).
+    Resolution: explicit *root* > ``$SLAB_PSEUDOS`` > ``[paths] pseudos``
+    from :mod:`slab.config` > ``$XDG_DATA_HOME/slab/pseudos`` >
+    ``~/.local/share/slab/pseudos``. The directory need not exist yet
+    (install creates it).
     """
     if root is not None:
         return Path(root).expanduser()
     from_env = os.environ.get(PSEUDOS_ENV_VAR)
     if from_env:
         return Path(from_env).expanduser()
+    from slab.config import config_value
+
+    configured = config_value("paths.pseudos")
+    if configured:
+        return Path(configured).expanduser()
     xdg = os.environ.get("XDG_DATA_HOME")
     base = Path(xdg).expanduser() if xdg else Path("~/.local/share").expanduser()
     return base / _DEFAULT_SUBDIR

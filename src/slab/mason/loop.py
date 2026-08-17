@@ -1,0 +1,363 @@
+"""The turn engine: one ReAct loop, budgeted context, harness-owned discipline.
+
+One :class:`Mason` holds one conversation. ``run_turn`` takes a user goal and
+loops model call -> tool dispatch -> observation until the model answers in
+plain text, calls ``finish``, or a harness limit stops it. The limits live in
+code because prompts do not enforce invariants:
+
+* ``max_turns`` model calls per goal — the runaway stop.
+* A consecutive-tool-failure streak aborts the turn with the evidence in
+  place (five malformed or crashing calls in a row is a stuck agent, not
+  progress).
+* Compaction triggers at ``compact_at`` x ``context_window`` — well below
+  the window, because model quality degrades before the hard limit — and a
+  context-overflow answer from the server forces one immediate compaction
+  and retry. Compaction folds the middle of the conversation into a
+  structured summary (state, verified results, failures observed, open
+  questions), writes that summary into the lab notebook, and rebuilds the
+  system message fresh so plan and notebook re-enter the context updated.
+
+Both tool protocols run through the same loop: native OpenAI tool calls, or
+the fenced-block text protocol for servers without a tool-call parser.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from typing import Any, Literal, Protocol
+
+from pydantic import BaseModel, ConfigDict
+
+from slab.config import AgentConfig
+from slab.errors import SlabError
+from slab.mason.client import (
+    ChatClient,
+    ChatReply,
+    ContextOverflowError,
+    parse_fenced_calls,
+    parse_loose_calls,
+)
+from slab.mason.prompts import COMPACTION_PROMPT, system_messages
+from slab.mason.session import MasonSession
+from slab.mason.tools import Toolbox, build_toolbox
+
+_ERROR_STREAK_LIMIT = 5
+_COMPACTION_KEEP_MESSAGES = 6
+_CHARS_PER_TOKEN = 4  # the usual rough estimate; real usage numbers override it
+
+StopReason = Literal["answer", "finish", "max_turns", "error_streak"]
+
+
+class ChatBackend(Protocol):
+    """What the loop needs from a model client (tests substitute a script)."""
+
+    def chat(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
+    ) -> ChatReply: ...
+
+
+class TurnResult(BaseModel):
+    """How one ``run_turn`` ended."""
+
+    model_config = ConfigDict(frozen=True)
+
+    text: str
+    stop_reason: StopReason
+    steps: int
+
+    @property
+    def finished(self) -> bool:
+        """True when the model declared the task done via the finish tool."""
+        return self.stop_reason == "finish"
+
+
+def client_from_config(agent: AgentConfig) -> ChatClient:
+    """Build the real client the config describes, refusing the unconfigured.
+
+    The API key is read from the environment variable ``api_key_env``
+    *names* — a set name whose variable is missing is a loud error, not an
+    anonymous request that fails somewhere down the line.
+    """
+    if agent.model is None:
+        raise SlabError(
+            "no model configured: set [agent] model in the slab config "
+            "('slab config init' writes a template; 'slab mason doctor' lists "
+            "what the endpoint serves)"
+        )
+    api_key: str | None = None
+    if agent.api_key_env is not None:
+        api_key = os.environ.get(agent.api_key_env)
+        if api_key is None:
+            raise SlabError(
+                f"[agent] api_key_env names ${agent.api_key_env}, which is not set "
+                f"in the environment"
+            )
+    return ChatClient(
+        agent.endpoint,
+        agent.model,
+        api_key=api_key,
+        temperature=agent.temperature,
+        timeout_s=agent.request_timeout_s,
+        max_reply_tokens=agent.max_reply_tokens,
+    )
+
+
+class Mason:
+    """One conversation with the resident research agent.
+
+    Args:
+        session: The project/session state (paths, config, transcript).
+        client: A chat backend; built from the session's config when omitted.
+        toolbox: The tool set; built for the session when omitted.
+        resume_from: Messages replayed from an earlier transcript (the system
+            message is always rebuilt fresh — plan, notebook, and environment
+            re-enter current, not as they were).
+    """
+
+    def __init__(
+        self,
+        session: MasonSession,
+        client: ChatBackend | None = None,
+        toolbox: Toolbox | None = None,
+        resume_from: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.session = session
+        self.client: ChatBackend = (
+            client if client is not None else client_from_config(session.agent)
+        )
+        self.toolbox = toolbox if toolbox is not None else build_toolbox(session)
+        self.fenced = session.agent.tool_protocol == "fenced"
+        catalog = self.toolbox.catalog_text() if self.fenced else None
+        self.messages: list[dict[str, Any]] = system_messages(session, catalog)
+        self._catalog = catalog
+        self._last_prompt_tokens: int | None = None
+        self._messages_at_last_compaction = 0
+        if resume_from:
+            # Re-record the replayed history into THIS session's transcript so
+            # each transcript stays self-contained: resuming a resumed session
+            # must not amputate everything before the previous resume.
+            self.session.record({"type": "resume", "messages": len(resume_from)})
+            for message in resume_from:
+                self._append(message)
+
+    # -- the loop -------------------------------------------------------------
+
+    def run_turn(self, user_text: str) -> TurnResult:
+        """Drive one goal until an answer, a finish, or a harness stop."""
+        self._append({"role": "user", "content": user_text})
+        error_streak = 0
+        for step in range(1, self.session.agent.max_turns + 1):
+            self._maybe_compact()
+            reply = self._call_model()
+            calls = list(reply.tool_calls)
+            from_text = False
+            if not calls:
+                # The text-protocol ladder: the documented fenced format, then
+                # the llama-style {"name": ..., "parameters": ...} that open
+                # models leak into content even when served with a tool parser.
+                if self.fenced:
+                    calls = list(parse_fenced_calls(reply.content))
+                if not calls:
+                    calls = list(parse_loose_calls(reply.content, frozenset(self.toolbox.tools)))
+                from_text = bool(calls)
+            self._append_assistant(reply, has_calls=bool(calls))
+            if not calls:
+                return TurnResult(
+                    text=reply.content or "", stop_reason="answer", steps=step
+                )
+            for position, call in enumerate(calls):
+                if call.name == "finish" and call.arguments_error is None:
+                    report = str(call.arguments.get("report", ""))
+                    self._append_tool_result(call, "task closed", as_text=from_text)
+                    self._answer_unrun(calls[position + 1 :], from_text=from_text)
+                    self.session.record({"type": "finish", "report": report})
+                    return TurnResult(text=report, stop_reason="finish", steps=step)
+                result, ok = self._dispatch(call)
+                self._append_tool_result(call, result, as_text=from_text)
+                error_streak = 0 if ok else error_streak + 1
+                if error_streak >= _ERROR_STREAK_LIMIT:
+                    self._answer_unrun(calls[position + 1 :], from_text=from_text)
+                    return TurnResult(
+                        text=(
+                            f"stopped: {_ERROR_STREAK_LIMIT} consecutive tool calls "
+                            f"failed at the harness level; the transcript holds the "
+                            f"evidence — the last failure was: {result}"
+                        ),
+                        stop_reason="error_streak",
+                        steps=step,
+                    )
+        return TurnResult(
+            text=(
+                f"stopped at the {self.session.agent.max_turns}-call budget for one "
+                f"goal without a final answer; PLAN.md and NOTEBOOK.md hold the "
+                f"state — continue with a narrower goal or raise [agent] max_turns"
+            ),
+            stop_reason="max_turns",
+            steps=self.session.agent.max_turns,
+        )
+
+    def _answer_unrun(self, calls: list[Any], *, from_text: bool) -> None:
+        """Answer tool calls we short-circuited past.
+
+        Every ``tool_calls`` entry in an assistant message must have a
+        matching tool result or the history is malformed — servers reject it
+        on the next request, and ``--resume`` would replay the breakage.
+        """
+        for call in calls:
+            self._append_tool_result(
+                call, "not run: the turn ended before this call", as_text=from_text
+            )
+
+    def _dispatch(self, call: Any) -> tuple[str, bool]:
+        """Run one tool call; ``ok=False`` marks harness-level failures only.
+
+        A domain answer like "no such file" is the model's problem to react
+        to, not a harness failure; malformed arguments, missing required
+        arguments, unknown tools, refused approvals, and crashed handlers all
+        count toward the abort streak — they are the loops that never
+        converge on their own.
+        """
+        result = self.toolbox.dispatch(call)
+        hard_failure = (
+            call.arguments_error is not None
+            or call.name not in self.toolbox.tools
+            or result.startswith(f"tool {call.name} failed:")
+            or result.startswith(f"tool {call.name} not run:")
+            or result.startswith(f"tool {call.name} was not approved")
+        )
+        return result, not hard_failure
+
+    def _call_model(self) -> ChatReply:
+        tools = None if self.fenced else self.toolbox.specs()
+        try:
+            reply = self.client.chat(self.messages, tools)
+        except ContextOverflowError as e:
+            # The server knows the window better than our estimate: compact
+            # once and retry. If there was nothing left to fold, retrying
+            # would just repeat the overflow — say so instead.
+            if not self._compact():
+                raise ContextOverflowError(
+                    f"{e} — and there is nothing left to compact: the system prompt, "
+                    f"plan, notebook tail, and current goal already exceed the model's "
+                    f"window. Shorten PLAN.md/AGENTS.md, or serve a larger context."
+                ) from e
+            reply = self.client.chat(self.messages, tools)
+        self.session.count_usage(reply.prompt_tokens, reply.completion_tokens)
+        self._last_prompt_tokens = reply.prompt_tokens
+        self.session.record(
+            {
+                "type": "usage",
+                "prompt_tokens": reply.prompt_tokens,
+                "completion_tokens": reply.completion_tokens,
+            }
+        )
+        return reply
+
+    # -- message bookkeeping --------------------------------------------------
+
+    def _append(self, message: dict[str, Any]) -> None:
+        self.messages.append(message)
+        self.session.record({"type": "message", "message": message})
+
+    def _append_assistant(self, reply: ChatReply, *, has_calls: bool) -> None:
+        message: dict[str, Any] = {"role": "assistant", "content": reply.content}
+        if has_calls and not self.fenced and reply.tool_calls:
+            message["tool_calls"] = [
+                {
+                    "id": call.id,
+                    "type": "function",
+                    "function": {"name": call.name, "arguments": call.arguments_raw},
+                }
+                for call in reply.tool_calls
+            ]
+        self._append(message)
+
+    def _append_tool_result(self, call: Any, result: str, *, as_text: bool = False) -> None:
+        # Calls parsed out of plain text have no server-side tool_calls to
+        # answer, so their results go back as labeled user messages (a tool
+        # message without a preceding tool_calls violates the protocol).
+        if self.fenced or as_text:
+            self._append(
+                {"role": "user", "content": f"[tool result: {call.name}]\n{result}"}
+            )
+        else:
+            self._append({"role": "tool", "tool_call_id": call.id, "content": result})
+
+    # -- compaction -----------------------------------------------------------
+
+    def _estimated_prompt_tokens(self) -> int:
+        """The server's last count when we have one, chars/4 as the floor."""
+        estimate = sum(len(json.dumps(m)) for m in self.messages) // _CHARS_PER_TOKEN
+        if self._last_prompt_tokens is not None:
+            return max(self._last_prompt_tokens, estimate // 2)
+        return estimate
+
+    def _maybe_compact(self) -> None:
+        agent = self.session.agent
+        if self._estimated_prompt_tokens() < int(agent.context_window * agent.compact_at):
+            return
+        # Over budget but nothing new since the last fold: compacting again
+        # would re-summarize the summary every single step, burning a model
+        # call per turn for no reduction. Let the turn proceed; a real
+        # overflow is caught by the server and handled loudly.
+        if len(self.messages) <= self._messages_at_last_compaction:
+            return
+        self._compact()
+
+    def _compact(self) -> bool:
+        """Fold the middle of the conversation into a structured summary.
+
+        Returns False when there was nothing foldable (the caller decides
+        whether that is fine or fatal).
+        """
+        keep = _COMPACTION_KEEP_MESSAGES
+        if len(self.messages) <= 1 + keep + 2:  # nothing worth folding
+            return False
+        boundary = len(self.messages) - keep
+        # A tool message must keep the assistant message that called it.
+        while boundary > 1 and self.messages[boundary].get("role") == "tool":
+            boundary -= 1
+        folded = self.messages[1:boundary]
+        if not folded:
+            return False
+        summary_reply = self.client.chat(
+            [
+                {"role": "system", "content": COMPACTION_PROMPT},
+                {"role": "user", "content": _render_for_summary(folded)},
+            ],
+            None,
+        )
+        summary = (summary_reply.content or "").strip() or "(the summarizer said nothing)"
+        self.session.count_usage(summary_reply.prompt_tokens, summary_reply.completion_tokens)
+        self.session.notebook_append(summary, heading="context compaction")
+        rebuilt = system_messages(self.session, self._catalog)
+        tail = self.messages[boundary:]
+        self.messages = [
+            *rebuilt,
+            {
+                "role": "user",
+                "content": f"[history compacted; working summary]\n{summary}",
+            },
+            *tail,
+        ]
+        self._last_prompt_tokens = None
+        self._messages_at_last_compaction = len(self.messages)
+        self.session.record({"type": "compaction", "summary": summary})
+        return True
+
+
+def _render_for_summary(messages: list[dict[str, Any]], per_message_chars: int = 1_500) -> str:
+    """A transcript rendering the summarizer can read; long entries clipped."""
+    lines = []
+    for message in messages:
+        role = str(message.get("role", "?"))
+        content = message.get("content")
+        text = "" if content is None else str(content)
+        for call in message.get("tool_calls", ()):
+            function = call.get("function", {})
+            text += f"\n[called {function.get('name')}({function.get('arguments', '')[:300]})]"
+        if len(text) > per_message_chars:
+            text = text[:per_message_chars] + " [...]"
+        lines.append(f"--- {role} ---\n{text}")
+    return "\n".join(lines)

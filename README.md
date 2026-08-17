@@ -331,6 +331,32 @@ code and environment variables as the calling user. SLAB isolates
 *configuration*, not *privilege* — trusting a cluster's `engines.json` is
 trusting its module farm, exactly as with rootstock installs.
 
+## Configuring for your HPC
+
+Everything machine-specific is **policy-as-data** in layered TOML: a *site*
+file the cluster maintainer ships (`$SLAB_SITE_CONFIG`, exported from a
+module file), a *user* file (`~/.config/slab/config.toml`), and a *project*
+`slab.toml` — merged key-by-key, project winning, explicit environment
+variables above all of it. `slab config init` writes a commented template;
+`slab config show` prints the merged result with each value's origin.
+
+One file declares paths (workspace, pseudopotential root, engine registry),
+`[engines.qe]` defaults (`command = "srun pw.x"`), and `[hpc]` SLURM
+partitions. The partitions drive a deliberately thin scheduler layer:
+
+```bash
+slab hpc partitions                                  # what the config declares
+slab hpc render "slab run relax.py" --name si        # the exact sbatch script
+slab hpc submit "slab run relax.py" --name si        # sbatch --parsable
+slab hpc status 4242314                              # squeue, then sacct
+```
+
+Only fields the config sets become `#SBATCH` directives — no silent resource
+defaults — and the submitted script is kept next to the job's outputs as
+provenance. Config never reaches a cache key: it supplies defaults that
+resolve into explicit values, and those resolved values are what recipes
+record.
+
 ## Agent surface (MCP)
 
 ```json
@@ -342,14 +368,42 @@ Tools: `launch_workflow`, `list_runs`, `show_run`, `promote_run`,
 returning structured JSON. Script output is captured into the result so prints can't corrupt the
 protocol channel.
 
+## Mason: the resident research agent
+
+The mason works the slab. `slab mason` is a built-in Claude-Code-class
+agent harness for **open-weight models** on your own hardware — Ollama on a
+laptop, vLLM on a compute node — through the OpenAI-compatible API with a
+stdlib HTTP client, no SDK. It is tuned for long atomistic research
+projects: calculations run as SLAB workflow scripts through its
+`slab_launch` tool, so every number it reports traces to a run id and its
+`@check` assertions; memory lives in `NOTEBOOK.md`/`PLAN.md` in the project
+directory (files outlive context windows); history compacts into structured
+summaries well before the model's window fills; and SLURM tools appear
+exactly when the config declares partitions.
+
+```bash
+slab mason doctor           # endpoint reachable? model served? tool calls parsed?
+slab mason chat             # interactive session
+slab mason run "..." --auto # one autonomous goal
+```
+
+Verified against a real Llama 3.1 8B via Ollama: an autonomous bulk-Cu
+relaxation whose reported energy matches an independent calculation exactly,
+with the run verified by its own checks. The design distills the 2024–2026
+agent-harness literature (ReAct, MemGPT, SWE-agent's interface results,
+Anthropic's context-engineering and long-horizon harness guidance, Manus's
+cache-first lessons) — each mechanism and its source is documented in
+[the Mason tutorial](https://tarbaugh.github.io/SLAB/tutorials/mason/).
+
 ## Non-goals
 
 - **No physics engines** and no new file-format parsers beyond what ASE
   provides. Backends are reached through the ASE `Calculator` contract;
   LAMMPS/VASP/GROMACS/QE/MLIPs are BLAS — SLAB is NumPy one layer up.
-- **No HPC scheduler integration** in the MVP. Execution is local; the
-  runtime is designed so a SLURM executor can be added behind the same
-  tracing surface.
+- **No workflow-engine scheduler integration.** The SLURM layer is thin
+  submission plumbing (`slab hpc`): render, submit, poll, cancel. Runs,
+  caching, and verification stay in the workspace regardless of where the
+  process executes; there is no remote state machine.
 - **No web UI.**
 - **No distributed daemon.** A workspace is a directory; concurrency is
   handled at the SQLite transaction level.
@@ -358,12 +412,16 @@ protocol channel.
 
 MVP vertical slice, working end to end: lifecycle state machine,
 content-addressed artifact store with tiered retention, define-by-run tracing
-with content-hash caching, verification hooks, MACE/ASE relaxation task, CLI,
-MCP server. 580 tests (including every docstring example, executed as
-doctests), ~100% coverage on the load-bearing core, mypy `--strict`, plus an
-adversarial multi-agent review pass whose confirmed findings are regression
-tests. The `RunStore` protocol is the seam for Postgres; the backend factory
-is the seam for more engines.
+with content-hash caching, verification hooks, MACE/ASE/Quantum ESPRESSO
+relaxation task, AiiDA-style protocols and SSSP pseudopotential families,
+layered HPC configuration with a SLURM submission layer, the Mason agent
+harness for open models, CLI, MCP server. 770+ tests (including every
+docstring example, executed as doctests), ~96% coverage, mypy `--strict`,
+plus adversarial multi-agent review passes whose confirmed findings are
+regression tests — the QE engine verified against a real `pw.x` 7.4.1, the
+balanced protocol against a real SSSP install, Mason against a real Llama
+via Ollama. The `RunStore` protocol is the seam for Postgres; the backend
+factory is the seam for more engines.
 
 ## Development
 

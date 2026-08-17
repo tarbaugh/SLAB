@@ -86,9 +86,10 @@ pip install -e ".[rootstock]" # + cluster-served MLIPs (thin client, no torch)
 pip install -e ".[mcp]"       # + MCP server for agents
 ```
 
-Python ≥ 3.11. No daemon, no database server, no configuration: a workspace
-is a directory (`.slab/` by default) holding a SQLite file and a
-content-addressed store.
+Python ≥ 3.11. No daemon, no database server, no required configuration: a
+workspace is a directory (`.slab/` by default) holding a SQLite file and a
+content-addressed store. Clusters describe themselves in one optional
+layered TOML file ([HPC configuration](tutorials/hpc-config.md)).
 
 ## Where to go next
 
@@ -102,10 +103,15 @@ content-addressed store.
   *is* the resume mechanism.
 - **[Engines](tutorials/engines.md)** — MACE in-process, cluster registries,
   and rootstock checkpoints served silently.
+- **[HPC configuration & SLURM](tutorials/hpc-config.md)** — one layered
+  TOML file per cluster: paths, engines, partitions, batch submission.
 - **[Debugging failures](tutorials/debugging-failures.md)** — the failure
   evidence surfaces, tuned for LLM consumers.
 - **[Agents over MCP](tutorials/agents-mcp.md)** — serve a workspace to an
   agent as a set of MCP tools.
+- **[Mason, the resident agent](tutorials/mason.md)** — a built-in
+  Claude-Code-class harness for open models, tuned for long research
+  projects.
 
 ## Status
 
@@ -113,10 +119,13 @@ MVP vertical slice, working end to end: lifecycle state machine,
 content-addressed artifact store with tiered retention, define-by-run tracing
 with content-hash caching, verification hooks, MACE/ASE/Quantum ESPRESSO
 relaxation task, AiiDA-style input protocols and SSSP pseudopotential
-families, CLI, MCP server. 630+ tests (every docstring example runs as a
-doctest), ~100% coverage on the load-bearing core, mypy `--strict`, plus
-adversarial multi-agent review passes whose confirmed findings are regression
-tests — the QE engine is verified against a real `pw.x` 7.4.1, and the
-balanced protocol against a real SSSP install.
+families, layered HPC configuration with a SLURM submission layer, the Mason
+agent harness for open models, CLI, MCP server. 770+ tests (every docstring
+example runs as a doctest), ~96% coverage, mypy `--strict`, plus adversarial
+multi-agent review passes whose confirmed findings are regression tests — the
+QE engine is verified against a real `pw.x` 7.4.1, the balanced protocol
+against a real SSSP install, and Mason against a real Llama 3.1 served by
+Ollama (an autonomous relax whose reported energy matches an independent
+calculation exactly).
 
 MIT licensed.
