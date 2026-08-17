@@ -122,13 +122,18 @@ class Toolbox:
                 + ")"
             )
         preview = _preview(call)
-        if tool.needs_approval(call.arguments) and not self.session.allows(
-            call.name, preview, requires_approval=True
-        ):
-            return (
-                f"tool {call.name} was not approved by the user; explain what you "
-                f"wanted it for, or work another way"
-            )
+        if tool.needs_approval(call.arguments):
+            try:
+                approved = self.session.allows(call.name, preview, requires_approval=True)
+            except Exception:
+                # dispatch never raises: a crashing approver (closed stdin,
+                # broken terminal) is a refusal, not a dead process.
+                approved = False
+            if not approved:
+                return (
+                    f"tool {call.name} was not approved by the user; explain what you "
+                    f"wanted it for, or work another way"
+                )
         try:
             result = tool.handler(call.arguments)
         except Exception as e:  # evidence for the model, never a dead loop
@@ -150,9 +155,13 @@ def _preview(call: ToolCall) -> str:
     for key in ("path", "script", "name", "partition", "old_string", "new_string", "content"):
         if key in arguments:
             value = str(arguments[key])
-            shown = value if len(value) <= 120 else value[:120] + "..."
+            # content is the thing being approved — a human shown 120 chars
+            # of a workflow script is approving blind. Head and tail, with
+            # the elision announced, is enough to actually read it.
+            limit = 1200 if key == "content" else 120
+            shown = value if len(value) <= limit else _truncate_middle(value, limit)
             parts.append(f"{key}={shown!r}")
-    return " ".join(parts)[:400] if parts else json.dumps(arguments)[:200]
+    return " ".join(parts)[:1600] if parts else json.dumps(arguments)[:200]
 
 
 def _truncate_middle(text: str, limit: int) -> str:

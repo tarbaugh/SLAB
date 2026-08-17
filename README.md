@@ -265,10 +265,17 @@ spacing, cold smearing, per-atom-scaled thresholds):
 
 ```python
 from slab.protocols import qe_protocol_options
+from slab.tasks import single_point
 
 options = qe_protocol_options(atoms, protocol="balanced")   # explicit, never a default
-relaxed, info = relax(atoms, engine="qe", calculator_options=options)
+relaxed, info = relax(atoms, engine="mace", fmax=0.02)      # cheap geometry
+final, dft = single_point(relaxed, engine="qe", calculator_options=options)
 ```
+
+`single_point` is `relax`'s sibling task — one energy+forces evaluation, no
+optimizer — and the pair makes the canonical two-fidelity chain: relax under
+a universal MLIP, then one DFT evaluation of the relaxed geometry, with the
+DFT residual force as the check that the cheap geometry held up.
 
 A protocol is only ever applied by name, explicitly, and the *expanded
 numbers* — not the name — are what the tracer hashes: retuning the protocol

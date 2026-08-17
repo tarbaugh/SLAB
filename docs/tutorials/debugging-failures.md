@@ -122,6 +122,9 @@ dying — it captures the evidence before the scratch directory vanishes:
   apart or the energy oscillated, frame by frame.
 - Untraced calls (outside `start_run`) still get the note; there is just no
   artifact store to keep the trajectory in.
+- `single_point` shares the same contract minus the trajectory (nothing is
+  optimized): engine error notes on the exception, and the engine's own files
+  kept as `{label or 'single-point'}-failed.*`.
 
 <!-- no-verify -->
 ```python

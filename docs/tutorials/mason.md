@@ -230,6 +230,16 @@ approval gate: interactively Mason asks; `--auto` (or `[agent] approval =
 boundaries, and a command containing shell control operators (`;`, `|`, `&`,
 redirection...) never auto-approves.
 
+Plan the gate before an interactive session: `write_file`, `edit_file`,
+`shell`, `slab_launch`, `submit_job`, and `cancel_job` ask; everything else
+(reads, `slab_engines`, `job_status`, the memory instruments) never does. A
+multi-step goal therefore prompts several times — every shell probe included,
+since the default allowlist is empty — and at the prompt **Enter refuses**
+(the default is "no"; five straight refusals abort the turn). Either answer
+`y` deliberately, run with `--auto`, or set `[agent] shell_allowlist` to your
+read-only probes so only the real mutations ask. `slab mason run` without
+`--auto` refuses every mutating tool — batch use wants `--auto`.
+
 ## Memory that outlives the context window
 
 Long projects die of context, not of model quality — models degrade well before

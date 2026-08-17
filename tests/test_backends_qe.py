@@ -113,7 +113,11 @@ def test_qe_unconfigured_points_at_both_setups(monkeypatch: pytest.MonkeyPatch) 
 
 def test_qe_scratch_lifecycle_and_option_forwarding(tmp_path: Path) -> None:
     calc = get_calculator(
-        "qe", command="/bin/echo", pseudo_dir="~/nowhere-pseudos", kpts=(2, 2, 2)
+        "qe",
+        command="/bin/echo",
+        pseudo_dir="~/nowhere-pseudos",
+        kpts=(2, 2, 2),
+        input_data={"system": {"ecutwfc": 30.0}},
     )
     scratch = calc._slab_scratch
     assert scratch.is_dir()
@@ -141,7 +145,7 @@ def test_qe_forces_printing_defaults_on(tmp_path: Path) -> None:
         "qe",
         command="/bin/echo",
         pseudo_dir=str(tmp_path),
-        input_data={"control": {"tprnfor": False}},
+        input_data={"control": {"tprnfor": False}, "system": {"ecutwfc": 14.0}},
     )
     assert calc.parameters["input_data"]["control"]["tprnfor"] is False
     close_calculator(calc)
@@ -169,7 +173,13 @@ def test_qe_never_mutates_caller_options(tmp_path: Path) -> None:
 def test_qe_explicit_directory_is_respected_and_kept(tmp_path: Path) -> None:
     mine = tmp_path / "mine"
     mine.mkdir()
-    calc = get_calculator("qe", command="/bin/echo", pseudo_dir=str(tmp_path), directory=mine)
+    calc = get_calculator(
+        "qe",
+        command="/bin/echo",
+        pseudo_dir=str(tmp_path),
+        directory=mine,
+        input_data={"system": {"ecutwfc": 30.0}},
+    )
     assert getattr(calc, "_slab_scratch", None) is None
     assert calc.directory == mine
     close_calculator(calc)
@@ -382,6 +392,8 @@ def test_relax_qe_failure_keeps_engine_evidence(ws: Workspace, tmp_path: Path) -
                 "command": str(script),
                 "pseudo_dir": str(tmp_path),
                 "pseudopotentials": {"Si": "fake.upf"},
+                "kpts": None,  # explicit Γ-only opt-in; the replay ignores inputs
+                "input_data": {"system": {"ecutwfc": 30.0}},
             },
         )
     notes = excinfo.value.__notes__
@@ -416,6 +428,8 @@ def test_relax_qe_failure_untraced_still_gets_notes(tmp_path: Path) -> None:
                 "command": str(script),
                 "pseudo_dir": str(tmp_path),
                 "pseudopotentials": {"Si": "fake.upf"},
+                "kpts": None,  # explicit Γ-only opt-in; the replay ignores inputs
+                "input_data": {"system": {"ecutwfc": 30.0}},
             },
         )
     notes = excinfo.value.__notes__
@@ -433,6 +447,8 @@ def test_relax_qe_success_replays_real_output(ws: Workspace, tmp_path: Path) -> 
         "command": str(script),
         "pseudo_dir": str(tmp_path),
         "pseudopotentials": {"Si": "Si.pz-vbc.UPF"},
+        "kpts": None,  # explicit Γ-only opt-in; the replay ignores inputs
+        "input_data": {"system": {"ecutwfc": 30.0}},
     }
 
     with ws.start_run(name="qe-ok", intent="fake pw.x replaying a real pwo") as run:
@@ -471,6 +487,57 @@ def test_relax_qe_success_replays_real_output(ws: Workspace, tmp_path: Path) -> 
     assert info_bumped["engine_version"] == "7.5.0"
 
 
+def test_single_point_qe_replay_keeps_pwo_and_caches(ws: Workspace, tmp_path: Path) -> None:
+    """One SCF, no optimizer: the pwo is the only artifact, and identity caches."""
+    from slab.tasks import single_point
+
+    script = _fake_pw_success(tmp_path, FIXTURE_PWO)
+    atoms = bulk("Si", "diamond", a=5.43)
+    options = {
+        "command": str(script),
+        "pseudo_dir": str(tmp_path),
+        "pseudopotentials": {"Si": "Si.pz-vbc.UPF"},
+        "kpts": None,  # explicit Γ-only opt-in; the replay ignores inputs
+        "input_data": {"system": {"ecutwfc": 30.0}},
+    }
+
+    with ws.start_run(name="qe-scf", intent="fake pw.x single point") as run:
+        evaluated, info = single_point(atoms, engine="qe", label="si", calculator_options=options)
+
+    assert info["engine_version"] == "7.4.1"
+    assert info["energy"] == pytest.approx(FIXTURE_ENERGY_EV)
+    assert "converged" not in info
+    assert info["fmax"] >= 0  # forces parsed from the replayed pwo
+    assert evaluated.get_potential_energy() == pytest.approx(FIXTURE_ENERGY_EV)
+    artifacts = {a.name for a in ws.runs.list_artifacts(run.id)}
+    assert artifacts == {"si.pwo"}  # no trajectory: nothing was optimized
+
+    with ws.start_run(name="qe-scf-again", intent="cache hit") as again:
+        single_point(atoms, engine="qe", label="si", calculator_options=options)
+    assert ws.runs.list_tasks(again.id)[0].cache_hit is True
+
+
+def test_single_point_qe_failure_untraced_still_gets_notes(tmp_path: Path) -> None:
+    from slab.tasks import single_point
+
+    script = _fake_pw_failure(tmp_path)
+    with pytest.raises(CalledProcessError) as excinfo:
+        single_point(
+            bulk("Si", "diamond", a=5.43),
+            engine="qe",
+            calculator_options={
+                "command": str(script),
+                "pseudo_dir": str(tmp_path),
+                "pseudopotentials": {"Si": "fake.upf"},
+                "kpts": None,  # explicit Γ-only opt-in; the replay ignores inputs
+                "input_data": {"system": {"ecutwfc": 30.0}},
+            },
+        )
+    notes = " ".join(excinfo.value.__notes__)
+    assert "Error in routine cheese (1): the wheel is not round" in notes
+    assert "kept as artifacts" not in notes  # no run, no store
+
+
 # -- the real thing, when present ------------------------------------------------------
 
 
@@ -505,3 +572,84 @@ def test_relax_qe_real_integration(ws: Workspace) -> None:
     assert relaxed.get_potential_energy() == pytest.approx(info["energy"])
     names = {a.name for a in ws.runs.list_artifacts(run.id)}
     assert {"si.traj", "si.pwo"} <= names
+
+
+# -- first-contact guards (protocol=, ecutwfc, launchers) ------------------------------
+
+
+def test_qe_refuses_protocol_name_in_options(tmp_path: Path) -> None:
+    """A protocol *name* would silently vanish inside ASE's input writer."""
+    with pytest.raises(EngineNotAvailableError, match="qe_protocol_options"):
+        get_calculator("qe", command="/bin/echo", pseudo_dir=str(tmp_path), protocol="balanced")
+
+
+def test_qe_refuses_missing_ecutwfc(tmp_path: Path) -> None:
+    """pw.x aborts at runtime without ecutwfc; slab refuses at build time."""
+    with pytest.raises(EngineNotAvailableError, match="ecutwfc"):
+        get_calculator("qe", command="/bin/echo", pseudo_dir=str(tmp_path))
+
+
+def _fake_launcher_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *names: str) -> None:
+    bins = tmp_path / "bin"
+    bins.mkdir(exist_ok=True)
+    for name in names:
+        _script(bins / name, "exit 0\n")
+    monkeypatch.setenv("PATH", f"{bins}:{os.environ.get('PATH', '')}")
+
+
+def test_qe_srun_outside_allocation_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """srun outside a job queues for a fresh allocation — a silent hang, since
+    ASE runs engine commands with no timeout. Refused loudly instead."""
+    _fake_launcher_env(tmp_path, monkeypatch, "srun", "pw.x")
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+    with pytest.raises(EngineNotAvailableError, match="not inside a SLURM allocation"):
+        get_calculator(
+            "qe",
+            command="srun pw.x",
+            pseudo_dir=str(tmp_path),
+            input_data={"system": {"ecutwfc": 30.0}},
+        )
+
+
+def test_qe_srun_inside_allocation_builds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_launcher_env(tmp_path, monkeypatch, "srun", "pw.x")
+    monkeypatch.setenv("SLURM_JOB_ID", "424242")
+    calc = get_calculator(
+        "qe",
+        command="srun pw.x",
+        pseudo_dir=str(tmp_path),
+        input_data={"system": {"ecutwfc": 30.0}},
+    )
+    close_calculator(calc)
+
+
+def test_qe_launcher_with_missing_payload_is_loud(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """which(argv[0]) alone validates the *launcher* and would miss this."""
+    _fake_launcher_env(tmp_path, monkeypatch, "srun")
+    monkeypatch.setenv("SLURM_JOB_ID", "424242")
+    with pytest.raises(EngineNotAvailableError, match="module load"):
+        get_calculator(
+            "qe",
+            command="srun definitely-not-pw",
+            pseudo_dir=str(tmp_path),
+            input_data={"system": {"ecutwfc": 30.0}},
+        )
+
+
+def test_srun_probe_short_circuits_outside_allocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The version probe must not burn its timeout on a doomed srun."""
+    from slab.backends import _srun_without_allocation
+
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+    assert _srun_without_allocation("srun pw.x") is True
+    assert _srun_without_allocation("mpirun pw.x") is False
+    monkeypatch.setenv("SLURM_JOB_ID", "1")
+    assert _srun_without_allocation("srun pw.x") is False

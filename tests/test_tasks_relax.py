@@ -409,3 +409,17 @@ def test_mace_extra_importable_when_installed() -> None:
     from mace.calculators import mace_mp
 
     assert callable(mace_mp)
+
+
+def test_mace_identity_names_model_and_dist_version() -> None:
+    """engine='mace' cache identity must say which MLIP actually runs: the
+    resolved checkpoint (slab's own 'small' default included) and the
+    mace-torch version — changing either must invalidate honestly."""
+    from importlib.metadata import version
+
+    from slab.backends import describe_engine
+
+    identity = describe_engine("mace")
+    assert identity["model"] == "small"
+    assert identity["version"] == version("mace-torch")
+    assert describe_engine("mace", {"model": "medium"})["model"] == "medium"

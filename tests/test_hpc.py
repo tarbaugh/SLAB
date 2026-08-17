@@ -377,3 +377,22 @@ def test_engines_overview_hpc_error_is_reported_not_raised(
     overview = engines_overview(registry)
     assert overview["hpc"] is None
     assert "not valid TOML" in overview["hpc_error"]
+
+
+def test_driver_payload_is_never_launched() -> None:
+    """srun on the slab driver would replicate the workflow once per task."""
+    from slab.config import HpcConfig
+    from slab.hpc import render_sbatch
+
+    hpc = HpcConfig.model_validate(
+        {
+            "default_partition": "cpu",
+            "partitions": {"cpu": {"launcher": "srun", "ntasks_per_node": 64}},
+        }
+    )
+    script = render_sbatch("slab run relax.py", job_name="wf", config=hpc)
+    assert "\nslab run relax.py" in script
+    assert "srun slab run" not in script
+    assert "launcher omitted" in script
+    engine_script = render_sbatch("pw.x -in si.pwi", job_name="pw", config=hpc)
+    assert "srun pw.x -in si.pwi" in engine_script  # engines still get the launcher

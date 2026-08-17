@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from collections.abc import Iterable
@@ -145,7 +146,11 @@ def render_sbatch(
     Only declared fields become ``#SBATCH`` directives; the ``[hpc]``-level
     ``account`` and ``setup`` apply unless the partition sets its own. The
     partition's ``launcher`` (``srun``, ``mpirun -np 4`` ...) prefixes the
-    command. *time_limit* overrides the partition's; *output* defaults to
+    command — except a command invoking the slab driver itself
+    (``slab run ...``), which is always emitted unlaunched with an
+    explanatory comment: launching the driver replicates the whole workflow
+    once per task and deadlocks the engines' own nested ``srun``.
+    *time_limit* overrides the partition's; *output* defaults to
     ``<job_name>-%j.out`` (SLURM merges stderr into it when no separate
     error file is asked for). The result is pure text — render it, read it,
     then submit it.
@@ -213,8 +218,28 @@ def render_sbatch(
     body.extend(spec.setup)
     body.extend(prologue)
     launcher = spec.launcher if use_launcher else None
+    if launcher and _is_driver_payload(command):
+        body.append("# partition launcher omitted: 'slab' is a single-process driver;")
+        body.append('# engines bring their own MPI (e.g. [engines.qe] command = "srun pw.x")')
+        launcher = None
     body.append(f"{launcher} {command}" if launcher else command)
     return "\n".join(lines + body)
+
+
+def _is_driver_payload(command: str) -> bool:
+    """True when *command* invokes the slab driver itself (``slab run ...``).
+
+    ``srun``-launching the Python driver replicates the whole workflow once
+    per task — N concurrent writers on one runs database — and each
+    replica's own engine ``srun`` then deadlocks on the already-consumed
+    allocation. The launcher belongs on engine commands *inside* the driver
+    ([engines.qe] ``command = "srun pw.x"``), never on the driver.
+    """
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    return bool(argv) and Path(argv[0]).name == "slab"
 
 
 def submit(

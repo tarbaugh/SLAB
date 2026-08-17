@@ -157,6 +157,11 @@ Driving relaxation with ASE optimizers instead of pw.x's internal loop? The
 protocol's force threshold converts to the `fmax` scale as
 `forc_conv_thr_ev_per_ang` in `protocol_details` (balanced ≈ 0.0026 eV/Å).
 
+The same expanded options drive `single_point` — the usual closing step of a
+two-fidelity chain (relax under an MLIP, then one SCF under `qe` on the
+relaxed geometry); the executed chain lives in
+[Engines](engines.md#two-fidelities-one-run).
+
 ## Why the cache never sees a protocol's name
 
 The expanded numbers — not the word "balanced" — flow into the task as traced

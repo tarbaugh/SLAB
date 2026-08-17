@@ -176,3 +176,34 @@ def test_mason_doctor_without_model_lists_served(
     result = runner.invoke(app, ["mason", "doctor", "--endpoint", url])
     assert result.exit_code == 1
     assert "no model configured; served here: a, b" in result.output
+
+
+def test_ask_approval_refuses_on_noninteractive_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under sbatch/nohup stdin is /dev/null: the gate must refuse, not die."""
+    from click.exceptions import Abort
+
+    from slab.cli import _ask_approval
+
+    def no_tty(*args: object, **kwargs: object) -> bool:
+        raise Abort()
+
+    monkeypatch.setattr("slab.cli.typer.confirm", no_tty)
+    assert _ask_approval("write_file", "path='x'") is False
+
+
+def test_mason_run_gets_the_refusing_gate_not_a_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """mason run promises 'mutating tools are refused' without --auto — the
+    session must carry the refuse-everything gate, never the terminal prompt."""
+    from slab.cli import _mason_session
+
+    monkeypatch.chdir(tmp_path)
+    batch = _mason_session(
+        tmp_path / "ws", auto=False, model=None, endpoint=None, interactive=False
+    )
+    assert batch.approver.__name__ == "_approve_nothing"
+    chat = _mason_session(tmp_path / "ws", auto=False, model=None, endpoint=None)
+    assert chat.approver.__name__ == "_ask_approval"

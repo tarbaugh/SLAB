@@ -752,3 +752,39 @@ def test_error_only_with_failed_status(store: SQLiteRunStore) -> None:
     with pytest.raises(ValueError, match="failed"):
         store.set_status(run.id, "running", error="nope")
     assert store.get(run.id).status is ExecutionStatus.PENDING
+
+
+def test_wal_refusal_falls_back_to_rollback_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Network scratch filesystems (Lustre/NFS) can refuse WAL's shared-memory
+    index; the store must degrade to rollback journaling, not refuse to open."""
+    real_connect = sqlite3.connect
+
+    class WalRefusingConnection:
+        def __init__(self, conn: object) -> None:
+            object.__setattr__(self, "_conn", conn)
+
+        def execute(self, sql: str, *args: object) -> object:
+            if "journal_mode = WAL" in sql:
+                raise sqlite3.OperationalError("unable to open shared memory")
+            return object.__getattribute__(self, "_conn").execute(sql, *args)
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(object.__getattribute__(self, "_conn"), name)
+
+        def __setattr__(self, name: str, value: object) -> None:
+            setattr(object.__getattribute__(self, "_conn"), name, value)
+
+    monkeypatch.setattr(
+        "slab.store.sqlite3.connect",
+        lambda *a, **k: WalRefusingConnection(real_connect(*a, **k)),
+    )
+    store = SQLiteRunStore(tmp_path / "runs.db")
+    try:
+        mode = store._conn.execute("PRAGMA journal_mode").fetchone()[0]
+        assert mode == "delete"
+        run = store.create(Run(name="wal-fallback"))
+        assert store.get(run.id).name == "wal-fallback"
+    finally:
+        store.close()

@@ -327,3 +327,29 @@ def test_notebook_appends_and_plan_recites(box: Toolbox, tmp_path: Path) -> None
 
 def test_finish_echoes_the_report(box: Toolbox) -> None:
     assert box.dispatch(_call("finish", report="done: a0=3.615 A (run abc)")).startswith("done:")
+
+
+def test_crashing_approver_is_a_refusal_not_a_crash(tmp_path: Path) -> None:
+    """dispatch never raises — an approver dying on closed stdin included."""
+
+    def broken(tool: str, preview: str) -> bool:
+        raise RuntimeError("stdin exploded")
+
+    session = MasonSession(
+        tmp_path, workspace_root=tmp_path / ".slab", config=SlabConfig(), approver=broken
+    )
+    box = build_toolbox(session)
+    answer = box.dispatch(_call("write_file", path="x.txt", content="c"))
+    assert "not approved" in answer
+    assert not (tmp_path / "x.txt").exists()
+
+
+def test_preview_shows_enough_content_to_review(tmp_path: Path) -> None:
+    """Approving a workflow script means reading it: head AND tail survive."""
+    from slab.mason.tools import _preview
+
+    body = "\n".join(f"line {i}" for i in range(400))
+    preview = _preview(_call("write_file", path="wf.py", content=body))
+    assert "wf.py" in preview
+    assert "line 0" in preview
+    assert "line 399" in preview

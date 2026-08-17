@@ -755,8 +755,16 @@ app.add_typer(mason_app, name="mason")
 
 
 def _ask_approval(tool_name: str, preview: str) -> bool:
+    from click.exceptions import Abort
+
     typer.echo(f"\n[approval] {tool_name}: {preview}")
-    return typer.confirm("allow?", default=False)
+    try:
+        return typer.confirm("allow?", default=False)
+    except (Abort, EOFError):
+        # stdin is not interactive (sbatch, piped input, closed terminal):
+        # refusing is the documented degradation; dying mid-turn is not.
+        typer.echo("[approval] no interactive stdin — refused")
+        return False
 
 
 def _mason_session(
@@ -767,11 +775,17 @@ def _mason_session(
     endpoint: str | None,
     provider: str | None = None,
     max_turns: int | None = None,
+    interactive: bool = True,
 ) -> MasonSession:
     from slab.mason import MasonSession
 
+    # Non-interactive entry points (mason run) get the refuse-everything
+    # gate instead of a terminal prompt, matching mason_run's docstring:
+    # without --auto, mutating tools are refused — there is no one to ask.
     session = MasonSession(
-        workspace_root=_ops.resolve_root(workspace), approver=_ask_approval, auto_approve=auto
+        workspace_root=_ops.resolve_root(workspace),
+        approver=_ask_approval if interactive else None,
+        auto_approve=auto,
     )
     updates: dict[str, object] = {}
     if model is not None:
@@ -897,6 +911,7 @@ def mason_run(
             endpoint=endpoint,
             provider=provider,
             max_turns=max_turns,
+            interactive=False,
         )
         mason = Mason(session)
         result = mason.run_turn(goal)

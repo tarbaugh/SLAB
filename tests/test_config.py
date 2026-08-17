@@ -405,7 +405,7 @@ def test_qe_factory_builds_profile_from_config(
         f'[engines.qe]\ncommand = "/bin/echo"\npseudo_dir = "{pseudo_dir}"\n'
     )
     monkeypatch.chdir(project)
-    calc = get_calculator("qe")
+    calc = get_calculator("qe", input_data={"system": {"ecutwfc": 30.0}})
     try:
         assert str(calc.profile.command) == "/bin/echo"
         assert calc.profile.pseudo_dir == str(pseudo_dir)

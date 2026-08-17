@@ -550,15 +550,24 @@ schema_version = 1
 
 [paths]
 # workspace = "/scratch/${USER}/slab-workspace"   # run database + artifacts
+#                                      # (parallel scratch works — slab falls back
+#                                      # from WAL journaling automatically — but
+#                                      # avoid heavy login-node polling of a
+#                                      # workspace a running job is writing to)
 # pseudos = "/shared/sw/slab/pseudos"             # pseudopotential family root
 # engines = "/shared/sw/slab/engines.json"        # cluster engine registry
 
 [engines.qe]
-# command = "srun pw.x"                # how to invoke pw.x on this machine
+# command = "pw.x"                     # login-node smoke tests / serial runs
+# command = "srun pw.x"                # inside batch jobs only: srun outside an
+#                                      # allocation queues or hangs, so slab
+#                                      # refuses it there — keep this form for
+#                                      # jobs submitted via 'slab hpc submit'
 # pseudo_dir = "/shared/sw/pseudos"    # used when no pseudo_family is given
 
 [engines.lammps]
-# command = "srun lmp"                 # how to invoke LAMMPS on this machine
+# command = "lmp"                      # login-node smoke tests / serial runs
+# command = "srun lmp"                 # inside batch jobs only (same srun rule)
 
 [hpc]
 # cluster = "delta"

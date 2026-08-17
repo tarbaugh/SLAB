@@ -61,7 +61,10 @@ pseudos = "/shared/sw/slab/pseudos"          # pseudopotential family root
 engines = "/shared/sw/slab/engines.json"     # cluster engine registry
 
 [engines.qe]
-command = "srun pw.x"       # outranks ASE's own [espresso] config section
+command = "srun pw.x"       # outranks ASE's own [espresso] config section;
+                            # batch jobs only — on the login node use plain
+                            # "pw.x" (srun outside an allocation queues or
+                            # hangs, and slab refuses it there loudly)
 pseudo_dir = "/shared/sw/pseudos"
 
 [hpc]
@@ -155,12 +158,19 @@ directives (Parsl's convention); SLAB adds no silent resource defaults:
 set -euo pipefail
 
 module load quantum-espresso/7.4
-srun slab run relax.py
+# partition launcher omitted: 'slab' is a single-process driver;
+# engines bring their own MPI (e.g. [engines.qe] command = "srun pw.x")
+slab run relax.py
 ```
 
 The usual payload is `slab run workflow.py`: the scheduler moves the
 process, and the result is still a traced, check-gated run in the
-workspace. The submitted script is kept next to the job's outputs — a
+workspace. Note what the launcher did *not* touch: a `slab` payload is
+never prefixed with the partition's `launcher` — `srun` on the Python
+driver would start one copy of the whole workflow per task, all writing
+one run database, each deadlocking on its own nested engine `srun`. The
+launcher belongs on the engine command inside the config, and slab
+enforces that split in the rendered script. The submitted script is kept next to the job's outputs — a
 job's exact script is provenance, not scratch.
 
 Status polling asks `squeue` first and falls back to `sacct` (finished
@@ -176,11 +186,18 @@ reason; an unknown is never dressed up as a known.
 2. Write `/sw/slab/config.toml` (paths, `[engines.qe]`, `[hpc]`
    partitions) and, optionally, `/sw/slab/engines.json` — starting from
    the files in `templates/` (see [Engines](engines.md) for the registry).
-3. Export from the module file:
+3. Pre-stage the two downloads compute nodes cannot make themselves
+   (they are typically firewalled): install the pseudopotential families
+   protocols will ask for (`slab pseudos install sssp` into a shared
+   `paths.pseudos` root), and warm the MLIP checkpoint cache from a node
+   with internet — `python -c "from mace.calculators import mace_mp;
+   mace_mp(model='small')"` populates `~/.cache/mace` — or serve MLIPs
+   through rootstock and skip local checkpoints entirely.
+4. Export from the module file:
    `setenv SLAB_SITE_CONFIG /sw/slab/config.toml`.
-4. Users check their view with `slab config show` and
+5. Users check their view with `slab config show` and
    `slab engines list` — which now also reports the cluster's partitions.
-5. If users will run the resident agent, add `[agent.serve]` (a GPU partition
+6. If users will run the resident agent, add `[agent.serve]` (a GPU partition
    and the `tool_call_parser` your vLLM build registers) so nobody has to
    rediscover the serving recipe. `slab mason doctor` is how they confirm the
    parser name was right.

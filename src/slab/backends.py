@@ -208,8 +208,20 @@ def describe_engine(
     """
     options = calculator_options or {}
     normalized = engine.strip().lower()
-    if normalized in ("emt", "lj", "mace", "rootstock"):
+    if normalized in ("emt", "lj", "rootstock"):
         return {"engine": normalized, "source": "builtin", "version": None}
+    if normalized == "mace":
+        # Which MLIP actually runs = the resolved checkpoint plus the
+        # mace-torch code executing it, so both are cache identity: bumping
+        # the package or changing the resolved "small" default must
+        # invalidate cached results honestly — the default lives in
+        # _mace_calculator, whose source the cache key never hashes.
+        return {
+            "engine": "mace",
+            "source": "builtin",
+            "version": _dist_version("mace-torch"),
+            "model": str(options.get("model", "small")),
+        }
     if normalized == "lammps":
         # The detected LAMMPS version and the resolved command are the cache
         # identity, mirroring qe: upgrading the binary or pointing at a
@@ -630,6 +642,7 @@ def _lammps_calculator(**options: Any) -> Any:
             f"calculator_options={{'command': '/path/to/lmp', ...}}, or set "
             f"command under [engines.lammps] in the slab config"
         )
+    _launcher_guard(command, "lammps")
     # No tmp_dir= means a slab-managed scratch, and the scratch is what makes
     # evidence possible: lammpsrun only *retains* the input/log/data files
     # when a tmp_dir is supplied — with its own auto-created directory the log
@@ -794,6 +807,8 @@ def _probe_lammps_version(command: str, executable: str, mtime_ns: int) -> str |
     identity, and a replaced binary is re-probed.
     """
     del executable, mtime_ns
+    if _srun_without_allocation(command):
+        return None  # doomed to queue, not to answer — skip the timeout
     try:
         import subprocess
 
@@ -949,10 +964,72 @@ def _lammps_failure_evidence(directory: Path) -> tuple[list[str], list[tuple[str
     return notes, files
 
 
+_MPI_LAUNCHERS = frozenset({"srun", "mpirun", "mpiexec"})
+
+
+def _srun_without_allocation(command: str) -> bool:
+    """True when *command* starts with srun but no SLURM allocation exists.
+
+    ``srun`` outside a job requests a *fresh* allocation, and ASE runs engine
+    commands through ``subprocess`` with no timeout — so the calculation
+    queues silently instead of failing. Login nodes are exactly where the
+    scenario's smoke test runs first.
+    """
+    argv = shlex.split(command)
+    return (
+        bool(argv)
+        and Path(argv[0]).name == "srun"
+        and not os.environ.get("SLURM_JOB_ID")
+    )
+
+
+def _launcher_guard(command: str, engine: str) -> None:
+    """Refuse a launcher-prefixed command that cannot work here, loudly.
+
+    Two first-contact cluster traps: ``shutil.which`` on ``argv[0]``
+    validates the *launcher* (``which srun`` passes on every login node even
+    when the engine binary is missing or behind a module load); and ``srun``
+    outside an allocation hangs silently (see
+    :func:`_srun_without_allocation`). Only the unambiguous two-token form
+    (``srun pw.x``) gets the payload PATH check — a flagged launcher line
+    (``srun -n 4 pw.x``) would need the launcher's own CLI parsed to find
+    the payload.
+    """
+    argv = shlex.split(command)
+    if not argv or Path(argv[0]).name not in _MPI_LAUNCHERS:
+        return
+    if len(argv) == 2 and not argv[1].startswith("-") and shutil.which(argv[1]) is None:
+        raise EngineNotAvailableError(
+            f"engine {engine!r}: command {command!r} launches {argv[1]!r}, "
+            f"which is not on PATH — the launcher exists but the engine "
+            f"binary does not (is a module load missing on this node?)"
+        )
+    if _srun_without_allocation(command):
+        raise EngineNotAvailableError(
+            f"engine {engine!r}: command {command!r} starts with srun, but "
+            f"this process is not inside a SLURM allocation — srun would "
+            f"queue for a fresh one and the calculation would hang silently. "
+            f"Use the bare executable for login-node smoke tests; keep the "
+            f"srun form for batch jobs (slab hpc submit)"
+        )
+
+
 def _qe_calculator(**options: Any) -> Any:
     from ase.calculators.calculator import BadConfiguration
     from ase.calculators.espresso import Espresso, EspressoProfile
 
+    # A protocol *name* must never reach ASE: Espresso(**options) accepts
+    # unknown keys and the input writer drops them without a warning, so
+    # calculator_options={'protocol': 'balanced'} would silently produce an
+    # input with no cutoffs and a Γ-only mesh. The factory also cannot
+    # expand it itself — expansion needs the structure (k-mesh, per-atom
+    # thresholds), which the factory never sees.
+    if "protocol" in options:
+        raise EngineNotAvailableError(
+            f"engine 'qe' has no protocol= option — expand it first with the "
+            f"structure in hand: calculator_options=qe_protocol_options("
+            f"atoms, protocol={options['protocol']!r}) (from slab.protocols)"
+        )
     profile = options.pop("profile", None)
     command = options.pop("command", None)
     pseudo_dir = options.pop("pseudo_dir", None)
@@ -1021,6 +1098,20 @@ def _qe_calculator(**options: Any) -> Any:
                 f"engine 'qe' resolved command {resolved_command!r}, but "
                 f"{executable!r} is not on PATH — install Quantum ESPRESSO or "
                 f"pass calculator_options={{'command': '/path/to/pw.x', ...}}"
+            )
+        _launcher_guard(resolved_command, "qe")
+        # ecutwfc is mandatory pw.x input and ASE does not validate it —
+        # without this refusal the job dies only at runtime (on a cluster,
+        # after the queue wait) with a namelist read error. pseudo_family
+        # resolves files, never cutoffs; only a protocol expansion or an
+        # explicit value supplies them. Machine problems (missing binary,
+        # unusable launcher) surface first, above.
+        if "ecutwfc" not in input_data["system"]:
+            raise EngineNotAvailableError(
+                "engine 'qe': input_data sets no ecutwfc, which pw.x "
+                "requires — expand a named protocol (qe_protocol_options("
+                "atoms, protocol=...) supplies family-recommended cutoffs) "
+                "or set input_data={'system': {'ecutwfc': ..., 'ecutrho': ...}}"
             )
     except BadConfiguration as e:
         if scratch is not None:
@@ -1125,6 +1216,8 @@ def _probe_banner_version(command: str, executable: str, mtime_ns: int) -> str |
     to key the memo cache.
     """
     del executable, mtime_ns
+    if _srun_without_allocation(command):
+        return None  # doomed to queue, not to answer — skip the 20s timeout
     try:
         import subprocess
 
@@ -1180,8 +1273,23 @@ def _mace_calculator(**options: Any) -> Any:
     try:
         from mace.calculators import mace_mp
     except ImportError as e:
+        # On clusters the MLIP normally is not installed in the client env at
+        # all — rootstock serves it from a pre-built env, and its checkpoint
+        # ids work directly as engine names. Point there when it exists,
+        # instead of teaching an agent to pip-install torch on a login node.
+        hint = ""
+        try:
+            import rootstock  # noqa: F401
+
+            hint = (
+                "; this machine has rootstock — prefer a served checkpoint id "
+                "as the engine name (e.g. engine='mace-mp-0-medium'; "
+                "'slab engines list' shows what is served)"
+            )
+        except ImportError:
+            pass
         raise EngineNotAvailableError(
-            "engine 'mace' needs the mace-torch package: pip install 'slab[mace]'"
+            f"engine 'mace' needs the mace-torch package: pip install 'slab[mace]'{hint}"
         ) from e
     options.setdefault("model", "small")
     options.setdefault("device", "cpu")

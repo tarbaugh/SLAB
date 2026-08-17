@@ -42,6 +42,13 @@ number is a rumor. A minimal workflow script:
     def forces_converged():
         return converged(info["fmax"], below=0.05)
 
+The task vocabulary is `relax` (BFGS on positions) and `single_point` (one \
+energy+forces evaluation, no optimization; its info has no 'converged' key). \
+Chain them for the canonical two-fidelity flow: relax under a cheap engine — \
+an MLIP like `mace` — then single_point the relaxed structure under the \
+expensive one, and check the DFT residual force to confirm the cheap \
+geometry held up.
+
 Write the script with write_file, run it with slab_launch (give an intent — \
 why this run exists), read the outcome, and cite the run id. Use slab_engines \
 to see which engines, QE protocols, pseudopotential families, and HPC \
@@ -49,8 +56,10 @@ partitions exist here before assuming any. For Quantum ESPRESSO, expand a \
 named protocol instead of inventing cutoffs:
 
     from slab.protocols import qe_protocol_options
-    options = qe_protocol_options(atoms, protocol="balanced")
-    relaxed, info = relax(atoms, engine="qe", calculator_options=options)
+    from slab.tasks import single_point
+
+    options = qe_protocol_options(relaxed, protocol="balanced")
+    final, dft = single_point(relaxed, engine="qe", calculator_options=options)
 
 Failures are evidence. When a run fails, read the failure record with \
 slab_show before retrying: diagnose, state what you will change and why, then \
@@ -128,7 +137,11 @@ overnight belongs on a cluster — say so rather than starting it.""",
 # Compute budget: cluster
 
 Production settings are appropriate here. Use the `balanced` protocol by \
-default and `stringent` when the result must be publishable. Anything longer \
+default and `stringent` when the result must be publishable. Universal MLIPs \
+on a cluster are *served*, never pip-installed: call `slab_engines` and use \
+a served checkpoint id directly as the engine name for the cheap-relax leg \
+(e.g. engine="mace-mp-0-medium") — do not install mace-torch into the \
+cluster environment. Anything longer \
 than a few minutes goes through `submit_job` (typically wrapping \
 `slab run workflow.py`) rather than running in this process — then poll \
 `job_status`. Keep interactive work on this node small.""",

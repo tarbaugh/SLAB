@@ -84,7 +84,11 @@ relaxed, info = relax(
 !!! note
     Options for `mace` are forwarded to `mace.calculators.mace_mp`; defaults are
     `model="small"`, `device="cpu"`, `default_dtype="float64"`. First use
-    downloads the checkpoint to `~/.cache/mace`.
+    downloads the checkpoint to `~/.cache/mace` — on a cluster, do that once
+    from a node with internet (compute nodes are typically firewalled), or
+    skip in-process MACE entirely and use a rootstock-served checkpoint id as
+    the engine name. The resolved model and the mace-torch version are both
+    part of the engine's cache identity.
 
 ## Quantum ESPRESSO
 
@@ -228,6 +232,55 @@ The details that keep runs honest and directories clean:
 
 A cluster's curated LAMMPS setup (fixed module, MPI launcher) belongs in the
 registry below under a distinct alias like `lammps-delta`, the same as QE.
+
+## Two fidelities, one run
+
+The seam's payoff is that engines compose. `slab.tasks` ships two traced
+tasks — `relax` (BFGS on positions) and `single_point` (one energy+forces
+evaluation, no optimization) — that take the same `engine` argument, so the
+canonical workflow is a chain: relax under a cheap engine, then evaluate the
+relaxed geometry under the expensive one. The DFT residual force is the
+check that says whether the cheap geometry held up:
+
+<!-- no-verify -->
+```python
+from ase.build import bulk
+from slab import check, converged
+from slab.protocols import qe_protocol_options
+from slab.tasks import relax, single_point
+
+atoms = bulk("Si", "diamond", a=5.43)
+atoms.rattle(stdev=0.05, seed=11)
+
+relaxed, cheap = relax(atoms, engine="mace", fmax=0.02, label="si-mace")
+
+options = qe_protocol_options(relaxed, protocol="fast")
+final, dft = single_point(relaxed, engine="qe", label="si-scf",
+                          calculator_options=options)
+
+@check
+def dft_confirms_geometry():
+    return converged(dft["fmax"], below=0.1, label="dft fmax")
+```
+
+Executed for real (MACE-MP small on CPU; Quantum ESPRESSO 7.5 with the
+SSSP PBEsol efficiency family through the `fast` protocol):
+
+<!-- no-verify -->
+```text
+MACE relax: converged=True E=-10.7384560555 eV fmax=0.013715 eV/A steps=4
+QE single point: E=-308.5312843034 eV fmax=0.021275 eV/A version=7.5 n_atoms=2
+run 01m08kqbd1sv4cadjxcre2tcaa  si-two-fidelity  state=verified status=completed checks=3/3 tasks=2
+```
+
+`single_point`'s info deliberately has no `converged` key — nothing was
+optimized, and an engine whose own self-consistency fails raises (with the
+engine's own error report attached as notes) instead of returning. Its
+artifacts follow relax's rules: the SCF's output is kept as the intermediate
+`si-scf.pwo`, both tasks cache (rerunning the script serves both results
+without re-invoking MACE or `pw.x`), and provenance links the chain by hash
+equality — `single_point`'s `atoms` input hash *is* `relax`'s first output
+hash.
 
 ## The cluster engine registry
 
