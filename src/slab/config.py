@@ -57,6 +57,7 @@ _PATH_KEYS = frozenset(
     {"paths.workspace", "paths.pseudos", "paths.engines", "engines.qe.pseudo_dir"}
 )
 _VAR_PATTERN = re.compile(r"\$\{(\w+)\}|\$(\w+)")
+_OLLAMA = "http://localhost:11434/v1"
 
 
 class ConfigError(SlabError):
@@ -178,17 +179,32 @@ class HpcConfig(BaseModel):
 class AgentConfig(BaseModel):
     """The resident research agent's model connection and budgets (``[agent]``).
 
-    ``endpoint`` is any OpenAI-compatible ``/v1`` server — vLLM on a compute
-    node, Ollama on a laptop. ``api_key_env`` names an environment variable
-    holding the key; the key itself never belongs in a config file (config
-    files get committed and shipped).
+    Two providers, one harness. ``provider = "openai"`` (the default) talks to
+    any OpenAI-compatible ``/v1`` server — vLLM on a compute node, Ollama on a
+    laptop — and keeps working where compute nodes have no internet.
+    ``provider = "anthropic"`` talks to the Claude Messages API, which is the
+    faster path when the bottleneck is reasoning rather than physics.
+
+    ``api_key_env`` names an environment variable holding the key; the key
+    itself never belongs in a config file (config files get committed and
+    shipped). ``compute_profile`` shapes what the agent *chooses* to run, not
+    what SLAB permits — see :func:`slab.mason.prompts.compute_profile_block`.
+
+    Examples:
+        >>> AgentConfig().resolved_endpoint
+        'http://localhost:11434/v1'
+        >>> AgentConfig(provider="anthropic").resolved_endpoint
+        'https://api.anthropic.com/v1'
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    endpoint: str = "http://localhost:11434/v1"
+    provider: Literal["openai", "anthropic"] = "openai"
+    endpoint: str | None = None
     model: str | None = None
     api_key_env: str | None = None
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+    compute_profile: Literal["laptop", "workstation", "cluster"] | None = None
     context_window: int = Field(default=65_536, ge=4_096)
     compact_at: float = Field(default=0.7, gt=0.0, le=1.0)
     max_turns: int = Field(default=60, ge=1)
@@ -201,12 +217,26 @@ class AgentConfig(BaseModel):
     approval: Literal["ask", "auto"] = "ask"
     shell_allowlist: tuple[str, ...] = ()
 
+    @property
+    def resolved_endpoint(self) -> str:
+        """The endpoint to call: explicit, else the provider's own default."""
+        if self.endpoint:
+            return self.endpoint
+        return "https://api.anthropic.com/v1" if self.provider == "anthropic" else _OLLAMA
+
+    @property
+    def resolved_api_key_env(self) -> str | None:
+        """The env var holding the key — Anthropic's is required and defaulted."""
+        if self.api_key_env:
+            return self.api_key_env
+        return "ANTHROPIC_API_KEY" if self.provider == "anthropic" else None
+
 
 class SlabConfig(BaseModel):
     """The merged, validated configuration — every section optional.
 
     Examples:
-        >>> SlabConfig().agent.endpoint
+        >>> SlabConfig().agent.resolved_endpoint
         'http://localhost:11434/v1'
     """
 
@@ -499,7 +529,8 @@ schema_version = 1
 # sbatch_extra = ["--exclusive"]       # raw directives the schema does not model
 
 [agent]
-# endpoint = "http://gpu-node-01:8000/v1"   # any OpenAI-compatible server (vLLM, Ollama)
+# provider = "openai"                       # "openai" = any OpenAI-compatible server; "anthropic"
+# endpoint = "http://gpu-node-01:8000/v1"   # vLLM/Ollama URL (default per provider)
 # model = "meta-models/Muse-Glimmer-30B"    # as the server names it ('slab mason doctor' lists)
 # api_key_env = "SLAB_AGENT_API_KEY"        # NAME of the env var holding the key, never the key
 # context_window = 131072                   # tokens the endpoint actually serves
@@ -508,6 +539,19 @@ schema_version = 1
 # approval = "ask"                          # "ask" gates mutating tools; "auto" trusts them
 # shell_allowlist = ["git status", "ls"]    # command prefixes that never need approval
 # tool_protocol = "native"                  # "fenced" for servers without a tool-call parser
+# compute_profile = "laptop"                # laptop | workstation | cluster — how big a
+#                                           # calculation the agent should reach for
+#                                           # (default: cluster if [hpc] partitions exist)
+
+# Claude instead of a locally served model — faster reasoning while you keep the
+# physics small. temperature does not apply here (current Claude models reject
+# sampling parameters); use effort instead.
+# [agent]
+# provider = "anthropic"
+# model = "claude-opus-5"
+# api_key_env = "ANTHROPIC_API_KEY"         # the default for this provider
+# effort = "medium"                         # low | medium | high | xhigh | max
+# max_reply_tokens = 16000                  # bounds thinking AND reply together
 '''
 
 

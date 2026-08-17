@@ -55,3 +55,43 @@ def test_real_model_reads_a_file_and_answers(tmp_path: Path) -> None:
     assert "perovskite" in last.lower()
     events = [json.loads(line) for line in session.transcript_path.read_text().splitlines()]
     assert any(event["type"] == "usage" for event in events)
+
+
+ANTHROPIC_MODEL = os.environ.get("SLAB_TEST_ANTHROPIC_MODEL", "claude-opus-5")
+
+
+@pytest.mark.skipif(
+    not os.environ.get("ANTHROPIC_API_KEY"),
+    reason="set ANTHROPIC_API_KEY to run against the live Anthropic API",
+)
+def test_real_anthropic_provider_reads_a_file_and_answers(tmp_path: Path) -> None:
+    """Same probe, the Claude provider — exercises the real Messages wire shape.
+
+    Run it with::
+
+        ANTHROPIC_API_KEY=sk-ant-... pytest tests/test_mason_real.py
+
+    Override the model with ``$SLAB_TEST_ANTHROPIC_MODEL``.
+    """
+    (tmp_path / "data.txt").write_text("the secret word is perovskite\n")
+    config = SlabConfig.model_validate(
+        {
+            "agent": {
+                "provider": "anthropic",
+                "model": ANTHROPIC_MODEL,
+                "max_turns": 6,
+                "effort": "low",
+            }
+        }
+    )
+    session = MasonSession(
+        tmp_path, workspace_root=tmp_path / ".slab", config=config, auto_approve=True
+    )
+    result = Mason(session).run_turn(
+        "Use the read_file tool on data.txt, then call finish reporting the secret word."
+    )
+    assert result.stop_reason in ("answer", "finish")
+    assert "perovskite" in result.text.lower()
+    events = [json.loads(line) for line in session.transcript_path.read_text().splitlines()]
+    usage = [event for event in events if event["type"] == "usage"]
+    assert usage and any(event["prompt_tokens"] for event in usage)

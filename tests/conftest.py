@@ -28,6 +28,7 @@ class _LlmHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(length)) if length else {}
         body["_auth"] = self.headers.get("Authorization")
+        body["_headers"] = {key.lower(): value for key, value in self.headers.items()}
         self.script.requests.append(body)
         status, payload = (
             self.script.responses.pop(0) if self.script.responses else (500, {"error": "empty"})

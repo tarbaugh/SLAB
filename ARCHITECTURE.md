@@ -510,6 +510,21 @@ SLAB-shaped:
   parserless servers, and a repair path for the llama-style JSON that
   models leak into plain text — each recovery observed against a real
   model during development, not imagined.
+- **The model is a seam, not the architecture.** `ChatBackend` is one
+  method, so the Anthropic Messages API is a second provider rather than a
+  second harness: same tools, same notebook, same verification gates, same
+  provenance. The translation lives entirely in the provider (system as a
+  parameter, tool calls as content blocks, no sampling parameters — current
+  Claude models reject them), and the open-model path stays primary because
+  compute nodes are often firewalled and owned GPUs are free at the margin.
+- **Compute profile: sizing physics to the machine.** `laptop`,
+  `workstation`, or `cluster` — derived from whether SLURM partitions are
+  declared — shapes what the agent *chooses* to run, and requires it to say
+  when a number is a smoke test rather than a production result. It changes
+  no physics itself: every choice still resolves into explicit, traced
+  `calculator_options`, so an audit reads the actual cutoffs, not a profile
+  name. Faster reasoning and smaller calculations are separate levers, and
+  SLAB keeps them separate.
 
 ## 8. Agent-native decisions, collected
 

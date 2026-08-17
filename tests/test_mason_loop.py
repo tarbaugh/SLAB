@@ -272,6 +272,55 @@ def test_loose_text_call_is_executed_and_answered_as_user_message(tmp_path: Path
     assert not any(m.get("role") == "tool" for m in followup)
 
 
+def test_compute_profile_shapes_the_prompt_and_defaults_to_laptop(tmp_path: Path) -> None:
+    client = FakeClient([_text_reply("ok")])
+    session = _session(tmp_path)
+    assert session.compute_profile == "laptop"  # no partitions configured
+    Mason(session, client=client).run_turn("hi")
+    system = client.requests[0][0][0]["content"]
+    assert "# Compute budget: laptop" in system
+    assert "protocol=\"fast\"" in system
+    assert "smoke-test" in system
+    assert "compute profile: laptop" in system
+
+
+def test_compute_profile_follows_the_cluster_when_partitions_exist(tmp_path: Path) -> None:
+    config = SlabConfig.model_validate(
+        {
+            "agent": {"model": "fake"},
+            "hpc": {"default_partition": "cpu", "partitions": {"cpu": {}}},
+        }
+    )
+    session = MasonSession(
+        tmp_path, workspace_root=tmp_path / ".slab", config=config, auto_approve=True
+    )
+    client = FakeClient([_text_reply("ok")])
+    Mason(session, client=client).run_turn("hi")
+    system = client.requests[0][0][0]["content"]
+    assert session.compute_profile == "cluster"
+    assert "# Compute budget: cluster" in system
+    assert "submit_job" in system
+
+
+def test_explicit_compute_profile_wins_over_the_derived_one(tmp_path: Path) -> None:
+    config = SlabConfig.model_validate(
+        {
+            "agent": {"model": "fake", "compute_profile": "workstation"},
+            "hpc": {"default_partition": "cpu", "partitions": {"cpu": {}}},
+        }
+    )
+    session = MasonSession(tmp_path, workspace_root=tmp_path / ".slab", config=config)
+    assert session.compute_profile == "workstation"
+
+
+def test_truncated_answers_are_reported_not_passed_off_as_finished(tmp_path: Path) -> None:
+    reply = ChatReply(content="half an ans", finish_reason="max_tokens", prompt_tokens=10)
+    result = Mason(_session(tmp_path), client=FakeClient([reply])).run_turn("go")
+    assert result.stop_reason == "answer"
+    assert "truncated" in result.text
+    assert "max_reply_tokens" in result.text
+
+
 def test_short_circuit_answers_every_tool_call(tmp_path: Path) -> None:
     """finish mid-list must not leave later tool_call ids unanswered."""
     reply = ChatReply(

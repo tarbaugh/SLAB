@@ -42,6 +42,7 @@ _CONTEXT_OVERFLOW_HINTS = (
     "context window",
     "maximum context",
     "context size",  # llama.cpp's wording
+    "prompt is too long",  # Anthropic's wording
     "too many tokens",
 )
 
@@ -153,46 +154,65 @@ class ChatClient:
         return [str(item.get("id")) for item in data if isinstance(item, dict)]
 
     def _request(self, path: str, body: dict[str, Any] | None) -> dict[str, Any]:
-        url = f"{self.endpoint}{path}"
-        data = None if body is None else json.dumps(body).encode()
-        last_error: LlmError | None = None
-        for attempt in range(_RETRIES):
-            request = urllib.request.Request(
-                url,
-                data=data,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {self.api_key}",
-                },
-                method="GET" if body is None else "POST",
-            )
-            try:
-                with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
-                    return _decode_json(response.read(), url)
-            except urllib.error.HTTPError as e:
-                parsed = _http_error(e, url)
-                if e.code < 500:
-                    raise parsed from e  # a 4xx is the server's answer, not weather
-                last_error = parsed  # 5xx: retry as promised
-            except TimeoutError as e:
-                raise LlmError(
-                    f"no answer from {url} within {self.timeout_s:.0f}s — slow inference "
-                    f"is normal on HPC; raise [agent] request_timeout_s if this recurs"
-                ) from e
-            except urllib.error.URLError as e:
-                last_error = LlmError(
-                    f"cannot reach {url}: {e.reason} — is the model server running? "
-                    f"(vLLM: 'vllm serve MODEL'; Ollama: 'ollama serve')"
-                )
-            except (OSError, http.client.HTTPException) as e:
-                # A connection dying mid-request/mid-read surfaces raw
-                # (ConnectionResetError, RemoteDisconnected, IncompleteRead);
-                # wrap and retry like any transport failure.
-                last_error = LlmError(f"connection to {url} failed mid-request: {e!r}")
-            if attempt < _RETRIES - 1:
-                time.sleep(_BACKOFF_S[min(attempt, len(_BACKOFF_S) - 1)])
-        assert last_error is not None
-        raise last_error
+        return request_json(
+            f"{self.endpoint}{path}",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            body=body,
+            timeout_s=self.timeout_s,
+            unreachable_hint=(
+                "is the model server running? "
+                "(vLLM: 'vllm serve MODEL'; Ollama: 'ollama serve')"
+            ),
+        )
+
+
+def request_json(
+    url: str,
+    *,
+    headers: dict[str, str],
+    body: dict[str, Any] | None,
+    timeout_s: float,
+    unreachable_hint: str,
+) -> dict[str, Any]:
+    """One JSON round trip with the retry discipline both providers share.
+
+    GET when *body* is None, POST otherwise. Connection failures and 5xx
+    answers are retried up to 3 attempts with backoff; 4xx answers are the
+    server telling us something and are never retried.
+    """
+    data = None if body is None else json.dumps(body).encode()
+    last_error: LlmError | None = None
+    for attempt in range(_RETRIES):
+        request = urllib.request.Request(
+            url, data=data, headers=headers, method="GET" if body is None else "POST"
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout_s) as response:
+                return _decode_json(response.read(), url)
+        except urllib.error.HTTPError as e:
+            parsed = _http_error(e, url)
+            if e.code < 500:
+                raise parsed from e  # a 4xx is the server's answer, not weather
+            last_error = parsed  # 5xx: retry as promised
+        except TimeoutError as e:
+            raise LlmError(
+                f"no answer from {url} within {timeout_s:.0f}s — slow inference "
+                f"is normal on HPC; raise [agent] request_timeout_s if this recurs"
+            ) from e
+        except urllib.error.URLError as e:
+            last_error = LlmError(f"cannot reach {url}: {e.reason} — {unreachable_hint}")
+        except (OSError, http.client.HTTPException) as e:
+            # A connection dying mid-request/mid-read surfaces raw
+            # (ConnectionResetError, RemoteDisconnected, IncompleteRead);
+            # wrap and retry like any transport failure.
+            last_error = LlmError(f"connection to {url} failed mid-request: {e!r}")
+        if attempt < _RETRIES - 1:
+            time.sleep(_BACKOFF_S[min(attempt, len(_BACKOFF_S) - 1)])
+    assert last_error is not None
+    raise last_error
 
 
 def _decode_json(raw: bytes, url: str) -> dict[str, Any]:
@@ -215,6 +235,8 @@ def _http_error(error: urllib.error.HTTPError, url: str) -> LlmError:
     message = _error_message(raw) or raw[:500].decode(errors="replace") or "no error body"
     if error.code == 400 and any(hint in message.lower() for hint in _CONTEXT_OVERFLOW_HINTS):
         return ContextOverflowError(f"{url}: {message}")
+    if error.code == 429:
+        return LlmError(f"{url} rate-limited this request (429): {message}")
     if error.code in (401, 403):
         return LlmError(
             f"{url} refused authentication ({error.code}): {message} — set [agent] "

@@ -77,6 +77,11 @@ setup = ["module load cuda/12.4"]     # runs after the [hpc] setup lines
 sbatch_extra = ["--exclusive"]        # raw directives the schema does not model
 ```
 
+The `[agent]` section configures the resident agent the same way — which
+provider and model it talks to, and (via `compute_profile`) how big a
+calculation it should reach for on this machine. See
+[Mason](mason.md#compute-budget-sizing-the-physics-to-the-machine).
+
 Configuration supplies *defaults that resolve into explicit values* — it
 never reaches a cache key itself. The `qe` engine's cache identity records
 the command and pseudo directory that actually ran, wherever they came

@@ -83,6 +83,65 @@ fails, report the failure — never soften it. When you finish a task, call \
 finish with a report citing run ids for every claim.
 """
 
+COMPUTE_PROFILES = {
+    "laptop": """\
+# Compute budget: laptop
+
+This machine is a laptop, not a cluster. Size every calculation so it finishes \
+in minutes, and prefer a converged cheap answer to an unconverged expensive one:
+
+- Engines: prefer `emt` or `lj` for structure and workflow shakeouts, and a \
+small MACE model when chemistry actually matters. Reach for `qe` only when the \
+question needs DFT, and then keep it small.
+- Cells: single-digit atoms for DFT, tens of atoms for MLIPs. Build the smallest \
+cell that can answer the question; do not run a 2x2x2 supercell to check that a \
+script works.
+- Quantum ESPRESSO: expand the `fast` protocol \
+(`qe_protocol_options(atoms, protocol="fast")`), and expect coarse k-meshes and \
+loose thresholds. Never expand `stringent` here.
+- Molecular dynamics: short runs — picoseconds, not nanoseconds — on small cells.
+- Before launching anything you expect to run longer than about ten minutes, say \
+so and ask first.
+
+These are low-accuracy, smoke-test settings, and saying so is part of the \
+result. Record the accuracy caveat in the run's `intent`, in the notebook \
+entry, and in your final report. A number produced at laptop settings is \
+evidence that the workflow runs, not a production result — never present it as \
+one.""",
+    "workstation": """\
+# Compute budget: workstation
+
+This machine is a workstation: bigger than a laptop, smaller than a cluster. \
+Medium cells and the `balanced` protocol are reasonable; hour-scale jobs are \
+acceptable if you say what you are starting and why. Anything that would run \
+overnight belongs on a cluster — say so rather than starting it.""",
+    "cluster": """\
+# Compute budget: cluster
+
+Production settings are appropriate here. Use the `balanced` protocol by \
+default and `stringent` when the result must be publishable. Anything longer \
+than a few minutes goes through `submit_job` (typically wrapping \
+`slab run workflow.py`) rather than running in this process — then poll \
+`job_status`. Keep interactive work on this node small.""",
+}
+
+
+def compute_profile_block(profile: str) -> str:
+    """Guidance for the machine's size, or empty for an unknown profile.
+
+    This shapes what the agent *chooses*; it changes no physics on its own.
+    Every choice it leads to still lands in explicit, traced
+    ``calculator_options`` that the run records.
+
+    Examples:
+        >>> compute_profile_block("laptop").splitlines()[0]
+        '# Compute budget: laptop'
+        >>> compute_profile_block("supercomputer")
+        ''
+    """
+    return COMPUTE_PROFILES.get(profile, "")
+
+
 FENCED_PROTOCOL = """\
 
 # Tool protocol (fenced)
@@ -124,6 +183,7 @@ def environment_block(session: MasonSession) -> str:
         f"slab workspace: {session.workspace_root}",
         f"platform: {platform.system()} {platform.machine()}",
         f"date: {datetime.now(UTC).strftime('%Y-%m-%d')}",
+        f"compute profile: {session.compute_profile}",
     ]
     if session.hpc.partitions:
         cluster = session.hpc.cluster or "unnamed cluster"
@@ -157,8 +217,11 @@ def _conventions_text(session: MasonSession, max_chars: int = 6_000) -> str:
 
 
 def system_messages(session: MasonSession, catalog: str | None = None) -> list[dict[str, Any]]:
-    """The system prompt: static core + fenced protocol (if used) + environment."""
+    """The system prompt: static core, compute budget, protocol, environment."""
     prompt = SYSTEM_PROMPT
+    budget = compute_profile_block(session.compute_profile)
+    if budget:
+        prompt += "\n" + budget + "\n"
     if catalog is not None:
         prompt += FENCED_PROTOCOL.replace("{catalog}", catalog)
     return [{"role": "system", "content": prompt + "\n" + environment_block(session)}]

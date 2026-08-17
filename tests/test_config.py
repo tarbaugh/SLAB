@@ -38,7 +38,7 @@ def _user_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, text: str) -> Pa
 def test_no_files_yields_pure_defaults(tmp_path: Path) -> None:
     config = load_config(tmp_path)
     assert config == SlabConfig()
-    assert config.agent.endpoint == "http://localhost:11434/v1"
+    assert config.agent.resolved_endpoint == "http://localhost:11434/v1"
 
 
 def test_layers_merge_project_over_user_over_site(

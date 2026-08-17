@@ -9,9 +9,10 @@ code paths the MCP server exposes to agents.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, NoReturn
+from typing import TYPE_CHECKING, Annotated, Any, NoReturn
 
 import typer
 
@@ -763,6 +764,7 @@ def _mason_session(
     auto: bool,
     model: str | None,
     endpoint: str | None,
+    provider: str | None = None,
     max_turns: int | None = None,
 ) -> MasonSession:
     from slab.mason import MasonSession
@@ -775,6 +777,8 @@ def _mason_session(
         updates["model"] = model
     if endpoint is not None:
         updates["endpoint"] = endpoint
+    if provider is not None:
+        updates["provider"] = provider
     if max_turns is not None:
         updates["max_turns"] = max_turns
     if updates:
@@ -787,6 +791,10 @@ _EndpointOpt = Annotated[str | None, typer.Option("--endpoint", help="Override [
 _AutoOpt = Annotated[
     bool, typer.Option("--auto", help="Approve every tool call (batch/HPC use).")
 ]
+_ProviderOpt = Annotated[
+    str | None,
+    typer.Option("--provider", help="Override [agent] provider: openai or anthropic."),
+]
 
 
 @mason_app.command("chat")
@@ -795,6 +803,7 @@ def mason_chat(
     auto: _AutoOpt = False,
     model: _ModelOpt = None,
     endpoint: _EndpointOpt = None,
+    provider: _ProviderOpt = None,
     resume: Annotated[
         bool, typer.Option("--resume", help="Continue the newest session in this workspace.")
     ] = False,
@@ -803,7 +812,9 @@ def mason_chat(
     from slab.mason import Mason
 
     try:
-        session = _mason_session(workspace, auto=auto, model=model, endpoint=endpoint)
+        session = _mason_session(
+            workspace, auto=auto, model=model, endpoint=endpoint, provider=provider
+        )
         resume_from = None
         if resume:
             latest = session.latest_transcript()
@@ -815,7 +826,7 @@ def mason_chat(
     except SlabError as e:
         _fail(str(e))
     agent = session.agent
-    typer.echo(f"mason ready: {agent.model} at {agent.endpoint}")
+    typer.echo(f"mason ready: {agent.model} at {agent.resolved_endpoint}")
     typer.echo(f"workspace {session.workspace_root}; notebook {session.notebook_path}")
     while True:
         try:
@@ -858,6 +869,7 @@ def mason_run(
     auto: _AutoOpt = False,
     model: _ModelOpt = None,
     endpoint: _EndpointOpt = None,
+    provider: _ProviderOpt = None,
     max_turns: Annotated[
         int | None, typer.Option("--max-turns", help="Model-call budget for this goal.")
     ] = None,
@@ -871,7 +883,12 @@ def mason_run(
 
     try:
         session = _mason_session(
-            workspace, auto=auto, model=model, endpoint=endpoint, max_turns=max_turns
+            workspace,
+            auto=auto,
+            model=model,
+            endpoint=endpoint,
+            provider=provider,
+            max_turns=max_turns,
         )
         mason = Mason(session)
         result = mason.run_turn(goal)
@@ -892,6 +909,7 @@ def mason_run(
 def mason_doctor(
     model: _ModelOpt = None,
     endpoint: _EndpointOpt = None,
+    provider: _ProviderOpt = None,
 ) -> None:
     """Check the model endpoint: reachable, model served, tool calls parsed."""
     from slab.config import load_config
@@ -901,11 +919,29 @@ def mason_doctor(
         agent = load_config().agent
     except SlabError as e:
         _fail(str(e))
-    resolved_endpoint = endpoint or agent.endpoint
+    if provider is not None:
+        agent = agent.model_copy(update={"provider": provider})
+    if endpoint is not None:
+        agent = agent.model_copy(update={"endpoint": endpoint})
+    resolved_endpoint = agent.resolved_endpoint
     resolved_model = model or agent.model
+    typer.echo(f"provider: {agent.provider}")
     typer.echo(f"endpoint: {resolved_endpoint}")
     typer.echo(f"model:    {resolved_model or '(not configured)'}")
-    client = ChatClient(resolved_endpoint, resolved_model or "unconfigured", timeout_s=60.0)
+    client: Any
+    if agent.provider == "anthropic":
+        from slab.mason.anthropic import AnthropicClient
+
+        key_var = agent.resolved_api_key_env or "ANTHROPIC_API_KEY"
+        api_key = os.environ.get(key_var)
+        if not api_key:
+            typer.echo(f"[x] ${key_var} is not set — the Anthropic provider needs a key")
+            raise typer.Exit(code=1)
+        client = AnthropicClient(
+            resolved_model or "unconfigured", api_key, endpoint=resolved_endpoint, timeout_s=60.0
+        )
+    else:
+        client = ChatClient(resolved_endpoint, resolved_model or "unconfigured", timeout_s=60.0)
     failed = 0
     try:
         names = client.model_names()

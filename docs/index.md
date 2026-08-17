@@ -120,7 +120,7 @@ content-addressed artifact store with tiered retention, define-by-run tracing
 with content-hash caching, verification hooks, MACE/ASE/Quantum ESPRESSO
 relaxation task, AiiDA-style input protocols and SSSP pseudopotential
 families, layered HPC configuration with a SLURM submission layer, the Mason
-agent harness for open models, CLI, MCP server. 770+ tests (every docstring
+agent harness for open models and Claude alike, CLI, MCP server. 820+ tests (every docstring
 example runs as a doctest), ~96% coverage, mypy `--strict`, plus adversarial
 multi-agent review passes whose confirmed findings are regression tests — the
 QE engine is verified against a real `pw.x` 7.4.1, the balanced protocol

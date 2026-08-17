@@ -81,6 +81,13 @@ class MasonSession:
         )
         self.approver: Approver = approver if approver is not None else _approve_nothing
         self.auto_approve = auto_approve
+        # Unset compute_profile derives from the machine: a config that declares
+        # SLURM partitions is a cluster, anything else is treated as a laptop —
+        # the conservative guess, since over-sizing a calculation wastes hours
+        # while under-sizing it wastes minutes.
+        self.compute_profile = self.agent.compute_profile or (
+            "cluster" if self.hpc.partitions else "laptop"
+        )
         self.notebook_path = self.cwd / "NOTEBOOK.md"
         self.plan_path = self.cwd / "PLAN.md"
         self.read_files: set[Path] = set()

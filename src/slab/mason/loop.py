@@ -72,29 +72,45 @@ class TurnResult(BaseModel):
         return self.stop_reason == "finish"
 
 
-def client_from_config(agent: AgentConfig) -> ChatClient:
-    """Build the real client the config describes, refusing the unconfigured.
+def client_from_config(agent: AgentConfig) -> ChatBackend:
+    """Build the client the config describes, refusing the unconfigured.
 
     The API key is read from the environment variable ``api_key_env``
     *names* — a set name whose variable is missing is a loud error, not an
-    anonymous request that fails somewhere down the line.
+    anonymous request that fails somewhere down the line. Anthropic has no
+    anonymous access, so a missing key there is refused before any request.
     """
     if agent.model is None:
-        raise SlabError(
-            "no model configured: set [agent] model in the slab config "
-            "('slab config init' writes a template; 'slab mason doctor' lists "
-            "what the endpoint serves)"
+        served = (
+            "e.g. claude-opus-5" if agent.provider == "anthropic" else "'slab mason doctor' lists"
         )
+        raise SlabError(
+            f"no model configured: set [agent] model in the slab config "
+            f"('slab config init' writes a template; {served} what the endpoint serves)"
+        )
+    key_var = agent.resolved_api_key_env
     api_key: str | None = None
-    if agent.api_key_env is not None:
-        api_key = os.environ.get(agent.api_key_env)
+    if key_var is not None:
+        api_key = os.environ.get(key_var)
         if api_key is None:
             raise SlabError(
-                f"[agent] api_key_env names ${agent.api_key_env}, which is not set "
-                f"in the environment"
+                f"the {agent.provider} provider needs an API key: ${key_var} is not set "
+                f"in the environment (name a different variable with [agent] api_key_env)"
             )
+    if agent.provider == "anthropic":
+        from slab.mason.anthropic import AnthropicClient
+
+        assert api_key is not None  # resolved_api_key_env always names one here
+        return AnthropicClient(
+            agent.model,
+            api_key,
+            endpoint=agent.resolved_endpoint,
+            max_reply_tokens=agent.max_reply_tokens,
+            effort=agent.effort,
+            timeout_s=agent.request_timeout_s,
+        )
     return ChatClient(
-        agent.endpoint,
+        agent.resolved_endpoint,
         agent.model,
         api_key=api_key,
         temperature=agent.temperature,
@@ -163,9 +179,15 @@ class Mason:
                 from_text = bool(calls)
             self._append_assistant(reply, has_calls=bool(calls))
             if not calls:
-                return TurnResult(
-                    text=reply.content or "", stop_reason="answer", steps=step
-                )
+                text = reply.content or ""
+                if reply.finish_reason == "max_tokens":
+                    # A truncated answer must not be passed off as a finished
+                    # one: the reply budget bounds thinking plus text together.
+                    text += (
+                        "\n\n[truncated: the model hit its reply-token ceiling; "
+                        "raise [agent] max_reply_tokens or narrow the goal]"
+                    )
+                return TurnResult(text=text, stop_reason="answer", steps=step)
             for position, call in enumerate(calls):
                 if call.name == "finish" and call.arguments_error is None:
                     report = str(call.arguments.get("report", ""))

@@ -8,6 +8,12 @@ Llama on a laptop via Ollama, anything vLLM serves on a compute node. No
 SDK, no API subscription: a stdlib HTTP client against the
 OpenAI-compatible surface every serious open-model server speaks.
 
+It also speaks the [Anthropic Messages
+API](#claude-for-the-thinking-small-physics-for-the-laptop), so you can put
+Claude behind the same harness when you want faster, stronger reasoning
+while iterating — without giving up the open-model path that works on an
+offline compute node.
+
 What makes it a *research* agent rather than a generic coder is the floor
 it stands on: calculations run as SLAB workflow scripts through
 `slab_launch`, so every number Mason reports traces to a run id, its
@@ -79,6 +85,77 @@ The script it wrote is in the project directory, the energy matches an
 independent EMT evaluation to machine precision, and the run's provenance
 is ordinary SLAB provenance — nothing about the result knows an LLM was
 involved.
+
+## Claude for the thinking, small physics for the laptop
+
+Mason's loop is provider-agnostic, so the same harness — same tools, same
+notebook, same verification gates — runs on the Anthropic Messages API when
+the bottleneck is reasoning rather than physics. This is the fast path for
+developing on a laptop: switch the model, and keep the calculations small
+enough that your own machine can run them.
+
+```toml
+[agent]
+provider = "anthropic"
+model = "claude-opus-5"
+api_key_env = "ANTHROPIC_API_KEY"   # the default for this provider
+effort = "medium"                   # low | medium | high | xhigh | max
+compute_profile = "laptop"
+```
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+slab mason doctor --provider anthropic
+slab mason run "..." --auto
+```
+
+Three things differ from the open-model path, and Mason handles all three
+for you: sampling parameters are never sent (current Claude models reject
+`temperature` outright, so **`[agent] temperature` applies to the
+OpenAI-compatible provider only** — `effort` is the equivalent knob);
+`max_tokens` is required and bounds *thinking plus reply* together, so a
+truncated turn is reported rather than passed off as a finished answer; and
+Mason's stable system prompt is sent with a cache breakpoint, so the prefix
+is served from Anthropic's prompt cache turn after turn.
+
+**Keep the open-model path.** HPC compute nodes are frequently firewalled off
+the internet, where `api.anthropic.com` is simply unreachable and a locally
+served model is the only option — and the GPUs you already own are free at the
+margin, which matters for a loop that runs overnight. The split that works:
+Claude while you iterate, open weights for the long unattended grind.
+
+One caveat worth stating: developing exclusively against Claude lets the
+open-model path rot silently. Every open-model bug fixed so far — llama-style
+tool JSON leaking into message text, useless missing-argument errors, Python
+written with literal `\n` — is something Claude would never have done. Keep
+the gated `SLAB_TEST_LLM` test as the acceptance gate before Mason changes
+land.
+
+## Compute budget: sizing the physics to the machine
+
+Faster reasoning does not make a DFT relaxation faster. The other half of a
+quick local loop is telling the agent how big a calculation it may reach
+for — `[agent] compute_profile`, one of `laptop`, `workstation`, or
+`cluster`. Unset, it is derived: a config that declares SLURM partitions is a
+cluster; anything else is treated as a laptop (the conservative guess, since
+over-sizing a calculation wastes hours while under-sizing wastes minutes).
+
+The `laptop` profile puts concrete limits in the system prompt: prefer
+`emt`/`lj` and small MACE models, single-digit atoms for DFT, the `fast`
+protocol rather than `balanced` or `stringent`, picosecond MD on small cells,
+and say so before launching anything expected to run past ten minutes.
+
+It also carries an honesty requirement, because this is where a fast loop can
+quietly produce a wrong impression: **laptop settings are smoke-test settings,
+and saying so is part of the result.** Mason is instructed to record the
+accuracy caveat in the run's `intent`, in the notebook entry, and in its final
+report — a number produced at laptop settings is evidence that the workflow
+runs, not a production result.
+
+The profile shapes what the agent *chooses*; it changes no physics on its own.
+Every choice it leads to still lands in explicit, traced `calculator_options`
+that the run records, so an audit sees the actual cutoffs and k-mesh rather
+than a profile name.
 
 ## The tool surface
 
@@ -249,3 +326,14 @@ SLAB guarantees that what Mason *reports* is traceable and verified, not
 that its research taste is good. And the approval gate is a workflow
 control for your own account on your own machine, not a security sandbox:
 `--auto` means what it says.
+
+The Anthropic provider is verified against a mock server that reproduces the
+documented Messages wire shape — including a Cu relaxation driven end to end
+through it, reaching `verified` — but has not yet been exercised against the
+live API, which needs a key this development machine does not have. The
+gated test is written and waiting:
+
+<!-- no-verify -->
+```bash
+ANTHROPIC_API_KEY=sk-ant-... pytest tests/test_mason_real.py
+```
