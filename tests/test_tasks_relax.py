@@ -417,6 +417,7 @@ def test_mace_identity_names_model_and_dist_version() -> None:
     mace-torch version — changing either must invalidate honestly."""
     from importlib.metadata import version
 
+    pytest.importorskip("mace", reason="mace extra not installed")
     from slab.backends import describe_engine
 
     identity = describe_engine("mace")
