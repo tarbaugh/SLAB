@@ -241,9 +241,10 @@ def _is_driver_payload(command: str) -> bool:
         return False
     for token in argv:
         # Env assignments legitimately prefix shell payloads
-        # (OMP_NUM_THREADS=4 slab run ...); the driver check must see
-        # through them or the launcher sneaks back onto the driver.
-        if re.fullmatch(r"\w+=\S*", token):
+        # (OMP_NUM_THREADS=4 slab run ...), with or without the explicit
+        # 'env' wrapper; the driver check must see through both or the
+        # launcher sneaks back onto the driver.
+        if re.fullmatch(r"\w+=\S*", token) or Path(token).name == "env":
             continue
         return Path(token).name == "slab"
     return False

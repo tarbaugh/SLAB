@@ -36,12 +36,13 @@
       "probe": ["lmp", "-h"]
     },
     "qe-delta": {
-      "calculator": "ase.calculators.espresso.Espresso",
-      "env": {
-        "ASE_CONFIG_PATH": "/sw/slab/ase-delta.ini"
+      "calculator": "slab.backends.qe_calculator",
+      "options": {
+        "command": "srun pw.x",
+        "pseudo_dir": "/sw/pseudos/sssp"
       },
       "version": "7.3.1",
-      "description": "Quantum ESPRESSO pw.x with this cluster's command and pseudo_dir baked in via the shared ASE config file. Plain engine='qe' is a slab built-in (and registry entries may not shadow it) — declare a distinct alias like this one to pin a curated site setup.",
+      "description": "Quantum ESPRESSO pw.x with this cluster's command and pseudo_dir baked in, through slab's own factory (all the built-in engine's guards; env-mediated ASE config is refused — ASE parses that file at import time). Plain engine='qe' is a slab built-in (and registry entries may not shadow it) — declare a distinct alias like this one to pin a curated site setup.",
       "probe": ["pw.x", "-h"]
     },
     "vasp": {

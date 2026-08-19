@@ -633,11 +633,12 @@ def _lammps_calculator(**options: Any) -> Any:
             "silently fall back to a dimensionless lj/cut toy potential"
         )
     command = str(command) if command is not None else (_lammps_setting("command") or "lmp")
-    executable_argv = shlex.split(command)
-    if not executable_argv or shutil.which(executable_argv[0]) is None:
+    _payload_guard(command, "lammps")
+    payload = _command_payload(command)
+    if payload and shutil.which(payload[0]) is None:
         raise EngineNotAvailableError(
             f"engine 'lammps' resolved command {command!r}, but "
-            f"{executable_argv[0] if executable_argv else command!r} is not on "
+            f"{payload[0]!r} is not on "
             f"PATH — install LAMMPS (or module-load it), pass "
             f"calculator_options={{'command': '/path/to/lmp', ...}}, or set "
             f"command under [engines.lammps] in the slab config"
@@ -965,22 +966,88 @@ def _lammps_failure_evidence(directory: Path) -> tuple[list[str], list[tuple[str
 
 
 _MPI_LAUNCHERS = frozenset({"srun", "mpirun", "mpiexec"})
+_SHELL_ENV_ASSIGNMENT = re.compile(r"\w+=.*")
+
+
+def _command_payload(command: str) -> list[str] | None:
+    """Argv of *command* with a leading ``env VAR=val ...`` wrapper stripped.
+
+    ``command = "env OMP_NUM_THREADS=1 pw.x"`` is the sanctioned way to give
+    one engine its own environment variables: ASE execs engine commands as a
+    plain argv (no shell), so ``/usr/bin/env`` applies the assignments to
+    that engine's subprocess alone — nothing leaks into this process or any
+    other engine. The guards and PATH checks must therefore judge the
+    program that actually runs, not the wrapper. Returns None when the
+    payload cannot be identified statically (an ``env`` flag like ``-i``, or
+    an unparseable line) — callers then skip payload checks rather than
+    refuse a command that would work.
+
+    Examples:
+        >>> _command_payload("env OMP_NUM_THREADS=1 srun pw.x")
+        ['srun', 'pw.x']
+        >>> _command_payload("pw.x")
+        ['pw.x']
+        >>> _command_payload("env -i pw.x") is None
+        True
+    """
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return None
+    if not argv or Path(argv[0]).name != "env":
+        return argv
+    rest = argv[1:]
+    while rest and _SHELL_ENV_ASSIGNMENT.fullmatch(rest[0]):
+        rest = rest[1:]
+    if rest and rest[0].startswith("-"):
+        return None  # env flags: finding the payload would mean parsing env's CLI
+    return rest
+
+
+def _payload_guard(command: str, engine: str) -> None:
+    """Refuse commands whose payload is a shell idiom or nothing at all.
+
+    ASE spawns engine commands as a plain argv, so ``VAR=val pw.x`` — a
+    shell idiom — would exec ``VAR=val`` as the program. Without this check
+    the refusal is the generic "'VAR=val' is not on PATH", which reads as a
+    missing binary rather than what it is. The fix is spelled out because it
+    is one word: the ``env`` wrapper form, which scopes the variables to
+    this engine's subprocess alone.
+    """
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return
+    if argv and _SHELL_ENV_ASSIGNMENT.fullmatch(argv[0]):
+        assignments = [t for t in argv if _SHELL_ENV_ASSIGNMENT.fullmatch(t)]
+        payload = [t for t in argv if not _SHELL_ENV_ASSIGNMENT.fullmatch(t)]
+        suggested = " ".join(["env", *assignments, *payload])
+        raise EngineNotAvailableError(
+            f"engine {engine!r}: command {command!r} starts with an environment "
+            f"assignment, which only a shell would apply — ASE execs the command "
+            f"directly, so {argv[0]!r} would be run as the program. Use the env "
+            f"wrapper instead: command = {suggested!r} scopes the variables to "
+            f"this engine's subprocess alone"
+        )
+    resolved = _command_payload(command)
+    if resolved is not None and not resolved:
+        raise EngineNotAvailableError(
+            f"engine {engine!r}: command {command!r} names no program to run"
+        )
 
 
 def _srun_without_allocation(command: str) -> bool:
-    """True when *command* starts with srun but no SLURM allocation exists.
+    """True when *command* runs srun but no SLURM allocation exists.
 
     ``srun`` outside a job requests a *fresh* allocation, and ASE runs engine
     commands through ``subprocess`` with no timeout — so the calculation
     queues silently instead of failing. Login nodes are exactly where the
-    scenario's smoke test runs first.
+    scenario's smoke test runs first. An ``env``-wrapped srun is still srun.
     """
-    argv = shlex.split(command)
-    return (
-        bool(argv)
-        and Path(argv[0]).name == "srun"
-        and not os.environ.get("SLURM_JOB_ID")
-    )
+    argv = _command_payload(command)
+    if not argv:
+        return False
+    return Path(argv[0]).name == "srun" and not os.environ.get("SLURM_JOB_ID")
 
 
 def _launcher_guard(command: str, engine: str) -> None:
@@ -993,9 +1060,9 @@ def _launcher_guard(command: str, engine: str) -> None:
     :func:`_srun_without_allocation`). Only the unambiguous two-token form
     (``srun pw.x``) gets the payload PATH check — a flagged launcher line
     (``srun -n 4 pw.x``) would need the launcher's own CLI parsed to find
-    the payload.
+    the payload. Both checks look through an ``env VAR=val`` wrapper.
     """
-    argv = shlex.split(command)
+    argv = _command_payload(command)
     if not argv or Path(argv[0]).name not in _MPI_LAUNCHERS:
         return
     if len(argv) == 2 and not argv[1].startswith("-") and shutil.which(argv[1]) is None:
@@ -1092,11 +1159,12 @@ def _qe_calculator(**options: Any) -> Any:
     try:
         calculator: Any = Espresso(profile=profile, directory=directory, **options)
         resolved_command = str(calculator.profile.command)
-        executable = shlex.split(resolved_command)[0]
-        if shutil.which(executable) is None:
+        _payload_guard(resolved_command, "qe")
+        payload = _command_payload(resolved_command)
+        if payload and shutil.which(payload[0]) is None:
             raise EngineNotAvailableError(
                 f"engine 'qe' resolved command {resolved_command!r}, but "
-                f"{executable!r} is not on PATH — install Quantum ESPRESSO or "
+                f"{payload[0]!r} is not on PATH — install Quantum ESPRESSO or "
                 f"pass calculator_options={{'command': '/path/to/pw.x', ...}}"
             )
         _launcher_guard(resolved_command, "qe")
@@ -1183,9 +1251,12 @@ def _executable_identity(command: str) -> tuple[str, int] | None:
     spawned once per identity, not on every task call — and replacing the
     executable (an upgrade, a module swap changing a symlink target) changes
     the mtime and forces a fresh probe, so long-lived processes (the MCP
-    server) still see version bumps.
+    server) still see version bumps. The identity is the *payload* binary:
+    for ``env``-wrapped commands, keying on ``/usr/bin/env``'s mtime would
+    never notice the engine binary changing under it.
     """
-    argv = shlex.split(command)
+    payload = _command_payload(command)
+    argv = shlex.split(command) if payload is None else payload
     executable = shutil.which(argv[0]) if argv else None
     if executable is None:
         return None
@@ -1294,7 +1365,45 @@ def _mace_calculator(**options: Any) -> Any:
     options.setdefault("model", "small")
     options.setdefault("device", "cpu")
     options.setdefault("default_dtype", "float64")
-    return mace_mp(**options)
+    return _fetch_named_checkpoint(mace_mp, options, engine="mace")
+
+
+_CHECKPOINT_FETCH_TIMEOUT_S = 60.0
+
+
+def _fetch_named_checkpoint(factory: Any, options: dict[str, Any], *, engine: str) -> Any:
+    """Call an MLIP factory whose named checkpoint may download on first use.
+
+    mace-torch resolves names like ``"small"`` against a local cache and
+    otherwise downloads — and on a firewalled compute node the download is
+    not a failure the user can read, it is a raw ``URLError`` (or, on paths
+    without their own timeout, a silent hang inside the batch job's time
+    limit). The bounded default socket timeout is a floor for the paths that
+    set none of their own; the translation into instructions — pre-warm,
+    point at a file, or serve — is the actual fix. A checkpoint already in
+    the cache never opens a socket, so pre-warmed nodes are unaffected; the
+    default-timeout window is scoped to the construction, and every other
+    slab network call sets its own explicit per-request timeout.
+    """
+    import socket
+    import urllib.error
+
+    previous = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(_CHECKPOINT_FETCH_TIMEOUT_S)
+    try:
+        return factory(**options)
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+        model = options.get("model", "small")
+        raise EngineNotAvailableError(
+            f"engine {engine!r} could not fetch checkpoint {model!r}: {e} — "
+            f"compute nodes are typically firewalled. Pre-warm the cache from "
+            f"a node with internet (python -c \"from mace.calculators import "
+            f"mace_mp; mace_mp(model='{model}')\"), point model= at a "
+            f"checkpoint file on disk, or use a rootstock-served checkpoint "
+            f"id as the engine name"
+        ) from e
+    finally:
+        socket.setdefaulttimeout(previous)
 
 
 def _rootstock_calculator(**options: Any) -> Any:
@@ -1310,3 +1419,33 @@ def _rootstock_calculator(**options: Any) -> Any:
             "calculator_options={'checkpoint': 'mace-mp-0-medium', 'cluster': 'delta'}"
         )
     return RootstockCalculator(**options)
+
+
+def qe_calculator(**options: Any) -> Any:
+    """The built-in ``qe`` engine as a dotted-path factory for registry entries.
+
+    A registry entry cannot express ``EspressoProfile`` objects in JSON, and
+    pointing ``env`` at an ASE config file does not work — ASE parses that
+    file once at import time, before any registry entry runs (the registry
+    refuses ``ASE_CONFIG_PATH`` for exactly this reason). This factory takes
+    the same JSON-able options as ``engine="qe"`` — ``command=``,
+    ``pseudo_dir=``, ``pseudo_family=``, ``input_data=``, ... — with all of
+    the built-in engine's guards, so a curated site setup can live under a
+    stable alias::
+
+        "qe-delta": {
+          "calculator": "slab.backends.qe_calculator",
+          "options": {"command": "srun pw.x", "pseudo_dir": "/sw/pseudos"}
+        }
+    """
+    return _qe_calculator(**options)
+
+
+def lammps_calculator(**options: Any) -> Any:
+    """The built-in ``lammps`` engine as a dotted-path factory for registry entries.
+
+    The registry analog of :func:`qe_calculator`: the built-in engine's
+    guards (required potential, PATH and launcher checks, evidence-retaining
+    scratch) under a maintainer-curated alias, with JSON-able options.
+    """
+    return _lammps_calculator(**options)

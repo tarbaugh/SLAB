@@ -653,3 +653,80 @@ def test_srun_probe_short_circuits_outside_allocation(
     assert _srun_without_allocation("mpirun pw.x") is False
     monkeypatch.setenv("SLURM_JOB_ID", "1")
     assert _srun_without_allocation("srun pw.x") is False
+
+
+# -- per-engine environments: the env wrapper -------------------------------------------
+
+
+def test_qe_env_wrapped_command_builds_and_checks_the_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """'env VAR=val pw.x' scopes variables to this engine's subprocess alone
+    (ASE execs argv, no shell) — and the PATH check must judge pw.x, not
+    /usr/bin/env."""
+    _fake_launcher_env(tmp_path, monkeypatch, "pw.x")
+    calc = get_calculator(
+        "qe",
+        command="env OMP_NUM_THREADS=1 pw.x",
+        pseudo_dir=str(tmp_path),
+        input_data={"system": {"ecutwfc": 30.0}},
+    )
+    close_calculator(calc)
+    with pytest.raises(EngineNotAvailableError, match="definitely-not-pw"):
+        get_calculator(
+            "qe",
+            command="env OMP_NUM_THREADS=1 definitely-not-pw",
+            pseudo_dir=str(tmp_path),
+            input_data={"system": {"ecutwfc": 30.0}},
+        )
+
+
+def test_qe_env_wrapped_srun_still_hits_the_allocation_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An env-wrapped srun is still srun: the wrapper must not become a hole
+    in the silent-hang refusal."""
+    _fake_launcher_env(tmp_path, monkeypatch, "srun", "pw.x")
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+    with pytest.raises(EngineNotAvailableError, match="not inside a SLURM allocation"):
+        get_calculator(
+            "qe",
+            command="env OMP_NUM_THREADS=1 srun pw.x",
+            pseudo_dir=str(tmp_path),
+            input_data={"system": {"ecutwfc": 30.0}},
+        )
+
+
+def test_qe_bare_env_assignment_prefix_is_refused_by_name(tmp_path: Path) -> None:
+    """A shell idiom in a no-shell seam: the refusal must teach the env form,
+    not report a missing binary called 'OMP_NUM_THREADS=4'."""
+    with pytest.raises(EngineNotAvailableError, match=r"env OMP_NUM_THREADS=4 pw\.x"):
+        get_calculator(
+            "qe",
+            command="OMP_NUM_THREADS=4 pw.x",
+            pseudo_dir=str(tmp_path),
+            input_data={"system": {"ecutwfc": 30.0}},
+        )
+
+
+def test_command_payload_sees_through_the_wrapper() -> None:
+    from slab.backends import _command_payload
+
+    assert _command_payload("env OMP_NUM_THREADS=1 srun pw.x") == ["srun", "pw.x"]
+    assert _command_payload("srun pw.x") == ["srun", "pw.x"]
+    assert _command_payload("env A=1 B=2") == []  # sets environment, names no program
+    assert _command_payload("env -i pw.x") is None  # env flags: payload is opaque
+    assert _command_payload('un"balanced') is None
+
+
+def test_qe_env_wrapped_version_probe_keys_on_the_payload_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The memoized version probe must watch pw.x's mtime, not /usr/bin/env's
+    — an env-keyed memo would never notice a module swap."""
+    from slab.backends import _executable_identity
+
+    _fake_launcher_env(tmp_path, monkeypatch, "pw.x")
+    identity = _executable_identity("env OMP_NUM_THREADS=1 pw.x")
+    assert identity is not None
+    assert identity[0] == str(tmp_path / "bin" / "pw.x")

@@ -401,3 +401,11 @@ def test_driver_payload_is_never_launched() -> None:
     assert "\nOMP_NUM_THREADS=4 slab run relax.py" in prefixed
     assert "srun OMP_NUM_THREADS" not in prefixed
     assert "launcher omitted" in prefixed
+    # The explicit env wrapper is the same payload in different clothes.
+    wrapped = render_sbatch("env OMP_NUM_THREADS=4 slab run relax.py", job_name="w", config=hpc)
+    assert "\nenv OMP_NUM_THREADS=4 slab run relax.py" in wrapped
+    assert "srun env" not in wrapped
+    assert "launcher omitted" in wrapped
+    # ...but an env-wrapped engine command still gets the launcher.
+    wrapped_engine = render_sbatch("env OMP_NUM_THREADS=4 pw.x", job_name="we", config=hpc)
+    assert "srun env OMP_NUM_THREADS=4 pw.x" in wrapped_engine

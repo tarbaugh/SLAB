@@ -464,3 +464,92 @@ def test_verify_probe_receives_declared_env(monkeypatch: pytest.MonkeyPatch) -> 
     )
     (result,) = verify_engines(registry)
     assert result.ok
+
+
+# -- env isolation: import-time refusal, builtin steering, the qe factory ---------------
+
+
+def test_registry_refuses_import_time_env() -> None:
+    """ASE parses its config file once at import — before any registry entry
+    runs — so an entry promising ASE_CONFIG_PATH would silently never apply."""
+    with pytest.raises(ValidationError, match="ASE_CONFIG_PATH"):
+        EngineSpec.model_validate(
+            {
+                "calculator": "ase.calculators.espresso.Espresso",
+                "env": {"ASE_CONFIG_PATH": "/sw/slab/ase.ini"},
+            }
+        )
+
+
+def test_registry_refusal_names_the_entry_at_load(tmp_path: Path) -> None:
+    payload = {
+        "engines": {
+            "qe-broken": {
+                "calculator": "ase.calculators.espresso.Espresso",
+                "env": {"ASE_CONFIG_PATH": "/sw/ase.ini"},
+            }
+        }
+    }
+    path = tmp_path / "engines.json"
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValidationError, match="qe-broken") as excinfo:
+        load_registry(path)
+    assert "ASE_CONFIG_PATH" in str(excinfo.value)
+
+
+def test_registry_warns_when_env_steers_builtin_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Setting ASE_LAMMPSRUN_COMMAND redirects the BUILT-IN lammps engine's
+    command resolution for the rest of the process — visible, never silent,
+    even when the variable was previously unset."""
+    import os
+
+    monkeypatch.delenv("ASE_LAMMPSRUN_COMMAND", raising=False)
+    spec = EngineSpec.model_validate(
+        {"calculator": "ase.calculators.emt.EMT", "env": {"ASE_LAMMPSRUN_COMMAND": "lmp_site"}}
+    )
+    with pytest.warns(UserWarning, match="built-in"):
+        build_engine("emt-steering", spec)
+    assert os.environ["ASE_LAMMPSRUN_COMMAND"] == "lmp_site"
+
+
+def test_registry_qe_factory_builds_the_builtin_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The JSON-able route to a curated QE alias: slab's own factory, with
+    the built-in engine's guards, instead of an env-mediated ASE config."""
+    import os
+
+    bins = tmp_path / "bin"
+    bins.mkdir()
+    pw = bins / "pw.x"
+    pw.write_text("#!/bin/sh\nexit 0\n")
+    pw.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bins}:{os.environ.get('PATH', '')}")
+    spec = EngineSpec.model_validate(
+        {
+            "calculator": "slab.backends.qe_calculator",
+            "options": {"command": "pw.x", "pseudo_dir": str(tmp_path)},
+            "version": "7.4.1",
+        }
+    )
+    calculator = build_engine("qe-site", spec, input_data={"system": {"ecutwfc": 30.0}})
+    try:
+        assert str(calculator.profile.command) == "pw.x"
+    finally:
+        close_calculator(calculator)
+    # And the guards came along: a protocol name is refused here too.
+    with pytest.raises(EngineNotAvailableError, match="qe_protocol_options"):
+        build_engine("qe-site", spec, protocol="balanced")
+
+
+def test_template_qe_alias_uses_the_factory_not_import_time_env() -> None:
+    """templates/engines.json must model the working mechanism."""
+    repo_root = Path(__file__).resolve().parent.parent
+    payload = json.loads((repo_root / "templates" / "engines.json").read_text())
+    spec = payload["engines"]["qe-mycluster"]
+    assert spec["calculator"] == "slab.backends.qe_calculator"
+    assert "env" not in spec
+    # No entry may carry the import-time var (the notes may explain the rule).
+    assert "ASE_CONFIG_PATH" not in json.dumps(payload["engines"])

@@ -36,7 +36,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from slab.config import AgentConfig, HpcConfig
+from slab.config import AgentConfig, HpcConfig, ServeConfig
 from slab.errors import SlabError
 from slab.hpc import SubmittedJob, job_state, render_sbatch, submit
 
@@ -185,6 +185,7 @@ def render_serve_script(
         output=f"{serve.job_name}-%j.out",
         prologue=[
             *serve.setup,
+            *_server_preflight(serve),
             # Absolute, always: the default workspace root is relative
             # (``.slab``), and the job's working directory is not the one the
             # script was rendered from — a relative record path would be
@@ -401,6 +402,24 @@ def _server_command(agent: AgentConfig, model: str) -> str:
         pieces.append(shlex.quote(serve.tool_call_parser))
     pieces.extend(serve.args)
     return " ".join(pieces)
+
+
+def _server_preflight(serve: ServeConfig) -> list[str]:
+    """A loud existence check for the default server binary, after setup runs.
+
+    Without it the failure is bash's own ``vllm: command not found`` — true,
+    but mute about the cause and printed only after a queue wait. The check
+    runs before the endpoint record is written, so a doomed job never
+    announces itself. An explicit ``[agent.serve] command`` is the
+    maintainer's own recipe and gets no check — its payload is opaque here.
+    """
+    if serve.command:
+        return []
+    return [
+        "command -v vllm >/dev/null 2>&1 || { "
+        "echo \"mason serve: 'vllm' not found after setup — do the "
+        '[agent.serve] setup lines activate the vLLM venv?" >&2; exit 1; }',
+    ]
 
 
 def _announce(model: str, record: Path, port: int) -> Iterable[str]:

@@ -816,3 +816,25 @@ def test_serve_variables_are_not_expanded_at_load(
     )
     serve = load_config(tmp_path).agent.serve
     assert serve.setup == ("source $SLAB_NO_SUCH_VAR/bin/activate",)
+
+
+# -- the vLLM preflight: fail loudly before announcing an endpoint ----------------------
+
+
+def test_serve_script_checks_vllm_exists_before_announcing(tmp_path: Path) -> None:
+    """A venv-less setup must die with a pointed message, not bash's mute
+    'command not found' — and before the endpoint record is written, so a
+    doomed job never announces itself."""
+    script = render_serve_script(_agent(), HPC, tmp_path)
+    guard = script.index("command -v vllm")
+    assert "[agent.serve] setup lines activate the vLLM venv" in script
+    assert guard < script.index("endpoint.json")
+    assert guard < script.index("vllm serve")
+
+
+def test_explicit_serve_command_gets_no_vllm_preflight(tmp_path: Path) -> None:
+    """A maintainer's own command is opaque here: no check to get wrong."""
+    script = render_serve_script(
+        _agent(command='my-server --port "$port"'), HPC, tmp_path
+    )
+    assert "command -v vllm" not in script

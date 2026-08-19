@@ -563,11 +563,16 @@ schema_version = 1
 #                                      # allocation queues or hangs, so slab
 #                                      # refuses it there — keep this form for
 #                                      # jobs submitted via 'slab hpc submit'
+# command = "env OMP_NUM_THREADS=4 pw.x"          # the env wrapper scopes
+#                                      # variables to this engine's subprocess
+#                                      # alone (bare VAR=x needs a shell and
+#                                      # is refused; ASE execs argv directly)
 # pseudo_dir = "/shared/sw/pseudos"    # used when no pseudo_family is given
 
 [engines.lammps]
 # command = "lmp"                      # login-node smoke tests / serial runs
 # command = "srun lmp"                 # inside batch jobs only (same srun rule)
+# command = "env OMP_NUM_THREADS=4 lmp"           # same env-wrapper rule as qe
 
 [hpc]
 # cluster = "delta"

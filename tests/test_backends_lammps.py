@@ -765,3 +765,28 @@ def test_relax_lammps_real_integration(ws: Workspace) -> None:
     header_at = max(i for i, line in enumerate(lines) if line.strip().startswith("Step "))
     row = dict(zip(lines[header_at].split(), lines[header_at + 1].split(), strict=False))
     assert float(row["PotEng"]) == pytest.approx(info["energy"], rel=1e-12)
+
+
+# -- per-engine environments: the env wrapper -------------------------------------------
+
+
+def test_lammps_bare_env_assignment_prefix_is_refused_by_name() -> None:
+    """Same rule as qe: lammpsrun execs argv without a shell, so a leading
+    assignment would be exec'd as the program — teach the env form."""
+    with pytest.raises(EngineNotAvailableError, match="env OMP_NUM_THREADS=2 lmp"):
+        get_calculator("lammps", command="OMP_NUM_THREADS=2 lmp", **POTENTIAL)
+
+
+def test_lammps_env_wrapped_command_checks_the_payload() -> None:
+    """The PATH refusal must name the missing engine binary, not pass on
+    /usr/bin/env's existence."""
+    with pytest.raises(EngineNotAvailableError, match="definitely-not-lmp"):
+        get_calculator("lammps", command="env OMP_NUM_THREADS=2 definitely-not-lmp", **POTENTIAL)
+
+
+def test_lammps_env_wrapped_command_builds(tmp_path: Path) -> None:
+    calc = get_calculator("lammps", command="env OMP_NUM_THREADS=2 /bin/echo", **POTENTIAL)
+    try:
+        assert calc.parameters["command"] == "env OMP_NUM_THREADS=2 /bin/echo"
+    finally:
+        close_calculator(calc)

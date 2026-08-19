@@ -233,6 +233,40 @@ The details that keep runs honest and directories clean:
 A cluster's curated LAMMPS setup (fixed module, MPI launcher) belongs in the
 registry below under a distinct alias like `lammps-delta`, the same as QE.
 
+## Per-engine environments
+
+Each engine runs isolated by construction: QE and LAMMPS are external
+binaries in private slab-managed scratch directories, rootstock and the
+Mason model server live behind HTTP in their own environments, and only
+mace-torch is deliberately in-process (its cluster-grade isolation *is*
+rootstock). What crosses the seam is the command line — and when one engine
+needs its own environment variables, the command line carries those too:
+
+```toml
+[engines.qe]
+command = "env OMP_NUM_THREADS=4 pw.x"
+```
+
+ASE execs engine commands as a plain argv (no shell), so `/usr/bin/env`
+applies the assignments to that engine's subprocess alone — nothing leaks
+into the Python process, the cache, or any other engine. The guards look
+through the wrapper: the PATH check judges `pw.x`, not `env`, an
+`env`-wrapped `srun` still trips the allocation refusal, and the version
+probe watches the payload binary's mtime. The bare shell idiom
+(`command = "OMP_NUM_THREADS=4 pw.x"`) is refused by name — only a shell
+would apply it, and there is no shell — with the working form spelled out
+in the message. The same seam takes a container:
+`command = "apptainer exec /sw/qe.sif pw.x"` isolates the whole userland.
+
+Two boundaries to know about. A batch job is still one environment: `[hpc]`
+and partition `setup` lines (module loads) apply to the whole job, so a
+module whose libraries conflict with the driver's venv belongs on the engine
+command via `env` (say, `env LD_LIBRARY_PATH=/opt/qe/lib pw.x`), not in
+job-global setup. And a *named* MACE checkpoint downloads on first use with
+no offline mode — on firewalled compute nodes slab bounds the attempt and
+refuses with instructions instead of hanging, but the real fix is the
+pre-warm (or rootstock) described under [Built-ins](#built-ins).
+
 ## Two fidelities, one run
 
 The seam's payoff is that engines compose. `slab.tasks` ships two traced
@@ -302,8 +336,8 @@ unchanged on any cluster whose registry declares `vasp`.
       "probe": ["rootstock", "list"]
     },
     "qe-delta": {
-      "calculator": "ase.calculators.espresso.Espresso",
-      "env": {"ASE_CONFIG_PATH": "/sw/slab/ase-delta.ini"},
+      "calculator": "slab.backends.qe_calculator",
+      "options": {"command": "srun pw.x", "pseudo_dir": "/sw/pseudos/sssp"},
       "version": "7.3.1",
       "probe": ["pw.x", "-h"]
     }
@@ -312,10 +346,16 @@ unchanged on any cluster whose registry declares `vasp`.
 ```
 
 Every entry is a dotted path to an ASE calculator class or factory — even
-rootstock enters through the same seam. `options` are defaults the caller
-overrides key-by-key; `env` declares variables the code needs
-(`ASE_CONFIG_PATH`, `VASP_PP_PATH`), applied process-wide at build time because
-ASE calculators read configuration at run time; `probe` is a cheap command
+rootstock enters through the same seam, and a curated QE or LAMMPS alias
+goes through SLAB's own factories (`slab.backends.qe_calculator` /
+`lammps_calculator`), which carry the built-in engines' guards and take
+JSON-able options. `options` are defaults the caller overrides key-by-key;
+`env` declares variables the calculator reads *at run time*
+(`VASP_PP_PATH`, `ASE_VASP_COMMAND`), applied process-wide at build time
+because those calculators consult the environment when they calculate —
+which is also why `ASE_CONFIG_PATH` is refused: ASE parses its config file
+exactly once, at import, before any registry entry runs, so that
+declaration would silently never apply. `probe` is a cheap command
 proving the engine actually works here. Discovery order: an explicit path, else
 `$SLAB_ENGINES`, else `~/.config/slab/engines.json` — a maintainer ships the
 file at a shared path and exports `SLAB_ENGINES` from a module file. The full

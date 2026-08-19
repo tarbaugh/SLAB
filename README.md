@@ -322,8 +322,8 @@ distinct names.
   "engines": {
     "mace-mp": {"calculator": "rootstock.RootstockCalculator",
                  "options": {"cluster": "delta", "checkpoint": "mace-mp-0-medium"}},
-    "qe-delta": {"calculator": "ase.calculators.espresso.Espresso",
-                 "env": {"ASE_CONFIG_PATH": "/sw/slab/ase-delta.ini"},
+    "qe-delta": {"calculator": "slab.backends.qe_calculator",
+                 "options": {"command": "srun pw.x", "pseudo_dir": "/sw/pseudos/sssp"},
                  "version": "7.3.1", "probe": ["pw.x", "-h"]}
   }
 }
@@ -332,10 +332,13 @@ distinct names.
 A maintainer ships this file at a shared path and exports `SLAB_ENGINES` from
 a module file (discovery: explicit path > `$SLAB_ENGINES` >
 `~/.config/slab/engines.json`; see
-[examples/engines.example.json](examples/engines.example.json)). Codes that
-read configuration from ASE's own config file (QE's command and `pseudo_dir`
-on ASE ≥ 3.23) are declared by pointing `ASE_CONFIG_PATH` at the cluster's
-shared `config.ini`, keeping one declaration chain. Every entry
+[examples/engines.example.json](examples/engines.example.json)). A curated QE
+or LAMMPS alias goes through SLAB's own factories
+(`slab.backends.qe_calculator` / `lammps_calculator`), which carry the
+built-in engines' guards and take JSON-able options — an entry's `env` may
+only hold variables the calculator reads at run time (`VASP_PP_PATH`), and
+`ASE_CONFIG_PATH` is refused because ASE parses that file once at import,
+before any registry entry runs. Every entry
 is a dotted path to an ASE calculator — the ASE `Calculator` contract stays
 SLAB's only engine seam. Declared `version`s land in task recipes as
 provenance *and* in the relax cache key, so bumping `qe-delta` from 7.3 to

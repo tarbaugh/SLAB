@@ -1,7 +1,7 @@
 {
   "layout_version": 1,
   "cluster": "FILL: short name for this machine, e.g. delta",
-  "notes": "Engine registry template — fill in the entries this cluster actually provides and delete the rest. You may not need this file at all: the built-in qe and lammps engines are configured in slab.toml under [engines.qe] and [engines.lammps]; the registry is for codes slab has no built-in for (VASP) and for pinning curated site setups under stable aliases. Rules: engine names must be lowercase and unpadded, and may not reuse a built-in name (emt, lammps, lj, mace, qe, rootstock) — use a distinct alias like qe-delta. Wire the filled file in via $SLAB_ENGINES, [paths] engines in slab.toml, or ~/.config/slab/engines.json. Entries execute as the calling user: trusting this file is trusting whoever edits it.",
+  "notes": "Engine registry template — fill in the entries this cluster actually provides and delete the rest. You may not need this file at all: the built-in qe and lammps engines are configured in slab.toml under [engines.qe] and [engines.lammps]; the registry is for codes slab has no built-in for (VASP) and for pinning curated site setups under stable aliases. Rules: engine names must be lowercase and unpadded, and may not reuse a built-in name (emt, lammps, lj, mace, qe, rootstock) — use a distinct alias like qe-delta. env may only hold variables the calculator reads at run time (VASP_PP_PATH, ASE_VASP_COMMAND); ASE_CONFIG_PATH is refused because ASE parses that file once at import, before any entry runs — declare command/pseudo_dir in options instead. Wire the filled file in via $SLAB_ENGINES, [paths] engines in slab.toml, or ~/.config/slab/engines.json. Entries execute as the calling user: trusting this file is trusting whoever edits it.",
   "engines": {
     "vasp": {
       "calculator": "ase.calculators.vasp.Vasp",
@@ -14,12 +14,13 @@
       "probe": ["bash", "-lc", "command -v vasp_std"]
     },
     "qe-mycluster": {
-      "calculator": "ase.calculators.espresso.Espresso",
-      "env": {
-        "ASE_CONFIG_PATH": "FILL: path to a shared ASE config.ini declaring the espresso command and pseudo_dir"
+      "calculator": "slab.backends.qe_calculator",
+      "options": {
+        "command": "FILL: how to invoke pw.x here, e.g. srun pw.x — or env OMP_NUM_THREADS=4 pw.x to give just this engine its own environment variables",
+        "pseudo_dir": "FILL: directory of .upf files, e.g. /sw/pseudos/sssp"
       },
       "version": "FILL: e.g. 7.4.1",
-      "description": "Optional pinned site alias for Quantum ESPRESSO. Only needed to curate a setup under a stable name — plain engine=\"qe\" with [engines.qe] in slab.toml already covers the normal case. Rename to qe-<your cluster>.",
+      "description": "Optional pinned site alias for Quantum ESPRESSO, with all the built-in engine's guards. Only needed to curate a setup under a stable name — plain engine=\"qe\" with [engines.qe] in slab.toml already covers the normal case. Rename to qe-<your cluster>.",
       "probe": ["pw.x", "-h"]
     }
   }

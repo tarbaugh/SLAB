@@ -43,8 +43,8 @@ itself (``rootstock.RootstockCalculator``)::
           "description": "MACE-MP via rootstock-managed environments"
         },
         "qe-delta": {
-          "calculator": "ase.calculators.espresso.Espresso",
-          "env": {"ASE_CONFIG_PATH": "/sw/slab/ase-delta.ini"},
+          "calculator": "slab.backends.qe_calculator",
+          "options": {"command": "srun pw.x", "pseudo_dir": "/sw/pseudos/sssp"},
           "version": "7.3.1",
           "probe": ["pw.x", "-h"]
         }
@@ -52,7 +52,10 @@ itself (``rootstock.RootstockCalculator``)::
     }
 
 (``qe-delta``, not ``qe``: plain ``qe`` is a built-in engine, and entries
-shadowing built-in names are refused at load.)
+shadowing built-in names are refused at load. And ``options``, not
+``env: {"ASE_CONFIG_PATH": ...}``: ASE parses its config file once at
+import time, before any registry entry runs, so that variable is refused —
+see :class:`EngineSpec`.)
 """
 
 from __future__ import annotations
@@ -74,6 +77,14 @@ REGISTRY_ENV_VAR = "SLAB_ENGINES"
 _USER_REGISTRY = Path("~/.config/slab/engines.json")
 _PROBE_TIMEOUT_S = 120
 _BUILTIN_ENGINES = ("emt", "lammps", "lj", "mace", "qe", "rootstock")
+# Variables ASE reads exactly once, at import time — and slab imports ASE
+# before any registry entry runs, so declaring them in an entry's env would
+# silently never apply. Refused at validation instead (see EngineSpec).
+_IMPORT_TIME_ENV = frozenset({"ASE_CONFIG_PATH"})
+# Variables the BUILT-IN engines' own command resolution consults: an entry
+# setting one redirects built-in behavior for the rest of the process, so
+# the application warns even when the variable was previously unset.
+_BUILTIN_STEERING_ENV = frozenset({"ASE_LAMMPSRUN_COMMAND"})
 
 
 class EngineSpec(BaseModel):
@@ -89,12 +100,19 @@ class EngineSpec(BaseModel):
             ``ase.calculators.lammpsrun.LAMMPS``, ``rootstock.RootstockCalculator``).
         options: Default keyword arguments for the calculator. Caller options
             override these key-by-key.
-        env: Environment variables the code needs (``VASP_PP_PATH``,
-            ``ASE_CONFIG_PATH``, ...). Applied to the process environment at
-            build time and left in place — ASE calculators read configuration
-            at run time, so the application is deliberately process-wide (see
+        env: Environment variables the code reads *at run time*
+            (``VASP_PP_PATH``, ``ASE_VASP_COMMAND``, ...). Applied to the
+            process environment at build time and left in place — those
+            calculators consult ``os.environ`` when they calculate, so the
+            application is deliberately process-wide (see
             :func:`build_engine`); entries needing conflicting values for the
-            same variable cannot share a process.
+            same variable cannot share a process. Variables ASE reads only
+            once at import time (``ASE_CONFIG_PATH``) are refused here: slab
+            imports ASE before any registry entry runs, so the value would
+            silently never apply — declare the engine explicitly instead
+            (e.g. ``calculator = "slab.backends.qe_calculator"`` with
+            ``command``/``pseudo_dir`` in ``options``), or export the
+            variable before Python starts (shell, module file).
         version: The maintainer's declared version of the underlying code —
             recorded into task recipes as provenance and, together with the
             rest of the spec, folded into relax's cache key.
@@ -118,6 +136,20 @@ class EngineSpec(BaseModel):
     version: str | None = None
     description: str = ""
     probe: list[str] | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _env_is_runtime_read(self) -> EngineSpec:
+        dead = sorted(set(self.env) & _IMPORT_TIME_ENV)
+        if dead:
+            raise ValueError(
+                f"env declares {dead}, which ASE reads exactly once at import "
+                f"time — and slab imports ASE before any registry entry runs, "
+                f"so the value would silently never apply. Declare the engine "
+                f"explicitly instead (calculator = 'slab.backends.qe_calculator' "
+                f"with command/pseudo_dir in options), or export the variable "
+                f"before Python starts (shell, module file)"
+            )
+        return self
 
 
 class EngineRegistry(BaseModel):
@@ -250,15 +282,20 @@ def build_engine(name: str, spec: EngineSpec, **options: Any) -> Any:
     dotted calculator, and calls it with the entry's defaults merged under
     the caller's options (caller wins key-by-key).
 
-    The env application is deliberately *persistent*: many ASE calculators
-    read their configuration at run time, not at construction, so a scoped
-    save-and-restore would silently break them. The consequence — declared
-    env is process-wide, and entries needing conflicting values for the same
-    variable cannot share a process — is a stated property of the registry,
-    and an overwrite of an existing variable with a *different* value warns
-    so cross-engine poisoning is visible, never silent. (Probes in
-    :func:`verify_engines` use a subprocess-scoped overlay instead, because a
-    probe's env must not leak into the maintainer's shell session.)
+    The env application is deliberately *persistent*: the calculators these
+    variables exist for (VASP's ``VASP_PP_PATH``, ``ASE_VASP_COMMAND``) read
+    ``os.environ`` at calculate time, after this function has returned, so a
+    scoped save-and-restore would silently break them. The consequence —
+    declared env is process-wide, and entries needing conflicting values for
+    the same variable cannot share a process — is a stated property of the
+    registry, and the poisoning is visible, never silent: an overwrite of an
+    existing variable with a *different* value warns, and a variable the
+    built-in engines' own resolution consults warns even when previously
+    unset (setting it redirects the built-ins for the rest of the process).
+    Variables ASE reads only at import time are refused at validation — see
+    :class:`EngineSpec`. (Probes in :func:`verify_engines` use a
+    subprocess-scoped overlay instead, because a probe's env must not leak
+    into the maintainer's shell session.)
 
     Raises:
         EngineNotAvailableError: The dotted path cannot be imported — the
@@ -272,7 +309,15 @@ def build_engine(name: str, spec: EngineSpec, **options: Any) -> Any:
     factory = _import_dotted(name, spec.calculator)
     for key, value in spec.env.items():
         previous = os.environ.get(key)
-        if previous is not None and previous != value:
+        if key in _BUILTIN_STEERING_ENV and previous != value:
+            warnings.warn(
+                f"engine {name!r} sets ${key}, which the built-in engines' own "
+                f"command resolution also consults — from now on, in this "
+                f"process, built-ins resolve through this entry's value "
+                f"({value!r})",
+                stacklevel=2,
+            )
+        elif previous is not None and previous != value:
             warnings.warn(
                 f"engine {name!r} overwrites ${key} ({previous!r} -> {value!r}); "
                 f"declared env is process-wide — engines needing different values "
