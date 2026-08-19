@@ -64,6 +64,7 @@ import importlib
 import json
 import os
 import subprocess
+import tempfile
 import warnings
 from pathlib import Path
 from typing import Any, Literal
@@ -81,10 +82,51 @@ _BUILTIN_ENGINES = ("emt", "lammps", "lj", "mace", "qe", "rootstock")
 # before any registry entry runs, so declaring them in an entry's env would
 # silently never apply. Refused at validation instead (see EngineSpec).
 _IMPORT_TIME_ENV = frozenset({"ASE_CONFIG_PATH"})
-# Variables the BUILT-IN engines' own command resolution consults: an entry
-# setting one redirects built-in behavior for the rest of the process, so
+# Variables slab's OWN resolution consults at run time — built-in engine
+# commands, config/registry/pseudos discovery, scheduler detection. An entry
+# setting one can redirect slab's behavior for the rest of the process, so
 # the application warns even when the variable was previously unset.
-_BUILTIN_STEERING_ENV = frozenset({"ASE_LAMMPSRUN_COMMAND"})
+# (Explicit config still outranks the environment where both exist.)
+_BUILTIN_STEERING_ENV = frozenset(
+    {
+        "ASE_LAMMPSRUN_COMMAND",
+        "SLAB_CONFIG",
+        "SLAB_SITE_CONFIG",
+        "SLAB_ENGINES",
+        "SLAB_PSEUDOS",
+        "SLAB_WORKSPACE",
+        "SLURM_JOB_ID",
+    }
+)
+# What build_engine wrote into os.environ, mapped to each variable's ORIGINAL
+# value (None = originally unset). Registry env exists for THIS process's
+# calculators; slab.hpc.submit uses this map to hand sbatch the environment
+# as it was before any registry entry ran, so a batch job never inherits
+# residue that would make the same script behave differently depending on
+# which engines this process happened to build first.
+_APPLIED_ENV: dict[str, str | None] = {}
+
+
+def applied_env() -> dict[str, str | None]:
+    """Registry-applied environment: variable -> its pre-application value.
+
+    Consumers restore, never just delete: a variable the user's own shell
+    exported and a registry entry overwrote goes back to the shell's value
+    at process boundaries (job submission), not to nothing.
+    """
+    return dict(_APPLIED_ENV)
+
+
+def _warn_always(message: str) -> None:
+    """``warnings.warn`` without the once-per-location dedup.
+
+    Env poisoning must be visible on every occurrence: a long-lived process
+    (the MCP server, a Mason session) alternating between entries would
+    otherwise warn once and mutate silently ever after. ``warn_explicit``
+    with a fresh registry defeats the dedup while still honoring the active
+    filters — so test recorders and user-set error filters behave normally.
+    """
+    warnings.warn_explicit(message, UserWarning, filename=__file__, lineno=0, registry=None)
 
 
 class EngineSpec(BaseModel):
@@ -267,7 +309,14 @@ def load_registry(path: str | os.PathLike[str] | None = None) -> EngineRegistry 
     if resolved is None:
         return None
     with open(resolved, encoding="utf-8") as handle:
-        return EngineRegistry.model_validate(json.load(handle))
+        try:
+            return EngineRegistry.model_validate(json.load(handle))
+        except (json.JSONDecodeError, ValueError) as e:
+            # Name the FILE: on a machine with several candidate registry
+            # locations, a bare validation error leaves the maintainer
+            # guessing which one to fix. (pydantic's ValidationError is a
+            # ValueError; its per-entry detail rides along in str(e).)
+            raise EngineNotAvailableError(f"engine registry {resolved} is invalid: {e}") from e
 
 
 def registry_engine_names(registry: EngineRegistry | None) -> tuple[str, ...]:
@@ -310,20 +359,22 @@ def build_engine(name: str, spec: EngineSpec, **options: Any) -> Any:
     for key, value in spec.env.items():
         previous = os.environ.get(key)
         if key in _BUILTIN_STEERING_ENV and previous != value:
-            warnings.warn(
-                f"engine {name!r} sets ${key}, which the built-in engines' own "
-                f"command resolution also consults — from now on, in this "
-                f"process, built-ins resolve through this entry's value "
-                f"({value!r})",
-                stacklevel=2,
+            was = f" (was {previous!r})" if previous is not None else ""
+            _warn_always(
+                f"engine {name!r} sets ${key}={value!r}{was}, which slab's own "
+                f"resolution consults — config discovery, built-in engine "
+                f"commands, or scheduler detection in this process may now "
+                f"behave differently (explicit config still outranks the "
+                f"environment where both exist)"
             )
         elif previous is not None and previous != value:
-            warnings.warn(
+            _warn_always(
                 f"engine {name!r} overwrites ${key} ({previous!r} -> {value!r}); "
                 f"declared env is process-wide — engines needing different values "
-                f"for the same variable cannot share a process",
-                stacklevel=2,
+                f"for the same variable cannot share a process"
             )
+        if previous != value:
+            _APPLIED_ENV.setdefault(key, previous)
         os.environ[key] = value
     merged = {**spec.options, **options}
     return factory(**merged)
@@ -361,16 +412,38 @@ def verify_engines(registry: EngineRegistry) -> list[ProbeResult]:
                     )
                 )
             continue
+        if Path(spec.probe[0]).name == "srun" and not os.environ.get("SLURM_JOB_ID"):
+            # The same trap the built-in engines refuse: srun outside an
+            # allocation queues for a fresh one, and a probe that queues is
+            # a probe that hangs.
+            results.append(
+                ProbeResult(
+                    engine=engine_name,
+                    ok=False,
+                    detail=(
+                        "probe starts with srun outside a SLURM allocation — it "
+                        "would queue instead of answering; probe the bare binary, "
+                        "or verify from inside a job"
+                    ),
+                )
+            )
+            continue
         env = {**os.environ, **spec.env}
         try:
-            completed = subprocess.run(
-                spec.probe,
-                capture_output=True,
-                text=True,
-                timeout=_PROBE_TIMEOUT_S,
-                env=env,
-                check=False,
-            )
+            # A private cwd and closed stdin, for the same reasons the version
+            # probes in slab.backends use them: pw.x writes input_tmp.in debris
+            # into cwd, and lmp without arguments blocks reading the terminal.
+            with tempfile.TemporaryDirectory(prefix="slab-probe-") as probe_dir:
+                completed = subprocess.run(
+                    spec.probe,
+                    capture_output=True,
+                    text=True,
+                    timeout=_PROBE_TIMEOUT_S,
+                    env=env,
+                    check=False,
+                    cwd=probe_dir,
+                    stdin=subprocess.DEVNULL,
+                )
         except (OSError, subprocess.TimeoutExpired) as e:
             results.append(ProbeResult(engine=engine_name, ok=False, detail=str(e)))
             continue

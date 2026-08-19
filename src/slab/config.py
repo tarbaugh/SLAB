@@ -54,7 +54,13 @@ PROJECT_FILE_NAME = "slab.toml"
 # verbatim: those are shell fragments whose variables must expand on the
 # compute node at run time, not on the login node at load time.
 _PATH_KEYS = frozenset(
-    {"paths.workspace", "paths.pseudos", "paths.engines", "engines.qe.pseudo_dir"}
+    {
+        "paths.workspace",
+        "paths.pseudos",
+        "paths.engines",
+        "paths.scratch",
+        "engines.qe.pseudo_dir",
+    }
 )
 _VAR_PATTERN = re.compile(r"\$\{(\w+)\}|\$(\w+)")
 _OLLAMA = "http://localhost:11434/v1"
@@ -97,13 +103,21 @@ class EnginesConfig(BaseModel):
 
 
 class PathsConfig(BaseModel):
-    """Where things live on this machine (``[paths]``)."""
+    """Where things live on this machine (``[paths]``).
+
+    ``scratch`` is where slab-managed per-calculation scratch directories
+    are created (unset = the platform default, $TMPDIR). On clusters set it
+    to a *shared* scratch filesystem: SLURM's node-local $TMPDIR is often a
+    few-GB tmpfs that pw.x's wavefunction files overflow, and MPI ranks on
+    other nodes cannot see node-local files at all.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     workspace: str | None = None
     pseudos: str | None = None
     engines: str | None = None
+    scratch: str | None = None
 
 
 class Partition(BaseModel):
@@ -221,6 +235,11 @@ class ServeConfig(BaseModel):
     setup: tuple[str, ...] = ()
     command: str | None = None
     ready_timeout_s: float = Field(default=1800.0, gt=0)
+    # The serve job brings a self-contained environment (its own venv via
+    # setup), and [hpc]-level setup exists to load ENGINE software — module
+    # stacks whose libraries fight the server's. So global setup is excluded
+    # by default; the partition's own setup (GPU drivers) still applies.
+    include_hpc_setup: bool = False
 
 
 class AgentConfig(BaseModel):
@@ -556,6 +575,11 @@ schema_version = 1
 #                                      # workspace a running job is writing to)
 # pseudos = "/shared/sw/slab/pseudos"             # pseudopotential family root
 # engines = "/shared/sw/slab/engines.json"        # cluster engine registry
+# scratch = "/scratch/${USER}/slab-scratch"       # per-calculation scratch root:
+#                                      # set on clusters — the default ($TMPDIR)
+#                                      # is often node-local tmpfs, too small
+#                                      # for pw.x wavefunctions and invisible
+#                                      # to MPI ranks on other nodes
 
 [engines.qe]
 # command = "pw.x"                     # login-node smoke tests / serial runs
@@ -647,7 +671,10 @@ schema_version = 1
 #   "export HF_HOME=/path/to/hf-cache",         # the cache 'hf download' filled
 #   "export HF_HUB_OFFLINE=1",                  # serve from disk; refuse every download
 # ]
-# command = "..."                           # a server this schema does not model; may use $port
+# command = "..."                           # a server this schema does not model; must bind "$port"
+# include_hpc_setup = false                 # serve jobs skip [hpc]-level setup by default:
+#                                           # global engine module loads fight the server's
+#                                           # venv; the partition's own setup still applies
 '''
 
 

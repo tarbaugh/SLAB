@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import os
 import re
-import shlex
 import shutil
 import subprocess
 from collections.abc import Iterable
@@ -140,6 +139,7 @@ def render_sbatch(
     output: str | None = None,
     prologue: Iterable[str] = (),
     use_launcher: bool = True,
+    include_global_setup: bool = True,
 ) -> str:
     """A complete sbatch script for *command* on the given partition.
 
@@ -161,6 +161,10 @@ def render_sbatch(
     payloads that must run in the batch script's own shell rather than as a
     parallel step (a single-node inference server, notably: it has to stay
     on the node whose hostname the prologue announced).
+    ``include_global_setup=False`` drops the ``[hpc]``-level setup lines while
+    keeping the partition's own — for jobs that bring a self-contained
+    environment (the model-serve job's venv) that global engine module loads
+    would fight.
 
     Examples:
         >>> from slab.config import HpcConfig
@@ -214,7 +218,8 @@ def render_sbatch(
     lines.extend(f"#SBATCH {extra}" for extra in spec.sbatch_extra)
 
     body = ["", "set -euo pipefail", ""]
-    body.extend(hpc.setup)
+    if include_global_setup:
+        body.extend(hpc.setup)
     body.extend(spec.setup)
     body.extend(prologue)
     launcher = spec.launcher if use_launcher else None
@@ -235,16 +240,19 @@ def _is_driver_payload(command: str) -> bool:
     allocation. The launcher belongs on engine commands *inside* the driver
     ([engines.qe] ``command = "srun pw.x"``), never on the driver.
     """
-    try:
-        argv = shlex.split(command)
-    except ValueError:
+    # Env assignments legitimately prefix shell payloads
+    # (OMP_NUM_THREADS=4 slab run ...), with or without the explicit 'env'
+    # wrapper (flags included: env -u VAR slab run ...); the driver check
+    # must see through them all with the SAME parser the engine guards use,
+    # or the launcher sneaks back onto the driver for a form one parser
+    # accepts and the other does not.
+    from slab.backends import _SHELL_ENV_ASSIGNMENT, _command_payload
+
+    payload = _command_payload(command)
+    if payload is None:
         return False
-    for token in argv:
-        # Env assignments legitimately prefix shell payloads
-        # (OMP_NUM_THREADS=4 slab run ...), with or without the explicit
-        # 'env' wrapper; the driver check must see through both or the
-        # launcher sneaks back onto the driver.
-        if re.fullmatch(r"\w+=\S*", token) or Path(token).name == "env":
+    for token in payload:
+        if _SHELL_ENV_ASSIGNMENT.fullmatch(token):
             continue
         return Path(token).name == "slab"
     return False
@@ -273,7 +281,10 @@ def submit(
     script_path = workdir / f"{job_name}.sbatch"
     script_path.write_text(script, encoding="utf-8")
     result = _run_scheduler_command(
-        ["sbatch", "--parsable", script_path.name], cwd=workdir, timeout=_SBATCH_TIMEOUT_S
+        ["sbatch", "--parsable", script_path.name],
+        cwd=workdir,
+        timeout=_SBATCH_TIMEOUT_S,
+        env=_submission_env(),
     )
     if result.returncode != 0:
         raise SchedulerError(
@@ -436,8 +447,41 @@ def _require(executable: str) -> None:
         )
 
 
+def _submission_env() -> dict[str, str] | None:
+    """The environment sbatch should export into the job, or None for as-is.
+
+    sbatch defaults to ``--export=ALL``: the job inherits the submitting
+    process's environment wholesale. That is normal SLURM behavior for what
+    the *user's shell* holds — but this process may also carry registry-engine
+    residue (:func:`slab.engines.build_engine` writes entries' ``env``
+    process-wide, for in-process calculators). A batch job is a fresh process
+    that resolves its own config; leaking the residue would make the kept
+    ``.sbatch`` script — the job's documented provenance — behave differently
+    depending on which engines this process happened to build first. So the
+    submission environment is the environment as it was *before* any registry
+    entry ran: applied variables are restored to their original values, or
+    dropped when they were originally unset.
+    """
+    from slab.engines import applied_env
+
+    residue = applied_env()
+    if not residue:
+        return None
+    env = dict(os.environ)
+    for key, original in residue.items():
+        if original is None:
+            env.pop(key, None)
+        else:
+            env[key] = original
+    return env
+
+
 def _run_scheduler_command(
-    argv: list[str], *, cwd: Path | None = None, timeout: float = _SQUEUE_TIMEOUT_S
+    argv: list[str],
+    *,
+    cwd: Path | None = None,
+    timeout: float = _SQUEUE_TIMEOUT_S,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
@@ -448,6 +492,7 @@ def _run_scheduler_command(
             timeout=timeout,
             check=False,
             stdin=subprocess.DEVNULL,
+            env=env,
         )
     except subprocess.TimeoutExpired as e:
         raise SchedulerError(

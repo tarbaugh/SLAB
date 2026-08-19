@@ -790,3 +790,28 @@ def test_lammps_env_wrapped_command_builds(tmp_path: Path) -> None:
         assert calc.parameters["command"] == "env OMP_NUM_THREADS=2 /bin/echo"
     finally:
         close_calculator(calc)
+
+
+def test_ambient_potential_resolution_is_stamped_into_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pair_coeff potential outside files= is resolved by lmp itself (cwd,
+    then $LAMMPS_POTENTIALS) — allowed, but never silently: the resolved
+    source lands in cache identity, so repointing the module farm's
+    potentials directory honestly invalidates cached results."""
+    farm_a = tmp_path / "farm-a"
+    farm_b = tmp_path / "farm-b"
+    for farm in (farm_a, farm_b):
+        farm.mkdir()
+        (farm / "Cu_u3.eam").write_text("fake potential\n")
+    monkeypatch.chdir(tmp_path)  # nothing resolvable in cwd
+    monkeypatch.setenv("LAMMPS_POTENTIALS", str(farm_a))
+    options = {"command": "/bin/echo", **POTENTIAL}
+    a = describe_engine("lammps", options)
+    assert a["pair_coeff_files"] == [str((farm_a / "Cu_u3.eam").resolve())]
+    monkeypatch.setenv("LAMMPS_POTENTIALS", str(farm_b))
+    b = describe_engine("lammps", options)
+    assert a["pair_coeff_files"] != b["pair_coeff_files"]  # swap invalidates
+    monkeypatch.delenv("LAMMPS_POTENTIALS")
+    unresolved = describe_engine("lammps", options)
+    assert "pair_coeff_files" not in unresolved  # nothing ambient to stamp

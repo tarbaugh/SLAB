@@ -65,3 +65,55 @@ def test_fetch_guard_lets_unrelated_errors_through_unwrapped() -> None:
         _fetch_named_checkpoint(
             lambda **kw: (_ for _ in ()).throw(ValueError("bad model")), {}, engine="mace"
         )
+
+
+def test_fetch_guard_sees_through_mace_runtime_error_wrapping() -> None:
+    """mace-torch wraps every download failure in RuntimeError('Model
+    download failed...'), so the network shapes arrive in disguise — by
+    cause and by message, both must translate."""
+
+    def wrapped_cause(**options: Any) -> Any:
+        try:
+            raise urllib.error.URLError("blackholed")
+        except urllib.error.URLError as e:
+            raise RuntimeError("Model download failed and no local model found") from e
+
+    with pytest.raises(EngineNotAvailableError, match="rootstock"):
+        _fetch_named_checkpoint(wrapped_cause, {"model": "small"}, engine="mace")
+
+    def wrapped_message(**options: Any) -> Any:
+        raise RuntimeError("Model download failed and no local model found")
+
+    with pytest.raises(EngineNotAvailableError, match="firewalled"):
+        _fetch_named_checkpoint(wrapped_message, {"model": "small"}, engine="mace")
+
+    def unrelated(**options: Any) -> Any:
+        raise RuntimeError("mismatched tensor shapes")
+
+    with pytest.raises(RuntimeError, match="tensor"):
+        _fetch_named_checkpoint(unrelated, {}, engine="mace")
+
+
+def test_mace_checkpoint_file_identity_includes_freshness() -> None:
+    """model= may be a checkpoint FILE; a path alone would let a
+    retrain-in-place serve stale cached results forever."""
+    import tempfile
+    from pathlib import Path
+
+    from slab.backends import describe_engine
+
+    with tempfile.TemporaryDirectory() as root:
+        checkpoint = Path(root) / "custom.model"
+        checkpoint.write_bytes(b"weights-v1")
+        a = describe_engine("mace", {"model": str(checkpoint)})
+        assert a["model"] == str(checkpoint)
+        assert a["model_size"] == len(b"weights-v1")
+        import os
+
+        os.utime(checkpoint, ns=(1, 1))
+        checkpoint.write_bytes(b"weights-v2-retrained")
+        b = describe_engine("mace", {"model": str(checkpoint)})
+        assert (a["model_mtime_ns"], a["model_size"]) != (b["model_mtime_ns"], b["model_size"])
+    # Named aliases stay name-identified — no file keys.
+    alias = describe_engine("mace", {"model": "small"})
+    assert "model_mtime_ns" not in alias

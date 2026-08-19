@@ -250,22 +250,32 @@ command = "env OMP_NUM_THREADS=4 pw.x"
 ASE execs engine commands as a plain argv (no shell), so `/usr/bin/env`
 applies the assignments to that engine's subprocess alone — nothing leaks
 into the Python process, the cache, or any other engine. The guards look
-through the wrapper: the PATH check judges `pw.x`, not `env`, an
-`env`-wrapped `srun` still trips the allocation refusal, and the version
-probe watches the payload binary's mtime. The bare shell idiom
+through the wrapper — plain assignments and env's portable flags (`-i`,
+`-u NAME`) alike: the PATH check judges `pw.x`, not `env` (and when the
+wrapper assigns `PATH=` itself, the payload is resolved under *that* PATH,
+the module-load-replacement case), an `env`-wrapped `srun` still trips the
+allocation refusal, and the version-probe memo watches every binary the
+command names, payload included. Version probes also never run *through* an
+MPI launcher — `srun pw.x` would queue or eat a job step and
+`mpirun -np 64 pw.x` would fan ranks out on a login node, so the probe runs
+the bare payload, which prints the same banner. The bare shell idiom
 (`command = "OMP_NUM_THREADS=4 pw.x"`) is refused by name — only a shell
 would apply it, and there is no shell — with the working form spelled out
 in the message. The same seam takes a container:
 `command = "apptainer exec /sw/qe.sif pw.x"` isolates the whole userland.
 
-Two boundaries to know about. A batch job is still one environment: `[hpc]`
-and partition `setup` lines (module loads) apply to the whole job, so a
-module whose libraries conflict with the driver's venv belongs on the engine
-command via `env` (say, `env LD_LIBRARY_PATH=/opt/qe/lib pw.x`), not in
-job-global setup. And a *named* MACE checkpoint downloads on first use with
+Three boundaries to know about. A batch job is still one environment:
+`[hpc]` and partition `setup` lines (module loads) apply to the whole job,
+so a module whose libraries conflict with the driver's venv belongs on the
+engine command via `env` (say, `env LD_LIBRARY_PATH=/opt/qe/lib pw.x`), not
+in job-global setup. A *named* MACE checkpoint downloads on first use with
 no offline mode — on firewalled compute nodes slab bounds the attempt and
 refuses with instructions instead of hanging, but the real fix is the
-pre-warm (or rootstock) described under [Built-ins](#built-ins).
+pre-warm (or rootstock) described under [Built-ins](#built-ins). And
+slab-managed scratch directories default to $TMPDIR, which clusters often
+point at small node-local tmpfs — set `[paths] scratch` to a shared scratch
+root so pw.x's wavefunctions fit and MPI ranks on other nodes can see their
+input.
 
 ## Two fidelities, one run
 
@@ -355,8 +365,16 @@ JSON-able options. `options` are defaults the caller overrides key-by-key;
 because those calculators consult the environment when they calculate —
 which is also why `ASE_CONFIG_PATH` is refused: ASE parses its config file
 exactly once, at import, before any registry entry runs, so that
-declaration would silently never apply. `probe` is a cheap command
-proving the engine actually works here. Discovery order: an explicit path, else
+declaration would silently never apply. Applied env stays in *this*
+process: job submission hands `sbatch` the environment as it was before any
+registry entry ran, so the kept batch script means the same thing no matter
+which engines the submitting process happened to build first. `probe` is a
+cheap command proving the engine actually works here. And the slab-factory
+aliases are deliberately strict: their spec (plus the caller's traced
+options) is their whole cache identity, so `qe_calculator` refuses to fall
+back to `[engines.qe]` or ASE config for `command`/`pseudo_dir`, and asks
+for an explicit k-point policy (`kpts=`/`kspacing=`) — the task-level
+k-point refusal only recognizes the literal name `qe`. Discovery order: an explicit path, else
 `$SLAB_ENGINES`, else `~/.config/slab/engines.json` — a maintainer ships the
 file at a shared path and exports `SLAB_ENGINES` from a module file. The full
 worked example is

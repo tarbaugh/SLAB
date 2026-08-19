@@ -90,7 +90,13 @@ import tempfile
 from pathlib import Path
 from typing import Any, Protocol
 
-from slab.engines import EngineRegistry, build_engine, load_registry, registry_engine_names
+from slab.engines import (
+    EngineRegistry,
+    applied_env,
+    build_engine,
+    load_registry,
+    registry_engine_names,
+)
 from slab.errors import EngineNotAvailableError
 
 
@@ -216,12 +222,23 @@ def describe_engine(
         # the package or changing the resolved "small" default must
         # invalidate cached results honestly — the default lives in
         # _mace_calculator, whose source the cache key never hashes.
-        return {
+        mace_identity: dict[str, Any] = {
             "engine": "mace",
             "source": "builtin",
             "version": _dist_version("mace-torch"),
             "model": str(options.get("model", "small")),
         }
+        # model= may be a checkpoint FILE, and a path alone is not an
+        # identity — a retrain-in-place would silently keep serving the old
+        # cache. Size+mtime is the same freshness signal the version probes
+        # use for engine binaries (contents are not hashed, same as a bare
+        # pseudo_dir; named aliases like "small" stay identified by name).
+        model_path = Path(str(options.get("model", ""))).expanduser()
+        if str(options.get("model", "")) and model_path.is_file():
+            stat = model_path.stat()
+            mace_identity["model_mtime_ns"] = stat.st_mtime_ns
+            mace_identity["model_size"] = stat.st_size
+        return mace_identity
     if normalized == "lammps":
         # The detected LAMMPS version and the resolved command are the cache
         # identity, mirroring qe: upgrading the binary or pointing at a
@@ -240,6 +257,15 @@ def describe_engine(
         sources = _lammps_file_sources(options)
         if sources is not None:
             identity["files"] = [str(source) for source in sources]
+        # Potential files lmp resolves AMBIENTLY (cwd, $LAMMPS_POTENTIALS)
+        # are identity too: the traced options hold only the literal name,
+        # and a module swap repointing $LAMMPS_POTENTIALS must not serve
+        # the old potential's cached results.
+        ambient = _ambient_potential_sources(options)
+        if ambient:
+            identity["pair_coeff_files"] = ambient
+        if identity["version"] is None:
+            identity.update(_binary_fingerprint(str(identity["command"])))
         return identity
     if normalized == "qe":
         # The detected pw.x version, the resolved command, and the resolved
@@ -272,6 +298,8 @@ def describe_engine(
             identity["pseudo_dir"] = None
             identity["pseudo_family"] = family.name
             identity["pseudo_family_digest"] = family_digest(family)
+        if identity["version"] is None:
+            identity.update(_binary_fingerprint(command))
         return identity
     registry = load_registry()
     if registry is not None and normalized in registry.engines:
@@ -612,6 +640,78 @@ def _file_suffix(name: str) -> str:
     return Path(name).suffix.lstrip(".").lower() or Path(name).name.lower()
 
 
+def _scratch_dir(prefix: str) -> Path:
+    """A fresh slab-managed scratch directory for one calculation.
+
+    ``[paths] scratch`` overrides the platform default ($TMPDIR). The
+    default is right on a laptop and wrong on many clusters: SLURM points
+    $TMPDIR at node-local (often RAM-backed) /tmp, where pw.x's wavefunction
+    files overflow a few-GB tmpfs — and where MPI ranks placed on *other*
+    nodes cannot see the input files at all. The template points cluster
+    maintainers at a shared scratch root for exactly this reason.
+    """
+    from slab.config import config_value
+
+    root = config_value("paths.scratch")
+    if root is None:
+        return Path(tempfile.mkdtemp(prefix=prefix))
+    base = Path(str(root)).expanduser()
+    base.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=base))
+
+
+_POTENTIAL_FILE_SUFFIXES = (
+    ".eam",
+    ".eam.alloy",
+    ".eam.fs",
+    ".adp",
+    ".meam",
+    ".sw",
+    ".tersoff",
+    ".airebo",
+    ".rebo",
+    ".snapcoeff",
+    ".snapparam",
+)
+
+
+def _ambient_potential_sources(options: dict[str, Any]) -> list[str]:
+    """Where lmp itself would find pair_coeff potential files, resolved.
+
+    A pair_coeff token naming a potential file *outside* ``files=`` is a
+    blessed LAMMPS idiom — lmp resolves it against its cwd and then the
+    module farm's ``$LAMMPS_POTENTIALS`` — but the traced options carry only
+    the literal name, so which bytes ran would be invisible to the cache
+    identity. This resolves the name the way lmp would and hands the result
+    to :func:`describe_engine` for stamping: ambient resolution is allowed,
+    silent ambient resolution is not. Detection is by the conventional
+    potential-file suffixes; absolute tokens are already deterministic in
+    the traced options, and declared files are stamped separately.
+    """
+    files = options.get("files") or []
+    declared = {Path(str(f)).name for f in ([files] if isinstance(files, str) else files)}
+    pair_coeff = options.get("pair_coeff") or []
+    entries = [pair_coeff] if isinstance(pair_coeff, str) else list(pair_coeff)
+    candidates: list[Path] = [Path.cwd()]
+    potentials_root = os.environ.get("LAMMPS_POTENTIALS")
+    if potentials_root:
+        candidates.append(Path(potentials_root))
+    resolved: list[str] = []
+    for entry in entries:
+        for token in str(entry).split():
+            name = Path(token).name
+            if not name.lower().endswith(_POTENTIAL_FILE_SUFFIXES):
+                continue
+            if name in declared or Path(token).is_absolute():
+                continue
+            for base in candidates:
+                source = base / token
+                if source.is_file():
+                    resolved.append(str(source.resolve()))
+                    break
+    return resolved
+
+
 def _lammps_calculator(**options: Any) -> Any:
     from ase.calculators.lammpsrun import LAMMPS
 
@@ -635,7 +735,7 @@ def _lammps_calculator(**options: Any) -> Any:
     command = str(command) if command is not None else (_lammps_setting("command") or "lmp")
     _payload_guard(command, "lammps")
     payload = _command_payload(command)
-    if payload and shutil.which(payload[0]) is None:
+    if payload and _which_payload(payload[0], command) is None:
         raise EngineNotAvailableError(
             f"engine 'lammps' resolved command {command!r}, but "
             f"{payload[0]!r} is not on "
@@ -650,7 +750,7 @@ def _lammps_calculator(**options: Any) -> Any:
     # is a consumed pipe and a crash leaves nothing to read.
     scratch: Path | None = None
     if tmp_dir is None:
-        scratch = Path(tempfile.mkdtemp(prefix="slab-lammps-"))
+        scratch = _scratch_dir("slab-lammps-")
         tmp_dir = scratch
     try:
         # Stage against the realpath — lammpsrun realpaths tmp_dir itself, so
@@ -791,31 +891,33 @@ def _lammps_version(options: dict[str, Any]) -> str | None:
         identity = _executable_identity(command)
         if identity is None:
             return None
-        return _probe_lammps_version(command, *identity)
+        return _probe_lammps_version(command, identity)
     except Exception:  # pragma: no cover - defensive: lru_cache internals
         return None
 
 
 @functools.lru_cache(maxsize=64)
-def _probe_lammps_version(command: str, executable: str, mtime_ns: int) -> str | None:
-    """Run ``<command> -h`` once and parse the LAMMPS version banner.
+def _probe_lammps_version(command: str, identity: tuple[str | int, ...]) -> str | None:
+    """Run the payload's ``-h`` once and parse the LAMMPS version banner.
 
     ``-h`` is required — LAMMPS without arguments blocks reading stdin.
-    Runs in a private temp dir under a hard timeout (a command like
-    ``srun lmp`` could otherwise block inside cache-key construction).
-    Every failure path returns None. ``executable`` and ``mtime_ns`` exist
-    to key the memo cache, exactly like the qe probe: one spawn per binary
-    identity, and a replaced binary is re-probed.
+    Runs in a private temp dir under a hard timeout, and never through an
+    MPI launcher (see :func:`_probe_argv` — ``srun lmp`` would queue or
+    consume a job step for a banner the bare binary prints identically).
+    Every failure path returns None. ``identity`` exists to key the memo
+    cache, exactly like the qe probe: one spawn per binary-set identity,
+    and a replaced binary — payload included — is re-probed.
     """
-    del executable, mtime_ns
-    if _srun_without_allocation(command):
-        return None  # doomed to queue, not to answer — skip the timeout
+    del identity
+    probe = _probe_argv(command)
+    if probe is None:
+        return None
     try:
         import subprocess
 
         with tempfile.TemporaryDirectory(prefix="slab-lammps-version-") as probe_dir:
             completed = subprocess.run(
-                [*shlex.split(command), "-h"],
+                [*probe, "-h"],
                 cwd=probe_dir,
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
@@ -987,21 +1089,109 @@ def _command_payload(command: str) -> list[str] | None:
         ['srun', 'pw.x']
         >>> _command_payload("pw.x")
         ['pw.x']
-        >>> _command_payload("env -i pw.x") is None
+        >>> _command_payload("env -u DISPLAY -i pw.x")
+        ['pw.x']
+        >>> _command_payload("env -S pw.x") is None
         True
+    """
+    split = _split_env_wrapper(command)
+    if split is None:
+        return None
+    _prefix, payload = split
+    return payload
+
+
+def _split_env_wrapper(command: str) -> tuple[list[str], list[str]] | None:
+    """``(env prefix, payload argv)`` for a command line, or None when opaque.
+
+    The prefix is empty when there is no wrapper. Understands plain
+    assignments and env's portable flags — ``-i``/``--ignore-environment``
+    and ``-u NAME``/``--unset=NAME`` — so the guards keep seeing the payload
+    through the forms people actually write. Anything stranger (``-S``,
+    ``-C``, unknown flags) is env's own CLI to interpret: opaque, never
+    guessed at. An unparseable line is opaque too.
     """
     try:
         argv = shlex.split(command)
     except ValueError:
         return None
     if not argv or Path(argv[0]).name != "env":
-        return argv
+        return [], argv
+    prefix = [argv[0]]
     rest = argv[1:]
-    while rest and _SHELL_ENV_ASSIGNMENT.fullmatch(rest[0]):
-        rest = rest[1:]
-    if rest and rest[0].startswith("-"):
-        return None  # env flags: finding the payload would mean parsing env's CLI
-    return rest
+    while rest:
+        token = rest[0]
+        if _SHELL_ENV_ASSIGNMENT.fullmatch(token) or token in ("-i", "--ignore-environment"):
+            prefix.append(token)
+            rest = rest[1:]
+            continue
+        if token == "-u" and len(rest) >= 2:
+            prefix.extend(rest[:2])
+            rest = rest[2:]
+            continue
+        if token.startswith("--unset="):
+            prefix.append(token)
+            rest = rest[1:]
+            continue
+        if token.startswith("-"):
+            return None
+        break
+    return prefix, rest
+
+
+def _wrapper_path_override(command: str) -> str | None:
+    """The PATH an ``env`` wrapper makes the payload resolve under, or None.
+
+    ``env PATH=/opt/qe/bin pw.x`` execs the payload via the *assigned* PATH,
+    so a which-check against the process PATH would refuse a command that
+    runs fine (and vice versa). None means the wrapper does not change
+    lookup; ``env -i`` without a PATH assignment yields ``""`` — nothing
+    resolves, which is exactly what exec would find.
+    """
+    split = _split_env_wrapper(command)
+    if split is None:
+        return None
+    prefix, _payload = split
+    override: str | None = None
+    cleared = any(token in ("-i", "--ignore-environment") for token in prefix)
+    for token in prefix:
+        if _SHELL_ENV_ASSIGNMENT.fullmatch(token) and token.startswith("PATH="):
+            override = token[len("PATH=") :]
+    if override is not None:
+        return override
+    return "" if cleared else None
+
+
+def _which_payload(token: str, command: str) -> str | None:
+    """``shutil.which`` for a payload token, under the wrapper's PATH rules."""
+    override = _wrapper_path_override(command)
+    if override is None:
+        return shutil.which(token)
+    return shutil.which(token, path=override)
+
+
+def _probe_argv(command: str) -> list[str] | None:
+    """The argv a version probe may run for *command*, or None to skip probing.
+
+    Probes never run through an MPI launcher: ``srun`` outside an allocation
+    queues silently, inside one it consumes a job step, and ``mpirun -np 64
+    pw.x`` would fan sixty-four ranks out on a login node — all for a banner
+    the bare binary prints identically. The launcher is stripped when the
+    payload is unambiguous (the two-token form); a flagged launcher line
+    degrades to no probe rather than a guess. An ``env`` wrapper is kept —
+    its assignments may be what makes the binary runnable.
+    """
+    split = _split_env_wrapper(command)
+    if split is None:
+        return None
+    prefix, argv = split
+    if not argv:
+        return None
+    if Path(argv[0]).name in _MPI_LAUNCHERS:
+        if len(argv) == 2 and not argv[1].startswith("-"):
+            return [*prefix, argv[1]]
+        return None
+    return [*prefix, *argv]
 
 
 def _payload_guard(command: str, engine: str) -> None:
@@ -1016,12 +1206,21 @@ def _payload_guard(command: str, engine: str) -> None:
     """
     try:
         argv = shlex.split(command)
-    except ValueError:
-        return
+    except ValueError as e:
+        # Pre-guard, an unparseable command raised at the factory; keep that
+        # loudness rather than deferring the failure to calculate time.
+        raise EngineNotAvailableError(
+            f"engine {engine!r}: command {command!r} is not parseable shell ({e})"
+        ) from e
     if argv and _SHELL_ENV_ASSIGNMENT.fullmatch(argv[0]):
-        assignments = [t for t in argv if _SHELL_ENV_ASSIGNMENT.fullmatch(t)]
-        payload = [t for t in argv if not _SHELL_ENV_ASSIGNMENT.fullmatch(t)]
-        suggested = " ".join(["env", *assignments, *payload])
+        # Only the LEADING run of assignments is environment; a later
+        # key=value token is the program's own argument (lmp -var x=1) and
+        # must stay exactly where it is. Tokens are re-quoted, so values
+        # with spaces survive the round trip into the suggestion.
+        idx = 0
+        while idx < len(argv) and _SHELL_ENV_ASSIGNMENT.fullmatch(argv[idx]):
+            idx += 1
+        suggested = " ".join(shlex.quote(t) for t in ["env", *argv[:idx], *argv[idx:]])
         raise EngineNotAvailableError(
             f"engine {engine!r}: command {command!r} starts with an environment "
             f"assignment, which only a shell would apply — ASE execs the command "
@@ -1065,7 +1264,7 @@ def _launcher_guard(command: str, engine: str) -> None:
     argv = _command_payload(command)
     if not argv or Path(argv[0]).name not in _MPI_LAUNCHERS:
         return
-    if len(argv) == 2 and not argv[1].startswith("-") and shutil.which(argv[1]) is None:
+    if len(argv) == 2 and not argv[1].startswith("-") and _which_payload(argv[1], command) is None:
         raise EngineNotAvailableError(
             f"engine {engine!r}: command {command!r} launches {argv[1]!r}, "
             f"which is not on PATH — the launcher exists but the engine "
@@ -1130,8 +1329,11 @@ def _qe_calculator(**options: Any) -> Any:
                 "option or under [engines.qe] in the slab config"
             )
         # Same fallback chain _qe_locator uses, so the stamped identity is
-        # always the binary that actually ran.
+        # always the binary that actually ran. Guarded before ASE sees it:
+        # ASE's own parse failure would be a BadConfiguration whose message
+        # points everywhere except the actual problem.
         command = command or _qe_setting("command") or "pw.x"
+        _payload_guard(command, "qe")
         profile = EspressoProfile(command=command, pseudo_dir=str(Path(pseudo_dir).expanduser()))
 
     # Force printing defaults on: pw.x omits forces unless tprnfor is set,
@@ -1154,14 +1356,14 @@ def _qe_calculator(**options: Any) -> Any:
     # removes it; relax captures evidence (kept artifacts, notes) first.
     scratch: Path | None = None
     if directory is None:
-        scratch = Path(tempfile.mkdtemp(prefix="slab-qe-"))
+        scratch = _scratch_dir("slab-qe-")
         directory = scratch
     try:
         calculator: Any = Espresso(profile=profile, directory=directory, **options)
         resolved_command = str(calculator.profile.command)
         _payload_guard(resolved_command, "qe")
         payload = _command_payload(resolved_command)
-        if payload and shutil.which(payload[0]) is None:
+        if payload and _which_payload(payload[0], resolved_command) is None:
             raise EngineNotAvailableError(
                 f"engine 'qe' resolved command {resolved_command!r}, but "
                 f"{payload[0]!r} is not on PATH — install Quantum ESPRESSO or "
@@ -1244,51 +1446,100 @@ def _qe_version(options: dict[str, Any]) -> str | None:
         return None
 
 
-def _executable_identity(command: str) -> tuple[str, int] | None:
-    """``(resolved executable, mtime_ns)`` of a command line, or None.
+def _executable_identity(command: str) -> tuple[str | int, ...] | None:
+    """A hashable identity for the binaries a command line names, or None.
 
-    The identity that keys the memoized version probes: the binary is
-    spawned once per identity, not on every task call — and replacing the
-    executable (an upgrade, a module swap changing a symlink target) changes
-    the mtime and forces a fresh probe, so long-lived processes (the MCP
-    server) still see version bumps. The identity is the *payload* binary:
-    for ``env``-wrapped commands, keying on ``/usr/bin/env``'s mtime would
-    never notice the engine binary changing under it.
+    Keys the memoized version probes: a binary is spawned once per identity,
+    not on every task call — and a changed identity forces a fresh probe, so
+    long-lived processes (the MCP server) still see version bumps. Every
+    token that resolves on PATH is stat'ed: for ``mpirun -np 4 pw.x`` that is
+    mpirun *and* pw.x, so replacing the payload binary under an unchanged
+    launcher (or ``env`` wrapper — /usr/bin/env never changes) still forces
+    a re-probe. The environment the engine registry has written into this
+    process (:func:`slab.engines.applied_env`) is folded in too: a probe's
+    outcome can depend on it, and a memo outliving it would describe an
+    environment that no longer exists.
     """
     payload = _command_payload(command)
-    argv = shlex.split(command) if payload is None else payload
-    executable = shutil.which(argv[0]) if argv else None
-    if executable is None:
-        return None
     try:
-        mtime_ns = os.stat(executable).st_mtime_ns
-    except OSError:  # pragma: no cover - raced deletion between which and stat
-        mtime_ns = -1
-    return executable, mtime_ns
+        argv = shlex.split(command) if payload is None else payload
+    except ValueError:
+        return None
+    if not argv or _which_payload(argv[0], command) is None:
+        return None
+    pieces = _stat_resolved_tokens(argv, _wrapper_path_override(command))
+    for key, _original in sorted(applied_env().items()):
+        pieces.extend((key, os.environ.get(key, "")))
+    return tuple(pieces)
+
+
+def _stat_resolved_tokens(argv: list[str], path_override: str | None) -> list[str | int]:
+    """``(resolved path, mtime_ns)`` pairs for every resolvable token.
+
+    *path_override* is the wrapper's PATH semantics (see
+    :func:`_wrapper_path_override`); tokens that resolve under either view
+    are counted — for identity purposes, more discrimination is the honest
+    side to err on.
+    """
+    pieces: list[str | int] = []
+    for token in argv:
+        executable = shutil.which(token)
+        if executable is None and path_override is not None:
+            executable = shutil.which(token, path=path_override)
+        if executable is None:
+            continue
+        try:
+            pieces.extend((executable, os.stat(executable).st_mtime_ns))
+        except OSError:  # pragma: no cover - raced deletion between which and stat
+            pieces.extend((executable, -1))
+    return pieces
+
+
+def _binary_fingerprint(command: str) -> dict[str, Any]:
+    """Resolved path+mtime of a command's binaries, for version-less identities.
+
+    When the version probe degrades to None, the command STRING alone would
+    let two different binaries share a cache key ("pw.x" today and "pw.x"
+    after a module swap). The fingerprint restores the discrimination the
+    version would have provided: every PATH-resolvable token, stat'ed —
+    over-invalidating on a same-version reinstall is the honest side to err
+    on. Never raises; a command that resolves nothing contributes nothing
+    (the identity then honestly carries only the command string, exactly as
+    before — there is no binary to describe).
+    """
+    payload = _command_payload(command)
+    try:
+        argv = shlex.split(command) if payload is None else payload
+    except ValueError:
+        return {}
+    stats = _stat_resolved_tokens(argv, _wrapper_path_override(command))
+    return {"executable_fingerprint": stats} if stats else {}
 
 
 def _banner_version(command: str) -> str | None:
-    """pw.x's version banner for *command*, memoized on the executable's identity."""
+    """pw.x's version banner for *command*, memoized on the executables' identity."""
     identity = _executable_identity(command)
     if identity is None:
         return None
-    return _probe_banner_version(command, *identity)
+    return _probe_banner_version(command, identity)
 
 
 @functools.lru_cache(maxsize=64)
-def _probe_banner_version(command: str, executable: str, mtime_ns: int) -> str | None:
-    """Run *command* once and parse QE's ``Program PWSCF v.X`` banner.
+def _probe_banner_version(command: str, identity: tuple[str | int, ...]) -> str | None:
+    """Run the payload once and parse QE's ``Program PWSCF v.X`` banner.
 
     Runs in a private temp dir with stdin closed — ``pw.x`` without input
     prints its banner, writes ``input_tmp.in`` debris in cwd, and exits —
-    and under a hard timeout, because a command like ``srun pw.x`` could
-    otherwise block inside cache-key construction waiting for an allocation.
-    Every failure path returns None. ``executable`` and ``mtime_ns`` exist
-    to key the memo cache.
+    under a hard timeout, and never through an MPI launcher (see
+    :func:`_probe_argv`: ``srun pw.x`` would queue or consume a job step,
+    and ``mpirun -np 64 pw.x`` would fan ranks out on a login node, all for
+    a banner the bare binary prints identically). Every failure path returns
+    None. ``identity`` exists to key the memo cache.
     """
-    del executable, mtime_ns
-    if _srun_without_allocation(command):
-        return None  # doomed to queue, not to answer — skip the 20s timeout
+    del identity
+    probe = _probe_argv(command)
+    if probe is None:
+        return None
     try:
         import subprocess
 
@@ -1296,7 +1547,7 @@ def _probe_banner_version(command: str, executable: str, mtime_ns: int) -> str |
 
         with tempfile.TemporaryDirectory(prefix="slab-qe-version-") as probe_dir:
             completed = subprocess.run(
-                shlex.split(command),
+                probe,
                 cwd=probe_dir,
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
@@ -1393,17 +1644,34 @@ def _fetch_named_checkpoint(factory: Any, options: dict[str, Any], *, engine: st
     try:
         return factory(**options)
     except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
-        model = options.get("model", "small")
-        raise EngineNotAvailableError(
-            f"engine {engine!r} could not fetch checkpoint {model!r}: {e} — "
-            f"compute nodes are typically firewalled. Pre-warm the cache from "
-            f"a node with internet (python -c \"from mace.calculators import "
-            f"mace_mp; mace_mp(model='{model}')\"), point model= at a "
-            f"checkpoint file on disk, or use a rootstock-served checkpoint "
-            f"id as the engine name"
-        ) from e
+        raise _checkpoint_fetch_error(engine, options, e) from e
+    except RuntimeError as e:
+        # mace-torch wraps its whole download/locate block in
+        # RuntimeError("Model download failed and no local model found"),
+        # so the network shapes above arrive here in disguise — recognize
+        # them by cause or by the message, and let real RuntimeErrors pass.
+        network_cause = isinstance(
+            e.__cause__, (urllib.error.URLError, TimeoutError, ConnectionError, OSError)
+        )
+        if network_cause or "download" in str(e).lower():
+            raise _checkpoint_fetch_error(engine, options, e) from e
+        raise
     finally:
         socket.setdefaulttimeout(previous)
+
+
+def _checkpoint_fetch_error(
+    engine: str, options: dict[str, Any], error: BaseException
+) -> EngineNotAvailableError:
+    model = options.get("model", "small")
+    return EngineNotAvailableError(
+        f"engine {engine!r} could not fetch checkpoint {model!r}: {error} — "
+        f"compute nodes are typically firewalled. Pre-warm the cache from "
+        f"a node with internet (python -c \"from mace.calculators import "
+        f"mace_mp; mace_mp(model='{model}')\"), point model= at a "
+        f"checkpoint file on disk, or use a rootstock-served checkpoint "
+        f"id as the engine name"
+    )
 
 
 def _rootstock_calculator(**options: Any) -> Any:
@@ -1437,7 +1705,37 @@ def qe_calculator(**options: Any) -> Any:
           "calculator": "slab.backends.qe_calculator",
           "options": {"command": "srun pw.x", "pseudo_dir": "/sw/pseudos"}
         }
+
+    A registry alias must be **self-contained**: its spec plus the caller's
+    traced options are its entire cache identity, so nothing here may fall
+    back to ambient machine config (slab.toml's ``[engines.qe]``, ASE's
+    config file) the way the plain ``qe`` engine does — the plain engine
+    resolves those values and *stamps them into identity*; an alias's
+    identity would never see them. Missing machine facts are refused, not
+    resolved. The k-point policy must be stated explicitly too (``kpts`` or
+    ``kspacing``; ``kpts=None`` is the deliberate Γ-only opt-in): the
+    task-level k-point refusal recognizes only the literal engine name
+    ``"qe"``, so the alias carries that guard itself.
     """
+    if options.get("command") is None:
+        raise EngineNotAvailableError(
+            "qe_calculator: a registry alias must declare command= itself "
+            "(in the entry's options or the caller's calculator_options) — "
+            "falling back to slab.toml or ASE's config file would let machine "
+            "config steer results without ever entering the cache identity"
+        )
+    if all(options.get(key) is None for key in ("pseudo_dir", "pseudo_family", "profile")):
+        raise EngineNotAvailableError(
+            "qe_calculator: a registry alias must declare pseudo_dir= or "
+            "pseudo_family= itself — the same self-containment rule as command="
+        )
+    if "kpts" not in options and "kspacing" not in options:
+        raise EngineNotAvailableError(
+            "qe_calculator: state the k-point policy explicitly — kpts= or "
+            "kspacing= (kpts=None is the deliberate Γ-only opt-in, and "
+            "qe_protocol_options supplies a mesh); the task-level k-point "
+            "refusal recognizes only engine=\"qe\", never aliases"
+        )
     return _qe_calculator(**options)
 
 
@@ -1446,6 +1744,24 @@ def lammps_calculator(**options: Any) -> Any:
 
     The registry analog of :func:`qe_calculator`: the built-in engine's
     guards (required potential, PATH and launcher checks, evidence-retaining
-    scratch) under a maintainer-curated alias, with JSON-able options.
+    scratch) under a maintainer-curated alias, with JSON-able options — and
+    the same self-containment rule: the spec is the identity, so the command
+    may not fall back to slab.toml or ``$ASE_LAMMPSRUN_COMMAND``, and
+    ``files=`` entries must be absolute (a relative path names different
+    bytes from different working directories, invisibly to the spec).
     """
+    if options.get("command") is None:
+        raise EngineNotAvailableError(
+            "lammps_calculator: a registry alias must declare command= itself "
+            "— falling back to slab.toml or $ASE_LAMMPSRUN_COMMAND would let "
+            "machine config steer results without ever entering the cache identity"
+        )
+    for entry in options.get("files") or []:
+        if not Path(str(entry)).expanduser().is_absolute():
+            raise EngineNotAvailableError(
+                f"lammps_calculator: files= entry {str(entry)!r} is relative — "
+                f"a registry alias's identity is its spec, and a relative path "
+                f"names different bytes from different working directories; "
+                f"declare absolute paths"
+            )
     return _lammps_calculator(**options)

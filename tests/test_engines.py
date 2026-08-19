@@ -135,7 +135,7 @@ def test_missing_explicit_or_env_path_is_loud(
 
 def test_invalid_registry_is_loud_never_empty(tmp_path: Path) -> None:
     bad = _write_registry(tmp_path / "bad.json", {"engines": {"vasp": {}}})  # no calculator
-    with pytest.raises(ValidationError):
+    with pytest.raises(EngineNotAvailableError, match=str(bad)):
         load_registry(bad)
 
 
@@ -492,9 +492,12 @@ def test_registry_refusal_names_the_entry_at_load(tmp_path: Path) -> None:
     }
     path = tmp_path / "engines.json"
     path.write_text(json.dumps(payload))
-    with pytest.raises(ValidationError, match="qe-broken") as excinfo:
+    with pytest.raises(EngineNotAvailableError, match="qe-broken") as excinfo:
         load_registry(path)
+    # The message names the file (several registry locations may exist) and
+    # the offending variable, so the maintainer knows what to fix where.
     assert "ASE_CONFIG_PATH" in str(excinfo.value)
+    assert str(path) in str(excinfo.value)
 
 
 def test_registry_warns_when_env_steers_builtin_resolution(
@@ -534,14 +537,40 @@ def test_registry_qe_factory_builds_the_builtin_engine(
             "version": "7.4.1",
         }
     )
-    calculator = build_engine("qe-site", spec, input_data={"system": {"ecutwfc": 30.0}})
+    calculator = build_engine(
+        "qe-site", spec, kpts=None, input_data={"system": {"ecutwfc": 30.0}}
+    )
     try:
         assert str(calculator.profile.command) == "pw.x"
     finally:
         close_calculator(calculator)
     # And the guards came along: a protocol name is refused here too.
     with pytest.raises(EngineNotAvailableError, match="qe_protocol_options"):
-        build_engine("qe-site", spec, protocol="balanced")
+        build_engine("qe-site", spec, kpts=None, protocol="balanced")
+
+
+def test_registry_qe_factory_is_self_contained(tmp_path: Path) -> None:
+    """An alias's spec (plus traced caller options) is its ENTIRE cache
+    identity — so nothing may come from slab.toml or ASE's config, and the
+    k-point policy the task-level guard would enforce for engine="qe" must
+    be stated explicitly here (the guard never sees alias names)."""
+    from slab.backends import lammps_calculator, qe_calculator
+
+    with pytest.raises(EngineNotAvailableError, match="command="):
+        qe_calculator(pseudo_dir=str(tmp_path), kpts=None)
+    with pytest.raises(EngineNotAvailableError, match="pseudo_dir="):
+        qe_calculator(command="pw.x", kpts=None)
+    with pytest.raises(EngineNotAvailableError, match="k-point"):
+        qe_calculator(command="pw.x", pseudo_dir=str(tmp_path))
+    with pytest.raises(EngineNotAvailableError, match="command="):
+        lammps_calculator(pair_style="eam", pair_coeff=["* * x"])
+    with pytest.raises(EngineNotAvailableError, match="absolute"):
+        lammps_calculator(
+            command="/bin/echo",
+            pair_style="eam/alloy",
+            pair_coeff=["* * Cu.eam.alloy Cu"],
+            files=["Cu.eam.alloy"],
+        )
 
 
 def test_template_qe_alias_uses_the_factory_not_import_time_env() -> None:
@@ -553,3 +582,104 @@ def test_template_qe_alias_uses_the_factory_not_import_time_env() -> None:
     assert "env" not in spec
     # No entry may carry the import-time var (the notes may explain the rule).
     assert "ASE_CONFIG_PATH" not in json.dumps(payload["engines"])
+
+
+def test_applied_env_restores_originals_and_skips_no_ops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The submission boundary needs the environment as it was BEFORE any
+    registry entry ran: originals for overwritten variables, absence for
+    created ones, and no entry at all for values that already matched."""
+    import os
+
+    import slab.engines as engines
+
+    monkeypatch.setattr(engines, "_APPLIED_ENV", {})
+    monkeypatch.setenv("SLAB_TEST_KEPT", "shell-value")
+    monkeypatch.setenv("SLAB_TEST_SAME", "same")
+    monkeypatch.delenv("SLAB_TEST_NEW", raising=False)
+    spec = EngineSpec.model_validate(
+        {
+            "calculator": "ase.calculators.emt.EMT",
+            "env": {
+                "SLAB_TEST_KEPT": "registry-value",
+                "SLAB_TEST_SAME": "same",
+                "SLAB_TEST_NEW": "created",
+            },
+        }
+    )
+    with pytest.warns(UserWarning):
+        build_engine("emt-env", spec)
+    applied = engines.applied_env()
+    assert applied["SLAB_TEST_KEPT"] == "shell-value"  # original survives for restore
+    assert applied["SLAB_TEST_NEW"] is None  # originally unset
+    assert "SLAB_TEST_SAME" not in applied  # no mutation happened
+    assert os.environ["SLAB_TEST_KEPT"] == "registry-value"
+
+
+def test_poisoning_warning_is_not_deduplicated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A long-lived process alternating between entries must warn EVERY time,
+    not once per process — Python's default warning registry would swallow
+    the repeats."""
+    import warnings as warnings_module
+
+    monkeypatch.setenv("SLAB_TEST_FLIP", "a")
+    spec_b = EngineSpec.model_validate(
+        {"calculator": "ase.calculators.emt.EMT", "env": {"SLAB_TEST_FLIP": "b"}}
+    )
+    spec_a = EngineSpec.model_validate(
+        {"calculator": "ase.calculators.emt.EMT", "env": {"SLAB_TEST_FLIP": "a"}}
+    )
+    with warnings_module.catch_warnings(record=True) as seen:
+        warnings_module.simplefilter("default")
+        build_engine("flip-b", spec_b)
+        build_engine("flip-a", spec_a)
+        build_engine("flip-b", spec_b)
+        build_engine("flip-a", spec_a)
+    messages = [str(w.message) for w in seen]
+    assert len(messages) == 4, messages
+
+
+def test_verify_probe_refuses_srun_outside_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+    registry = EngineRegistry.model_validate(
+        {
+            "engines": {
+                "qe-site": {
+                    "calculator": "ase.calculators.emt.EMT",
+                    "probe": ["srun", "pw.x", "-h"],
+                }
+            }
+        }
+    )
+    (result,) = verify_engines(registry)
+    assert not result.ok
+    assert "srun" in result.detail and "allocation" in result.detail
+
+
+def test_verify_probe_runs_in_a_private_cwd_with_closed_stdin(tmp_path: Path) -> None:
+    """pw.x-style probes write debris into cwd and lmp-style probes block on
+    stdin; the registry probe path must be as careful as the version probes."""
+    import os
+
+    registry = EngineRegistry.model_validate(
+        {
+            "engines": {
+                "debris": {
+                    "calculator": "ase.calculators.emt.EMT",
+                    "probe": ["sh", "-c", "touch debris.txt && head -c1 >/dev/null; exit 0"],
+                }
+            }
+        }
+    )
+    before = set(os.listdir(tmp_path))
+    cwd = os.getcwd()
+    try:
+        os.chdir(tmp_path)
+        (result,) = verify_engines(registry)
+    finally:
+        os.chdir(cwd)
+    assert result.ok, result.detail  # closed stdin: head reads EOF, no hang
+    assert set(os.listdir(tmp_path)) == before  # debris landed in the private cwd

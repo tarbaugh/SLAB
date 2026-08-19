@@ -72,6 +72,10 @@ class ServeRecord(BaseModel):
     node: str = ""
     port: int = 0
     started_at: str = ""
+    # Job ids are per-cluster; on centers where one filesystem is mounted
+    # across several SLURM clusters, acting on a bare numeric id from the
+    # wrong cluster would query — or scancel — someone else's job.
+    cluster: str = ""
 
 
 def mason_dir(workspace_root: str | os.PathLike[str]) -> Path:
@@ -192,9 +196,15 @@ def render_serve_script(
             # written somewhere the client never looks. Symlinks are left
             # alone (a site's /scratch link may mean different things on the
             # login node and the compute node).
-            *_announce(model, _absolute(record_path(workspace_root)), chosen_port),
+            *_announce(
+                model,
+                _absolute(record_path(workspace_root)),
+                chosen_port,
+                cluster=hpc.cluster or "",
+            ),
         ],
         use_launcher=False,
+        include_global_setup=serve.include_hpc_setup,
     )
 
 
@@ -232,13 +242,27 @@ def start(
     )
 
 
-def stop(workspace_root: str | os.PathLike[str]) -> str:
-    """Cancel the recorded server job and drop its record; describe what happened."""
+def stop(workspace_root: str | os.PathLike[str], *, cluster: str = "") -> str:
+    """Cancel the recorded server job and drop its record; describe what happened.
+
+    *cluster* is this config's ``[hpc] cluster``; a record announcing a
+    different cluster is refused, not cancelled — job ids are per-cluster,
+    and on shared filesystems mounted across clusters a bare numeric id
+    from elsewhere could name someone else's job here.
+    """
     from slab.hpc import cancel
 
     record = read_record(workspace_root)
     if record is None:
         return f"no server recorded at {record_path(workspace_root)}; nothing to stop"
+    if record.cluster and cluster and record.cluster != cluster:
+        raise ServeError(
+            f"the recorded server belongs to cluster {record.cluster!r}, but this "
+            f"config says [hpc] cluster = {cluster!r} — job ids are per-cluster, "
+            f"so cancelling job {record.job_id or '?'} from here could kill an "
+            f"unrelated job. Run 'slab mason serve stop' where the config names "
+            f"{record.cluster!r}"
+        )
     if not record.job_id:
         clear_record(workspace_root)
         return f"record removed; it named no job id, so nothing was cancelled ({record.endpoint})"
@@ -326,7 +350,7 @@ def wait_for_record(
 
 
 def describe(
-    agent: AgentConfig, workspace_root: str | os.PathLike[str]
+    agent: AgentConfig, workspace_root: str | os.PathLike[str], *, cluster: str = ""
 ) -> list[str]:
     """Human-readable lines about the recorded server: record, job, live probe."""
     record = read_record(workspace_root)
@@ -341,9 +365,19 @@ def describe(
         f"model:    {record.model}",
         f"node:     {record.node or 'unnamed'}  port {record.port or 'unknown'}",
     ]
+    if record.cluster:
+        lines.append(f"cluster:  {record.cluster}")
     if record.started_at:
         lines.append(f"started:  {record.started_at}")
-    if record.job_id:
+    foreign = bool(record.cluster and cluster and record.cluster != cluster)
+    if record.job_id and foreign:
+        # A job id is only meaningful on its own cluster; querying it here
+        # would describe an unrelated job that happens to share the number.
+        lines.append(
+            f"job {record.job_id}: belongs to cluster {record.cluster!r}; "
+            f"not queried from this config's cluster ({cluster!r})"
+        )
+    elif record.job_id:
         try:
             status = job_state(record.job_id)
             raw = f" ({status.raw})" if status.raw else ""
@@ -386,6 +420,14 @@ def _server_command(agent: AgentConfig, model: str) -> str:
     """The vLLM invocation, or the configured command verbatim."""
     serve = agent.serve
     if serve.command:
+        if "$port" not in serve.command and "${port}" not in serve.command:
+            raise ServeError(
+                "[agent.serve] command never references \"$port\", but the job "
+                "announces http://<node>:<port>/v1 built from [agent.serve] "
+                "port — a server bound elsewhere would leave a record no "
+                "process answers. Bind the script's $port variable in the "
+                "command (it is set from [agent.serve] port)"
+            )
         return serve.command
     if agent.tool_protocol == "native" and not serve.tool_call_parser:
         raise ServeError(
@@ -422,18 +464,20 @@ def _server_preflight(serve: ServeConfig) -> list[str]:
     ]
 
 
-def _announce(model: str, record: Path, port: int) -> Iterable[str]:
+def _announce(model: str, record: Path, port: int, *, cluster: str = "") -> Iterable[str]:
     """Shell that writes this node's endpoint down, and cleans up after itself."""
     return [
         "# --- mason serve: announce this node's endpoint, then run the server ---",
         f'port={port}',
         f'model={shlex.quote(model)}',
+        f'cluster={shlex.quote(cluster)}',
         'host="$(hostname -f)"',
         f"record={shlex.quote(str(record))}",
         'mkdir -p "$(dirname "$record")"',
         'cat > "$record" <<SLAB_ENDPOINT_RECORD',
         '{"endpoint": "http://$host:$port/v1", "model": "$model",'
         ' "job_id": "${SLURM_JOB_ID:-}", "node": "$host", "port": $port,'
+        ' "cluster": "$cluster",'
         ' "started_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"}',
         "SLAB_ENDPOINT_RECORD",
         # A record outliving its server would point the agent at a dead node.

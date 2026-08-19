@@ -67,6 +67,15 @@ compute nodes rarely have internet. `HF_HUB_OFFLINE=1` makes that arrangement
 explicit: a checkpoint missing from the cache is a loud startup error, not a
 download attempt hanging inside a batch job.
 
+The serve job's environment is deliberately its own: `[hpc]`-level `setup`
+lines exist to load *engine* software, and those module stacks fight the
+server's venv, so the serve script skips them by default (the partition's own
+setup — GPU drivers — still applies; set `[agent.serve] include_hpc_setup =
+true` to opt back in). The script also checks that `vllm` exists right after
+setup, before announcing an endpoint, and the endpoint record carries the
+cluster name — `serve stop` refuses to `scancel` a record that belongs to a
+different cluster, since job ids are only meaningful on their own.
+
 Note what is *not* there: an `endpoint`. The GPU node is the scheduler's
 choice, so the URL cannot be written down in advance — it is discovered.
 

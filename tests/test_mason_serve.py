@@ -115,8 +115,12 @@ def test_render_does_not_put_the_server_under_the_launcher(tmp_path: Path) -> No
 
 
 def test_render_orders_setup_hpc_then_partition_then_serve(tmp_path: Path) -> None:
+    """With include_hpc_setup opted in, the layering matches every other job:
+    hpc-level, then the partition's, then the serve job's own lines."""
     script = render_serve_script(
-        _agent(setup=["source ~/venvs/vllm/bin/activate"]), HPC, tmp_path
+        _agent(setup=["source ~/venvs/vllm/bin/activate"], include_hpc_setup=True),
+        HPC,
+        tmp_path,
     )
     body = script.splitlines()
     assert body.index("module load slab") < body.index("module load cuda/12.4")
@@ -838,3 +842,81 @@ def test_explicit_serve_command_gets_no_vllm_preflight(tmp_path: Path) -> None:
         _agent(command='my-server --port "$port"'), HPC, tmp_path
     )
     assert "command -v vllm" not in script
+
+
+# -- serve-job isolation: setup scope, port contract, cluster identity ------------------
+
+
+def test_serve_job_excludes_hpc_global_setup_by_default(tmp_path: Path) -> None:
+    """[hpc] setup exists to load ENGINE software; those module stacks fight
+    the server's venv. The partition's own setup (GPU drivers) still applies."""
+    hpc = HpcConfig.model_validate(
+        {
+            "setup": ["module load quantum-espresso/7.4"],
+            "partitions": {"gpu": {"gres": "gpu:a100:4", "setup": ["module load cuda/12.4"]}},
+        }
+    )
+    script = render_serve_script(_agent(), hpc, tmp_path)
+    assert "quantum-espresso" not in script
+    assert "module load cuda/12.4" in script
+    opted_in = render_serve_script(_agent(include_hpc_setup=True), hpc, tmp_path)
+    assert "module load quantum-espresso/7.4" in opted_in
+
+
+def test_custom_serve_command_must_bind_the_announced_port(tmp_path: Path) -> None:
+    """The record announces http://<node>:<port>/v1; a custom command that
+    never references $port could leave a record no process answers."""
+    with pytest.raises(ServeError, match=r"\$port"):
+        render_serve_script(_agent(command="my-server --port 9000"), HPC, tmp_path)
+    script = render_serve_script(
+        _agent(command='my-server --port "$port"'), HPC, tmp_path
+    )
+    assert 'my-server --port "$port"' in script
+
+
+def test_record_carries_cluster_and_stop_refuses_foreign_records(
+    tmp_path: Path,
+) -> None:
+    """Job ids are per-cluster; on filesystems mounted across clusters,
+    scancel on a foreign record's numeric id could kill someone else's job."""
+    from slab.mason.serve import ServeRecord, record_path, stop
+
+    hpc = HpcConfig.model_validate(
+        {"cluster": "delta", "partitions": {"gpu": {"gres": "gpu:a100:4"}}}
+    )
+    script = render_serve_script(_agent(), hpc, tmp_path)
+    assert '"cluster": "$cluster"' in script
+    assert "cluster=delta" in script
+
+    record = record_path(tmp_path)
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(
+        ServeRecord(
+            endpoint="http://gpu-1:8000/v1",
+            model=GLIMMER,
+            job_id="424242",
+            cluster="delta",
+        ).model_dump_json()
+    )
+    with pytest.raises(ServeError, match="delta"):
+        stop(tmp_path, cluster="omega")
+    assert record.is_file()  # the record survives a refused stop
+
+
+def test_describe_does_not_query_foreign_job_ids(tmp_path: Path) -> None:
+    from slab.mason.serve import ServeRecord, describe, record_path
+
+    record = record_path(tmp_path)
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(
+        ServeRecord(
+            endpoint="http://127.0.0.1:1/v1",  # answers nothing, quickly
+            model=GLIMMER,
+            job_id="424242",
+            cluster="delta",
+        ).model_dump_json()
+    )
+    lines = describe(_agent(), tmp_path, cluster="omega")
+    joined = "\n".join(lines)
+    assert "belongs to cluster 'delta'" in joined
+    assert "cluster:  delta" in joined

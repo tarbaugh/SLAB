@@ -15,6 +15,11 @@ schema_version = 1
 #                                      # workspace a running job is writing to)
 # pseudos = "/shared/sw/slab/pseudos"             # pseudopotential family root
 # engines = "/shared/sw/slab/engines.json"        # cluster engine registry
+# scratch = "/scratch/${USER}/slab-scratch"       # per-calculation scratch root:
+#                                      # set on clusters — the default ($TMPDIR)
+#                                      # is often node-local tmpfs, too small
+#                                      # for pw.x wavefunctions and invisible
+#                                      # to MPI ranks on other nodes
 
 [engines.qe]
 # command = "pw.x"                     # login-node smoke tests / serial runs
@@ -106,4 +111,7 @@ schema_version = 1
 #   "export HF_HOME=/path/to/hf-cache",         # the cache 'hf download' filled
 #   "export HF_HUB_OFFLINE=1",                  # serve from disk; refuse every download
 # ]
-# command = "..."                           # a server this schema does not model; may use $port
+# command = "..."                           # a server this schema does not model; must bind "$port"
+# include_hpc_setup = false                 # serve jobs skip [hpc]-level setup by default:
+#                                           # global engine module loads fight the server's
+#                                           # venv; the partition's own setup still applies

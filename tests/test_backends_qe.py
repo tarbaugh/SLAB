@@ -715,7 +715,12 @@ def test_command_payload_sees_through_the_wrapper() -> None:
     assert _command_payload("env OMP_NUM_THREADS=1 srun pw.x") == ["srun", "pw.x"]
     assert _command_payload("srun pw.x") == ["srun", "pw.x"]
     assert _command_payload("env A=1 B=2") == []  # sets environment, names no program
-    assert _command_payload("env -i pw.x") is None  # env flags: payload is opaque
+    # env's portable flags are understood — the guards must not disengage
+    # for -i or -u, the forms people actually write.
+    assert _command_payload("env -i pw.x") == ["pw.x"]
+    assert _command_payload("env -u DISPLAY srun pw.x") == ["srun", "pw.x"]
+    assert _command_payload("env --unset=DISPLAY pw.x") == ["pw.x"]
+    assert _command_payload("env -S pw.x") is None  # -S re-splits: env's business
     assert _command_payload('un"balanced') is None
 
 
@@ -730,3 +735,96 @@ def test_qe_env_wrapped_version_probe_keys_on_the_payload_binary(
     identity = _executable_identity("env OMP_NUM_THREADS=1 pw.x")
     assert identity is not None
     assert identity[0] == str(tmp_path / "bin" / "pw.x")
+
+
+def test_env_wrapper_setting_path_resolves_payload_through_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """'env PATH=/opt/qe/bin pw.x' execs the payload via the ASSIGNED PATH —
+    the module-load-replacement use case — so the which-check must judge it
+    there, not against the process PATH."""
+    bins = tmp_path / "qe-bin"
+    bins.mkdir()
+    _script(bins / "pw.x", "exit 0\n")
+    # pw.x is NOT on the process PATH; only the wrapper's assignment finds it.
+    calc = get_calculator(
+        "qe",
+        command=f"env PATH={bins} pw.x",
+        pseudo_dir=str(tmp_path),
+        input_data={"system": {"ecutwfc": 30.0}},
+    )
+    close_calculator(calc)
+    # And the reverse: 'env -i pw.x' clears PATH, so a bare payload name
+    # genuinely cannot exec — the refusal is telling the truth.
+    with pytest.raises(EngineNotAvailableError, match="not on PATH"):
+        get_calculator(
+            "qe",
+            command="env -i pw.x",
+            pseudo_dir=str(tmp_path),
+            input_data={"system": {"ecutwfc": 30.0}},
+        )
+
+
+def test_unparseable_command_is_refused_at_the_factory(tmp_path: Path) -> None:
+    """An unbalanced quote raised loudly before the guards existed; it must
+    not have regressed into a deferred calculate-time failure."""
+    with pytest.raises(EngineNotAvailableError, match="not parseable"):
+        get_calculator(
+            "qe",
+            command='pw.x "unbalanced',
+            pseudo_dir=str(tmp_path),
+            input_data={"system": {"ecutwfc": 30.0}},
+        )
+
+
+def test_version_probe_never_runs_through_a_launcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """'mpirun -np 64 pw.x' at identity time would fan ranks out on a login
+    node; the probe must run the bare payload (two-token form) or nothing."""
+    from slab.backends import _banner_version
+
+    bins = tmp_path / "bin"
+    bins.mkdir(exist_ok=True)
+    marker = tmp_path / "mpirun-ran"
+    _script(bins / "mpirun", f"touch {marker}\nexit 0\n")
+    _script(bins / "pw.x", 'echo "Program PWSCF v.7.5 starts"\nexit 0\n')
+    monkeypatch.setenv("PATH", f"{bins}:{os.environ.get('PATH', '')}")
+    assert _banner_version("mpirun pw.x") == "7.5"  # probed via bare pw.x
+    assert not marker.exists()  # the launcher itself never executed
+    assert _banner_version("mpirun -np 64 pw.x") is None  # flagged form: no probe
+    assert not marker.exists()
+
+
+def test_versionless_identity_carries_a_binary_fingerprint(tmp_path: Path) -> None:
+    """When the banner probe yields None, the command STRING alone would let
+    two different binaries share a cache key; the resolved path+mtime keeps
+    them apart."""
+    a = describe_engine("qe", {"command": "/bin/echo", "pseudo_dir": str(tmp_path)})
+    assert a["version"] is None
+    assert "/bin/echo" in a["executable_fingerprint"]
+    b = describe_engine("qe", {"command": "/bin/cat", "pseudo_dir": str(tmp_path)})
+    assert a["executable_fingerprint"] != b["executable_fingerprint"]
+
+
+def test_scratch_root_config_is_honored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """[paths] scratch redirects slab-managed scratches off node-local
+    $TMPDIR — pw.x wavefunctions overflow tmpfs, and MPI ranks on other
+    nodes cannot see node-local files."""
+    from slab.backends import _scratch_dir
+
+    root = tmp_path / "shared-scratch"
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "slab.toml").write_text(f'[paths]\nscratch = "{root}"\n')
+    monkeypatch.chdir(project)
+    monkeypatch.delenv("SLAB_CONFIG", raising=False)
+    monkeypatch.delenv("SLAB_SITE_CONFIG", raising=False)
+    scratch = _scratch_dir("slab-qe-")
+    try:
+        assert scratch.parent == root
+        assert scratch.name.startswith("slab-qe-")
+    finally:
+        scratch.rmdir()

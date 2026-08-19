@@ -409,3 +409,32 @@ def test_driver_payload_is_never_launched() -> None:
     # ...but an env-wrapped engine command still gets the launcher.
     wrapped_engine = render_sbatch("env OMP_NUM_THREADS=4 pw.x", job_name="we", config=hpc)
     assert "srun env OMP_NUM_THREADS=4 pw.x" in wrapped_engine
+
+
+def test_submission_env_restores_pre_registry_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sbatch --export=ALL would carry registry-engine residue into the job's
+    fresh process (where an ASE_CONFIG_PATH that no-oped in-process WOULD
+    apply); the submission env is the environment as it was before any
+    registry entry ran."""
+    import os
+
+    import slab.engines as engines
+    from slab.hpc import _submission_env
+
+    monkeypatch.setattr(engines, "_APPLIED_ENV", {})
+    assert _submission_env() is None  # nothing applied: env passes through as-is
+
+    monkeypatch.setenv("SLAB_TEST_OVERWRITTEN", "registry-value")
+    monkeypatch.setenv("SLAB_TEST_CREATED", "registry-value")
+    monkeypatch.setattr(
+        engines,
+        "_APPLIED_ENV",
+        {"SLAB_TEST_OVERWRITTEN": "shell-value", "SLAB_TEST_CREATED": None},
+    )
+    env = _submission_env()
+    assert env is not None
+    assert env["SLAB_TEST_OVERWRITTEN"] == "shell-value"  # original restored
+    assert "SLAB_TEST_CREATED" not in env  # originally unset: dropped
+    assert os.environ["SLAB_TEST_CREATED"] == "registry-value"  # process untouched

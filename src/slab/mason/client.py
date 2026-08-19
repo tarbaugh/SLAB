@@ -203,6 +203,16 @@ def request_json(
                 f"is normal on HPC; raise [agent] request_timeout_s if this recurs"
             ) from e
         except urllib.error.URLError as e:
+            if isinstance(e.reason, TimeoutError):
+                # urllib wraps connect-phase timeouts in URLError, so a
+                # blackholed endpoint (packet-dropping firewall) would land
+                # in the retry path and burn attempts x timeout in silence.
+                # A timeout is a timeout: fail fast, like the branch above.
+                raise LlmError(
+                    f"no answer from {url} within {timeout_s:.0f}s (the connection "
+                    f"attempt itself timed out — firewalled endpoint or wrong "
+                    f"node?) — {unreachable_hint}"
+                ) from e
             last_error = LlmError(f"cannot reach {url}: {e.reason} — {unreachable_hint}")
         except (OSError, http.client.HTTPException) as e:
             # A connection dying mid-request/mid-read surfaces raw

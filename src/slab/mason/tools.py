@@ -440,19 +440,40 @@ def _add_shell_tool(box: Toolbox, session: MasonSession) -> None:
             float(arguments.get("timeout_s", session.agent.shell_timeout_s)),
             _MAX_SHELL_TIMEOUT_S,
         )
+        # start_new_session puts the whole pipeline in its own process
+        # group: on timeout, killing only the immediate /bin/sh would leave
+        # pipeline stages, backgrounded children, or mpirun ranks running
+        # detached while the model reads "timed out" as the command being
+        # gone — so the timeout kills the group.
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 command,
                 shell=True,
                 cwd=session.cwd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout,
                 stdin=subprocess.DEVNULL,
+                start_new_session=True,
             )
+        except OSError as e:
+            return f"could not start the command: {e}"
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired as e:
+            import contextlib as _contextlib
+            import os as _os
+            import signal as _signal
+
+            with _contextlib.suppress(ProcessLookupError, PermissionError):  # raced exit
+                _os.killpg(process.pid, _signal.SIGKILL)
+            process.communicate()  # reap; the group is gone
             partial = (e.stdout or "") if isinstance(e.stdout, str) else ""
-            return f"command timed out after {timeout:.0f}s; partial output:\n{partial}"
+            return (
+                f"command timed out after {timeout:.0f}s; the command and its "
+                f"children were killed; partial output:\n{partial}"
+            )
+        completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
         output = completed.stdout + (
             f"\n[stderr]\n{completed.stderr}" if completed.stderr.strip() else ""
         )

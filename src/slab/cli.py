@@ -1013,8 +1013,8 @@ def mason_serve_status(
     from slab.mason.serve import describe
 
     try:
-        agent, _hpc, root = _serve_inputs(workspace)
-        for line in describe(agent, root):
+        agent, hpc, root = _serve_inputs(workspace)
+        for line in describe(agent, root, cluster=hpc.cluster or ""):
             typer.echo(line)
     except SlabError as e:
         _fail(str(e))
@@ -1028,8 +1028,8 @@ def mason_serve_stop(
     from slab.mason.serve import stop
 
     try:
-        _agent, _hpc, root = _serve_inputs(workspace)
-        typer.echo(stop(root))
+        _agent, hpc, root = _serve_inputs(workspace)
+        typer.echo(stop(root, cluster=hpc.cluster or ""))
     except SlabError as e:
         _fail(str(e))
 

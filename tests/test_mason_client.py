@@ -263,3 +263,25 @@ def test_loose_calls_surface_hallucinated_tool_names_for_teaching() -> None:
         '{"name": "slab_run", "parameters": {}}\n{"name": "shell", "parameters": {}}', known
     )
     assert [call.name for call in both] == ["shell"]
+
+
+def test_blackholed_connect_fails_fast_instead_of_retrying(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """urllib wraps connect-phase timeouts in URLError; treating that as a
+    retryable connection failure would burn attempts x timeout in silence
+    on a firewalled endpoint."""
+    import urllib.error
+    import urllib.request
+
+    attempts: list[int] = []
+
+    def blackholed(request: object, timeout: float = 0) -> object:
+        attempts.append(1)
+        raise urllib.error.URLError(TimeoutError("timed out"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", blackholed)
+    client = ChatClient("http://gpu-9:8000/v1", "m", timeout_s=5.0)
+    with pytest.raises(LlmError, match="timed out"):
+        client.chat([{"role": "user", "content": "hi"}])
+    assert len(attempts) == 1  # no retries against a blackhole
