@@ -683,3 +683,74 @@ def test_verify_probe_runs_in_a_private_cwd_with_closed_stdin(tmp_path: Path) ->
         os.chdir(cwd)
     assert result.ok, result.detail  # closed stdin: head reads EOF, no hang
     assert set(os.listdir(tmp_path)) == before  # debris landed in the private cwd
+
+
+# -- [engines.rootstock]: the local-install machine fact --------------------------------
+
+
+def test_checkpoint_id_resolves_via_config_root(
+    rootstock_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A LOCAL rootstock install is a machine fact like [engines.qe] command:
+    declared once in slab.toml, checkpoint ids then work as engine names with
+    no per-call options and no $ROOTSTOCK_ROOT export."""
+    monkeypatch.delenv("ROOTSTOCK_ROOT", raising=False)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "slab.toml").write_text(
+        f'[engines.rootstock]\nroot = "{rootstock_root}"\n'
+    )
+    monkeypatch.chdir(project)
+    calc = get_calculator("fake-mace-checkpoint")
+    try:
+        assert type(calc).__name__ == "RootstockCalculator"
+        assert calc.checkpoint == "fake-mace-checkpoint"
+    finally:
+        close_calculator(calc)
+
+
+def test_explicit_options_beat_config_rootstock_defaults(
+    rootstock_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import rootstock
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "slab.toml").write_text('[engines.rootstock]\ncluster = "config-cluster"\n')
+    monkeypatch.chdir(project)
+    captured: dict[str, object] = {}
+
+    class StubCalculator:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(rootstock, "RootstockCalculator", StubCalculator)
+    get_calculator("rootstock", checkpoint="x", root=str(rootstock_root))
+    assert captured.get("root") == str(rootstock_root)
+    assert "cluster" not in captured  # caller named a location: config stays out
+
+
+def test_config_root_feeds_the_builtin_rootstock_engine(
+    rootstock_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import rootstock
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "slab.toml").write_text(f'[engines.rootstock]\nroot = "{rootstock_root}"\n')
+    monkeypatch.chdir(project)
+    captured: dict[str, object] = {}
+
+    class StubCalculator:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(rootstock, "RootstockCalculator", StubCalculator)
+    get_calculator("rootstock", checkpoint="fake-mace-checkpoint")
+    assert captured.get("root") == str(rootstock_root)
+
+
+def test_unconfigured_hint_names_the_config_section() -> None:
+    pytest.importorskip("rootstock", reason="rootstock extra not installed")
+    with pytest.raises(EngineNotAvailableError, match=r"\[engines.rootstock\]"):
+        get_calculator("nope-checkpoint")

@@ -472,9 +472,24 @@ relaxed, info = relax(
 ```
 
 The install is found via `cluster=` or `root=` in `calculator_options`, else
-rootstock's own defaults (`$ROOTSTOCK_ROOT`, `~/.config/rootstock/config.toml`).
-Because resolution tries the registry first, a maintainer's alias always beats
-a bare id. The explicit `engine="rootstock"` form remains for full control —
+`[engines.rootstock]` in the slab config, else rootstock's own defaults
+(`$ROOTSTOCK_ROOT`, `~/.config/rootstock/config.toml`). The config section is
+the machine-fact home, exactly like `[engines.qe] command`: a *local* install
+declares its path once —
+
+```toml
+[engines.rootstock]
+root = "/scratch/me/rootstock-install"   # a local install: the path form
+# cluster = "delta"                      # or a site-maintained install, by
+#                                        # rootstock's name for it — unrelated
+#                                        # to [hpc] cluster, the SLURM label
+```
+
+— and checkpoint ids then work as engine names with no per-call options. The
+install's location deliberately never enters cache identity: rootstock's
+contract is that canonical ids are stable identities wherever they are served
+from. Because resolution tries the registry first, a maintainer's alias always
+beats a bare id. The explicit `engine="rootstock"` form remains for full control —
 e.g. `calculator_options={"checkpoint": "uma:custom", "weights": ..., "cluster": "delta"}`
 with your own weights. `relax` closes the worker subprocess when the task
 finishes.

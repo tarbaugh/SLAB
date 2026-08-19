@@ -60,6 +60,7 @@ _PATH_KEYS = frozenset(
         "paths.engines",
         "paths.scratch",
         "engines.qe.pseudo_dir",
+        "engines.rootstock.root",
     }
 )
 _VAR_PATTERN = re.compile(r"\$\{(\w+)\}|\$(\w+)")
@@ -93,6 +94,28 @@ class LammpsEngineConfig(BaseModel):
     command: str | None = None
 
 
+class RootstockEngineConfig(BaseModel):
+    """Where this machine's rootstock install lives (``[engines.rootstock]``).
+
+    Machine facts for the built-in ``rootstock`` engine AND for serving
+    checkpoint ids directly as engine names. ``root`` is the local-install
+    form (the path holding ``envs/<name>/env_source.py``); ``cluster`` is
+    the site-maintained form (a name rootstock's own cluster table knows) —
+    nothing to do with ``[hpc] cluster``, which labels the SLURM cluster.
+    Explicit ``calculator_options`` win key-by-key, and rootstock's own
+    fallbacks (``$ROOTSTOCK_ROOT``, ``~/.config/rootstock/config.toml``)
+    still apply when neither this section nor the caller says anything.
+    The install location deliberately never enters cache identity:
+    rootstock's contract is that canonical checkpoint ids are stable
+    identities wherever they are served from.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    root: str | None = None
+    cluster: str | None = None
+
+
 class EnginesConfig(BaseModel):
     """Per-engine defaults (``[engines]``)."""
 
@@ -100,6 +123,7 @@ class EnginesConfig(BaseModel):
 
     qe: QeEngineConfig = QeEngineConfig()
     lammps: LammpsEngineConfig = LammpsEngineConfig()
+    rootstock: RootstockEngineConfig = RootstockEngineConfig()
 
 
 class PathsConfig(BaseModel):
@@ -598,8 +622,20 @@ schema_version = 1
 # command = "srun lmp"                 # inside batch jobs only (same srun rule)
 # command = "env OMP_NUM_THREADS=4 lmp"           # same env-wrapper rule as qe
 
+[engines.rootstock]
+# root = "/path/to/rootstock-install"  # a LOCAL rootstock install (the directory
+#                                      # holding envs/<name>/env_source.py); lets
+#                                      # served checkpoint ids work as engine names
+#                                      # with no per-call options
+# cluster = "delta"                    # OR a site-maintained install rootstock
+#                                      # knows by name — this is rootstock's label,
+#                                      # nothing to do with [hpc] cluster below
+
 [hpc]
-# cluster = "delta"
+# cluster = "delta"                    # THIS SLURM cluster's name: run provenance and
+#                                      # serve-record identity (job ids are per-cluster,
+#                                      # so cross-cluster stop/status refuse) — not
+#                                      # rootstock's cluster=, see [engines.rootstock]
 # account = "abc-123"                  # default charge account for all partitions
 # default_partition = "cpu"
 # setup = ["module load quantum-espresso/7.4"]    # runs before every job body

@@ -38,8 +38,20 @@ schema_version = 1
 # command = "srun lmp"                 # inside batch jobs only (same srun rule)
 # command = "env OMP_NUM_THREADS=4 lmp"           # same env-wrapper rule as qe
 
+[engines.rootstock]
+# root = "/path/to/rootstock-install"  # a LOCAL rootstock install (the directory
+#                                      # holding envs/<name>/env_source.py); lets
+#                                      # served checkpoint ids work as engine names
+#                                      # with no per-call options
+# cluster = "delta"                    # OR a site-maintained install rootstock
+#                                      # knows by name — this is rootstock's label,
+#                                      # nothing to do with [hpc] cluster below
+
 [hpc]
-# cluster = "delta"
+# cluster = "delta"                    # THIS SLURM cluster's name: run provenance and
+#                                      # serve-record identity (job ids are per-cluster,
+#                                      # so cross-cluster stop/status refuse) — not
+#                                      # rootstock's cluster=, see [engines.rootstock]
 # account = "abc-123"                  # default charge account for all partitions
 # default_partition = "cpu"
 # setup = ["module load quantum-espresso/7.4"]    # runs before every job body

@@ -131,7 +131,9 @@ def get_calculator(engine: str, **options: Any) -> Any:
     declares works directly as the engine name —
     ``get_calculator("mace-mp-0-medium", cluster="delta")`` serves the MACE
     model silently from its pre-built environment. The install is found via
-    ``cluster=``/``root=`` options, else rootstock's own defaults
+    ``cluster=``/``root=`` options, else ``[engines.rootstock]`` in the slab
+    config (``root`` for a local install's path, ``cluster`` for a
+    site-maintained name), else rootstock's own defaults
     (``$ROOTSTOCK_ROOT``, ``~/.config/rootstock/config.toml``).
 
     Raises:
@@ -345,6 +347,7 @@ def _resolve_rootstock_checkpoint(
         from rootstock.environment import CheckpointNotFoundError, resolve_checkpoint
     except ImportError:
         return None, None
+    options = _with_rootstock_defaults(options)
     if "root" in options:
         root = Path(options["root"])
     elif "cluster" in options:
@@ -356,9 +359,11 @@ def _resolve_rootstock_checkpoint(
         root = resolve_default_root()
     if root is None:
         return None, (
-            "rootstock is installed but no install root is configured — pass "
-            "calculator_options={'cluster': ...} or set $ROOTSTOCK_ROOT to serve "
-            "checkpoint ids directly"
+            "rootstock is installed but no install root is configured — set "
+            "root (a local install's path) or cluster under [engines.rootstock] "
+            "in the slab config, pass calculator_options={'root': ...} or "
+            "{'cluster': ...}, or set $ROOTSTOCK_ROOT, to serve checkpoint ids "
+            "directly"
         )
     try:
         resolved = resolve_checkpoint(root, name, options.get("cluster"))
@@ -1717,6 +1722,31 @@ def _checkpoint_fetch_error(
     )
 
 
+def _rootstock_setting(key: str) -> str | None:
+    """``[engines.rootstock]`` from the slab config (root/cluster defaults)."""
+    from slab.config import config_value
+
+    value = config_value(f"engines.rootstock.{key}")
+    return None if value is None else str(value)
+
+
+def _with_rootstock_defaults(options: dict[str, Any]) -> dict[str, Any]:
+    """Caller options with ``[engines.rootstock]`` filled in underneath.
+
+    Explicit options win key-by-key; when the caller names NEITHER root nor
+    cluster, the config supplies whichever it declares (root outranks
+    cluster, mirroring the resolution order). A copy, never a mutation —
+    calculator_options is a traced input.
+    """
+    if "root" in options or "cluster" in options:
+        return options
+    for key in ("root", "cluster"):
+        configured = _rootstock_setting(key)
+        if configured is not None:
+            return {**options, key: configured}
+    return options
+
+
 def _rootstock_calculator(**options: Any) -> Any:
     try:
         from rootstock import RootstockCalculator
@@ -1729,7 +1759,7 @@ def _rootstock_calculator(**options: Any) -> Any:
             "engine 'rootstock' requires a checkpoint id, e.g. "
             "calculator_options={'checkpoint': 'mace-mp-0-medium', 'cluster': 'delta'}"
         )
-    return RootstockCalculator(**options)
+    return RootstockCalculator(**_with_rootstock_defaults(options))
 
 
 def qe_calculator(**options: Any) -> Any:
