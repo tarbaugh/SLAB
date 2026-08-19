@@ -95,7 +95,11 @@ partition = "gpu"
 time_limit = "08:00:00"
 tool_call_parser = "llama4_pythonic"   # vLLM's, and model-specific
 args = ["--tensor-parallel-size 4", "--max-model-len 131072"]
-setup = ["source ~/venvs/vllm/bin/activate"]
+setup = [
+  "source $SCRATCH/venvs/vllm/bin/activate",
+  "export HF_HOME=$SCRATCH/hf-cache",  # pre-downloaded on the login node
+  "export HF_HUB_OFFLINE=1",           # compute nodes are firewalled; serve from disk
+]
 ```
 
 The `[agent]` section configures the resident agent the same way — which model
@@ -197,10 +201,12 @@ reason; an unknown is never dressed up as a known.
    `setenv SLAB_SITE_CONFIG /sw/slab/config.toml`.
 5. Users check their view with `slab config show` and
    `slab engines list` — which now also reports the cluster's partitions.
-6. If users will run the resident agent, add `[agent.serve]` (a GPU partition
-   and the `tool_call_parser` your vLLM build registers) so nobody has to
-   rediscover the serving recipe. `slab mason doctor` is how they confirm the
-   parser name was right.
+6. If users will run the resident agent, add `[agent.serve]` (a GPU partition,
+   the `tool_call_parser` your vLLM build registers, and `setup` lines that
+   activate the vLLM venv and point `HF_HOME` at a model cache pre-downloaded
+   on the login node, with `HF_HUB_OFFLINE=1`) so nobody has to rediscover the
+   serving recipe. `slab mason doctor` is how they confirm the parser name was
+   right.
 
 Users then override per project in `slab.toml`, and nothing about a
 cluster is baked into anyone's Python.

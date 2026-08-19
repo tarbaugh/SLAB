@@ -54,8 +54,18 @@ partition = "gpu"
 time_limit = "08:00:00"
 tool_call_parser = "llama4_pythonic"
 args = ["--tensor-parallel-size 4", "--max-model-len 131072"]
-setup = ["source ~/venvs/vllm/bin/activate"]
+setup = [
+  "source $SCRATCH/venvs/vllm/bin/activate",
+  "export HF_HOME=$SCRATCH/hf-cache",   # filled by 'hf download' on the login node
+  "export HF_HUB_OFFLINE=1",            # compute nodes are firewalled; serve from disk
+]
 ```
+
+The model itself is downloaded once, on the login node —
+`HF_HOME=$SCRATCH/hf-cache hf download meta-models/Muse-Glimmer-30B` — because
+compute nodes rarely have internet. `HF_HUB_OFFLINE=1` makes that arrangement
+explicit: a checkpoint missing from the cache is a loud startup error, not a
+download attempt hanging inside a batch job.
 
 Note what is *not* there: an `endpoint`. The GPU node is the scheduler's
 choice, so the URL cannot be written down in advance — it is discovered.

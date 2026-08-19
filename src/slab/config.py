@@ -594,7 +594,10 @@ schema_version = 1
 
 [agent]
 # provider = "openai"                       # "openai" = any OpenAI-compatible server; "anthropic"
-# model = "meta-models/Muse-Glimmer-30B"    # as the server names it ('slab mason doctor' lists)
+# model = "meta-models/Muse-Glimmer-30B"    # as the server names it ('slab mason doctor'
+#                                           # lists); an absolute path to a downloaded
+#                                           # model directory also works, and never
+#                                           # touches the network
 # endpoint = "http://gpu-node-01:8000/v1"   # leave unset on a cluster: 'slab mason serve'
 #                                           # records the URL of the node it landed on
 # api_key_env = "SLAB_AGENT_API_KEY"        # NAME of the env var holding the key, never the key
@@ -621,6 +624,10 @@ schema_version = 1
 
 # How 'slab mason serve' starts that server as a batch job. The GPU node is the
 # scheduler's choice, so the endpoint URL is discovered, never configured.
+# Compute nodes rarely have internet: download the model once, on the login node
+# ('HF_HOME=/path/to/hf-cache hf download meta-models/Muse-Glimmer-30B'), and let
+# the setup lines below serve it from that cache — offline, so a model missing
+# from the cache fails loudly at startup instead of hanging on a download.
 [agent.serve]
 # partition = "gpu"                         # a partition from [hpc.partitions]
 # time_limit = "08:00:00"                   # serve jobs are long-lived
@@ -629,7 +636,12 @@ schema_version = 1
 #                                           # and required for native tool calls
 #                                           # ('vllm serve --help' lists your build's)
 # args = ["--tensor-parallel-size 4", "--max-model-len 131072"]   # extra vllm flags
-# setup = ["source ~/venvs/vllm/bin/activate"]                    # before the server starts
+# setup = [                                 # compute-node shell, run before the server
+#   "source /path/to/venvs/vllm/bin/activate",  # vLLM gets its own venv (its torch
+#                                               # pin and mace-torch's rarely agree)
+#   "export HF_HOME=/path/to/hf-cache",         # the cache 'hf download' filled
+#   "export HF_HUB_OFFLINE=1",                  # serve from disk; refuse every download
+# ]
 # command = "..."                           # a server this schema does not model; may use $port
 '''
 
