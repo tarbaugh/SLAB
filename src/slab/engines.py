@@ -90,29 +90,33 @@ _IMPORT_TIME_ENV = frozenset({"ASE_CONFIG_PATH"})
 _BUILTIN_STEERING_ENV = frozenset(
     {
         "ASE_LAMMPSRUN_COMMAND",
+        "LAMMPS_POTENTIALS",
         "SLAB_CONFIG",
         "SLAB_SITE_CONFIG",
         "SLAB_ENGINES",
         "SLAB_PSEUDOS",
         "SLAB_WORKSPACE",
         "SLURM_JOB_ID",
+        "XDG_CONFIG_HOME",
     }
 )
-# What build_engine wrote into os.environ, mapped to each variable's ORIGINAL
-# value (None = originally unset). Registry env exists for THIS process's
-# calculators; slab.hpc.submit uses this map to hand sbatch the environment
-# as it was before any registry entry ran, so a batch job never inherits
-# residue that would make the same script behave differently depending on
-# which engines this process happened to build first.
-_APPLIED_ENV: dict[str, str | None] = {}
+# What build_engine wrote into os.environ: variable -> (ORIGINAL value
+# before the first application, None = originally unset; the value most
+# recently APPLIED). Registry env exists for THIS process's calculators;
+# slab.hpc.submit uses this map to hand sbatch the environment as it was
+# before any registry entry ran — but only where the current value still IS
+# the applied one: a value the user changed since is their intent, not
+# residue, and silently reverting it would be its own poisoning.
+_APPLIED_ENV: dict[str, tuple[str | None, str]] = {}
 
 
-def applied_env() -> dict[str, str | None]:
-    """Registry-applied environment: variable -> its pre-application value.
+def applied_env() -> dict[str, tuple[str | None, str]]:
+    """Registry-applied environment: variable -> (original, applied) values.
 
     Consumers restore, never just delete: a variable the user's own shell
     exported and a registry entry overwrote goes back to the shell's value
-    at process boundaries (job submission), not to nothing.
+    at process boundaries (job submission), not to nothing — and a variable
+    the user re-set AFTER application is left exactly as they set it.
     """
     return dict(_APPLIED_ENV)
 
@@ -374,7 +378,8 @@ def build_engine(name: str, spec: EngineSpec, **options: Any) -> Any:
                 f"for the same variable cannot share a process"
             )
         if previous != value:
-            _APPLIED_ENV.setdefault(key, previous)
+            original = _APPLIED_ENV.get(key, (previous, value))[0]
+            _APPLIED_ENV[key] = (original, value)
         os.environ[key] = value
     merged = {**spec.options, **options}
     return factory(**merged)

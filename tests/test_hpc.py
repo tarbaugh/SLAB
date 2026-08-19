@@ -428,13 +428,20 @@ def test_submission_env_restores_pre_registry_environment(
 
     monkeypatch.setenv("SLAB_TEST_OVERWRITTEN", "registry-value")
     monkeypatch.setenv("SLAB_TEST_CREATED", "registry-value")
+    monkeypatch.setenv("SLAB_TEST_USERSET", "user-fresh-export")
     monkeypatch.setattr(
         engines,
         "_APPLIED_ENV",
-        {"SLAB_TEST_OVERWRITTEN": "shell-value", "SLAB_TEST_CREATED": None},
+        {
+            "SLAB_TEST_OVERWRITTEN": ("shell-value", "registry-value"),
+            "SLAB_TEST_CREATED": (None, "registry-value"),
+            "SLAB_TEST_USERSET": ("old-shell-value", "registry-value"),
+        },
     )
     env = _submission_env()
     assert env is not None
-    assert env["SLAB_TEST_OVERWRITTEN"] == "shell-value"  # original restored
+    assert env["SLAB_TEST_OVERWRITTEN"] == "shell-value"  # unchanged residue: restored
     assert "SLAB_TEST_CREATED" not in env  # originally unset: dropped
+    # A value the USER re-set after application is intent, not residue.
+    assert env["SLAB_TEST_USERSET"] == "user-fresh-export"
     assert os.environ["SLAB_TEST_CREATED"] == "registry-value"  # process untouched

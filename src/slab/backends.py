@@ -304,13 +304,20 @@ def describe_engine(
     registry = load_registry()
     if registry is not None and normalized in registry.engines:
         spec = registry.engines[normalized]
-        return {
+        registry_identity: dict[str, Any] = {
             "engine": normalized,
             "source": f"registry:{registry.cluster}" if registry.cluster else "registry",
             "version": spec.version,
             "calculator": spec.calculator,
             "spec": spec.model_dump(mode="json"),
         }
+        if spec.calculator == "slab.backends.lammps_calculator":
+            # The alias runs the same lmp with the same ambient potential
+            # resolution as the built-in engine; the stamping must follow.
+            ambient = _ambient_potential_sources({**spec.options, **options})
+            if ambient:
+                registry_identity["pair_coeff_files"] = ambient
+        return registry_identity
     resolution, _note = _resolve_rootstock_checkpoint(normalized, options)
     if resolution is not None:
         return {
@@ -688,14 +695,17 @@ def _ambient_potential_sources(options: dict[str, Any]) -> list[str]:
     potential-file suffixes; absolute tokens are already deterministic in
     the traced options, and declared files are stamped separately.
     """
-    files = options.get("files") or []
-    declared = {Path(str(f)).name for f in ([files] if isinstance(files, str) else files)}
+    declared = {Path(str(f)).name for f in _files_entries(options.get("files"))}
     pair_coeff = options.get("pair_coeff") or []
     entries = [pair_coeff] if isinstance(pair_coeff, str) else list(pair_coeff)
-    candidates: list[Path] = [Path.cwd()]
-    potentials_root = os.environ.get("LAMMPS_POTENTIALS")
-    if potentials_root:
-        candidates.append(Path(potentials_root))
+    # LAMMPS's own lookup order (utils::get_potential_file_path): the token
+    # as given relative to lmp's cwd, then each os.pathsep-separated
+    # directory of $LAMMPS_POTENTIALS joined with the token's BASENAME.
+    potential_dirs = [
+        Path(root)
+        for root in (os.environ.get("LAMMPS_POTENTIALS") or "").split(os.pathsep)
+        if root
+    ]
     resolved: list[str] = []
     for entry in entries:
         for token in str(entry).split():
@@ -704,12 +714,22 @@ def _ambient_potential_sources(options: dict[str, Any]) -> list[str]:
                 continue
             if name in declared or Path(token).is_absolute():
                 continue
-            for base in candidates:
-                source = base / token
+            candidates = [Path.cwd() / token, *(root / name for root in potential_dirs)]
+            for source in candidates:
                 if source.is_file():
                     resolved.append(str(source.resolve()))
                     break
     return resolved
+
+
+def _files_entries(files: Any) -> list[Any]:
+    """``files=`` as a list, honoring the singular str/PathLike forms the
+    engine accepts everywhere else — never a character iteration."""
+    if files is None:
+        return []
+    if isinstance(files, (str, os.PathLike)):
+        return [files]
+    return list(files)
 
 
 def _lammps_calculator(**options: Any) -> Any:
@@ -1068,7 +1088,10 @@ def _lammps_failure_evidence(directory: Path) -> tuple[list[str], list[tuple[str
 
 
 _MPI_LAUNCHERS = frozenset({"srun", "mpirun", "mpiexec"})
-_SHELL_ENV_ASSIGNMENT = re.compile(r"\w+=.*")
+# (?s: allows newlines inside a quoted assignment value — rare, but exec
+# accepts them, so misreading the token as the payload would refuse a
+# command that runs.
+_SHELL_ENV_ASSIGNMENT = re.compile(r"\w+=(?s:.*)")
 
 
 def _command_payload(command: str) -> list[str] | None:
@@ -1119,22 +1142,32 @@ def _split_env_wrapper(command: str) -> tuple[list[str], list[str]] | None:
         return [], argv
     prefix = [argv[0]]
     rest = argv[1:]
+    seen_assignment = False
     while rest:
         token = rest[0]
-        if _SHELL_ENV_ASSIGNMENT.fullmatch(token) or token in ("-i", "--ignore-environment"):
+        if _SHELL_ENV_ASSIGNMENT.fullmatch(token):
+            seen_assignment = True
             prefix.append(token)
             rest = rest[1:]
             continue
-        if token == "-u" and len(rest) >= 2:
-            prefix.extend(rest[:2])
-            rest = rest[2:]
-            continue
-        if token.startswith("--unset="):
-            prefix.append(token)
-            rest = rest[1:]
-            continue
-        if token.startswith("-"):
-            return None
+        # env stops option parsing at the first assignment: a flag AFTER one
+        # is the utility name to env, so it is the payload here too — the
+        # which-check will then refuse it by its own (true) name.
+        if not seen_assignment:
+            if token in ("-i", "--ignore-environment"):
+                prefix.append(token)
+                rest = rest[1:]
+                continue
+            if token == "-u" and len(rest) >= 2:
+                prefix.extend(rest[:2])
+                rest = rest[2:]
+                continue
+            if token.startswith("--unset="):
+                prefix.append(token)
+                rest = rest[1:]
+                continue
+            if token.startswith("-"):
+                return None
         break
     return prefix, rest
 
@@ -1159,7 +1192,15 @@ def _wrapper_path_override(command: str) -> str | None:
             override = token[len("PATH=") :]
     if override is not None:
         return override
-    return "" if cleared else None
+    if not cleared:
+        return None
+    # env -i unsets PATH, and execvp then falls back to the SYSTEM default
+    # path (confstr CS_PATH, canonically /bin:/usr/bin) — not to nothing —
+    # so the checks must resolve where exec would.
+    try:
+        return os.confstr("CS_PATH") or os.defpath
+    except (AttributeError, ValueError):  # pragma: no cover - non-POSIX
+        return os.defpath
 
 
 def _which_payload(token: str, command: str) -> str | None:
@@ -1477,15 +1518,17 @@ def _stat_resolved_tokens(argv: list[str], path_override: str | None) -> list[st
     """``(resolved path, mtime_ns)`` pairs for every resolvable token.
 
     *path_override* is the wrapper's PATH semantics (see
-    :func:`_wrapper_path_override`); tokens that resolve under either view
-    are counted — for identity purposes, more discrimination is the honest
-    side to err on.
+    :func:`_wrapper_path_override`), and when set it is the ONLY view: exec
+    resolves every token after the wrapper under the wrapper's PATH, so a
+    process-PATH shadow of the same name is a binary that never runs and
+    must not enter the identity.
     """
     pieces: list[str | int] = []
     for token in argv:
-        executable = shutil.which(token)
-        if executable is None and path_override is not None:
+        if path_override is not None:
             executable = shutil.which(token, path=path_override)
+        else:
+            executable = shutil.which(token)
         if executable is None:
             continue
         try:
@@ -1756,12 +1799,12 @@ def lammps_calculator(**options: Any) -> Any:
             "— falling back to slab.toml or $ASE_LAMMPSRUN_COMMAND would let "
             "machine config steer results without ever entering the cache identity"
         )
-    for entry in options.get("files") or []:
-        if not Path(str(entry)).expanduser().is_absolute():
+    for entry in _files_entries(options.get("files")):
+        if str(entry).startswith("~") or not Path(str(entry)).is_absolute():
             raise EngineNotAvailableError(
-                f"lammps_calculator: files= entry {str(entry)!r} is relative — "
-                f"a registry alias's identity is its spec, and a relative path "
-                f"names different bytes from different working directories; "
-                f"declare absolute paths"
+                f"lammps_calculator: files= entry {str(entry)!r} is not an "
+                f"absolute path — a registry alias's identity is its spec, and "
+                f"a relative (or ~-anchored) path names different bytes from "
+                f"different working directories or homes; declare absolute paths"
             )
     return _lammps_calculator(**options)

@@ -366,7 +366,7 @@ def test_shell_timeout_kills_the_whole_process_group(tmp_path: Path) -> None:
     started = time.monotonic()
     result = box.dispatch(_call("shell", command=command, timeout_s=1.0))
     assert "timed out" in result
-    assert "children were killed" in result
+    assert "process group were killed" in result
     time.sleep(2.5)  # give the would-be orphan time to prove itself
     assert not marker.exists()
     assert time.monotonic() - started < 20

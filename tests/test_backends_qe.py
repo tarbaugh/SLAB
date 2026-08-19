@@ -828,3 +828,54 @@ def test_scratch_root_config_is_honored(
         assert scratch.name.startswith("slab-qe-")
     finally:
         scratch.rmdir()
+
+
+def test_wrapper_path_override_follows_exec_semantics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A PATH= wrapper makes exec resolve the payload ONLY under the assigned
+    PATH — identity must stat the binary that runs, never a process-PATH
+    shadow of the same name; and 'env -i' falls back to the system default
+    path, not to nothing."""
+    from slab.backends import _executable_identity, _which_payload
+
+    override_bin = tmp_path / "override-bin"
+    shadow_bin = tmp_path / "shadow-bin"
+    for bins in (override_bin, shadow_bin):
+        bins.mkdir()
+        _script(bins / "pw.x", "exit 0\n")
+    monkeypatch.setenv("PATH", f"{shadow_bin}:/usr/bin:/bin")
+    identity = _executable_identity(f"env PATH={override_bin} pw.x")
+    assert identity is not None
+    assert str(override_bin / "pw.x") in identity  # the binary exec runs
+    assert str(shadow_bin / "pw.x") not in identity  # the shadow never runs
+    # env -i: exec falls back to the system default path (confstr CS_PATH).
+    assert _which_payload("ls", "env -i ls") is not None
+
+
+def test_env_flags_after_assignments_are_payload(tmp_path: Path) -> None:
+    """env stops option parsing at the first assignment, so a flag after one
+    is the utility name — the guards must refuse it by its own name instead
+    of parsing it as a flag and passing a command that exits 127."""
+    with pytest.raises(EngineNotAvailableError, match="'-u'"):
+        get_calculator(
+            "qe",
+            command="env A=1 -u X pw.x",
+            pseudo_dir=str(tmp_path),
+            input_data={"system": {"ecutwfc": 30.0}},
+        )
+
+
+def test_qe_shaped_recognizes_registry_aliases(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The task-level qe guards are engine-semantic: a registry alias built
+    on slab.backends.qe_calculator earns them too."""
+    import slab.tasks as tasks
+
+    def fake_describe(engine: str, options: object = None) -> dict:
+        return {"calculator": "slab.backends.qe_calculator"}
+
+    monkeypatch.setattr(tasks, "describe_engine", fake_describe)
+    assert tasks._qe_shaped("qe-delta", None) is True
+    monkeypatch.setattr(tasks, "describe_engine", lambda e, o=None: {"calculator": "x.Y"})
+    assert tasks._qe_shaped("lammps-delta", None) is False
+    assert tasks._qe_shaped("qe", None) is True  # the literal name, no lookup needed

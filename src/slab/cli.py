@@ -1034,7 +1034,7 @@ def mason_serve_stop(
         _fail(str(e))
 
 
-def _serve_hint(agent: AgentConfig, root: Path, origin: str) -> list[str]:
+def _serve_hint(agent: AgentConfig, root: Path, origin: str, *, cluster: str = "") -> list[str]:
     """Why an unreachable endpoint might be unreachable, when we can tell."""
     from slab.hpc import job_state
     from slab.mason.serve import read_record
@@ -1057,6 +1057,13 @@ def _serve_hint(agent: AgentConfig, root: Path, origin: str) -> list[str]:
         ]
     if not record.job_id:
         return [f"    a record exists ({record.endpoint}) but names no job to ask about"]
+    if record.cluster and record.cluster != cluster:
+        # A job id is only meaningful on its own cluster; asking this one
+        # would describe an unrelated job that happens to share the number.
+        return [
+            f"    the record belongs to cluster {record.cluster!r}; job "
+            f"{record.job_id} is not queried from here (job ids are per-cluster)"
+        ]
     try:
         status = job_state(record.job_id)
     except SlabError as e:
@@ -1082,7 +1089,8 @@ def mason_doctor(
     from slab.mason.serve import discover_endpoint
 
     try:
-        agent = load_config().agent
+        doctor_config = load_config()
+        agent = doctor_config.agent
         root = _ops.resolve_root(workspace)
     except SlabError as e:
         _fail(str(e))
@@ -1120,7 +1128,7 @@ def mason_doctor(
         typer.echo(f"[+] endpoint answers; {len(names)} model(s) served")
     except LlmError as e:
         typer.echo(f"[x] endpoint: {e}")
-        for line in _serve_hint(agent, root, origin):
+        for line in _serve_hint(agent, root, origin, cluster=doctor_config.hpc.cluster or ""):
             typer.echo(line)
         raise typer.Exit(code=1) from None
     if resolved_model is None:

@@ -458,20 +458,42 @@ def _add_shell_tool(box: Toolbox, session: MasonSession) -> None:
             )
         except OSError as e:
             return f"could not start the command: {e}"
-        try:
-            stdout, stderr = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired as e:
-            import contextlib as _contextlib
-            import os as _os
-            import signal as _signal
+        import contextlib as _contextlib
+        import os as _os
+        import signal as _signal
 
+        def _kill_group() -> None:
             with _contextlib.suppress(ProcessLookupError, PermissionError):  # raced exit
                 _os.killpg(process.pid, _signal.SIGKILL)
-            process.communicate()  # reap; the group is gone
-            partial = (e.stdout or "") if isinstance(e.stdout, str) else ""
+
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except KeyboardInterrupt:
+            # Ctrl-C in the REPL reaches only this process now (the child
+            # runs in its own session), so the interrupt must kill the
+            # command tree itself or it keeps running detached.
+            _kill_group()
+            raise
+        except subprocess.TimeoutExpired as e:
+            _kill_group()
+            # Reap the shell itself — wait() cannot block on pipes — but do
+            # NOT communicate(): a child that escaped the group (setsid)
+            # still holds the pipe ends, and reading to EOF would hang the
+            # agent turn on a daemon that never exits. Abandon the pipes.
+            with _contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=5.0)
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    with _contextlib.suppress(OSError):
+                        stream.close()
+            raw_partial = e.stdout
+            if isinstance(raw_partial, bytes):
+                partial = raw_partial.decode(errors="replace")
+            else:
+                partial = raw_partial or ""
             return (
                 f"command timed out after {timeout:.0f}s; the command and its "
-                f"children were killed; partial output:\n{partial}"
+                f"process group were killed; partial output:\n{partial}"
             )
         completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
         output = completed.stdout + (

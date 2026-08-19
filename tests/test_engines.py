@@ -611,8 +611,8 @@ def test_applied_env_restores_originals_and_skips_no_ops(
     with pytest.warns(UserWarning):
         build_engine("emt-env", spec)
     applied = engines.applied_env()
-    assert applied["SLAB_TEST_KEPT"] == "shell-value"  # original survives for restore
-    assert applied["SLAB_TEST_NEW"] is None  # originally unset
+    assert applied["SLAB_TEST_KEPT"] == ("shell-value", "registry-value")
+    assert applied["SLAB_TEST_NEW"] == (None, "created")  # originally unset
     assert "SLAB_TEST_SAME" not in applied  # no mutation happened
     assert os.environ["SLAB_TEST_KEPT"] == "registry-value"
 

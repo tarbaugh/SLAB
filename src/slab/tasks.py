@@ -117,7 +117,7 @@ def relax(
         >>> info["converged"], info["fmax"] < 0.05, info["energy_unit"]
         (True, True, 'eV')
     """
-    if engine.strip().lower() == "qe":
+    if _qe_shaped(engine, calculator_options):
         _guard_qe_kpoints(atoms, calculator_options, task="relax")
     # Engine identity is resolved BEFORE the (possibly hours-long) computation
     # and reused afterwards: a registry edited or deleted mid-run can neither
@@ -232,7 +232,7 @@ def single_point(
         ('eV', 1, False)
     """
     resolved_options = calculator_options
-    if engine.strip().lower() == "qe":
+    if _qe_shaped(engine, calculator_options):
         _guard_qe_kpoints(atoms, calculator_options, task="single_point")
         resolved_options = _qe_scf_options(calculator_options)
     # Same ordering rule as relax: engine identity resolves BEFORE the
@@ -274,6 +274,20 @@ def single_point(
     evaluated = system.copy()
     evaluated.calc = SinglePointCalculator(evaluated, energy=energy, forces=forces)
     return evaluated, info
+
+
+def _qe_shaped(engine: str, options: dict[str, Any] | None) -> bool:
+    """True for the built-in ``qe`` engine AND registry aliases built on it.
+
+    The qe guards are engine-semantic, not name-semantic: an alias declared
+    as ``calculator = "slab.backends.qe_calculator"`` runs the same pw.x and
+    earns the same refusals (k-points, single_point's scf pin) — keying them
+    on the literal name "qe" would make the alias the silent-wrong-answer
+    route around them.
+    """
+    if engine.strip().lower() == "qe":
+        return True
+    return describe_engine(engine, options).get("calculator") == "slab.backends.qe_calculator"
 
 
 def _guard_qe_kpoints(atoms: Atoms, options: dict[str, Any] | None, *, task: str) -> None:

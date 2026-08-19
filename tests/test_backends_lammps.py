@@ -815,3 +815,17 @@ def test_ambient_potential_resolution_is_stamped_into_identity(
     monkeypatch.delenv("LAMMPS_POTENTIALS")
     unresolved = describe_engine("lammps", options)
     assert "pair_coeff_files" not in unresolved  # nothing ambient to stamp
+
+
+def test_identity_accepts_singular_files_forms(tmp_path: Path) -> None:
+    """files= as one str or one PathLike is one file everywhere — identity
+    construction must never iterate a path per character or raise."""
+    pot = tmp_path / "Cu_u3.eam"
+    pot.write_text("fake\n")
+    for form in (str(pot), Path(str(pot))):
+        identity = describe_engine(
+            "lammps",
+            {"command": "/bin/echo", "pair_style": "eam",
+             "pair_coeff": ["1 1 Cu_u3.eam"], "files": form},
+        )
+        assert identity["files"] == [str(pot)]

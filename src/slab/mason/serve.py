@@ -188,6 +188,7 @@ def render_serve_script(
         time_limit=time_limit or serve.time_limit,
         output=f"{serve.job_name}-%j.out",
         prologue=[
+            *_setup_omission_note(serve, hpc),
             *serve.setup,
             *_server_preflight(serve),
             # Absolute, always: the default workspace root is relative
@@ -255,17 +256,23 @@ def stop(workspace_root: str | os.PathLike[str], *, cluster: str = "") -> str:
     record = read_record(workspace_root)
     if record is None:
         return f"no server recorded at {record_path(workspace_root)}; nothing to stop"
-    if record.cluster and cluster and record.cluster != cluster:
-        raise ServeError(
-            f"the recorded server belongs to cluster {record.cluster!r}, but this "
-            f"config says [hpc] cluster = {cluster!r} — job ids are per-cluster, "
-            f"so cancelling job {record.job_id or '?'} from here could kill an "
-            f"unrelated job. Run 'slab mason serve stop' where the config names "
-            f"{record.cluster!r}"
-        )
     if not record.job_id:
+        # Nothing would be cancelled; clearing a jobless record is safe from
+        # anywhere, so this precedes the cluster check.
         clear_record(workspace_root)
         return f"record removed; it named no job id, so nothing was cancelled ({record.endpoint})"
+    if record.cluster and record.cluster != cluster:
+        # An unnamed local cluster cannot PROVE it is the record's, so an
+        # empty *cluster* refuses too — the bypass would be exactly the
+        # foreign scancel this guard exists to prevent.
+        named = f"[hpc] cluster = {cluster!r}" if cluster else "no [hpc] cluster at all"
+        raise ServeError(
+            f"the recorded server belongs to cluster {record.cluster!r}, but this "
+            f"config names {named} — job ids are per-cluster, so cancelling job "
+            f"{record.job_id} from here could kill an unrelated job. Run "
+            f"'slab mason serve stop' under a config with [hpc] cluster = "
+            f"{record.cluster!r} (on that cluster) to confirm"
+        )
     # Cancel first: if cancellation fails, the record must survive, or the next
     # 'serve start' would cheerfully stack a second server on a live one.
     cancel(record.job_id)
@@ -369,13 +376,14 @@ def describe(
         lines.append(f"cluster:  {record.cluster}")
     if record.started_at:
         lines.append(f"started:  {record.started_at}")
-    foreign = bool(record.cluster and cluster and record.cluster != cluster)
+    foreign = bool(record.cluster and record.cluster != cluster)
     if record.job_id and foreign:
         # A job id is only meaningful on its own cluster; querying it here
         # would describe an unrelated job that happens to share the number.
+        named = f"[hpc] cluster = {cluster!r}" if cluster else "no [hpc] cluster"
         lines.append(
             f"job {record.job_id}: belongs to cluster {record.cluster!r}; "
-            f"not queried from this config's cluster ({cluster!r})"
+            f"not queried from here (this config names {named})"
         )
     elif record.job_id:
         try:
@@ -444,6 +452,23 @@ def _server_command(agent: AgentConfig, model: str) -> str:
         pieces.append(shlex.quote(serve.tool_call_parser))
     pieces.extend(serve.args)
     return " ".join(pieces)
+
+
+def _setup_omission_note(serve: ServeConfig, hpc: HpcConfig) -> list[str]:
+    """A rendered comment naming what the serve script deliberately skipped.
+
+    The script is the readable artifact ("render it, read it, then submit
+    it"), so a config whose ``[hpc] setup`` exists but is excluded says so
+    IN the script — the same convention as the omitted-launcher comment —
+    instead of silently differing from every other job's rendering.
+    """
+    if serve.include_hpc_setup or not hpc.setup:
+        return []
+    return [
+        "# [hpc]-level setup omitted: serve jobs bring their own environment",
+        "# (engine module stacks fight the server's venv); set [agent.serve]",
+        "# include_hpc_setup = true to include it. The partition's setup applies.",
+    ]
 
 
 def _server_preflight(serve: ServeConfig) -> list[str]:

@@ -468,7 +468,12 @@ def _submission_env() -> dict[str, str] | None:
     if not residue:
         return None
     env = dict(os.environ)
-    for key, original in residue.items():
+    for key, (original, applied) in residue.items():
+        if os.environ.get(key) != applied:
+            # The user changed (or deleted) it AFTER the registry applied it:
+            # the current state is their intent, not residue — reverting it
+            # would be its own silent poisoning.
+            continue
         if original is None:
             env.pop(key, None)
         else:
