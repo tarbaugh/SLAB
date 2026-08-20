@@ -72,19 +72,28 @@ class ConfigError(SlabError):
 
 
 class QeEngineConfig(BaseModel):
-    """Defaults for the built-in ``qe`` engine (``[engines.qe]``)."""
+    """Defaults for the built-in ``qe`` engine (``[engines.qe]``).
+
+    ``setup`` lines (module loads, exports) run in a private login-shell
+    wrapper around THIS engine's subprocess only — the per-engine home for
+    dependencies that must not apply job-wide the way ``[hpc] setup`` does.
+    Shell for the node that runs the engine; nothing is expanded at load.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     command: str | None = None
     pseudo_dir: str | None = None
+    setup: tuple[str, ...] = ()
 
 
 class LammpsEngineConfig(BaseModel):
     """Defaults for the built-in ``lammps`` engine (``[engines.lammps]``).
 
-    Only the machine fact lives here — how to invoke the binary. The
-    interatomic potential (``pair_style``/``pair_coeff``/``files``) is a
+    Only machine facts live here — how to invoke the binary, and the
+    ``setup`` lines (module loads, exports) its install needs, run in a
+    private login-shell wrapper scoped to this engine's subprocess alone.
+    The interatomic potential (``pair_style``/``pair_coeff``/``files``) is a
     science decision passed per call in ``calculator_options``, never a
     machine default.
     """
@@ -92,6 +101,7 @@ class LammpsEngineConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     command: str | None = None
+    setup: tuple[str, ...] = ()
 
 
 class RootstockEngineConfig(BaseModel):
@@ -615,12 +625,19 @@ schema_version = 1
 #                                      # variables to this engine's subprocess
 #                                      # alone (bare VAR=x needs a shell and
 #                                      # is refused; ASE execs argv directly)
+# setup = ["module load qe/7.4", "export OMP_NUM_THREADS=4"]
+#                                      # THIS engine's dependencies: run in a
+#                                      # private login-shell wrapper around the
+#                                      # engine subprocess only — never job-wide
+#                                      # like [hpc] setup; PATH and version are
+#                                      # then checked inside that same shell
 # pseudo_dir = "/shared/sw/pseudos"    # used when no pseudo_family is given
 
 [engines.lammps]
 # command = "lmp"                      # login-node smoke tests / serial runs
 # command = "srun lmp"                 # inside batch jobs only (same srun rule)
 # command = "env OMP_NUM_THREADS=4 lmp"           # same env-wrapper rule as qe
+# setup = ["module load lammps/2025.07"]          # same per-engine setup rule as qe
 
 [engines.rootstock]
 # root = "/path/to/rootstock-install"  # a LOCAL rootstock install (the directory

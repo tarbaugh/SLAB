@@ -249,7 +249,37 @@ command = "env OMP_NUM_THREADS=4 pw.x"
 
 ASE execs engine commands as a plain argv (no shell), so `/usr/bin/env`
 applies the assignments to that engine's subprocess alone — nothing leaks
-into the Python process, the cache, or any other engine. The guards look
+into the Python process, the cache, or any other engine.
+
+When an engine's install needs more than variables — a `module load`, an
+`LD_LIBRARY_PATH` dance, anything that takes a shell — declare it as the
+engine's own `setup`:
+
+```toml
+[engines.qe]
+command = "pw.x"
+setup = ["module load qe/7.4", "export OMP_NUM_THREADS=4"]
+
+[engines.lammps]
+command = "lmp"
+setup = ["module load lammps/2025.07"]
+```
+
+slab materializes each engine's setup into a private `#!/bin/bash -l`
+wrapper (`set -e`, your lines, then `exec` of the real command) scoped to
+that engine's subprocess alone — the per-engine answer to dependencies that
+must not apply job-wide the way `[hpc] setup` does, so two engines with
+conflicting module stacks share one job without sharing an environment. The
+guards follow the semantics: with setup lines in play the process PATH
+proves nothing (the module may be exactly what provides `pw.x`), so
+existence is checked — and the version banner probed — *inside* the same
+login shell the wrapper uses, and a setup that still can't find the binary
+refuses loudly with the shell's own words. Cache identity stamps the
+logical command, the setup lines, and the setup-resolved binary; the
+wrapper file itself is an implementation detail, created with the
+calculator and removed with it. `setup=` also works per call in
+`calculator_options` (overriding the config's) and inside a registry
+alias's options. The guards look
 through the wrapper — plain assignments and env's portable flags (`-i`,
 `-u NAME`) alike: the PATH check judges `pw.x`, not `env` (and when the
 wrapper assigns `PATH=` itself, the payload is resolved under *that* PATH,
@@ -265,10 +295,10 @@ in the message. The same seam takes a container:
 `command = "apptainer exec /sw/qe.sif pw.x"` isolates the whole userland.
 
 Three boundaries to know about. A batch job is still one environment:
-`[hpc]` and partition `setup` lines (module loads) apply to the whole job,
-so a module whose libraries conflict with the driver's venv belongs on the
-engine command via `env` (say, `env LD_LIBRARY_PATH=/opt/qe/lib pw.x`), not
-in job-global setup. A *named* MACE checkpoint downloads on first use with
+`[hpc]` and partition `setup` lines apply to the whole job, so anything one
+engine needs and another must not see belongs in that engine's own
+`[engines.X] setup` (or, for plain variables, the `env` command wrapper) —
+never in job-global setup. A *named* MACE checkpoint downloads on first use with
 no offline mode — on firewalled compute nodes slab bounds the attempt and
 refuses with instructions instead of hanging, but the real fix is the
 pre-warm (or rootstock) described under [Built-ins](#built-ins). And

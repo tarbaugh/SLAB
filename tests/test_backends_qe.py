@@ -879,3 +879,145 @@ def test_qe_shaped_recognizes_registry_aliases(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(tasks, "describe_engine", lambda e, o=None: {"calculator": "x.Y"})
     assert tasks._qe_shaped("lammps-delta", None) is False
     assert tasks._qe_shaped("qe", None) is True  # the literal name, no lookup needed
+
+
+# -- per-engine setup: module loads and exports, scoped by a wrapper --------------------
+
+
+def _pw_behind_setup(tmp_path: Path) -> tuple[Path, list[str]]:
+    """A fake pw.x reachable ONLY through setup lines, never the process PATH."""
+    bins = tmp_path / "module-bin"
+    bins.mkdir(exist_ok=True)
+    _script(bins / "pw.x", 'echo "     Program PWSCF v.7.4.9 starts"\n')
+    return bins, [f'export PATH="{bins}:$PATH"']
+
+
+def test_qe_setup_wraps_the_engine_in_its_own_login_shell(tmp_path: Path) -> None:
+    """setup lines (module loads, exports) are THIS engine's dependencies:
+    materialized into a private #!/bin/bash -l wrapper that execs the real
+    command — never applied job-wide, and removed with the calculator."""
+    _bins, setup = _pw_behind_setup(tmp_path)
+    calc = get_calculator(
+        "qe",
+        command="pw.x",
+        pseudo_dir=str(tmp_path),
+        setup=setup,
+        input_data={"system": {"ecutwfc": 30.0}},
+    )
+    wrapper = Path(str(calc.profile.command))
+    text = wrapper.read_text()
+    assert text.startswith("#!/bin/bash -l\nset -e\n")
+    assert setup[0] in text
+    assert 'exec pw.x "$@"' in text
+    setup_dir = calc._slab_setup_dir
+    assert wrapper.parent == setup_dir
+    close_calculator(calc)
+    assert not setup_dir.exists()
+
+
+def test_qe_setup_runs_the_scenario_end_to_end(tmp_path: Path, ws: Workspace) -> None:
+    """The wrapper is not decoration: a relax replay runs pw.x found only by
+    the setup shell, with artifacts collected as ever."""
+    bins = tmp_path / "module-bin"
+    bins.mkdir()
+    _script(bins / "pw.x", f'cat "{FIXTURE_PWO}"\n')
+    setup = [f'export PATH="{bins}:$PATH"']
+    atoms = bulk("Si", "diamond", a=5.43)
+    with ws.start_run(name="qe-setup", intent="relax through a setup wrapper"):
+        _relaxed, info = relax(
+            atoms,
+            engine="qe",
+            fmax=10.0,
+            label="si-setup",
+            calculator_options={
+                "command": "pw.x",
+                "pseudo_dir": str(tmp_path),
+                "pseudopotentials": {"Si": "Si.pz-vbc.UPF"},
+                "setup": setup,
+                "kpts": None,  # explicit Γ-only opt-in; the replay ignores inputs
+                "input_data": {"system": {"ecutwfc": 30.0}},
+            },
+        )
+    assert info["energy"] == pytest.approx(FIXTURE_ENERGY_EV)
+    assert info["engine_version"] == "7.4.1"  # the fixture's banner, probed in-shell
+
+
+def test_qe_setup_identity_and_version_probe_in_shell(tmp_path: Path) -> None:
+    """Identity stamps the LOGICAL command plus the setup lines, and the
+    version comes from a probe inside the setup shell — the module may be
+    what provides the binary."""
+    _bins, setup = _pw_behind_setup(tmp_path)
+    options = {"command": "pw.x", "pseudo_dir": str(tmp_path), "setup": setup}
+    identity = describe_engine("qe", options)
+    assert identity["command"] == "pw.x"  # never the wrapper path
+    assert identity["setup"] == setup
+    assert identity["version"] == "7.4.9"
+    # And a versionless setup engine still gets a resolved fingerprint.
+    _script(tmp_path / "module-bin" / "quiet.x", "exit 0\n")
+    quiet = describe_engine(
+        "qe", {"command": "quiet.x", "pseudo_dir": str(tmp_path), "setup": setup}
+    )
+    assert quiet["version"] is None
+    assert quiet["executable_fingerprint"][0] == str(tmp_path / "module-bin" / "quiet.x")
+
+
+def test_qe_setup_failure_is_loud_with_the_shells_words(tmp_path: Path) -> None:
+    with pytest.raises(EngineNotAvailableError, match="after its setup lines ran"):
+        get_calculator(
+            "qe",
+            command="definitely-not-pw",
+            pseudo_dir=str(tmp_path),
+            setup=["echo module load qe/9.9 failed >&2"],
+            input_data={"system": {"ecutwfc": 30.0}},
+        )
+
+
+def test_qe_setup_conflicts_with_profile(tmp_path: Path) -> None:
+    from ase.calculators.espresso import EspressoProfile
+
+    profile = EspressoProfile(command="/bin/echo", pseudo_dir=str(tmp_path))
+    with pytest.raises(EngineNotAvailableError, match="not both"):
+        get_calculator("qe", profile=profile, setup=["true"])
+
+
+def test_qe_setup_srun_guard_still_applies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bins, setup = _pw_behind_setup(tmp_path)
+    _script(bins / "srun", "exit 0\n")
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+    with pytest.raises(EngineNotAvailableError, match="not inside a SLURM allocation"):
+        get_calculator(
+            "qe",
+            command="srun pw.x",
+            pseudo_dir=str(tmp_path),
+            setup=setup,
+            input_data={"system": {"ecutwfc": 30.0}},
+        )
+
+
+def test_qe_setup_from_config_and_per_call_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """[engines.qe] setup is the machine fact; a per-call setup= overrides it."""
+    _bins, setup = _pw_behind_setup(tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    setup_toml = ", ".join(f"'{line}'" for line in setup)  # literal strings: lines hold quotes
+    (project / "slab.toml").write_text(
+        f'[engines.qe]\ncommand = "pw.x"\npseudo_dir = "{tmp_path}"\nsetup = [{setup_toml}]\n'
+    )
+    monkeypatch.chdir(project)
+    calc = get_calculator("qe", input_data={"system": {"ecutwfc": 30.0}})
+    try:
+        assert setup[0] in Path(str(calc.profile.command)).read_text()
+    finally:
+        close_calculator(calc)
+    identity = describe_engine("qe", {})
+    assert identity["setup"] == setup
+    with pytest.raises(EngineNotAvailableError, match="after its setup lines ran"):
+        get_calculator(
+            "qe",
+            setup=["export PATH=/nowhere"],  # per-call wins; pw.x vanishes
+            input_data={"system": {"ecutwfc": 30.0}},
+        )

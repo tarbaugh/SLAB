@@ -266,8 +266,13 @@ def describe_engine(
         ambient = _ambient_potential_sources(options)
         if ambient:
             identity["pair_coeff_files"] = ambient
+        lammps_setup = _engine_setup(options.get("setup"), "lammps")
+        if lammps_setup:
+            identity["setup"] = list(lammps_setup)
         if identity["version"] is None:
-            identity.update(_binary_fingerprint(str(identity["command"])))
+            identity.update(
+                _versionless_fingerprint(str(identity["command"]), lammps_setup)
+            )
         return identity
     if normalized == "qe":
         # The detected pw.x version, the resolved command, and the resolved
@@ -300,8 +305,11 @@ def describe_engine(
             identity["pseudo_dir"] = None
             identity["pseudo_family"] = family.name
             identity["pseudo_family_digest"] = family_digest(family)
+        qe_setup = _engine_setup(options.get("setup"), "qe")
+        if qe_setup:
+            identity["setup"] = list(qe_setup)
         if identity["version"] is None:
-            identity.update(_binary_fingerprint(command))
+            identity.update(_versionless_fingerprint(command, qe_setup))
         return identity
     registry = load_registry()
     if registry is not None and normalized in registry.engines:
@@ -416,6 +424,9 @@ def close_calculator(calculator: Any) -> None:
     scratch = getattr(calculator, "_slab_scratch", None)
     if scratch is not None:
         shutil.rmtree(scratch, ignore_errors=True)
+    setup_dir = getattr(calculator, "_slab_setup_dir", None)
+    if setup_dir is not None:
+        shutil.rmtree(setup_dir, ignore_errors=True)
 
 
 def resolve_pseudopotentials(atoms_or_symbols: Any, pseudo_dir: str | Path) -> dict[str, str]:
@@ -758,17 +769,28 @@ def _lammps_calculator(**options: Any) -> Any:
             "silently fall back to a dimensionless lj/cut toy potential"
         )
     command = str(command) if command is not None else (_lammps_setting("command") or "lmp")
+    setup = _engine_setup(options.pop("setup", None), "lammps")
     _payload_guard(command, "lammps")
-    payload = _command_payload(command)
-    if payload and _which_payload(payload[0], command) is None:
-        raise EngineNotAvailableError(
-            f"engine 'lammps' resolved command {command!r}, but "
-            f"{payload[0]!r} is not on "
-            f"PATH — install LAMMPS (or module-load it), pass "
-            f"calculator_options={{'command': '/path/to/lmp', ...}}, or set "
-            f"command under [engines.lammps] in the slab config"
-        )
-    _launcher_guard(command, "lammps")
+    run_command = command
+    setup_dir: Path | None = None
+    if setup:
+        # Same rule as qe: the engine's own dependencies, scoped to its
+        # subprocess by a materialized login-shell wrapper, with existence
+        # checked inside that shell.
+        _setup_guard(command, setup, "lammps")
+        setup_dir, wrapper = _materialize_setup_wrapper("lammps", setup, command)
+        run_command = str(wrapper)
+    else:
+        payload = _command_payload(command)
+        if payload and _which_payload(payload[0], command) is None:
+            raise EngineNotAvailableError(
+                f"engine 'lammps' resolved command {command!r}, but "
+                f"{payload[0]!r} is not on "
+                f"PATH — install LAMMPS (or module-load it), pass "
+                f"calculator_options={{'command': '/path/to/lmp', ...}}, or set "
+                f"command under [engines.lammps] in the slab config"
+            )
+        _launcher_guard(command, "lammps")
     # No tmp_dir= means a slab-managed scratch, and the scratch is what makes
     # evidence possible: lammpsrun only *retains* the input/log/data files
     # when a tmp_dir is supplied — with its own auto-created directory the log
@@ -782,13 +804,17 @@ def _lammps_calculator(**options: Any) -> Any:
         # this keeps one canonical directory across the staged references,
         # the calculator's parameters, and the files it writes.
         options = _stage_lammps_files(options, Path(os.path.realpath(tmp_dir)))
-        calculator: Any = LAMMPS(command=command, tmp_dir=str(tmp_dir), **options)
+        calculator: Any = LAMMPS(command=run_command, tmp_dir=str(tmp_dir), **options)
     except Exception:
         if scratch is not None:
             shutil.rmtree(scratch, ignore_errors=True)
+        if setup_dir is not None:
+            shutil.rmtree(setup_dir, ignore_errors=True)
         raise
     if scratch is not None:
         calculator._slab_scratch = scratch
+    if setup_dir is not None:
+        calculator._slab_setup_dir = setup_dir
     # lammpsrun keeps a persistent lmp subprocess (keep_alive=True) but has no
     # close(); its _lmp_end is the idempotent terminator close_calculator
     # needs, exposed through the generic _slab_close hook.
@@ -913,6 +939,9 @@ def _lammps_version(options: dict[str, Any]) -> str | None:
     """
     try:
         command = _lammps_locator(options)
+        setup = _engine_setup(options.get("setup"), "lammps")
+        if setup:
+            return _setup_shell_version(setup, command, kind="lammps")
         identity = _executable_identity(command)
         if identity is None:
             return None
@@ -1240,6 +1269,143 @@ def _probe_argv(command: str) -> list[str] | None:
     return [*prefix, *argv]
 
 
+_SETUP_PROBE_TIMEOUT_S = 60
+# Successful setup-shell resolutions, memoized per (setup lines, token) —
+# identity stamping and version probes reuse them. Failures are NOT cached:
+# a fixed module farm must be noticed without a process restart, and the
+# refusal wants the shell's own words each time.
+_SETUP_WHICH_CACHE: dict[tuple[tuple[str, ...], str], tuple[str, int]] = {}
+
+
+def _engine_setup(per_call: Any, engine: str) -> tuple[str, ...]:
+    """The engine's scoped setup lines: per-call value, else ``[engines.X]``.
+
+    Setup lines are shell for a private login-shell wrapper around THIS
+    engine's subprocess — the per-engine home for module loads and exports
+    that must not apply job-wide (see :func:`_materialize_setup_wrapper`).
+    """
+    if per_call is not None:
+        lines = [per_call] if isinstance(per_call, str) else list(per_call)
+        return tuple(str(line) for line in lines)
+    from slab.config import config_value
+
+    configured = config_value(f"engines.{engine}.setup")
+    if not configured:
+        return ()
+    return tuple(str(line) for line in configured)
+
+
+def _setup_script(setup: tuple[str, ...], payload: list[str], *, pass_args: bool) -> str:
+    """The wrapper script text: login shell, fail-fast setup, exec payload.
+
+    ``#!/bin/bash -l`` so the ``module`` shell function exists; ``set -e``
+    so a failing module load kills the run instead of exec'ing into the
+    wrong environment; ``exec`` so the engine replaces the shell — signals,
+    the exit code, and ASE's process handling all see the engine itself.
+    """
+    quoted = " ".join(shlex.quote(token) for token in payload)
+    tail = f'exec {quoted} "$@"' if pass_args else f"exec {quoted}"
+    return "\n".join(["#!/bin/bash -l", "set -e", *setup, tail]) + "\n"
+
+
+def _materialize_setup_wrapper(
+    engine: str, setup: tuple[str, ...], command: str
+) -> tuple[Path, Path]:
+    """``(wrapper dir, wrapper script)`` running *command* under *setup*.
+
+    The dir is private and slab-managed; the factory attaches it to the
+    calculator as ``_slab_setup_dir`` and :func:`close_calculator` removes
+    it with the calculator.
+    """
+    argv = shlex.split(command)
+    wrapper_dir = _scratch_dir(f"slab-{engine}-setup-")
+    script = wrapper_dir / f"{engine}-with-setup"
+    script.write_text(_setup_script(setup, argv, pass_args=True), encoding="utf-8")
+    script.chmod(0o700)
+    return wrapper_dir, script
+
+
+def _setup_which(setup: tuple[str, ...], token: str) -> tuple[tuple[str, int] | None, str]:
+    """``((path, mtime_ns) | None, detail)`` for *token* under *setup*'s shell.
+
+    With setup lines in play the process PATH proves nothing — the module
+    load may be exactly what provides the binary — so existence is answered
+    the only honest way: the same login shell the wrapper will use.
+    """
+    key = (setup, token)
+    cached = _SETUP_WHICH_CACHE.get(key)
+    if cached is not None:
+        return cached, ""
+    import subprocess
+
+    script = "\n".join([*setup, f"command -v {shlex.quote(token)}"])
+    try:
+        completed = subprocess.run(
+            ["/bin/bash", "-l", "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=_SETUP_PROBE_TIMEOUT_S,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, str(e)
+    stdout = completed.stdout.strip()
+    resolved = stdout.splitlines()[-1] if stdout else ""  # profiles may chatter above
+    if completed.returncode != 0 or not resolved.startswith("/"):
+        tail = (completed.stderr or completed.stdout).strip().splitlines()
+        return None, (tail[-1] if tail else "the setup shell gave no detail")
+    try:
+        mtime_ns = os.stat(resolved).st_mtime_ns
+    except OSError:
+        mtime_ns = -1
+    _SETUP_WHICH_CACHE[key] = (resolved, mtime_ns)
+    return (resolved, mtime_ns), ""
+
+
+def _setup_probe_token(command: str) -> str | None:
+    """The binary a setup-shell existence check should ask about, or None.
+
+    The payload for plain commands; the launched binary for the two-token
+    launcher form (the launcher itself resolves without modules); nothing
+    checkable for flagged launcher lines — the wrapper's ``set -e`` and the
+    engine's own failure evidence take over at run time.
+    """
+    payload = _command_payload(command)
+    if not payload:
+        return None
+    if Path(payload[0]).name in _MPI_LAUNCHERS:
+        if len(payload) == 2 and not payload[1].startswith("-"):
+            return payload[1]
+        return None
+    return payload[0]
+
+
+def _setup_guard(command: str, setup: tuple[str, ...], engine: str) -> None:
+    """The PATH half of the factory guards, run inside the setup shell."""
+    token = _setup_probe_token(command)
+    if token is not None:
+        resolved, detail = _setup_which(setup, token)
+        if resolved is None:
+            raise EngineNotAvailableError(
+                f"engine {engine!r}: after its setup lines ran, {token!r} is "
+                f"still not on PATH — {detail}. Check [engines.{engine}] setup "
+                f"(module name? shell error?)"
+            )
+    _refuse_srun_outside_allocation(command, engine)
+
+
+def _refuse_srun_outside_allocation(command: str, engine: str) -> None:
+    if _srun_without_allocation(command):
+        raise EngineNotAvailableError(
+            f"engine {engine!r}: command {command!r} starts with srun, but "
+            f"this process is not inside a SLURM allocation — srun would "
+            f"queue for a fresh one and the calculation would hang silently. "
+            f"Use the bare executable for login-node smoke tests; keep the "
+            f"srun form for batch jobs (slab hpc submit)"
+        )
+
+
 def _payload_guard(command: str, engine: str) -> None:
     """Refuse commands whose payload is a shell idiom or nothing at all.
 
@@ -1316,14 +1482,7 @@ def _launcher_guard(command: str, engine: str) -> None:
             f"which is not on PATH — the launcher exists but the engine "
             f"binary does not (is a module load missing on this node?)"
         )
-    if _srun_without_allocation(command):
-        raise EngineNotAvailableError(
-            f"engine {engine!r}: command {command!r} starts with srun, but "
-            f"this process is not inside a SLURM allocation — srun would "
-            f"queue for a fresh one and the calculation would hang silently. "
-            f"Use the bare executable for login-node smoke tests; keep the "
-            f"srun form for batch jobs (slab hpc submit)"
-        )
+    _refuse_srun_outside_allocation(command, engine)
 
 
 def _qe_calculator(**options: Any) -> Any:
@@ -1347,9 +1506,16 @@ def _qe_calculator(**options: Any) -> Any:
     pseudo_dir = options.pop("pseudo_dir", None)
     pseudo_family = options.pop("pseudo_family", None)
     directory = options.pop("directory", None)
+    setup = _engine_setup(options.pop("setup", None), "qe")
     if profile is not None and (command is not None or pseudo_dir is not None):
         raise EngineNotAvailableError(
             "engine 'qe': pass either profile= or command=/pseudo_dir=, not both"
+        )
+    if setup and profile is not None:
+        raise EngineNotAvailableError(
+            "engine 'qe': pass either profile= or setup= lines, not both — setup "
+            "wraps the command in its own login shell, and a profile carries a "
+            "command slab must not rewrite"
         )
     if pseudo_family is not None:
         if pseudo_dir is not None or profile is not None:
@@ -1367,7 +1533,8 @@ def _qe_calculator(**options: Any) -> Any:
         # Machine defaults: the slab config's [engines.qe], then ASE's own
         # [espresso] section — one slab.toml can configure a whole cluster.
         pseudo_dir = _qe_setting("pseudo_dir")
-    if profile is None and (command is not None or pseudo_dir is not None):
+    setup_dir: Path | None = None
+    if profile is None and (command is not None or pseudo_dir is not None or setup):
         if pseudo_dir is None:
             raise EngineNotAvailableError(
                 "engine 'qe': a command alone is not enough — also set pseudo_dir "
@@ -1380,7 +1547,18 @@ def _qe_calculator(**options: Any) -> Any:
         # points everywhere except the actual problem.
         command = command or _qe_setting("command") or "pw.x"
         _payload_guard(command, "qe")
-        profile = EspressoProfile(command=command, pseudo_dir=str(Path(pseudo_dir).expanduser()))
+        run_command = command
+        if setup:
+            # The engine's own dependencies (module loads, exports), scoped
+            # to its subprocess by a materialized login-shell wrapper — and
+            # existence is checked inside that same shell, because the
+            # module may be exactly what provides pw.x.
+            _setup_guard(command, setup, "qe")
+            setup_dir, wrapper = _materialize_setup_wrapper("qe", setup, command)
+            run_command = str(wrapper)
+        profile = EspressoProfile(
+            command=run_command, pseudo_dir=str(Path(pseudo_dir).expanduser())
+        )
 
     # Force printing defaults on: pw.x omits forces unless tprnfor is set,
     # and slab's tasks drive optimizers with them. Output verbosity, not
@@ -1406,16 +1584,20 @@ def _qe_calculator(**options: Any) -> Any:
         directory = scratch
     try:
         calculator: Any = Espresso(profile=profile, directory=directory, **options)
-        resolved_command = str(calculator.profile.command)
-        _payload_guard(resolved_command, "qe")
-        payload = _command_payload(resolved_command)
-        if payload and _which_payload(payload[0], resolved_command) is None:
-            raise EngineNotAvailableError(
-                f"engine 'qe' resolved command {resolved_command!r}, but "
-                f"{payload[0]!r} is not on PATH — install Quantum ESPRESSO or "
-                f"pass calculator_options={{'command': '/path/to/pw.x', ...}}"
-            )
-        _launcher_guard(resolved_command, "qe")
+        if not setup:
+            # With setup lines, existence and launcher rules were checked
+            # inside the setup shell above; the profile command here is the
+            # wrapper script, which trivially exists.
+            resolved_command = str(calculator.profile.command)
+            _payload_guard(resolved_command, "qe")
+            payload = _command_payload(resolved_command)
+            if payload and _which_payload(payload[0], resolved_command) is None:
+                raise EngineNotAvailableError(
+                    f"engine 'qe' resolved command {resolved_command!r}, but "
+                    f"{payload[0]!r} is not on PATH — install Quantum ESPRESSO or "
+                    f"pass calculator_options={{'command': '/path/to/pw.x', ...}}"
+                )
+            _launcher_guard(resolved_command, "qe")
         # ecutwfc is mandatory pw.x input and ASE does not validate it —
         # without this refusal the job dies only at runtime (on a cluster,
         # after the queue wait) with a namelist read error. pseudo_family
@@ -1432,6 +1614,8 @@ def _qe_calculator(**options: Any) -> Any:
     except BadConfiguration as e:
         if scratch is not None:
             shutil.rmtree(scratch, ignore_errors=True)
+        if setup_dir is not None:
+            shutil.rmtree(setup_dir, ignore_errors=True)
         raise EngineNotAvailableError(
             "engine 'qe' is not configured: pass calculator_options="
             "{'command': 'pw.x', 'pseudo_dir': '/path/to/pseudos', ...}, set "
@@ -1443,9 +1627,13 @@ def _qe_calculator(**options: Any) -> Any:
     except Exception:
         if scratch is not None:
             shutil.rmtree(scratch, ignore_errors=True)
+        if setup_dir is not None:
+            shutil.rmtree(setup_dir, ignore_errors=True)
         raise
     if scratch is not None:
         calculator._slab_scratch = scratch
+    if setup_dir is not None:
+        calculator._slab_setup_dir = setup_dir
     return calculator
 
 
@@ -1487,6 +1675,9 @@ def _qe_version(options: dict[str, Any]) -> str | None:
     """
     try:
         command, _pseudo_dir = _qe_locator(options)
+        setup = _engine_setup(options.get("setup"), "qe")
+        if setup:
+            return _setup_shell_version(setup, command, kind="qe")
         return _banner_version(command)
     except Exception:  # pragma: no cover - defensive: lru_cache internals
         return None
@@ -1543,6 +1734,25 @@ def _stat_resolved_tokens(argv: list[str], path_override: str | None) -> list[st
     return pieces
 
 
+def _versionless_fingerprint(command: str, setup: tuple[str, ...]) -> dict[str, Any]:
+    """The identity fallback when no version could be probed.
+
+    With setup lines, the binary lives behind the setup shell — the
+    fingerprint is the setup-resolved path+mtime (memoized on success).
+    Without them, every PATH-resolvable token is stat'ed as before. Never
+    raises; nothing resolvable contributes nothing.
+    """
+    if setup:
+        token = _setup_probe_token(command)
+        if token is None:
+            return {}
+        resolved, _detail = _setup_which(setup, token)
+        if resolved is None:
+            return {}
+        return {"executable_fingerprint": [resolved[0], resolved[1]]}
+    return _binary_fingerprint(command)
+
+
 def _binary_fingerprint(command: str) -> dict[str, Any]:
     """Resolved path+mtime of a command's binaries, for version-less identities.
 
@@ -1562,6 +1772,59 @@ def _binary_fingerprint(command: str) -> dict[str, Any]:
         return {}
     stats = _stat_resolved_tokens(argv, _wrapper_path_override(command))
     return {"executable_fingerprint": stats} if stats else {}
+
+
+def _setup_shell_version(setup: tuple[str, ...], command: str, *, kind: str) -> str | None:
+    """Version probed INSIDE the setup shell, or None.
+
+    The module load may provide the binary — and the libraries it needs to
+    even start — so with setup lines the probe must run where the engine
+    will. Keyed on the setup-resolved binary's path+mtime, so a module swap
+    re-probes. Never raises; every failure degrades to None (the identity
+    then carries the setup lines and the resolved fingerprint instead).
+    """
+    token = _setup_probe_token(command)
+    if token is None:
+        return None
+    resolved, _detail = _setup_which(setup, token)
+    if resolved is None:
+        return None
+    return _probe_setup_shell_version(setup, command, kind, resolved)
+
+
+@functools.lru_cache(maxsize=64)
+def _probe_setup_shell_version(
+    setup: tuple[str, ...], command: str, kind: str, identity: tuple[str, int]
+) -> str | None:
+    del identity  # keys the memo, exactly like the no-setup probes
+    probe = _probe_argv(command)
+    if probe is None:
+        return None
+    import subprocess
+
+    quoted = " ".join(shlex.quote(token) for token in probe)
+    if kind == "lammps":
+        quoted += " -h"
+    script = "\n".join([*setup, f"exec {quoted}"])
+    try:
+        with tempfile.TemporaryDirectory(prefix=f"slab-{kind}-version-") as probe_dir:
+            completed = subprocess.run(
+                ["/bin/bash", "-l", "-c", script],
+                cwd=probe_dir,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=_SETUP_PROBE_TIMEOUT_S,
+                check=False,
+            )
+        if kind == "lammps":
+            match = _LAMMPS_BANNER.search(completed.stdout)
+            return match.group(1).strip() if match else None
+        from ase.calculators.espresso import EspressoProfile
+
+        return str(EspressoProfile.parse_version(completed.stdout))
+    except Exception:
+        return None
 
 
 def _banner_version(command: str) -> str | None:

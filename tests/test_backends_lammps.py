@@ -829,3 +829,25 @@ def test_identity_accepts_singular_files_forms(tmp_path: Path) -> None:
              "pair_coeff": ["1 1 Cu_u3.eam"], "files": form},
         )
         assert identity["files"] == [str(pot)]
+
+
+def test_lammps_setup_wraps_and_cleans_up(tmp_path: Path) -> None:
+    """Same per-engine setup rule as qe: private login-shell wrapper, checked
+    in-shell, removed with the calculator."""
+    bins = tmp_path / "module-bin"
+    bins.mkdir()
+    lmp = bins / "lmp"
+    lmp.write_text("#!/bin/sh\nexit 0\n")
+    lmp.chmod(0o755)
+    setup = [f'export PATH="{bins}:$PATH"']
+    calc = get_calculator("lammps", command="lmp", setup=setup, **POTENTIAL)
+    wrapper = Path(calc.parameters["command"])
+    assert 'exec lmp "$@"' in wrapper.read_text()
+    setup_dir = calc._slab_setup_dir
+    close_calculator(calc)
+    assert not setup_dir.exists()
+    identity = describe_engine("lammps", {"command": "lmp", "setup": setup, **POTENTIAL})
+    assert identity["setup"] == setup
+    assert identity["command"] == "lmp"
+    with pytest.raises(EngineNotAvailableError, match="after its setup lines ran"):
+        get_calculator("lammps", command="lmp", setup=["export PATH=/nowhere"], **POTENTIAL)
