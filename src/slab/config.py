@@ -625,19 +625,27 @@ schema_version = 1
 #                                      # variables to this engine's subprocess
 #                                      # alone (bare VAR=x needs a shell and
 #                                      # is refused; ASE execs argv directly)
-# setup = ["module load qe/7.4", "export OMP_NUM_THREADS=4"]
+# setup = ["module purge", "module load qe/7.4", "export OMP_NUM_THREADS=4"]
 #                                      # THIS engine's dependencies: run in a
 #                                      # private login-shell wrapper around the
 #                                      # engine subprocess only — never job-wide
 #                                      # like [hpc] setup; PATH and version are
-#                                      # then checked inside that same shell
+#                                      # then checked inside that same shell.
+#                                      # That wrapper INHERITS the job's env and
+#                                      # your login profile, so the leading
+#                                      # 'module purge' is how you choose what
+#                                      # this engine starts from — drop it to
+#                                      # build on the job's modules instead
 # pseudo_dir = "/shared/sw/pseudos"    # used when no pseudo_family is given
 
 [engines.lammps]
 # command = "lmp"                      # login-node smoke tests / serial runs
 # command = "srun lmp"                 # inside batch jobs only (same srun rule)
 # command = "env OMP_NUM_THREADS=4 lmp"           # same env-wrapper rule as qe
-# setup = ["module load lammps/2025.07"]          # same per-engine setup rule as qe
+# setup = ["module purge", "module load lammps/2025.07"]
+#                                      # same per-engine setup rule as qe —
+#                                      # purge first so whatever the job (or
+#                                      # your profile) loaded can't reach it
 
 [engines.rootstock]
 # root = "/path/to/rootstock-install"  # a LOCAL rootstock install (the directory

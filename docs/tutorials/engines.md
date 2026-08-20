@@ -258,11 +258,11 @@ engine's own `setup`:
 ```toml
 [engines.qe]
 command = "pw.x"
-setup = ["module load qe/7.4", "export OMP_NUM_THREADS=4"]
+setup = ["module purge", "module load qe/7.4", "export OMP_NUM_THREADS=4"]
 
 [engines.lammps]
 command = "lmp"
-setup = ["module load lammps/2025.07"]
+setup = ["module purge", "module load lammps/2025.07"]
 ```
 
 slab materializes each engine's setup into a private `#!/bin/bash -l`
@@ -279,7 +279,23 @@ logical command, the setup lines, and the setup-resolved binary; the
 wrapper file itself is an implementation detail, created with the
 calculator and removed with it. `setup=` also works per call in
 `calculator_options` (overriding the config's) and inside a registry
-alias's options. The guards look
+alias's options.
+
+The isolation is lateral, not a sandbox: each engine gets its own
+short-lived shell that dies with its subprocess, so one engine's
+`module load` never reaches another — but every one of them starts from
+the *same* base. Three layers arrive in the engine's process, each able to
+override the one before: the driver's environment (whatever `sbatch`
+exported, the `[hpc] setup` lines, the driver's venv, any registry `env`
+values slab applied), then the login profile `bash -l` sources, then your
+`setup` lines last. Note that the profile can rewrite `PATH` before your
+lines run, so don't assume a `PATH` the driver built arrives intact. This
+is why the template leads with `module purge`: it is the line that decides
+what the engine inherits. Drop it to build on the job's modules; keep it
+when the engine's stack must not see them. For a genuinely sealed
+userland, the command seam still takes `apptainer exec ...sif pw.x`.
+
+The guards look
 through the wrapper — plain assignments and env's portable flags (`-i`,
 `-u NAME`) alike: the PATH check judges `pw.x`, not `env` (and when the
 wrapper assigns `PATH=` itself, the payload is resolved under *that* PATH,
