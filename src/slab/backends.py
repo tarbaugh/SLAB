@@ -87,6 +87,7 @@ import re
 import shlex
 import shutil
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -1270,11 +1271,27 @@ def _probe_argv(command: str) -> list[str] | None:
 
 
 _SETUP_PROBE_TIMEOUT_S = 60
-# Successful setup-shell resolutions, memoized per (setup lines, token) —
-# identity stamping and version probes reuse them. Failures are NOT cached:
-# a fixed module farm must be noticed without a process restart, and the
-# refusal wants the shell's own words each time.
-_SETUP_WHICH_CACHE: dict[tuple[tuple[str, ...], str], tuple[str, int]] = {}
+# How long either setup-shell memo below may answer without asking the shell
+# again. Asking costs a login shell — up to _SETUP_PROBE_TIMEOUT_S of one
+# when a profile hangs — and the guards run per get_calculator, so an agent
+# working through a hundred tasks would otherwise spawn a hundred shells.
+# One window, one shell.
+_SETUP_WHICH_TTL_S = 60.0
+# Setup-shell resolutions, memoized per (setup lines, token) as
+# (recorded, path). Only the RESOLUTION is memoized, never the mtime: that
+# is re-read on every hit, so a binary rebuilt in place lands in the next
+# cache identity exactly as it does without setup lines (where every token
+# is stat'ed per call). What the TTL covers is the part a stat cannot see —
+# a module farm that REPOINTS the name at a different path, learnable only
+# by asking the shell again. Editing the setup lines changes the key and
+# re-resolves at once, so the fast way to retry is to change what you retry.
+_SETUP_WHICH_CACHE: dict[tuple[tuple[str, ...], str], tuple[float, str]] = {}
+# Refusals, memoized under the same key and the same window. A refusal has
+# none of the staleness signal a success has — no resolved path, so nothing
+# to stat — which is exactly why it is remembered for a bounded window
+# rather than cached: a module farm fixed under unchanged setup lines would
+# otherwise be refused until the process restarts.
+_SETUP_WHICH_FAIL_CACHE: dict[tuple[tuple[str, ...], str], tuple[float, str]] = {}
 
 
 def _engine_setup(per_call: Any, engine: str) -> tuple[str, ...]:
@@ -1331,11 +1348,26 @@ def _setup_which(setup: tuple[str, ...], token: str) -> tuple[tuple[str, int] | 
     With setup lines in play the process PATH proves nothing — the module
     load may be exactly what provides the binary — so existence is answered
     the only honest way: the same login shell the wrapper will use.
+
+    Both outcomes are memoized for :data:`_SETUP_WHICH_TTL_S`
+    (:data:`_SETUP_WHICH_CACHE`, :data:`_SETUP_WHICH_FAIL_CACHE`). A hit on
+    the resolution still re-reads the binary's mtime, so only the shell call
+    is saved; a hit on the refusal is marked as remembered.
     """
     key = (setup, token)
     cached = _SETUP_WHICH_CACHE.get(key)
     if cached is not None:
-        return cached, ""
+        recorded, path = cached
+        if time.monotonic() - recorded < _SETUP_WHICH_TTL_S:
+            return (path, _mtime_ns(path)), ""  # the stat is cheap; the shell is not
+        del _SETUP_WHICH_CACHE[key]
+    remembered = _SETUP_WHICH_FAIL_CACHE.get(key)
+    if remembered is not None:
+        recorded, detail = remembered
+        if time.monotonic() - recorded < _SETUP_WHICH_TTL_S:
+            ttl = int(_SETUP_WHICH_TTL_S)
+            return None, f"{detail} (remembered; re-probed at most once every {ttl}s)"
+        del _SETUP_WHICH_FAIL_CACHE[key]
     import subprocess
 
     script = "\n".join([*setup, f"command -v {shlex.quote(token)}"])
@@ -1349,18 +1381,39 @@ def _setup_which(setup: tuple[str, ...], token: str) -> tuple[tuple[str, int] | 
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as e:
-        return None, str(e)
+        return _remember_setup_failure(key, str(e))
     stdout = completed.stdout.strip()
     resolved = stdout.splitlines()[-1] if stdout else ""  # profiles may chatter above
     if completed.returncode != 0 or not resolved.startswith("/"):
         tail = (completed.stderr or completed.stdout).strip().splitlines()
-        return None, (tail[-1] if tail else "the setup shell gave no detail")
+        detail = tail[-1] if tail else "the setup shell gave no detail"
+        return _remember_setup_failure(key, detail)
+    _SETUP_WHICH_CACHE[key] = (time.monotonic(), resolved)
+    _SETUP_WHICH_FAIL_CACHE.pop(key, None)
+    return (resolved, _mtime_ns(resolved)), ""
+
+
+def _mtime_ns(path: str) -> int:
+    """``st_mtime_ns`` for *path*, or -1 when it cannot be stat'ed.
+
+    The sentinel keeps an unreadable binary describable: it still enters the
+    identity, as one whose mtime is unknown rather than as no binary at all.
+    """
     try:
-        mtime_ns = os.stat(resolved).st_mtime_ns
+        return os.stat(path).st_mtime_ns
     except OSError:
-        mtime_ns = -1
-    _SETUP_WHICH_CACHE[key] = (resolved, mtime_ns)
-    return (resolved, mtime_ns), ""
+        return -1
+
+
+def _remember_setup_failure(key: tuple[tuple[str, ...], str], detail: str) -> tuple[None, str]:
+    """Record a refusal against *key*; return it with the shell's own words.
+
+    The caller that actually ran the probe gets those words verbatim; a
+    repeat inside the TTL gets them back from the memo, marked as remembered
+    so a refusal is never mistaken for a fresh reading of the environment.
+    """
+    _SETUP_WHICH_FAIL_CACHE[key] = (time.monotonic(), detail)
+    return None, detail
 
 
 def _setup_probe_token(command: str) -> str | None:
@@ -1779,9 +1832,11 @@ def _setup_shell_version(setup: tuple[str, ...], command: str, *, kind: str) -> 
 
     The module load may provide the binary — and the libraries it needs to
     even start — so with setup lines the probe must run where the engine
-    will. Keyed on the setup-resolved binary's path+mtime, so a module swap
-    re-probes. Never raises; every failure degrades to None (the identity
-    then carries the setup lines and the resolved fingerprint instead).
+    will. Keyed on the setup-resolved binary's path+mtime, so a binary
+    rebuilt in place re-probes at once and a module farm that repoints the
+    name re-probes within :data:`_SETUP_WHICH_TTL_S`. Never raises; every
+    failure degrades to None (the identity then carries the setup lines and
+    the resolved fingerprint instead).
     """
     token = _setup_probe_token(command)
     if token is None:

@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import pytest
 from ase.build import bulk
 
-from slab import EngineNotAvailableError, ExecutionStatus, Workspace
+from slab import EngineNotAvailableError, ExecutionStatus, Workspace, backends
 from slab.backends import (
     _error_blocks,
     _qe_version,
@@ -970,6 +970,128 @@ def test_qe_setup_failure_is_loud_with_the_shells_words(tmp_path: Path) -> None:
             setup=["echo module load qe/9.9 failed >&2"],
             input_data={"system": {"ecutwfc": 30.0}},
         )
+
+
+def test_qe_setup_failure_is_remembered_briefly_then_re_probed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refusal costs a login shell — up to the probe timeout of one — and
+    the guard runs per calculator, so an agent retrying a typo'd module name
+    would pay for one on every task. The refusal is remembered instead, and
+    only for a TTL: a failure has none of the staleness signal a success has
+    (no resolved path, so no mtime to fold into identity)."""
+    monkeypatch.setattr(backends, "_SETUP_WHICH_CACHE", {})
+    monkeypatch.setattr(backends, "_SETUP_WHICH_FAIL_CACHE", {})
+    probes = tmp_path / "probes"
+    setup = [f'echo probe >> "{probes}"']
+
+    def refuse() -> str:
+        match = "after its setup lines ran"
+        with pytest.raises(EngineNotAvailableError, match=match) as excinfo:
+            get_calculator(
+                "qe",
+                command="definitely-not-pw",
+                pseudo_dir=str(tmp_path),
+                setup=setup,
+                input_data={"system": {"ecutwfc": 30.0}},
+            )
+        return str(excinfo.value)
+
+    first = refuse()
+    assert probes.read_text().count("probe") == 1
+    assert "remembered" not in first  # the shell's own words, freshly read
+
+    second = refuse()  # inside the TTL: no second login shell is spawned
+    assert probes.read_text().count("probe") == 1
+    assert "remembered" in second  # and it says so, rather than posing as fresh
+
+    monkeypatch.setattr(backends, "_SETUP_WHICH_TTL_S", 0.0)
+    third = refuse()  # TTL lapsed: the environment is asked again
+    assert probes.read_text().count("probe") == 2
+    assert "remembered" not in third
+
+
+def test_qe_setup_recovers_when_the_module_farm_is_fixed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Why the refusal is remembered and not cached: a binary that appears
+    behind unchanged setup lines is found once the TTL lapses, with no
+    process restart — and the refusal is forgotten rather than left to
+    shadow the success."""
+    monkeypatch.setattr(backends, "_SETUP_WHICH_CACHE", {})
+    monkeypatch.setattr(backends, "_SETUP_WHICH_FAIL_CACHE", {})
+    bins = tmp_path / "module-bin"
+    bins.mkdir()
+    setup = [f'export PATH="{bins}:$PATH"']
+    options = {
+        "command": "pw.x",
+        "pseudo_dir": str(tmp_path),
+        "setup": setup,
+        "input_data": {"system": {"ecutwfc": 30.0}},
+    }
+    with pytest.raises(EngineNotAvailableError, match="after its setup lines ran"):
+        get_calculator("qe", **options)
+
+    _script(bins / "pw.x", 'echo "     Program PWSCF v.7.4.9 starts"\n')
+    monkeypatch.setattr(backends, "_SETUP_WHICH_TTL_S", 0.0)
+
+    calc = get_calculator("qe", **options)
+    close_calculator(calc)
+    key = (tuple(setup), "pw.x")
+    assert key in backends._SETUP_WHICH_CACHE
+    assert key not in backends._SETUP_WHICH_FAIL_CACHE
+
+
+def test_setup_resolution_restats_but_memoizes_the_shell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the login shell is memoized, never the mtime. A binary rebuilt in
+    place must reach the next cache identity exactly as it does without setup
+    lines — otherwise a rebuilt pw.x would keep serving results keyed to the
+    binary it replaced."""
+    monkeypatch.setattr(backends, "_SETUP_WHICH_CACHE", {})
+    monkeypatch.setattr(backends, "_SETUP_WHICH_FAIL_CACHE", {})
+    bins, setup = _pw_behind_setup(tmp_path)
+    probes = tmp_path / "probes"
+    setup = [f'echo probe >> "{probes}"', *setup]
+
+    first = backends._setup_which(tuple(setup), "pw.x")[0]
+    assert first is not None
+    _script(bins / "pw.x", 'echo "     Program PWSCF v.8.0 starts"\n')
+    os.utime(bins / "pw.x", (0, 0))  # a rebuild, at the same path
+
+    second = backends._setup_which(tuple(setup), "pw.x")[0]
+    assert second is not None
+    assert second[0] == first[0]  # same path, resolved once
+    assert second[1] != first[1]  # fresh mtime, so the identity moves
+    assert probes.read_text().count("probe") == 1  # and no second login shell
+
+
+def test_setup_resolution_re_resolves_when_the_window_lapses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stat cannot see a module farm REPOINT the name at a different path —
+    only the shell can, so the memo asks it again once the window lapses."""
+    monkeypatch.setattr(backends, "_SETUP_WHICH_CACHE", {})
+    monkeypatch.setattr(backends, "_SETUP_WHICH_FAIL_CACHE", {})
+    old_bins = tmp_path / "old-bin"
+    new_bins = tmp_path / "new-bin"
+    for bins in (old_bins, new_bins):
+        bins.mkdir()
+        _script(bins / "pw.x", 'echo "     Program PWSCF v.7.4.9 starts"\n')
+    pointer = tmp_path / "which-bin"
+    pointer.write_text(str(old_bins))
+    setup = (f'export PATH="$(cat {pointer}):$PATH"',)
+
+    first = backends._setup_which(setup, "pw.x")[0]
+    assert first is not None and first[0] == str(old_bins / "pw.x")
+
+    pointer.write_text(str(new_bins))
+    assert backends._setup_which(setup, "pw.x")[0] == first  # inside the window
+
+    monkeypatch.setattr(backends, "_SETUP_WHICH_TTL_S", 0.0)
+    third = backends._setup_which(setup, "pw.x")[0]
+    assert third is not None and third[0] == str(new_bins / "pw.x")
 
 
 def test_qe_setup_conflicts_with_profile(tmp_path: Path) -> None:

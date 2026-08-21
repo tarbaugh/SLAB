@@ -130,6 +130,28 @@ the automatic outcome and *keeping* is the deliberate one-command act
 The archive converges toward being a set of things someone chose, each
 carrying the reason it was chosen.
 
+**The vocabulary for this is not ours.** Shi, Zhang and Cui's *A Programming
+Paradigm for Spatiotemporal Composability* (2026) draws the distinction the
+lifecycle rests on, in a setting far from materials science — runtime plugin
+composition. Every outward operation splits into an **acquisition**, which
+installs a record inside the system's boundary and can therefore be reverted,
+and an **emission**, which pushes data across that boundary and cannot. A
+converged structure written into a workspace is an emission. Their claim is
+that a system facing one has exactly two recoveries available: **withholding**
+it until the state that produced it is certain to persist — the output commit
+problem of rollback recovery — or **compensation**, an action restoring the
+state up to an equivalence the application itself supplies.
+
+SLAB uses both, and the lifecycle is where they are spelled out. Quarantine is
+withholding: results exist and are readable, but nothing about them is durable
+until promotion commits the output — which is why promotion is one explicit
+command and not a flag set at submission. TTL expiry is compensation. It is not
+a true inverse, the compute being genuinely gone, but a restoration up to the
+equivalence §4 defines, in which a hash and a recipe are what "the same result"
+means. Naming the two makes the asymmetry above a design *choice* rather than a
+preference: the totality model withholds nothing and compensates for nothing,
+so the only lever it has left is a deletion nobody ever performs.
+
 Deletion of promoted data is intentionally hard (there is no CLI verb for it);
 expiry of unpromoted data is intentionally silent. Both halves are the same
 design decision.

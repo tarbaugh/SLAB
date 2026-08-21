@@ -50,6 +50,69 @@ cluster config surfaces at load, never silently configures nothing. Path
 values expand `~` and `${VAR}`, and an **unset** variable is a loud error
 (`os.path.expandvars` would quietly leave `$USRE` literal).
 
+## When an edit takes effect
+
+Configuration is **re-read, not loaded once**: every layer of `slab.toml`
+and the `engines.json` registry are parsed on each lookup, so an edit is
+live for the next call — no reload command, no restart. What does *not*
+re-read is the short list of memos SLAB keeps so that a task does not pay
+for a login shell or a version probe every time it runs. Those are what a
+long-lived process (`slab serve`, a Mason session) can hold past their
+truth, and they are the only reason to ever restart one.
+
+| you changed | picked up |
+|---|---|
+| any value, in any `slab.toml` layer | next call — the file is re-parsed each lookup |
+| an `engines.json` registry entry | next call — likewise |
+| `[engines.X] setup` lines | next call — the lines *are* the memo key |
+| an engine binary, rebuilt at the same path | next call — its mtime is re-read every time |
+| a module that was missing and is now installed | within 60s |
+| a module farm repointing a name at a different path | within 60s |
+| a registry entry's `env` values | restart |
+
+The last four rows are the ones worth understanding.
+
+**A refusal is remembered for 60 seconds.** Answering "is `pw.x` on PATH
+once the modules load?" honestly costs a login shell, and the check runs
+per calculator — so an agent retrying a typo'd module name would spawn one
+on every task, each able to hang for the full probe timeout. The refusal is
+memoized instead, and a repeat inside the window says so rather than posing
+as a fresh reading:
+
+<!-- no-verify -->
+```text
+engine 'qe': after its setup lines ran, 'pw.x' is still not on PATH —
+/bin/bash: line 1: module: command not found (remembered; re-probed at most
+once every 60s). Check [engines.qe] setup (module name? shell error?)
+```
+
+The window is short because a refusal has no other way of being noticed:
+fix the module farm under unchanged `setup` lines and the next probe after
+the window finds it. Editing the `setup` lines changes the memo key and
+re-probes at once, so the fast way to retry is to change what you are
+retrying.
+
+**Behind `setup` lines, only the shell call is memoized — never the
+answer's mtime.** Without `setup` lines the binaries a command names are
+stat'ed on every call, so replacing one lands in the next cache identity and
+re-probes the version. Behind `setup` lines, asking *where* `pw.x` is costs
+a login shell, so that resolution is memoized for the window — but the
+binary's mtime is re-read on every use, which means a rebuild at the same
+path reaches the next cache identity just as it does without `setup` lines.
+What the window covers is the part no `stat` can see: a farm that repoints
+the name at a *different* path, learnable only by asking the shell again.
+This matters only for long-lived processes anyway; a `slab` CLI call is a
+fresh process and always re-resolves.
+
+**Registry `env` values are applied process-wide and never withdrawn.**
+`build_engine` writes an entry's `env` into the driver's environment,
+because in-process ASE calculators read it when they calculate rather than
+when they are built. Nothing reverts it, so switching a long-lived process
+between engines whose entries disagree on a variable leaves the first
+engine's value standing — SLAB warns when it happens. `slab.hpc.submit`
+restores the pre-registry environment before handing it to `sbatch`, so a
+submitted job never inherits the residue.
+
 ## What goes in it
 
 ```toml
