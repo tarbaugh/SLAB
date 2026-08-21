@@ -1,31 +1,32 @@
 # Debugging failures
 
 When a run fails, SLAB does not retry, restart, or route the error anywhere.
-It captures structured evidence — exception, trimmed traceback, diagnostic
-notes, the scratch data that explains what happened — and stops.
+It captures structured evidence and stops. The evidence is the exception, a
+trimmed traceback, diagnostic notes, and the scratch data that explains what
+happened.
 
 ## Evidence, not protocol
 
-AiiDA-style engines treat failure as a dispatch problem: a calculation exits
+AiiDA-style engines treat failure as a dispatch problem. A calculation exits
 with a code, and the code routes to a predefined restart handler written by
 whoever anticipated that failure mode. That design assumes the set of
 corrections is enumerable in advance.
 
-SLAB's user is an LLM agent (or a human at a terminal) that can improvise a
-*niche* correction — shrink the perturbation, switch the engine, loosen a
-threshold — **if** it can see what actually happened. So the contract is
-evidence delivery: failed runs and tasks carry a structured `failure` record,
-and delivery is tiered so listings stay cheap. `slab list` shows a one-line
-`error` per run; `slab show <id>` fetches the full record for the one run you
-are actually debugging.
+SLAB's user is an LLM agent, or a human at a terminal. Either one can
+improvise a niche correction, such as a smaller perturbation, a different
+engine, or a looser threshold, if it can see what actually happened. So the
+contract is evidence delivery. Failed runs and tasks carry a structured
+`failure` record, and delivery is tiered so that listings stay cheap.
+`slab list` shows a one-line `error` per run. `slab show <id>` fetches the
+full record for the one run you are debugging.
 
 ## A failing task
 
-The evidence channel is plain [PEP 678](https://peps.python.org/pep-0678/):
-`Exception.add_note`. No SLAB import, no special error type — annotate the
-exception at the point of failure, where the diagnostic values are still in
-scope, and the tracer does the rest. Here is a task standing in for an engine
-call that diverges:
+The evidence channel is plain [PEP 678](https://peps.python.org/pep-0678/),
+`Exception.add_note`. There is no SLAB import and no special error type.
+Annotate the exception at the point of failure, where the diagnostic values
+are still in scope, and the tracer does the rest. Here is a task that stands
+in for an engine call that diverges:
 
 ```python
 from slab import Workspace, task
@@ -49,15 +50,15 @@ except RuntimeError as exc:
 caught: SCF failed to converge in 200 iterations
 ```
 
-The exception propagated normally — SLAB never swallows your errors — but on
-the way out, two things were recorded: the task's record was marked failed
-with the evidence attached, and the run itself was marked failed.
+The exception propagated normally. SLAB never swallows your errors. On the
+way out, SLAB recorded two things. It marked the task's record failed with
+the evidence attached, and it marked the run itself failed.
 
 ## Reading the record
 
 The failed task record carries a one-line `error` for listings and a
-structured `failure` dict for debugging — `type`, `message`, `traceback`, and
-`notes`:
+structured `failure` dict for debugging. The dict holds `type`, `message`,
+`traceback`, and `notes`:
 
 ```python
 record = ws.runs.list_tasks(run.id)[0]
@@ -79,14 +80,20 @@ kpts=4; residual stopped decreasing after iteration 120
 ```
 
 The record is information-rich but token-bounded, because its consumer reads
-it verbatim. The traceback keeps the entry point and the failure site of each
-contiguous frame group (first 3 and last 5 frames) and elides deep middles
-with a `[... N frame(s) elided ...]` marker; every message piece is clipped at
-2000 characters so a giant exception message can never crowd out the frames;
-the whole text caps at 10000 characters, keeping the *end* of a long exception
-chain. Notes are capped at 10. Notes also appear at the end of the formatted
-traceback (that is standard PEP 678 rendering), but listing them separately in
-`notes` means a reader can act on them without parsing the traceback at all.
+it verbatim. The bounds:
+
+- The traceback keeps the entry point and the failure site of each
+  contiguous frame group (the first 3 and last 5 frames) and elides deep
+  middles with a `[... N frame(s) elided ...]` marker.
+- Every message piece is clipped at 2000 characters, so a giant exception
+  message can never crowd out the frames.
+- The whole text is capped at 10000 characters, and the cap keeps the end
+  of a long exception chain.
+- Notes are capped at 10.
+
+Notes also appear at the end of the formatted traceback, which is standard
+PEP 678 rendering. But the separate `notes` list means a reader can act on
+them without parsing the traceback at all.
 
 The run carries the same evidence. When an exception escapes the
 `start_run` block, the run is marked `failed`, checks are skipped, and the
@@ -105,26 +112,27 @@ RuntimeError: SCF failed to converge in 200 iterations
 True
 ```
 
-Note the lifecycle state: still `quarantined`. Failure is an execution
-status, not a lifecycle state — the failed run sits in quarantine like any
+Note the lifecycle state. It is still `quarantined`. Failure is an execution
+status, not a lifecycle state. The failed run sits in quarantine like any
 other unverified run, fully inspectable until it expires.
 
 ## What `relax` does for you
 
 The built-in [relax task](engines.md) applies the same pattern with domain
-knowledge added. On a mid-optimization crash — an engine exception, a worker
-dying — it captures the evidence before the scratch directory vanishes:
+knowledge added. On a crash in the middle of an optimization, such as an
+engine exception or a dying worker, it captures the evidence before the
+scratch directory vanishes:
 
 - The exception gets a note with the completed step count and the last
   trajectory frame's energy and residual force.
 - Inside a run, the partial trajectory is kept as an artifact named
-  `{label or 'relax'}-failed.traj` — so you can see whether the structure flew
-  apart or the energy oscillated, frame by frame.
-- Untraced calls (outside `start_run`) still get the note; there is just no
+  `{label or 'relax'}-failed.traj`. So you can see whether the structure
+  flew apart or the energy oscillated, frame by frame.
+- Untraced calls (outside `start_run`) still get the note. There is just no
   artifact store to keep the trajectory in.
-- `single_point` shares the same contract minus the trajectory (nothing is
-  optimized): engine error notes on the exception, and the engine's own files
-  kept as `{label or 'single-point'}-failed.*`.
+- `single_point` shares the same contract minus the trajectory, because
+  nothing is optimized. It puts engine error notes on the exception and
+  keeps the engine's own files as `{label or 'single-point'}-failed.*`.
 
 <!-- no-verify -->
 ```python
@@ -141,31 +149,35 @@ frame: E=-0.018471 eV, max|F|=0.3032 eV/Å; partial trajectory kept as
 artifact 'cu-failed.traj'"]
 ```
 
-That note alone often decides the correction: a residual force of 0.3 eV/Å
-after 3 steps on a gently rattled crystal says "engine hiccup, retry or switch
-engine"; a max|F| in the hundreds says "structure is unphysical, fix the
-input". Diagnostics capture is best-effort and never masks the original
-error — if keeping the trajectory itself fails (disk full), the note says so
-and the original exception still propagates.
+That note alone often decides the correction. A residual force of 0.3 eV/Å
+after 3 steps on a gently rattled crystal says "engine hiccup: retry, or
+switch engine". A max|F| in the hundreds says "the structure is unphysical:
+fix the input". Diagnostics capture is best-effort and never masks the
+original error. If keeping the trajectory itself fails (disk full), the note
+says so, and the original exception still propagates.
 
 ## When the engine writes files
 
 In-process engines fail as Python exceptions with meaningful messages.
-File-IO engines fail with the story somewhere else entirely.
+File-IO engines fail with the explanation somewhere else entirely.
 [Quantum ESPRESSO](engines.md#quantum-espresso) fails as a bare
-`CalledProcessError: ... returned non-zero exit status 2` — `pw.x` wrote the
-actual story to files in a scratch directory that is about to vanish.
-[LAMMPS](engines.md#lammps) is one step worse: `lammpsrun` raises the real
-`ERROR: ...` inside a reader *thread*, where no caller can catch it, and
+`CalledProcessError: ... returned non-zero exit status 2`. `pw.x` wrote the
+actual explanation to files in a scratch directory that is about to vanish.
+[LAMMPS](engines.md#lammps) is one step worse. `lammpsrun` raises the real
+`ERROR: ...` inside a reader thread, where no caller can catch it, and
 Python sees only `RuntimeError: Failed to retrieve any thermo_style-output`.
-So the failure path reads the story back out of the retained files: QE's
-fenced `Error in routine ...` block (or, when there is no block, flagged
-stop lines and the output tail, plus stderr) becomes notes, and the engine's
-input/output/`CRASH` files are kept as artifacts; LAMMPS's `ERROR` line(s)
-become notes with one line of preceding context — the echoed command that
-died, or the last thermo row before a blow-up — and the input/log/data files
-are kept. A LAMMPS potential file that cannot be opened, captured from a
-real run:
+
+So the failure path reads the explanation back out of the retained files:
+
+- For QE, the fenced `Error in routine ...` block becomes notes. When there
+  is no block, the flagged stop lines, the output tail, and stderr become
+  notes instead. The engine's input, output, and `CRASH` files are kept as
+  artifacts.
+- For LAMMPS, the `ERROR` line(s) become notes, with one line of preceding
+  context. That line is the echoed command that died, or the last thermo
+  row before a blow-up. The input, log, and data files are kept.
+
+A LAMMPS potential file that cannot be opened, captured from a real run:
 
 <!-- no-verify -->
 ```text
@@ -177,8 +189,8 @@ notes:
 - engine log context (log_lammps00000113gc6gof): pair_coeff 1 1 Cu_u3.eam
 ```
 
-And a missing pseudopotential file, captured from a real `pw.x` run (paths
-shortened):
+And a missing pseudopotential file, captured from a real `pw.x` run, with
+paths shortened:
 
 <!-- no-verify -->
 ```text
@@ -190,24 +202,25 @@ notes:
 - engine files kept as artifacts: 'si-failed.pwi', 'si-failed.pwo', 'si-failed.err'
 ```
 
-And the classic — an SCF that cannot converge (here capped at one iteration),
-which QE reports *without* a fenced error block:
+And the classic case, an SCF that cannot converge (here capped at one
+iteration). QE reports it without a fenced error block:
 
 <!-- no-verify -->
 ```text
 - engine output flagged (espresso.pwo): convergence NOT achieved after   1 iterations: stopping
 ```
 
-"Exit status 2" invites a blind retry; "smearing is needed" or "convergence
+"Exit status 2" invites a blind retry. "smearing is needed" or "convergence
 NOT achieved" is a correction an agent can actually compute. The kept
-`si-failed.pwi` is the exact input that crashed — reproducible outside SLAB
-with nothing but `pw.x`.
+`si-failed.pwi` is the exact input that crashed. You can reproduce it outside
+SLAB with nothing but `pw.x`.
 
 ## Checks as correction inputs
 
-A run that *completes* but fails [verification](verification.md) is the other
-debugging case. Check results store the `observed`/`expected` values their
-assertions compared — the numbers a correction is computed from:
+A run that completes but fails [verification](verification.md) is the other
+debugging case. Check results store the `observed` and `expected` values
+their assertions compared. Those are the numbers a correction is computed
+from:
 
 ```python
 from slab import check, converged
@@ -232,8 +245,8 @@ observed: 0.062  expected: {'below': 0.05}
 quarantined
 ```
 
-"fmax was 0.062 against 0.05" is enough to compute the fix — rerun with more
-steps, or a tighter optimizer — without re-reading the workflow.
+"fmax was 0.062 against 0.05" is enough to compute the fix, such as a rerun
+with more steps or a tighter optimizer, without re-reading the workflow.
 
 !!! note
     Failure diagnostics self-clean. Failed runs sit in quarantine under the
@@ -244,10 +257,10 @@ steps, or a tighter optimizer — without re-reading the workflow.
 
 ## The surfaces
 
-`slab show` renders each traceback under its owner: the run's `failure`
-prints at run level *unless* a failed task carries the same exception (the
-usual case — it propagated), in which case it renders once, under that task.
-For the failed relax run above:
+`slab show` renders each traceback under its owner. The run's `failure`
+prints at run level, unless a failed task carries the same exception. That
+is the usual case, because the exception propagated. Then it renders once,
+under that task. For the failed relax run above:
 
 <!-- no-verify -->
 ```text
@@ -277,10 +290,10 @@ run 01k...  cu-relax
     cu-failed.traj  intermediate  3581B  bytes  8c700c74ed78
 ```
 
-`slab show <id> --json` emits the same details machine-readably — `failure`
-keys on the run and on each task, `observed`/`expected` on each check. Agents
-get identical structures without the CLI: the MCP `show_run` tool returns this
-JSON, and `launch_workflow` returns the `failure` record directly in its
-result when a launched script fails — see [Agents over MCP](agents-mcp.md).
-The philosophy behind the whole arrangement is argued in
-[Architecture](../architecture.md).
+`slab show <id> --json` emits the same details in machine-readable form. It
+has `failure` keys on the run and on each task, and `observed` and
+`expected` on each check. Agents get identical structures without the CLI.
+The MCP `show_run` tool returns this JSON, and `launch_workflow` returns the
+`failure` record directly in its result when a launched script fails. See
+[Agents over MCP](agents-mcp.md). The philosophy behind the whole arrangement
+is argued in [Architecture](../architecture.md).

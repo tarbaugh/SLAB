@@ -1,29 +1,33 @@
 # Quickstart
 
-The whole SLAB loop in five minutes: relax a structure inside a traced run, watch
-verification gate it out of quarantine, promote it to permanent, and clean up.
-Plain Python, no daemon, no configuration.
+This page shows the whole SLAB loop in five minutes. You relax a structure
+inside a traced run, verify it out of quarantine, promote it to permanent,
+and clean up. It is plain Python, with no daemon and no configuration.
 
 ## Install
 
-SLAB needs Python ≥ 3.11. The core install brings `pydantic`, `typer`, and `ase` —
-enough for everything on this page, because the EMT engine ships with ASE:
+SLAB needs Python ≥ 3.11. The core install brings `pydantic`, `typer`, and
+`ase`. That is enough for everything on this page, because the EMT engine
+ships with ASE:
 
 <!-- no-verify -->
 ```bash
 pip install -e .
 ```
 
-There is nothing to configure. A workspace is a directory holding a SQLite file
-and a content-addressed store, created on first use.
+You configure nothing. A workspace is a directory that holds a SQLite file
+and a content-addressed store. SLAB creates it on first use.
 
 ## Run, check, keep
 
-Build a rattled Cu supercell, open a workspace, and do a relaxation inside a run.
-Three things happen in the `with` block: the `relax` call is traced (inputs hashed,
-results cached, the trajectory recorded), the `@check` registers a verification
-hook, and `run.keep` declares which value is a *terminal* artifact — the thing
-promotion will later preserve.
+Build a rattled Cu supercell, open a workspace, and relax it inside a run.
+Three things happen in the `with` block:
+
+- The `relax` call is traced. SLAB hashes the inputs, caches the result, and
+  records the trajectory.
+- The `@check` registers a verification hook.
+- `run.keep` declares which value is a terminal artifact. A terminal
+  artifact is what promotion will later preserve.
 
 ```python
 from ase.build import bulk
@@ -55,30 +59,32 @@ E = -0.213682 eV  fmax = 0.0435  steps = 11
 state = verified  status = completed
 ```
 
-The numbers are reproducible — the rattle seed is fixed and EMT is deterministic.
-The `intent` is narrative provenance: *why* this run exists, stored on the run and
-shown in every listing.
+The numbers reproduce exactly, because the rattle seed is fixed and EMT is
+deterministic. The `intent` is narrative provenance. It states why this run
+exists. SLAB stores it on the run and shows it in every listing.
 
 ## Verification is earned
 
-The run was born `quarantined` — every run is. On exit from the `with` block the
-runtime evaluated the registered check, stored its result (including the observed
-and expected values: `fmax=0.0434817 < 0.05`), and only because every assertion
-passed did the run move `quarantined -> verified`. A run with zero checks stays
-quarantined forever: verification is earned, never defaulted. If the block had
-raised, the run would be marked `failed` with a structured failure record and
-simply age out.
+The run was born `quarantined`, like every run. When the `with` block exits,
+the runtime evaluates each registered check and stores its result, including
+the observed and expected values (`fmax=0.0434817 < 0.05`). The run moves
+`quarantined -> verified` only because every assertion passed.
+
+A run with zero checks stays quarantined forever. Verification is earned,
+never defaulted. If the block raises, SLAB marks the run `failed` with a
+structured failure record, and the run ages out.
 
 !!! note
     Rerunning this script is also the resume mechanism. `relax` is content-hash
-    cached on its inputs (structure, engine, parameters), so a second execution
-    replays the cached result in milliseconds and gets on with whatever comes next.
+    cached on its inputs (structure, engine, parameters). A second execution
+    replays the cached result in milliseconds and continues from there.
 
 ## Promote what matters
 
-Nothing so far is permanent. `verified` means "the machine-checkable claims held" —
-whether the result *matters* is your decision, made now, after seeing it. Promotion
-is the only thing that makes data permanent, and it wants a reason:
+Nothing so far is permanent. `verified` means the machine-checkable claims
+held. Whether the result matters is your decision, and you make it now,
+after you see the result. Promotion is the only action that makes data
+permanent, and it records a reason:
 
 ```python
 promoted = ws.runs.transition(run.id, "promoted", reason="quickstart result worth keeping")
@@ -89,14 +95,15 @@ print(f"state = {promoted.state.value}")
 state = promoted
 ```
 
-Promoted runs cannot expire — the transition does not exist in the lifecycle, and
-a retention policy that tries to attach a TTL to `promoted` fails validation.
+Promoted runs cannot expire. The transition does not exist in the lifecycle,
+and a retention policy that puts a TTL on `promoted` fails validation.
 
 ## Housekeeping
 
-Everything you never promote silently expires. Cleanup is two-phase: `expire_due`
-flips overdue unpromoted runs to `expired` (a state change only), then `gc` drops
-every artifact byte no retention rule demands:
+Everything you never promote expires automatically. Cleanup has two phases.
+First, `expire_due` moves overdue unpromoted runs to `expired`. That is a
+state change only. Then `gc` drops every artifact byte that no retention
+rule demands:
 
 ```python
 expired = ws.expire_due()
@@ -109,19 +116,20 @@ ws.close()
 expired 0 run(s); dropped 2 blob(s), kept 6
 ```
 
-Nothing expired — our only run is promoted, and the default TTLs (30 days
-quarantined, 90 verified) are nowhere near due. But `gc` still reclaimed bytes:
-retention is tiered by artifact *role*, and even a promoted run keeps full bytes
-only for **terminal** artifacts and **input** roots. The intermediate BFGS
-trajectory (`relax.traj`) was hash-and-discarded — its content hash and complete
-recipe stay on the run forever, so it remains queryable and recomputable. The
-full model is in [Lifecycle and retention](lifecycle-and-retention.md).
+Nothing expired. The only run is promoted, and the default TTLs (30 days
+quarantined, 90 days verified) are not due. But `gc` still reclaimed bytes.
+Retention is tiered by artifact role, and even a promoted run keeps full
+bytes only for **terminal** artifacts and **input** roots. The intermediate
+BFGS trajectory (`relax.traj`) was hash-and-discarded. Its content hash and
+complete recipe stay on the run forever, so it remains queryable and
+recomputable. The full model is in
+[Lifecycle and retention](lifecycle-and-retention.md).
 
 ## The same loop from the CLI
 
-Every verb goes through the same operations layer as the Python API. Zero-ceremony
-scripts (no `start_run` of their own) launch with `slab run` and land in
-quarantine; the rest of the loop is one command each:
+Every verb goes through the same operations layer as the Python API. A
+zero-ceremony script has no `start_run` of its own. It launches with
+`slab run` and lands in quarantine. The rest of the loop is one command each:
 
 <!-- no-verify -->
 ```bash
@@ -133,7 +141,8 @@ slab expire --older-than 0d                 # everything unpromoted, now
 slab gc
 ```
 
-`slab show` prints state, intent, checks with their compared values, tasks,
-artifacts (with `bytes` vs `hash-only` presence), and the full transition history.
-Agents get the identical surface as MCP tools — see [Agents and MCP](agents-mcp.md),
-and [Engines](engines.md) for swapping EMT for MACE or cluster-served codes.
+`slab show` prints the state, the intent, the checks with their compared
+values, the tasks, the artifacts (with `bytes` or `hash-only` presence), and
+the full transition history. Agents get the identical surface as MCP tools.
+See [Agents over MCP](agents-mcp.md). To swap EMT for MACE or a
+cluster-served code, see [Engines](engines.md).

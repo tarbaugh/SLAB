@@ -1,33 +1,40 @@
 # Caching & resume
 
-SLAB has no `--resume` flag, no checkpoint files, no restart handlers. Rerunning
-the script *is* the resume mechanism: every `@task` call is content-hash cached
-across runs in a workspace, so finished work is skipped and the script picks up
-exactly where it died.
+SLAB has no `--resume` flag, no checkpoint files, and no restart handlers.
+Rerunning the script is the resume mechanism. Every `@task` call is
+content-hash cached across runs in a workspace, so finished work is skipped
+and the script continues exactly where it died.
 
 ## The model
 
 Inside a run, each `@task` call serializes its bound arguments (defaults
-applied), content-hashes them into the workspace's artifact store, and computes
-a cache key fingerprinting everything that determines the result: the
-function's module and qualname, a hash of its source, a hash of its *bytecode*
-(so REPL- and `exec`-defined functions are covered too), the fingerprint of
-every closure cell value, the resolved versions of any declared engines, the
-task's `cache_extra` contribution, and the input hashes. If a completed task
-with the same key exists — from any earlier run in the workspace — and its
-output bytes are still present, the stored outputs are returned without
-executing.
+applied), content-hashes them into the workspace's artifact store, and
+computes a cache key. The key fingerprints everything that determines the
+result:
 
-Two honesty rules bound the cache. Failed tasks never populate it: a retry
-after an exception computes for real, never serves a poisoned entry. And if
-retention has discarded the output bytes (see
-[Lifecycle & retention](lifecycle-and-retention.md)), the same key is a cache *miss* and
-the task recomputes — a hash-only skeleton is a recipe, not a result.
+- the function's module and qualname;
+- a hash of its source, and a hash of its bytecode (so REPL- and
+  `exec`-defined functions are covered too);
+- the fingerprint of every closure cell value;
+- the resolved versions of any declared engines;
+- the task's `cache_extra` contribution;
+- the input hashes.
+
+A completed task with the same key may exist from any earlier run in the
+workspace. If it does, and its output bytes are still present, the stored
+outputs are returned without executing.
+
+Two honesty rules bound the cache. First, failed tasks never populate it. A
+retry after an exception computes for real and never serves a poisoned
+entry. Second, if retention has discarded the output bytes (see
+[Lifecycle & retention](lifecycle-and-retention.md)), the same key is a cache
+miss and the task recomputes. A hash-only skeleton is a recipe, not a
+result.
 
 ## Seeing the cache work
 
-The tracer is inert outside a run. A decorated function called at module scope
-is just the function — nothing is hashed, nothing is recorded:
+The tracer is inert outside a run. A decorated function called at module
+scope is just the function. Nothing is hashed, and nothing is recorded:
 
 ```python
 from slab import Workspace, task
@@ -45,8 +52,8 @@ computing...
 6.0
 ```
 
-Inside runs, the first call with a given input computes; the second — even in
-a *different* run — is served from cache, silently:
+Inside runs, the first call with a given input computes. The second call is
+served from cache without any message, even in a different run:
 
 ```python
 ws = Workspace("workspace")
@@ -69,10 +76,10 @@ False
 True
 ```
 
-The cache hit is not invisible bookkeeping: the second run gets a full
-`TaskRecord` — same recipe, same input and output hashes — with
-`cache_hit=True`. Provenance is complete either way. A changed input is a
-different key and computes honestly:
+The cache hit is not invisible bookkeeping. The second run gets a full
+`TaskRecord`, with the same recipe and the same input and output hashes, and
+with `cache_hit=True`. Provenance is complete either way. A changed input is
+a different key, and it computes honestly:
 
 ```python
 with ws.start_run(name="third") as third:
@@ -88,9 +95,9 @@ False
 
 ## Crash, rerun, resume
 
-Here is the mechanism doing its real job. A two-task pipeline dies in task two
-on the first execution — a node failure, simulated with a flag file. The fix
-is not a restart API; it is running the same script again:
+Here is the mechanism doing its real job. A two-task pipeline dies in task
+two on the first execution. The example simulates a node failure with a flag
+file. The fix is not a restart API. The fix is to run the same script again:
 
 ```python
 from pathlib import Path
@@ -135,37 +142,39 @@ analyze completed cache_hit = False
 ```
 
 `build_supercell` succeeded before the crash, so its result was cached even
-though its *run* failed — caching is per-task, not per-run. On the rerun it is
-served silently; only `analyze` executes. The crashed run stays behind as a
-quarantined failed run carrying the structured failure evidence — exception
-type, trimmed traceback, diagnostic notes — and expires on its TTL like any
-other unpromoted run.
+though its run failed. Caching is per-task, not per-run. On the rerun, the
+cache serves it without a message, and only `analyze` executes. The crashed
+run stays behind as a quarantined failed run. It carries the structured
+failure evidence (exception type, trimmed traceback, diagnostic notes) and
+expires on its TTL like any other unpromoted run.
 
 !!! note
-    This is why a provisional `running` row is committed *before* each task
-    executes: a hard-killed process still leaves its input references visible,
-    so a concurrent retention sweep cannot pull the roots out from under the
-    resume.
+    This is why SLAB commits a provisional `running` row before each task
+    executes. A hard-killed process still leaves its input references visible,
+    so a concurrent retention sweep cannot remove the roots the resume will
+    need.
 
 ## What invalidates a cached result
 
-Anything that would change the answer changes the key. Edit the function body
-— even a version with no retrievable source — and the source/bytecode hashes
-miss. Rebind a closure cell (two products of the same task factory with
-different bound parameters) and the closure fingerprints miss.
+Anything that would change the answer changes the key. Edit the function
+body, even to a version with no retrievable source, and the source and
+bytecode hashes miss. Rebind a closure cell (for example, two products of
+the same task factory with different bound parameters) and the closure
+fingerprints miss.
 
 Environment identity is opt-in and explicit. `@task(engines=("ase",))` pins
-the installed `ase` version into the recipe and the key, so upgrading the
-package invalidates results computed under the old one. For identity that
-lives outside pip, `cache_extra` is a callable receiving the bound arguments
-and returning a dict folded into the key. `relax` wires
-`cache_extra=describe_engine`: at call time it resolves what the `engine`
-argument actually names — a built-in, a cluster-registry entry with its full
-spec, or a rootstock checkpoint — and folds that into the key. A maintainer
-bumping a `qe-delta` site alias from 7.3 to 7.4 in the cluster's registry
-file honestly invalidates every cached relax that used it, as does *any*
-spec edit (options, env, calculator path). See [Engines](engines.md) for
-the registry itself.
+the installed `ase` version into the recipe and the key, so a package upgrade
+invalidates results computed under the old version. For identity that lives
+outside pip, `cache_extra` is a callable that receives the bound arguments
+and returns a dict folded into the key.
+
+`relax` wires `cache_extra=describe_engine`. At call time, it resolves what
+the `engine` argument actually names (a built-in, a cluster-registry entry
+with its full spec, or a rootstock checkpoint) and folds that into the key.
+When a maintainer bumps a `qe-delta` site alias from 7.3 to 7.4 in the
+cluster's registry file, every cached relax that used it is honestly
+invalidated. Any other spec edit (options, env, calculator path) invalidates
+the same way. See [Engines](engines.md) for the registry itself.
 
 ```python
 from ase.build import bulk
@@ -191,22 +200,22 @@ True -0.053417
 
 ## What the key cannot see
 
-A global your function reads and *mutates* between calls is invisible to the
-fingerprint — the bytecode references the name, not the value. A task whose
-behavior depends on mutated globals can be served a stale hit. Treat globals
-as constants, or pass the value as an argument so it is hashed like any other
-input.
+A global that your function reads and mutates between calls is invisible to
+the fingerprint. The bytecode references the name, not the value. A task
+whose behavior depends on mutated globals can be served a stale hit. Treat
+globals as constants, or pass the value as an argument so it is hashed like
+any other input.
 
-Closure cells are the opposite case: they *are* fingerprinted, but a cell
-holding an unserializable value (a lambda, an open handle) cannot be. Rather
-than risk a collision — serving one computation's result for another is the
-one failure the cache must never produce — such a call is honestly
-*uncacheable*: it records normally but computes every time.
+Closure cells are the opposite case. They are fingerprinted, but a cell that
+holds an unserializable value (a lambda, an open handle) cannot be. Serving
+one computation's result for another is the one failure the cache must never
+produce. Rather than risk that collision, SLAB marks such a call
+uncacheable. It records normally but computes every time.
 
 ## The DAG is derived, not declared
 
 There is no graph API. Task B consuming task A's output is visible because
-B's input hash equals A's output hash — provenance by equality:
+B's input hash equals A's output hash. That is provenance by equality:
 
 ```python
 with ws.start_run(name="dag") as dag:
@@ -221,9 +230,9 @@ analyze: computing
 True
 ```
 
-Tuple returns are stored element-wise (`return[0]`, `return[1]`, ...), so the
-`atoms, info = relax(...)` pattern leaves a per-value hash for each element
-and downstream consumers of either one are linked the same way. Start from
-[Quickstart](quickstart.md) if you have not seen runs and checks yet; the
-lifecycle side of what happens to all these runs lives in
+Tuple returns are stored element-wise (`return[0]`, `return[1]`, ...). The
+`atoms, info = relax(...)` pattern therefore leaves a per-value hash for each
+element, and downstream consumers of either one are linked the same way.
+Start from the [Quickstart](quickstart.md) if you have not seen runs and
+checks yet. For the lifecycle side of what happens to all these runs, see
 [Architecture](../architecture.md).

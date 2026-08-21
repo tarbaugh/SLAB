@@ -1,10 +1,10 @@
 # Agents over MCP
 
-LLM agents are SLAB's primary user, so the workspace speaks their native protocol: `slab mcp` serves the same operations as the CLI — one shared code path in `slab._ops`, two skins — as MCP tools over stdio, returning structured JSON instead of formatted text.
+LLM agents are SLAB's primary user, so the workspace speaks their native protocol. `slab mcp` serves the same operations as the CLI as MCP tools over stdio. There is one shared code path in `slab._ops` and two skins. The tools return structured JSON instead of formatted text.
 
 ## Setup
 
-The server ships as an extra and any MCP client launches it as a subprocess:
+The server ships as an extra. Any MCP client launches it as a subprocess:
 
 <!-- no-verify -->
 ```bash
@@ -16,10 +16,10 @@ pip install 'slab[mcp]'
 {"mcpServers": {"slab": {"command": "slab", "args": ["mcp"]}}}
 ```
 
-The workspace is resolved exactly as for the CLI: `-w/--workspace` flag > `$SLAB_WORKSPACE` > `./.slab` (so `{"args": ["mcp", "-w", "/scratch/proj/.slab"]}` pins a specific one). No daemon, no database server — the workspace is a directory, and concurrent CLI and MCP access coexist at the SQLite transaction level.
+The workspace is resolved exactly as for the CLI: `-w/--workspace` flag > `$SLAB_WORKSPACE` > `./.slab`. So `{"args": ["mcp", "-w", "/scratch/proj/.slab"]}` pins a specific one. There is no daemon and no database server. The workspace is a directory, and concurrent CLI and MCP access coexist at the SQLite transaction level.
 
 !!! note
-    Under stdio MCP, stdout *is* the protocol channel. `launch_workflow` therefore redirects everything a workflow script prints (checks included, which evaluate at run exit) into the result's `output` field. Scripts can `print()` freely; nothing corrupts the wire.
+    Under stdio MCP, stdout is the protocol channel. `launch_workflow` therefore redirects everything a workflow script prints into the result's `output` field. That includes the checks, which evaluate at run exit. Scripts can `print()` freely. Nothing corrupts the wire.
 
 ## The toolbox
 
@@ -31,19 +31,19 @@ Seven tools, each a thin wrapper over the operations layer:
 | `list_runs` | Runs newest first, filterable by lifecycle `state` and execution `status`. |
 | `show_run` | Everything about one run: checks, tasks, artifacts, history, failure evidence. |
 | `promote_run` | Make a run permanent (`verified -> promoted`), with a recorded reason. |
-| `expire_runs` | Expire unpromoted runs past their TTL; `older_than="0d"` means everything, now. |
-| `gc` | Drop artifact bytes no retention rule demands (`dry_run=True` only reports). |
+| `expire_runs` | Expire unpromoted runs past their TTL. `older_than="0d"` means everything, now. |
+| `gc` | Drop artifact bytes no retention rule demands. `dry_run=True` only reports. |
 | `list_engines` | Built-in engines, the cluster registry's declarations, rootstock checkpoint ids, QE protocols, installed pseudo families. |
 
-**`launch_workflow(script_path, name=None, intent=None)`** runs a zero-ceremony script — bare `@task` calls and `@check` declarations, no `Workspace` or `start_run` of its own — inside a fresh run that lands in quarantine. The result carries the `run_id`, final `state` (`verified` if all checks passed), check counts, and the captured `output`. On failure it includes the structured `failure` record; if even recording the failure failed (storage died mid-crash), a raw `traceback` string appears instead. Always pass `intent` — why this run exists.
+**`launch_workflow(script_path, name=None, intent=None)`** runs a zero-ceremony script inside a fresh run that lands in quarantine. A zero-ceremony script has bare `@task` calls and `@check` declarations, with no `Workspace` or `start_run` of its own. The result carries the `run_id`, the final `state` (`verified` if all checks passed), the check counts, and the captured `output`. On failure, it includes the structured `failure` record. If even recording the failure failed (storage died mid-crash), a raw `traceback` string appears instead. Always pass `intent`. It says why this run exists.
 
-**`show_run(run_id)`** is the evidence surface. Beyond the run's fields it returns check results *with the observed/expected values their assertions compared*, traced tasks with recipes and cache-hit flags, artifacts annotated with `bytes_available` (still stored, or hash-and-discarded), and the full lifecycle history. Failed runs and tasks carry a `failure` record — exception type, message, trimmed traceback, and diagnostic notes — the input for deciding a specific correction instead of retrying blind. Ids accept unique prefixes, git-style, here and in `promote_run`.
+**`show_run(run_id)`** is the evidence surface. Beyond the run's fields, it returns four things. Check results come with the observed/expected values their assertions compared. Traced tasks come with recipes and cache-hit flags. Artifacts are annotated with `bytes_available` (still stored, or hash-and-discarded). And the full lifecycle history is included. Failed runs and tasks carry a `failure` record with the exception type, message, trimmed traceback, and diagnostic notes. That record is the input for a specific correction instead of a blind retry. Ids accept unique prefixes, git-style, here and in `promote_run`.
 
-**`list_engines()`** answers "what can I compute with, here": SLAB's built-ins (`emt`/`lammps`/`lj`/`mace`/`qe`/`rootstock`), everything the cluster's engine registry declares (with the maintainer's declared versions and whether a probe verifies each entry), and — under `rootstock` — the canonical MLIP checkpoint ids the local rootstock install serves, each usable directly as the `engine=` argument. It also lists the named QE input protocols (`qe_protocols`) and the installed pseudopotential families (`pseudo_families`) — see [Engines](engines.md) and [Protocols & pseudopotentials](protocols-and-pseudos.md).
+**`list_engines()`** answers "what can I compute with, here". It lists SLAB's built-ins (`emt`/`lammps`/`lj`/`mace`/`qe`/`rootstock`). It lists everything the cluster's engine registry declares, with the maintainer's declared versions and whether a probe verifies each entry. Under `rootstock`, it lists the canonical MLIP checkpoint ids the local rootstock install serves, each usable directly as the `engine=` argument. It also lists the named QE input protocols (`qe_protocols`) and the installed pseudopotential families (`pseudo_families`). See [Engines](engines.md) and [Protocols & pseudopotentials](protocols-and-pseudos.md).
 
 ## A session: fail, inspect, correct, promote
 
-A representative exchange, payloads abbreviated but structurally truthful.
+A representative exchange, with payloads abbreviated but structurally truthful.
 
 <!-- no-verify -->
 ```json
@@ -63,7 +63,7 @@ launch_workflow({"script_path": "probe.py",
  "output": ""}
 ```
 
-The note already contains the diagnosis: after three steps the structure sits 41 eV high with 63 eV/Å residual forces — the rattle destroyed the crystal rather than perturbing it. `show_run("01k4q8")` would add the per-task failure record, the recipe that produced it, and the kept `relax-failed.traj` for actual inspection. The agent shrinks the perturbation and relaunches:
+The note already contains the diagnosis. After three steps, the structure sits 41 eV high with 63 eV/Å residual forces. The rattle destroyed the crystal instead of perturbing it. `show_run("01k4q8")` would add the per-task failure record, the recipe that produced it, and the kept `relax-failed.traj` for inspection. The agent shrinks the perturbation and relaunches:
 
 <!-- no-verify -->
 ```json
@@ -90,15 +90,22 @@ promote_run({"run_id": "01k4q9", "reason": "converged baseline after correcting 
 {"id": "01k4q9...", "state": "promoted", "status": "completed", ...}
 ```
 
-The failed probe stays in quarantine, partial trajectory and all, until its TTL — diagnostics self-clean instead of accumulating. See [Debugging failures](debugging-failures.md) for the full evidence contract.
+The failed probe stays in quarantine, partial trajectory and all, until its TTL. Diagnostics self-clean instead of accumulating. See [Debugging failures](debugging-failures.md) for the full evidence contract.
 
 ## Intent, and lifecycle hygiene for agents
 
-`intent` is narrative provenance: the *why* that a recipe cannot capture. It is stored on the run, shown by `list_runs` and `show_run`, and — as the retry above shows — the natural place to record what the previous attempt taught. Weeks later, an agent (the same one or another) querying the workspace reads intents as the lab notebook: which runs were baselines, which were corrections, which were speculative. The lifecycle guidance follows from SLAB's one asymmetry ([Lifecycle & retention](lifecycle-and-retention.md)): promote only what deserves keeping, always with a reason; let everything else expire, and run `expire_runs` + `gc` periodically to reclaim it. Promotion is the only path to permanence, so an agent that never promotes leaves nothing behind — and one that promotes indiscriminately recreates the archive-of-failures problem SLAB exists to avoid.
+`intent` is narrative provenance. It is the why that a recipe cannot capture. SLAB stores it on the run and shows it in `list_runs` and `show_run`. As the retry above shows, it is the natural place to record what the previous attempt taught. Weeks later, an agent (the same one or another) that queries the workspace reads the intents as the lab notebook. They show which runs were baselines, which were corrections, and which were speculative.
+
+The lifecycle guidance follows from SLAB's one asymmetry ([Lifecycle & retention](lifecycle-and-retention.md)):
+
+- Promote only what deserves keeping, always with a reason.
+- Let everything else expire, and run `expire_runs` + `gc` periodically to reclaim it.
+
+Promotion is the only path to permanence. An agent that never promotes leaves nothing behind. An agent that promotes indiscriminately recreates the archive-of-failures problem that SLAB exists to avoid.
 
 ## Under the hood
 
-Every tool calls `slab._ops` — the functions below are exactly what `launch_workflow` and `show_run` run, so you can reproduce the agent's view without an MCP client. First, the workflow script an agent would launch (zero ceremony: no `Workspace`, no `start_run` — the runner supplies both):
+Every tool calls `slab._ops`. The functions below are exactly what `launch_workflow` and `show_run` run, so you can reproduce the agent's view without an MCP client. First, the workflow script an agent would launch. It has zero ceremony, with no `Workspace` and no `start_run`, because the runner supplies both:
 
 ```python
 from pathlib import Path
@@ -145,4 +152,4 @@ forces_converged observed: 0.01990506040266342 expected: {'below': 0.05}
 [('relax.traj', 'intermediate'), ('relaxed.xyz', 'terminal')]
 ```
 
-The numbers are deterministic (fixed rattle seed, EMT); only run ids and timestamps vary. Note the shapes: the check stored the observed residual and the threshold it was compared against, and the artifacts carry roles — the trajectory is an *intermediate* (hash-and-discarded once retention tiers kick in), the declared result a *terminal* (kept in full if this run is ever promoted). That role distinction is the whole retention story, told in [Lifecycle & retention](lifecycle-and-retention.md); how these runs get built in the first place is the [Quickstart](quickstart.md), and the design argument is the [Architecture](../architecture.md) page.
+The numbers are deterministic (fixed rattle seed, EMT). Only run ids and timestamps vary. Note the shapes. The check stored the observed residual and the threshold it was compared against. The artifacts carry roles. The trajectory is an intermediate, hash-and-discarded once retention tiers apply. The declared result is a terminal, kept in full if this run is ever promoted. That role distinction is the whole retention model, described in [Lifecycle & retention](lifecycle-and-retention.md). For how these runs are built in the first place, see the [Quickstart](quickstart.md). For the design argument, see [Architecture](../architecture.md).

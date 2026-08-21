@@ -1,19 +1,20 @@
 # Protocols & pseudopotential families
 
-Running Quantum ESPRESSO well means choosing cutoffs, a k-mesh, smearing, and
-convergence thresholds — physics decisions SLAB refuses to make silently. This
-page covers the two pieces that make those decisions *explicit, curated, and
-reproducible*, both adopted from the AiiDA ecosystem: named input **protocols**
-(from [aiida-quantumespresso](https://aiida-quantumespresso.readthedocs.io/en/stable/topics/protocol.html))
-and installable **pseudopotential families** (from
-[aiida-pseudo](https://github.com/aiidateam/aiida-pseudo)).
+To run Quantum ESPRESSO well, you must choose cutoffs, a k-mesh, smearing,
+and convergence thresholds. Those are physics decisions, and SLAB refuses to
+make them silently. This page covers the two pieces that make those
+decisions explicit, curated, and reproducible. Both are adopted from the
+AiiDA ecosystem. Named input **protocols** come from
+[aiida-quantumespresso](https://aiida-quantumespresso.readthedocs.io/en/stable/topics/protocol.html).
+Installable **pseudopotential families** come from
+[aiida-pseudo](https://github.com/aiidateam/aiida-pseudo).
 
 ## Pseudopotential families
 
 A family is a curated, versioned set of one pseudopotential per element, with
 per-element recommended cutoffs as metadata. Install one from the official
-[Materials Cloud SSSP archive](https://www.materialscloud.org/discover/sssp)
-— every file is verified against the published MD5 checksums; one mismatch
+[Materials Cloud SSSP archive](https://www.materialscloud.org/discover/sssp).
+Every file is verified against the published MD5 checksums, and one mismatch
 aborts the whole install:
 
 <!-- no-verify -->
@@ -28,11 +29,11 @@ installed SSSP/1.3.0/PBEsol/efficiency (103 elements, digest b20acfb68f77) at
 /Users/you/.local/share/slab/pseudos/SSSP_1.3.0_PBEsol_efficiency
 ```
 
-Families land under `$SLAB_PSEUDOS` (default
-`$XDG_DATA_HOME/slab/pseudos`, i.e. `~/.local/share/slab/pseudos`)
-and are addressed by name, git-style on the version: `SSSP/1.3/PBEsol/efficiency`
-finds the installed `1.3.0` as long as exactly one `1.3.x` exists — ambiguity
-is refused, never guessed. `slab pseudos list` shows the inventory;
+Families land under `$SLAB_PSEUDOS`. The default is
+`$XDG_DATA_HOME/slab/pseudos`, that is `~/.local/share/slab/pseudos`. They
+are addressed by name, git-style on the version. `SSSP/1.3/PBEsol/efficiency`
+finds the installed `1.3.0` as long as exactly one `1.3.x` exists. Ambiguity
+is refused, never guessed. `slab pseudos list` shows the inventory.
 `slab pseudos verify <name>` re-hashes every file against the manifest.
 
 From then on the `qe` engine takes the family instead of a directory:
@@ -46,19 +47,21 @@ relaxed, info = relax(
 )
 ```
 
-The element→file mapping comes from the family manifest, and the cache
-identity upgrades from a directory *path* to the family name plus a **digest
-of its per-element checksums** — content-derived, portable across machines.
-Only SSSP installs today: PseudoDojo's archives are served over unverified
-HTTP upstream, and SLAB will not download physics inputs over a channel it
-cannot authenticate (point `pseudo_dir=` at your own files instead).
+The element-to-file mapping comes from the family manifest. The cache
+identity upgrades from a directory path to the family name plus a **digest
+of its per-element checksums**. That identity is content-derived, and it is
+portable across machines.
+
+Only SSSP installs today. PseudoDojo's archives are served over unverified
+HTTP upstream, and SLAB does not download physics inputs over a channel it
+cannot authenticate. Point `pseudo_dir=` at your own files instead.
 
 ## Protocols: fast, balanced, stringent
 
-A protocol is a named, versioned bundle of input choices. SLAB adopts
-aiida-quantumespresso v4.10's three (values in
-[`slab/data/qe_protocols.json`](https://github.com/tarbaugh/SLAB/blob/main/src/slab/data/qe_protocols.json)
-— data, not code):
+A protocol is a named, versioned bundle of input choices. SLAB adopts the
+three from aiida-quantumespresso v4.10. The values live in
+[`slab/data/qe_protocols.json`](https://github.com/tarbaugh/SLAB/blob/main/src/slab/data/qe_protocols.json),
+as data, not code:
 
 ```python
 from slab.protocols import protocol_details
@@ -83,10 +86,10 @@ smearing: cold
 ```
 
 Units are QE-native (Ry, Ry/atom, Ry/bohr; `kpoints_distance` in Å⁻¹).
-`fast` trades accuracy for speed (0.30 Å⁻¹ mesh, loose thresholds);
-`stringent` tightens everything and switches to the `precision` family.
-AiiDA's pre-rename names are refused with a pointer, not aliased — the
-rename came with retuned values:
+`fast` trades accuracy for speed, with a 0.30 Å⁻¹ mesh and loose
+thresholds. `stringent` tightens everything and switches to the `precision`
+family. AiiDA's pre-rename names are refused with a pointer, not aliased,
+because the rename came with retuned values:
 
 ```python
 from slab.protocols import ProtocolError, qe_protocol_options
@@ -103,9 +106,10 @@ protocol 'moderate' was renamed 'balanced' (and retuned) in aiida-quantumespress
 
 ## Expansion: from name to numbers
 
-A protocol is structure-dependent — cutoffs come from the elements present,
-the k-mesh from the cell — so expansion is an explicit, atoms-aware call, and
-what it returns is a plain `calculator_options` dict of **concrete values**:
+A protocol is structure-dependent. Cutoffs come from the elements present,
+and the k-mesh from the cell. Expansion is therefore an explicit, atoms-aware
+call, and it returns a plain `calculator_options` dict of **concrete
+values**:
 
 <!-- no-verify -->
 ```python
@@ -119,8 +123,8 @@ relaxed, info = relax(atoms, engine="qe", fmax=0.05, label="si",
                       calculator_options=options)
 ```
 
-Expanded against the real SSSP family above, `options` is (pseudopotentials
-key elided):
+Expanded against the real SSSP family above, `options` is as follows, with
+the pseudopotentials key elided:
 
 <!-- no-verify -->
 ```json
@@ -137,15 +141,18 @@ key elided):
 }
 ```
 
-The arithmetic is AiiDA's exactly: `ecutwfc`/`ecutrho` are element-wise
-maxima of the family's recommendations (Si: 30/240 Ry); the mesh is
-`ceil(|b_i| / 0.15)` per reciprocal vector (2π included) — 14³ for this
-2-atom primitive cell; `etot_conv_thr` and `conv_thr` scale with the atom
-count (2 × 1e-5, 2 × 2e-10) while `forc_conv_thr` does not (it is per force
-component). Insulators drop the smearing:
+The arithmetic is exactly AiiDA's:
+
+- `ecutwfc` and `ecutrho` are element-wise maxima of the family's
+  recommendations (Si: 30/240 Ry).
+- The mesh is `ceil(|b_i| / 0.15)` per reciprocal vector, with 2π included.
+  That gives 14³ for this 2-atom primitive cell.
+- `etot_conv_thr` and `conv_thr` scale with the atom count (2 × 1e-5,
+  2 × 2e-10). `forc_conv_thr` does not, because it is per force component.
+
+Insulators drop the smearing.
 `qe_protocol_options(atoms, protocol="balanced", electronic_type="insulator")`
-sets fixed occupations. And overrides merge recursively, right wins,
-AiiDA-style:
+sets fixed occupations. Overrides merge recursively, right wins, AiiDA-style:
 
 <!-- no-verify -->
 ```python
@@ -153,19 +160,19 @@ options = qe_protocol_options(atoms, protocol="balanced",
                               overrides={"input_data": {"system": {"ecutwfc": 90.0}}})
 ```
 
-Driving relaxation with ASE optimizers instead of pw.x's internal loop? The
-protocol's force threshold converts to the `fmax` scale as
-`forc_conv_thr_ev_per_ang` in `protocol_details` (balanced ≈ 0.0026 eV/Å).
+To drive relaxation with ASE optimizers instead of pw.x's internal loop, use
+the protocol's force threshold on the `fmax` scale. `protocol_details`
+reports it as `forc_conv_thr_ev_per_ang` (balanced ≈ 0.0026 eV/Å).
 
-The same expanded options drive `single_point` — the usual closing step of a
-two-fidelity chain (relax under an MLIP, then one SCF under `qe` on the
-relaxed geometry); the executed chain lives in
+The same expanded options drive `single_point`, the usual closing step of a
+two-fidelity chain. That chain relaxes under an MLIP, then runs one SCF
+under `qe` on the relaxed geometry. The executed chain is in
 [Engines](engines.md#two-fidelities-one-run).
 
 ## Why the cache never sees a protocol's name
 
-The expanded numbers — not the word "balanced" — flow into the task as traced
-inputs. Run the Si relax above and the recorded cache identity is:
+The expanded numbers flow into the task as traced inputs, not the word
+"balanced". Run the Si relax above and the recorded cache identity is:
 
 <!-- no-verify -->
 ```json
@@ -179,16 +186,17 @@ inputs. Run the Si relax above and the recorded cache identity is:
 ```
 
 plus every expanded value in the traced `calculator_options`. If the protocol
-data file is ever retuned, previously cached results stay valid *for the
-numbers they were computed with* — nothing is silently re-served under a new
+data file is ever retuned, previously cached results stay valid for the
+numbers they were computed with. Nothing is silently re-served under a new
 meaning. Record the protocol name in the run's `intent` for the narrative
-("balanced protocol on Si"); the recipe holds the physics.
+("balanced protocol on Si"). The recipe holds the physics.
 
-Scope, honestly stated: this adopts the `pw` base protocol. AiiDA's
+Scope, honestly stated: SLAB adopts the `pw` base protocol. AiiDA's
 spin/magnetization handling, 2D `assume_isolated` treatment, and the
-PwRelaxWorkChain meta-convergence loop are not adopted (yet) — structures
-must be fully periodic, and magnetism is yours to configure via `input_data`.
+PwRelaxWorkChain meta-convergence loop are not adopted (yet). Structures must
+be fully periodic, and magnetism is yours to configure via `input_data`.
 
-Where to go next: the engine seam these options feed is
-[Engines](engines.md#quantum-espresso); what happens when pw.x rejects your
-protocol-expanded input is [Debugging failures](debugging-failures.md#when-the-engine-writes-files).
+Where to go next: for the engine seam these options feed, see
+[Engines](engines.md#quantum-espresso). For what happens when pw.x rejects
+your protocol-expanded input, see
+[Debugging failures](debugging-failures.md#when-the-engine-writes-files).

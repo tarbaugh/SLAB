@@ -1,34 +1,36 @@
 # Engines
 
-SLAB implements no physics. Every engine — EMT toy, in-process MACE, a `pw.x`
-binary, LAMMPS on a cluster, an MLIP served from a rootstock install — is
-reached through exactly one seam: the ASE `Calculator` contract. This page
-walks that seam from laptop built-ins to cluster registries.
+SLAB implements no physics. Every engine is reached through exactly one
+seam, the ASE `Calculator` contract. That covers the EMT toy, in-process
+MACE, a `pw.x` binary, LAMMPS on a cluster, and an MLIP served from a
+rootstock install. This page follows that seam from laptop built-ins to
+cluster registries.
 
 ## One seam, three sources
 
-`get_calculator(engine, **options)` maps an engine *name* to a ready ASE
+`get_calculator(engine, **options)` maps an engine name to a ready ASE
 calculator. Three sources feed the mapping, tried in order:
 
-1. **Built-ins** — `emt`, `lj` (ASE toys), `mace` (in-process, `slab[mace]`),
-   `qe` (Quantum ESPRESSO's `pw.x`, no extra needed), `lammps` (the `lmp`
-   binary, likewise no extra), `rootstock` (cluster-served MLIPs,
-   `slab[rootstock]`).
-2. **The cluster engine registry** — names a cluster maintainer declared in an
-   `engines.json` that lives with the install (`vasp`, curated site aliases
-   like `qe-delta`, MLIP aliases).
-3. **Rootstock checkpoint ids, served silently** — any canonical id a cluster's
-   rootstock install declares works directly as an engine name, no registry
+1. **Built-ins.** `emt` and `lj` (ASE toys), `mace` (in-process,
+   `slab[mace]`), `qe` (Quantum ESPRESSO's `pw.x`, no extra needed),
+   `lammps` (the `lmp` binary, likewise no extra), and `rootstock`
+   (cluster-served MLIPs, `slab[rootstock]`).
+2. **The cluster engine registry.** Names that a cluster maintainer declared
+   in an `engines.json` that lives with the install: `vasp`, curated site
+   aliases like `qe-delta`, MLIP aliases.
+3. **Rootstock checkpoint ids.** Any canonical id that a cluster's rootstock
+   install declares works directly as an engine name, with no registry
    entry needed.
 
-Registry entries deliberately win over bare checkpoint ids: a maintainer's
-curated alias with baked-in options beats bare resolution. Nothing in the
-tracing, lifecycle, or retention layers knows engines exist — adding a backend
-means adding a registry entry, never touching SLAB.
+Registry entries deliberately win over bare checkpoint ids. A maintainer's
+curated alias, with its baked-in options, beats bare resolution. Nothing in
+the tracing, lifecycle, or retention layers knows that engines exist. To add
+a backend, add a registry entry. Never touch SLAB.
 
 ## Built-ins
 
-`available_engines()` lists what resolves right now; `get_calculator` builds it.
+`available_engines()` lists what resolves right now. `get_calculator` builds
+it.
 
 ```python
 from slab.backends import available_engines, get_calculator
@@ -43,8 +45,8 @@ print(type(calc).__name__)
 EMT
 ```
 
-Tasks take the same name. `relax` forwards `calculator_options` verbatim to the
-engine factory, and stamps the resolved identity into its `info` dict:
+Tasks take the same name. `relax` forwards `calculator_options` verbatim to
+the engine factory, and stamps the resolved identity into its `info` dict:
 
 ```python
 from ase.build import bulk
@@ -68,9 +70,9 @@ E = -0.053417 eV   fmax = 0.0388   steps = 9
 ```
 
 EMT is deterministic and the rattle seed is fixed, so these numbers reproduce
-exactly. EMT and LJ run in milliseconds per step and are fit only for the
-elements they parametrize — ideal for tests and tutorials, not for science. For
-real work in-process, the MACE foundation model:
+exactly. EMT and LJ run in milliseconds per step, and they fit only the
+elements they parametrize. They are ideal for tests and tutorials, not for
+science. For real work in-process, use the MACE foundation model:
 
 <!-- no-verify -->
 ```python
@@ -82,24 +84,24 @@ relaxed, info = relax(
 ```
 
 !!! note
-    Options for `mace` are forwarded to `mace.calculators.mace_mp`; defaults are
-    `model="small"`, `device="cpu"`, `default_dtype="float64"`. First use
-    downloads the checkpoint to `~/.cache/mace` — on a cluster, do that once
-    from a node with internet (compute nodes are typically firewalled), or
-    skip in-process MACE entirely and use a rootstock-served checkpoint id as
-    the engine name. The resolved model and the mace-torch version are both
-    part of the engine's cache identity.
+    Options for `mace` are forwarded to `mace.calculators.mace_mp`. The
+    defaults are `model="small"`, `device="cpu"`, `default_dtype="float64"`.
+    First use downloads the checkpoint to `~/.cache/mace`. On a cluster, do
+    that once from a node with internet, because compute nodes are typically
+    firewalled. Or skip in-process MACE and use a rootstock-served checkpoint
+    id as the engine name. The resolved model and the mace-torch version are
+    both part of the engine's cache identity.
 
 ## Quantum ESPRESSO
 
-`qe` is a built-in: it drives `pw.x` through ASE's file-IO calculator, so it
-works wherever the executable and pseudopotentials exist — a laptop build or a
-cluster module, no extra to install. Two options locate the code: `command`
-and `pseudo_dir` (or configure an `[espresso]` section in ASE's own config
-file once and pass neither). Everything else is standard `Espresso` options,
-forwarded verbatim. `resolve_pseudopotentials` maps elements to `.upf` files
-in a directory and refuses ambiguity rather than guessing — *which*
-pseudopotential to use is a science decision:
+`qe` is a built-in. It drives `pw.x` through ASE's file-IO calculator, so it
+works wherever the executable and the pseudopotentials exist. That can be a
+laptop build or a cluster module, with no extra to install. Two options
+locate the code, `command` and `pseudo_dir`. Or configure an `[espresso]`
+section in ASE's own config file once, and pass neither. Everything else is
+standard `Espresso` options, forwarded verbatim. `resolve_pseudopotentials`
+maps elements to `.upf` files in a directory. It refuses ambiguity rather
+than guessing, because which pseudopotential to use is a science decision:
 
 <!-- no-verify -->
 ```python
@@ -131,50 +133,55 @@ print(info["engine_version"], info["converged"], info["steps"])
 The details that keep runs honest and directories clean:
 
 - **Scratch, not cwd.** Each calculation runs in a slab-managed temporary
-  directory, removed when the task finishes; pass `directory=` to manage the
+  directory, removed when the task finishes. Pass `directory=` to manage the
   files yourself. Inside a run, the final SCF's `espresso.pwo` is kept as an
-  intermediate artifact (`si.pwo` here) next to the trajectory — ASE reruns
-  `pw.x` for every force evaluation, overwriting its output, so what survives
-  is the last step's.
+  intermediate artifact (`si.pwo` here) next to the trajectory. ASE reruns
+  `pw.x` for every force evaluation and overwrites its output, so the kept
+  file is the last step's.
 - **The `pw.x` identity is detected and cached against.** SLAB probes the
-  binary (once per executable — memoized on its path and mtime, under a
-  timeout), parses the `Program PWSCF v.7.4.1` banner, and folds the version
-  plus the resolved command and `pseudo_dir` into provenance
-  (`info["engine_version"]`) and the cache key: upgrading the executable or
-  switching pseudopotential libraries honestly invalidates cached results.
-  Pseudo file *contents* are not hashed — the directory path is the identity.
+  binary once per executable and parses the `Program PWSCF v.7.4.1` banner.
+  The probe is memoized on the binary's path and mtime, and it runs under a
+  timeout. The version, the
+  resolved command, and `pseudo_dir` go into provenance
+  (`info["engine_version"]`) and the cache key. An executable upgrade or a
+  pseudopotential-library switch therefore honestly invalidates cached
+  results. Pseudo file contents are not hashed. The directory path is the
+  identity.
 - **Forces default on.** `pw.x` omits forces unless `tprnfor` is set, and
-  SLAB's tasks drive optimizers with forces — so the factory sets it (an
-  explicit `tprnfor` in `input_data` still wins).
+  SLAB's tasks drive optimizers with forces. So the factory sets it. An
+  explicit `tprnfor` in `input_data` still wins.
 - **Failure speaks QE.** A crashed `pw.x` is a bare `CalledProcessError` in
-  Python; the evidence — QE's own `Error in routine ...` message, the kept
-  input/output/`CRASH` files — lands in the failure record. See
+  Python. The evidence lands in the failure record: QE's own
+  `Error in routine ...` message, and the kept input, output, and `CRASH`
+  files. See
   [Debugging failures](debugging-failures.md#when-the-engine-writes-files).
 
-Two adopted AiiDA patterns take the ceremony out of the options above:
-installable **pseudopotential families** (`slab pseudos install sssp`, then
-`pseudo_family="SSSP/1.3/PBEsol/efficiency"` replaces
-`pseudo_dir`+`pseudopotentials`) and named **input protocols**
-(`qe_protocol_options(atoms, protocol="balanced")` expands to curated
-cutoffs, k-mesh, smearing, and thresholds). Both are their own story:
-[Protocols & pseudopotentials](protocols-and-pseudos.md).
+Two patterns adopted from AiiDA remove the ceremony from the options above.
+Installable **pseudopotential families** replace `pseudo_dir` plus
+`pseudopotentials` with one name (`slab pseudos install sssp`, then
+`pseudo_family="SSSP/1.3/PBEsol/efficiency"`). Named **input protocols**
+expand to curated cutoffs, k-mesh, smearing, and thresholds
+(`qe_protocol_options(atoms, protocol="balanced")`). Both have their own
+page, [Protocols & pseudopotentials](protocols-and-pseudos.md).
 
-A cluster's *curated* QE setup (fixed module, shared pseudo library, MPI
+A cluster's curated QE setup (fixed module, shared pseudo library, MPI
 launcher) still belongs in the registry below, under a distinct alias like
-`qe-delta` — entries may not shadow built-in names.
+`qe-delta`. Entries may not shadow built-in names.
 
 ## LAMMPS
 
-`lammps` is a built-in on the same terms as `qe`: it drives the `lmp` binary
+`lammps` is a built-in on the same terms as `qe`. It drives the `lmp` binary
 through ASE's `lammpsrun` calculator, so it works wherever the executable
-exists — no extra to install. One option locates the code: `command` (or set
-it once under `[engines.lammps]` in the slab config, or export
-`$ASE_LAMMPSRUN_COMMAND`; bare `lmp` is the default). The *interatomic
-potential* has no default at all: `pair_style` and `pair_coeff` are required,
-and a `lammps` engine without them is refused. That refusal is deliberate —
-ASE's own fallback is a dimensionless `lj/cut` toy that would happily "relax"
-any material and return numbers meaning nothing, and *which* potential
-describes a system is a science decision, exactly like which pseudopotential.
+exists, with no extra to install. One option locates the code, `command`.
+Or set it once under `[engines.lammps]` in the slab config, or export
+`$ASE_LAMMPSRUN_COMMAND`. Bare `lmp` is the default.
+
+The interatomic potential has no default at all. `pair_style` and
+`pair_coeff` are required, and SLAB refuses a `lammps` engine without them.
+The refusal is deliberate. ASE's own fallback is a dimensionless `lj/cut`
+toy that would "relax" any material and return meaningless numbers. And
+which potential describes a system is a science decision, exactly like which
+pseudopotential.
 
 <!-- no-verify -->
 ```python
@@ -200,34 +207,35 @@ print(info["engine_version"], info["converged"], info["energy"])
 
 The details that keep runs honest and directories clean:
 
-- **Scratch, not cwd — and staged potentials.** Each calculator runs in a
-  slab-managed scratch directory, removed when the task finishes (pass
-  `tmp_dir=` to manage the files yourself). `files=` entries are staged into
-  that scratch and bare-basename references to them in `pair_coeff` are
-  rewritten to the staged copies — so the options above work from any cwd.
-  (Stock `lammpsrun` resolves that bare `Cu_u3.eam` against the *caller's*
+- **Scratch, not cwd, and staged potentials.** Each calculator runs in a
+  slab-managed scratch directory, removed when the task finishes. Pass
+  `tmp_dir=` to manage the files yourself. `files=` entries are staged into
+  that scratch, and bare-basename references to them in `pair_coeff` are
+  rewritten to the staged copies, so the options above work from any cwd.
+  (Stock `lammpsrun` resolves that bare `Cu_u3.eam` against the caller's
   cwd, which a traced task must never depend on.) Inside a run, the final
-  force evaluation's log — thermo table included — is kept as an intermediate
+  force evaluation's log, thermo table included, is kept as an intermediate
   artifact (`cu.log` here) next to the trajectory.
 - **The `lmp` identity is detected and cached against.** SLAB probes
-  `<command> -h` (once per executable — memoized on its path and mtime, under
-  a timeout), parses the `Large-scale Atomic/Molecular Massively Parallel
-  Simulator - 22 Jul 2025` banner, and folds the version plus the resolved
-  command into provenance and the cache key. Potential file *contents* are
-  not hashed — their paths, riding in the traced options, are the identity.
+  `<command> -h` once per executable and parses the `Large-scale
+  Atomic/Molecular Massively Parallel Simulator - 22 Jul 2025` banner. The
+  probe is memoized on the binary's path and mtime, and it runs under a
+  timeout. The version and the resolved command go
+  into provenance and the cache key. Potential file contents are not
+  hashed. Their paths, which ride in the traced options, are the identity.
 - **Units come back converted.** Whatever `units=` the potential requires
-  (`metal`, `real`, ...), ASE converts results to eV and eV/Å — `relax`'s
+  (`metal`, `real`, ...), ASE converts results to eV and eV/Å. `relax`'s
   `energy_unit` stays `"eV"`.
-- **Failure speaks LAMMPS — because the scratch exists.** A crashed `lmp`
+- **Failure speaks LAMMPS, because the scratch exists.** A crashed `lmp`
   surfaces in Python as a useless
-  `RuntimeError: Failed to retrieve any thermo_style-output`: the real
+  `RuntimeError: Failed to retrieve any thermo_style-output`. The real
   `ERROR: Unrecognized pair style 'eam/aloy' (src/force.cpp:275)` is raised
-  inside a `lammpsrun` reader *thread*, where no caller can catch it. The log
-  file is the only place the story survives, and stock `lammpsrun` retains
-  files only when given a working directory — which is exactly what the
-  slab-managed scratch provides. The failure record gets the `ERROR` line(s),
-  one line of preceding context (the echoed command that died, or the last
-  thermo row before a blow-up), and the kept `-failed.{in,log,data}` files.
+  inside a `lammpsrun` reader thread, where no caller can catch it. The log
+  file is the only place the message survives, and stock `lammpsrun` retains
+  files only when given a working directory. The slab-managed scratch
+  provides one. The failure record gets the `ERROR` line(s), one line of
+  preceding context (the echoed command that died, or the last thermo row
+  before a blow-up), and the kept `-failed.{in,log,data}` files.
   See [Debugging failures](debugging-failures.md#when-the-engine-writes-files).
 
 A cluster's curated LAMMPS setup (fixed module, MPI launcher) belongs in the
@@ -235,25 +243,25 @@ registry below under a distinct alias like `lammps-delta`, the same as QE.
 
 ## Per-engine environments
 
-Each engine runs isolated by construction: QE and LAMMPS are external
-binaries in private slab-managed scratch directories, rootstock and the
-Mason model server live behind HTTP in their own environments, and only
-mace-torch is deliberately in-process (its cluster-grade isolation *is*
-rootstock). What crosses the seam is the command line — and when one engine
-needs its own environment variables, the command line carries those too:
+Each engine runs isolated by construction. QE and LAMMPS are external
+binaries in private slab-managed scratch directories. Rootstock and the Mason
+model server live behind HTTP in their own environments. Only mace-torch is
+deliberately in-process, and its cluster-grade isolation is rootstock. What
+crosses the seam is the command line. When one engine needs its own
+environment variables, the command line carries those too:
 
 ```toml
 [engines.qe]
 command = "env OMP_NUM_THREADS=4 pw.x"
 ```
 
-ASE execs engine commands as a plain argv (no shell), so `/usr/bin/env`
-applies the assignments to that engine's subprocess alone — nothing leaks
-into the Python process, the cache, or any other engine.
+ASE execs engine commands as a plain argv, with no shell. `/usr/bin/env`
+therefore applies the assignments to that engine's subprocess alone. Nothing
+leaks into the Python process, the cache, or any other engine.
 
-When an engine's install needs more than variables — a `module load`, an
-`LD_LIBRARY_PATH` dance, anything that takes a shell — declare it as the
-engine's own `setup`:
+Sometimes an engine's install needs more than variables. It may need a
+`module load`, an `LD_LIBRARY_PATH` change, or anything else that takes a
+shell. Declare that as the engine's own `setup`:
 
 ```toml
 [engines.qe]
@@ -265,72 +273,83 @@ command = "lmp"
 setup = ["module purge", "module load lammps/2025.07"]
 ```
 
-slab materializes each engine's setup into a private `#!/bin/bash -l`
-wrapper (`set -e`, your lines, then `exec` of the real command) scoped to
-that engine's subprocess alone — the per-engine answer to dependencies that
-must not apply job-wide the way `[hpc] setup` does, so two engines with
-conflicting module stacks share one job without sharing an environment. The
-guards follow the semantics: with setup lines in play the process PATH
-proves nothing (the module may be exactly what provides `pw.x`), so
-existence is checked — and the version banner probed — *inside* the same
-login shell the wrapper uses, and a setup that still can't find the binary
-refuses loudly with the shell's own words. Cache identity stamps the
-logical command, the setup lines, and the setup-resolved binary; the
-wrapper file itself is an implementation detail, created with the
-calculator and removed with it. `setup=` also works per call in
-`calculator_options` (overriding the config's) and inside a registry
+SLAB materializes each engine's `setup` into a private `#!/bin/bash -l`
+wrapper. The wrapper runs `set -e`, then your lines, then `exec` of the real
+command. It is scoped to that engine's subprocess alone. `[hpc] setup` lines
+apply to the whole job. `[engines.X] setup` lines apply to one engine. Two
+engines with conflicting module stacks can therefore share one job without
+sharing an environment.
+
+The guards follow the semantics. With `setup` lines in play, the process PATH
+proves nothing, because the module load may be exactly what provides `pw.x`.
+So SLAB checks existence, and probes the version banner, inside the same
+login shell the wrapper uses. A setup that still cannot find the binary
+refuses loudly, with the shell's own words. Cache identity stamps the logical
+command, the setup lines, and the setup-resolved binary. The wrapper file
+itself is an implementation detail. SLAB creates it with the calculator and
+removes it with the calculator. `setup=` also works per call in
+`calculator_options`, where it overrides the config's, and inside a registry
 alias's options.
 
-The isolation is lateral, not a sandbox: each engine gets its own
-short-lived shell that dies with its subprocess, so one engine's
-`module load` never reaches another — but every one of them starts from
-the *same* base. Three layers arrive in the engine's process, each able to
-override the one before: the driver's environment (whatever `sbatch`
-exported, the `[hpc] setup` lines, the driver's venv, any registry `env`
-values slab applied), then the login profile `bash -l` sources, then your
-`setup` lines last. Note that the profile can rewrite `PATH` before your
-lines run, so don't assume a `PATH` the driver built arrives intact. This
-is why the template leads with `module purge`: it is the line that decides
-what the engine inherits. Drop it to build on the job's modules; keep it
-when the engine's stack must not see them. For a genuinely sealed
-userland, the command seam still takes `apptainer exec ...sif pw.x`.
+The isolation is lateral, not a sandbox. Each engine gets its own short-lived
+shell that dies with its subprocess, so one engine's `module load` never
+reaches another. But every engine starts from the same base. Three layers
+arrive in the engine's process, and each can override the one before:
 
-The guards look
-through the wrapper — plain assignments and env's portable flags (`-i`,
-`-u NAME`) alike: the PATH check judges `pw.x`, not `env` (and when the
-wrapper assigns `PATH=` itself, the payload is resolved under *that* PATH,
-the module-load-replacement case), an `env`-wrapped `srun` still trips the
-allocation refusal, and the version-probe memo watches every binary the
-command names, payload included. Version probes also never run *through* an
-MPI launcher — `srun pw.x` would queue or eat a job step and
-`mpirun -np 64 pw.x` would fan ranks out on a login node, so the probe runs
-the bare payload, which prints the same banner. The bare shell idiom
-(`command = "OMP_NUM_THREADS=4 pw.x"`) is refused by name — only a shell
-would apply it, and there is no shell — with the working form spelled out
-in the message. The same seam takes a container:
+1. the driver's environment, which holds whatever `sbatch` exported, the
+   `[hpc] setup` lines, the driver's venv, and any registry `env` values slab
+   applied;
+2. the login profile that `bash -l` sources;
+3. your `setup` lines, last.
+
+The profile can rewrite `PATH` before your lines run, so do not assume that a
+`PATH` the driver built arrives intact. This is why the template leads with
+`module purge`. That line decides what the engine inherits. Drop it to build
+on the job's modules. Keep it when the engine's stack must not see them. For
+a sealed userland, the same command seam takes a container.
 `command = "apptainer exec /sw/qe.sif pw.x"` isolates the whole userland.
 
-Three boundaries to know about. A batch job is still one environment:
-`[hpc]` and partition `setup` lines apply to the whole job, so anything one
-engine needs and another must not see belongs in that engine's own
-`[engines.X] setup` (or, for plain variables, the `env` command wrapper) —
-never in job-global setup. A *named* MACE checkpoint downloads on first use with
-no offline mode — on firewalled compute nodes slab bounds the attempt and
-refuses with instructions instead of hanging, but the real fix is the
-pre-warm (or rootstock) described under [Built-ins](#built-ins). And
-slab-managed scratch directories default to $TMPDIR, which clusters often
-point at small node-local tmpfs — set `[paths] scratch` to a shared scratch
-root so pw.x's wavefunctions fit and MPI ranks on other nodes can see their
-input.
+The guards look through the `env` wrapper, for plain assignments and for
+env's portable flags (`-i`, `-u NAME`) alike:
+
+- The PATH check judges `pw.x`, not `env`. When the wrapper assigns `PATH=`
+  itself, the payload is resolved under that PATH. This is the
+  module-load-replacement case.
+- An `env`-wrapped `srun` still trips the allocation refusal.
+- The version-probe memo watches every binary the command names, payload
+  included.
+- Version probes never run through an MPI launcher. `srun pw.x` would
+  queue or consume a job step, and `mpirun -np 64 pw.x` would fan ranks out
+  on a login node. So the probe runs the bare payload, which prints the
+  same banner.
+
+The bare shell idiom (`command = "OMP_NUM_THREADS=4 pw.x"`) is refused by
+name. Only a shell would apply it, and there is no shell. The refusal message
+spells out the working form.
+
+Three boundaries to know about:
+
+- A batch job is still one environment. `[hpc]` and partition `setup` lines
+  apply to the whole job. Anything one engine needs and another must not see
+  belongs in that engine's own `[engines.X] setup`, or in the `env` command
+  wrapper for plain variables. It never belongs in job-global setup.
+- A named MACE checkpoint downloads on first use, and it has no offline
+  mode. On firewalled compute nodes, slab bounds the attempt and refuses with
+  instructions instead of hanging. The real fix is the pre-warm (or
+  rootstock) described under [Built-ins](#built-ins).
+- Slab-managed scratch directories default to `$TMPDIR`, which clusters often
+  point at small node-local tmpfs. Set `[paths] scratch` to a shared scratch
+  root, so pw.x's wavefunctions fit and MPI ranks on other nodes can see
+  their input.
 
 ## Two fidelities, one run
 
 The seam's payoff is that engines compose. `slab.tasks` ships two traced
-tasks — `relax` (BFGS on positions) and `single_point` (one energy+forces
-evaluation, no optimization) — that take the same `engine` argument, so the
-canonical workflow is a chain: relax under a cheap engine, then evaluate the
-relaxed geometry under the expensive one. The DFT residual force is the
-check that says whether the cheap geometry held up:
+tasks that take the same `engine` argument. `relax` runs BFGS on positions.
+`single_point` runs one energy and forces evaluation, with no optimization.
+The canonical workflow is therefore a chain. Relax under a cheap engine,
+then evaluate the relaxed geometry under the expensive one. The DFT residual
+force is the check that says whether the cheap geometry held up:
 
 <!-- no-verify -->
 ```python
@@ -353,8 +372,8 @@ def dft_confirms_geometry():
     return converged(dft["fmax"], below=0.1, label="dft fmax")
 ```
 
-Executed for real (MACE-MP small on CPU; Quantum ESPRESSO 7.5 with the
-SSSP PBEsol efficiency family through the `fast` protocol):
+Executed for real, with MACE-MP small on CPU and Quantum ESPRESSO 7.5 with
+the SSSP PBEsol efficiency family through the `fast` protocol:
 
 <!-- no-verify -->
 ```text
@@ -363,21 +382,21 @@ QE single point: E=-308.5312843034 eV fmax=0.021275 eV/A version=7.5 n_atoms=2
 run 01m08kqbd1sv4cadjxcre2tcaa  si-two-fidelity  state=verified status=completed checks=3/3 tasks=2
 ```
 
-`single_point`'s info deliberately has no `converged` key — nothing was
-optimized, and an engine whose own self-consistency fails raises (with the
-engine's own error report attached as notes) instead of returning. Its
-artifacts follow relax's rules: the SCF's output is kept as the intermediate
-`si-scf.pwo`, both tasks cache (rerunning the script serves both results
-without re-invoking MACE or `pw.x`), and provenance links the chain by hash
-equality — `single_point`'s `atoms` input hash *is* `relax`'s first output
+`single_point`'s info deliberately has no `converged` key. Nothing was
+optimized. An engine whose own self-consistency fails raises, with the
+engine's error report attached as notes, instead of returning. Its artifacts
+follow relax's rules. The SCF's output is kept as the intermediate
+`si-scf.pwo`. Both tasks cache, so rerunning the script serves both results
+without re-invoking MACE or `pw.x`. And provenance links the chain by hash
+equality. `single_point`'s `atoms` input hash is `relax`'s first output
 hash.
 
 ## The cluster engine registry
 
 For VASP, site-specific MLIP aliases, and curated site setups of the built-in
-engines, SLAB generalizes rootstock's management pattern: the client is only
-a bootstrap, and a JSON file that lives with the cluster declares how each
-canonical name is built *here*. Workflow code says `engine="vasp"` and runs
+engines, SLAB generalizes rootstock's management pattern. The client is only
+a bootstrap. A JSON file that lives with the cluster declares how each
+canonical name is built here. Workflow code says `engine="vasp"` and runs
 unchanged on any cluster whose registry declares `vasp`.
 
 ```json
@@ -401,29 +420,34 @@ unchanged on any cluster whose registry declares `vasp`.
 }
 ```
 
-Every entry is a dotted path to an ASE calculator class or factory — even
-rootstock enters through the same seam, and a curated QE or LAMMPS alias
-goes through SLAB's own factories (`slab.backends.qe_calculator` /
+Every entry is a dotted path to an ASE calculator class or factory. Even
+rootstock enters through the same seam. A curated QE or LAMMPS alias goes
+through SLAB's own factories (`slab.backends.qe_calculator` and
 `lammps_calculator`), which carry the built-in engines' guards and take
-JSON-able options. `options` are defaults the caller overrides key-by-key;
-`env` declares variables the calculator reads *at run time*
-(`VASP_PP_PATH`, `ASE_VASP_COMMAND`), applied process-wide at build time
-because those calculators consult the environment when they calculate —
-which is also why `ASE_CONFIG_PATH` is refused: ASE parses its config file
-exactly once, at import, before any registry entry runs, so that
-declaration would silently never apply. Applied env stays in *this*
-process: job submission hands `sbatch` the environment as it was before any
-registry entry ran, so the kept batch script means the same thing no matter
-which engines the submitting process happened to build first. `probe` is a
-cheap command proving the engine actually works here. And the slab-factory
-aliases are deliberately strict: their spec (plus the caller's traced
-options) is their whole cache identity, so `qe_calculator` refuses to fall
-back to `[engines.qe]` or ASE config for `command`/`pseudo_dir`, and asks
-for an explicit k-point policy (`kpts=`/`kspacing=`) — the task-level
-k-point refusal only recognizes the literal name `qe`. Discovery order: an explicit path, else
-`$SLAB_ENGINES`, else `~/.config/slab/engines.json` — a maintainer ships the
-file at a shared path and exports `SLAB_ENGINES` from a module file. The full
-worked example is
+JSON-able options. The fields:
+
+- `options` are defaults. The caller overrides them key-by-key.
+- `env` declares variables the calculator reads at run time
+  (`VASP_PP_PATH`, `ASE_VASP_COMMAND`). SLAB applies them process-wide at
+  build time, because those calculators consult the environment when they
+  calculate. This is also why `ASE_CONFIG_PATH` is refused. ASE parses its
+  config file exactly once, at import, before any registry entry runs, so
+  that declaration would silently never apply. Applied env stays in this
+  process. Job submission hands `sbatch` the environment as it was before any
+  registry entry ran. So the kept batch script means the same thing no
+  matter which engines the submitting process built first.
+- `probe` is a cheap command that proves the engine actually works here.
+
+The slab-factory aliases are deliberately strict. Their spec, plus the
+caller's traced options, is their whole cache identity. So `qe_calculator`
+refuses to fall back to `[engines.qe]` or ASE config for `command` and
+`pseudo_dir`, and it requires an explicit k-point policy (`kpts=` or
+`kspacing=`). The task-level k-point refusal only recognizes the literal
+name `qe`.
+
+Discovery order is an explicit path, else `$SLAB_ENGINES`, else
+`~/.config/slab/engines.json`. A maintainer ships the file at a shared path
+and exports `SLAB_ENGINES` from a module file. The full worked example is
 [examples/engines.example.json](https://github.com/tarbaugh/SLAB/blob/main/examples/engines.example.json).
 
 <!-- no-verify -->
@@ -433,12 +457,12 @@ slab engines verify    # run every entry's probe; exit nonzero on failure
 ```
 
 Two refusals keep resolution honest. An entry that shadows a built-in name
-(`mace`, `emt`, ...) is rejected loudly at load — it would silently win or lose
-depending on resolution order, and either way you get a different engine than
-someone intended. And a registry declaring a newer `layout_version` than the
-client understands refuses rather than misreads.
+(`mace`, `emt`, ...) is rejected loudly at load. It would silently win or
+lose depending on resolution order, and either way you would get a different
+engine than someone intended. And a registry that declares a newer
+`layout_version` than the client understands refuses rather than misreads.
 
-You can exercise the whole chain locally — the registry is just a file, and
+You can exercise the whole chain locally. The registry is just a file, and
 nothing says its calculator must live on a cluster:
 
 ```python
@@ -471,10 +495,10 @@ print(info["engine"], info["engine_source"], info["engine_version"])
 emt-cluster registry:laptop 1.0
 ```
 
-The declared `version` lands in the task recipe as provenance *and* in the
-cache key. When a maintainer bumps `qe-delta` from 7.3 to 7.4, cached results
-are honestly invalidated instead of the old engine's numbers being served —
-and not just versions: any spec edit (options, env, calculator) changes the
+The declared `version` lands in the task recipe as provenance and in the
+cache key. When a maintainer bumps `qe-delta` from 7.3 to 7.4, SLAB honestly
+invalidates cached results instead of serving the old engine's numbers. And
+not just versions. Any spec edit (options, env, calculator) changes the
 fingerprint. Watch it happen:
 
 ```python
@@ -497,16 +521,16 @@ cache hit: True
 cache hit: False
 ```
 
-How the cache key is built is [Caching & resume](caching-and-resume.md)'s
-story; the point here is that engine identity is part of it.
+For how the cache key is built, see [Caching & resume](caching-and-resume.md).
+The point here is that engine identity is part of it.
 
 ## Rootstock checkpoint ids, served silently
 
 On a cluster with a [Garden-AI/rootstock](https://github.com/Garden-AI/rootstock)
-install, any canonical checkpoint id works *directly as the engine name* —
-rootstock resolves the hosting environment and serves the model from a worker
-subprocess, so your Python environment stays free of torch and model packages
-(`pip install 'slab[rootstock]'` adds only a thin client):
+install, any canonical checkpoint id works directly as the engine name.
+Rootstock resolves the hosting environment and serves the model from a worker
+subprocess, so your Python environment stays free of torch and model
+packages. `pip install 'slab[rootstock]'` adds only a thin client:
 
 <!-- no-verify -->
 ```python
@@ -517,11 +541,11 @@ relaxed, info = relax(
 )
 ```
 
-The install is found via `cluster=` or `root=` in `calculator_options`, else
-`[engines.rootstock]` in the slab config, else rootstock's own defaults
+SLAB finds the install via `cluster=` or `root=` in `calculator_options`,
+else `[engines.rootstock]` in the slab config, else rootstock's own defaults
 (`$ROOTSTOCK_ROOT`, `~/.config/rootstock/config.toml`). The config section is
-the machine-fact home, exactly like `[engines.qe] command`: a *local* install
-declares its path once —
+the machine-fact home, exactly like `[engines.qe] command`. A local install
+declares its path once:
 
 ```toml
 [engines.rootstock]
@@ -531,30 +555,30 @@ root = "/scratch/me/rootstock-install"   # a local install: the path form
 #                                        # to [hpc] cluster, the SLURM label
 ```
 
-— and checkpoint ids then work as engine names with no per-call options. The
-install's location deliberately never enters cache identity: rootstock's
-contract is that canonical ids are stable identities wherever they are served
-from. Because resolution tries the registry first, a maintainer's alias always
-beats a bare id. The explicit `engine="rootstock"` form remains for full control —
-e.g. `calculator_options={"checkpoint": "uma:custom", "weights": ..., "cluster": "delta"}`
+Checkpoint ids then work as engine names with no per-call options. Because
+resolution tries the registry first, a maintainer's alias always beats a
+bare id. The explicit `engine="rootstock"` form remains for full control,
+for example
+`calculator_options={"checkpoint": "uma:custom", "weights": ..., "cluster": "delta"}`
 with your own weights. `relax` closes the worker subprocess when the task
 finishes.
 
 Cache identity for silently-served engines is deliberately the checkpoint id
-plus the rootstock *client* version — not the install's path or hosting
-environment. Rootstock's contract is that canonical ids are stable identities:
-the same id on another install is the same computation, while cluster-side
-internals (env rebuilds, in-place weight edits) are invisible to any client.
+plus the rootstock client version. It is never the install's path or hosting
+environment. Rootstock's contract is that canonical ids are stable
+identities. The same id on another install is the same computation, and
+cluster-side internals (env rebuilds, in-place weight edits) are invisible to
+any client.
 
 ## Trust model
 
 Stated plainly: registry entries execute maintainer-declared code and
 environment variables as the calling user, and rootstock installs run
-maintainer-built environments the same way. SLAB isolates *configuration*, not
-*privilege* — trusting a cluster's `engines.json` is trusting its module farm.
-`slab engines verify` tells you the declarations work; it does not tell you
-they are benign.
+maintainer-built environments the same way. SLAB isolates configuration,
+not privilege. Trusting a cluster's `engines.json` is trusting its module
+farm. `slab engines verify` tells you the declarations work. It does not tell
+you they are benign.
 
-When an engine misbehaves mid-run, the evidence survives — see
+When an engine misbehaves mid-run, the evidence survives. See
 [Debugging failures](debugging-failures.md). For where the seam sits in the
 overall design, see [Architecture](../architecture.md).

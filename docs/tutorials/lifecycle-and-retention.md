@@ -1,6 +1,6 @@
 # Lifecycle & retention
 
-Every SLAB run is born ephemeral and moves toward permanence only by explicit action — nothing is born permanent and later deleted. This page walks the state machine, the retention policy that ages unpromoted runs out, and the two-phase `expire` + `gc` housekeeping built on both.
+Every SLAB run starts as temporary, and it becomes permanent only by an explicit action. Nothing is stored permanently by default and deleted later. This page covers the state machine, the retention policy that ages unpromoted runs out, and the two-phase `expire` + `gc` housekeeping built on both.
 
 ## The state machine
 
@@ -13,7 +13,7 @@ quarantined ──checks pass──▶ verified ──promote──▶ promoted 
  expired ◀──────────────────────┘
 ```
 
-Two rules are structural, not policy: nothing makes promoted or archived data expire (the transition does not exist, with or without `force`), and `expired`/`archived` are terminal. The relation itself is queryable:
+Two rules are structural, not policy. Nothing makes promoted or archived data expire. The transition does not exist, with or without `force`. And `expired` and `archived` are terminal states. The relation itself is queryable:
 
 ```python
 from slab import LifecycleState, can_transition
@@ -31,13 +31,13 @@ True
 False
 ```
 
-`force=True` unlocks exactly one edge — quarantined → promoted, recorded as forced. It never unlocks expiry of promoted data.
+`force=True` unlocks exactly one edge, quarantined → promoted, and records it as forced. It never unlocks expiry of promoted data.
 
-Orthogonal to the lifecycle, each run carries an *execution status*: `pending → running → completed | failed`. A run that fails execution needs no special lifecycle handling — it stays quarantined and ages out, which is what makes failure diagnostics self-cleaning (see [Debugging failures](debugging-failures.md)).
+Each run also carries an execution status, orthogonal to the lifecycle: `pending → running → completed | failed`. A run that fails execution needs no special lifecycle handling. It stays quarantined and ages out, which makes failure diagnostics self-cleaning. See [Debugging failures](debugging-failures.md).
 
 ## Three runs, three states
 
-One workspace, three endings: a checked run that lands `verified`, an unchecked probe that stays `quarantined`, and a run we will force-promote by hand.
+One workspace, three endings. A checked run lands `verified`. An unchecked probe stays `quarantined`. A third run is force-promoted by hand.
 
 ```python
 from ase.build import bulk
@@ -76,9 +76,9 @@ probe     status=completed state=quarantined
 rescue    status=completed state=quarantined
 ```
 
-All three completed; only the run whose checks passed became verified. Completion is a fact about execution, verification is a claim about the result — the two axes never collapse into one.
+All three runs completed. Only the run whose checks passed became verified. Completion is a fact about execution. Verification is a claim about the result. The two axes never collapse into one.
 
-Force-promotion is the recorded escape hatch for when you want a run kept without (or before) verification. Every transition lands in the run's history with actor, reason, and a `forced` flag:
+Force-promotion is the recorded escape hatch. Use it to keep a run without verification, or before verification. Every transition lands in the run's history with an actor, a reason, and a `forced` flag:
 
 ```python
 promoted = ws.runs.transition(
@@ -96,11 +96,11 @@ promoted
 quarantined -> promoted  actor=agent  forced=True  reason='loose relax is good enough for the survey'
 ```
 
-`forced` is true only when the transition *needed* force — passing `force=True` on a normally-legal promotion records `forced=False`. The audit trail cannot be gamed into looking routine.
+`forced` is true only when the transition needed force. Passing `force=True` on a normally-legal promotion records `forced=False`, so the audit trail cannot be made to look routine.
 
 ## The asymmetry is enforced, not conventional
 
-A retention policy that puts a TTL on `promoted` is not misconfiguration to be warned about — it is unrepresentable:
+A retention policy that puts a TTL on `promoted` is not a misconfiguration that SLAB warns about. It is unrepresentable:
 
 ```python
 from slab import RetentionPolicy
@@ -117,11 +117,15 @@ except ValueError as e:
     For further information visit https://errors.pydantic.dev/2.13/v/value_error
 ```
 
-The same rejection covers `archived` and `expired`. Between this and the missing transition edge, "promoted data never expires" holds at two independent layers.
+The same rejection covers `archived` and `expired`. Together with the missing transition edge, "promoted data never expires" holds at two independent layers.
 
 ## Policy as data
 
-A `RetentionPolicy` maps lifecycle states to rules: `ttl_days` (how long a run may sit in the state) and `keep` (which artifact *roles* — `terminal`, `input`, `intermediate` — must retain bytes while a run is there). The defaults: quarantined expires after 30 days, verified after 90; alive runs keep all bytes so they can be inspected; promoted runs keep `terminal` outputs and `input` recompute roots but let `intermediate` bytes go hash-only.
+A `RetentionPolicy` maps lifecycle states to rules. `ttl_days` says how long a run may sit in the state. `keep` says which artifact roles (`terminal`, `input`, `intermediate`) must retain bytes while a run is there. The defaults:
+
+- Quarantined runs expire after 30 days. Verified runs expire after 90.
+- Alive runs keep all bytes, so you can inspect them.
+- Promoted runs keep `terminal` outputs and `input` recompute roots, and let `intermediate` bytes go hash-only.
 
 ```python
 from slab import DEFAULT_POLICY
@@ -142,7 +146,7 @@ print(strict.quarantined.ttl_days, strict.verified.ttl_days)
 7.0 90.0
 ```
 
-Unmentioned states keep their defaults, unknown keys are rejected. Because the policy is plain data, it also lives in a file — drop this at `<workspace>/policy.json`, or point the CLI at any path with `--policy file.json`:
+Unmentioned states keep their defaults. Unknown keys are rejected. Because the policy is plain data, it can also live in a file. Drop this at `<workspace>/policy.json`, or point the CLI at any path with `--policy file.json`:
 
 ```json
 {
@@ -152,11 +156,11 @@ Unmentioned states keep their defaults, unknown keys are rejected. Because the p
 }
 ```
 
-TTLs anchor to `state_entered_at` — the clock restarts when a run changes state, so a run promoted on day 29 was never in danger, and a freshly verified run gets the full verified window regardless of how long it sat in quarantine.
+TTLs anchor to `state_entered_at`, so the clock restarts when a run changes state. A run promoted on day 29 was never in danger. A freshly verified run gets the full verified window no matter how long it sat in quarantine.
 
 ## Expire, then gc
 
-Housekeeping is two deliberate phases. `expire_due` is the TTL sweep — a state change only. `gc` reclaims artifact bytes that no run's retention rule demands. Both `expire_due` and its `slab expire` CLI counterpart take the sweep time as an argument (`now=` / `--older-than`), so we can test a 40-day-later sweep without waiting:
+Housekeeping has two deliberate phases. `expire_due` is the TTL sweep, and it is a state change only. `gc` reclaims artifact bytes that no run's retention rule demands. Both `expire_due` and its CLI counterpart `slab expire` take the sweep time as an argument (`now=` / `--older-than`), so the example can run a 40-day-later sweep without waiting:
 
 ```python
 from datetime import timedelta
@@ -188,11 +192,16 @@ probe bytes on disk: False
 probe reference:     notes
 ```
 
-At day 40, only `probe` is past its 30-day quarantine TTL; `baseline` has 50 days of verified window left, and `rescue` is structurally out of reach. Then `gc` drops three blobs: the expired run's artifact, plus the *promoted* run's traced intermediates — promotion keeps terminal bytes and recompute roots, not the scratch in between. Note the last two lines: the bytes are gone (`ws.artifacts.has` flipped to `False`) but the reference — name, role, hash, recipe — survives in the run database forever. Whether bytes are currently available is a property of the store, not of the reference.
+At day 40, only `probe` is past its 30-day quarantine TTL. `baseline` has 50 days of verified window left, and `rescue` is structurally out of reach. `gc` then drops three blobs: the expired run's artifact, plus the promoted run's traced intermediates. Promotion keeps terminal bytes and recompute roots, not the scratch in between. Note the last two lines. The bytes are gone (`ws.artifacts.has` flipped to `False`), but the reference (name, role, hash, recipe) survives in the run database forever. Whether bytes are currently available is a property of the store, not of the reference.
 
 !!! note
-    The exact byte count is stable here — seeds are fixed and EMT is deterministic — but run ids and timestamps differ every run.
+    The exact byte count is stable here, because seeds are fixed and EMT is deterministic. Run ids and timestamps differ every run.
 
-Why two phases instead of one `cleanup`? Because they carry different risk. Expiry is cheap and reviewable — a state change you can list (`slab list --state expired`) and inspect before any byte is touched, and `gc --dry-run` reports what would drop without dropping it. Byte deletion is the irreversible step, so it gets its own explicit command. Two safety valves follow the same logic: blobs referenced by no run are reported as `orphans` but never deleted (they may belong to an in-flight run that has not recorded its references yet), and runs at status `running` are never swept by default — a hard-killed process leaves its run at `running` forever, so `expire --include-running` (or `include_running=True`) exists for when you know those processes are dead: such runs are marked failed first, then expired.
+The two phases exist because they carry different risk. Expiry is cheap and reviewable. It is a state change that you can list (`slab list --state expired`) and inspect before any byte is touched, and `gc --dry-run` reports what would drop without dropping it. Byte deletion is the irreversible step, so it gets its own explicit command.
 
-For where these states come from in the first place, see the [Quickstart](quickstart.md); for the argument behind the design, see [Architecture](../architecture.md).
+Two safety valves follow the same logic:
+
+- Blobs that no run references are reported as `orphans` but never deleted. They may belong to an in-flight run that has not recorded its references yet.
+- Runs at status `running` are never swept by default. A hard-killed process leaves its run at `running` forever, so `expire --include-running` (or `include_running=True`) exists for when you know those processes are dead. Such runs are marked failed first, then expired.
+
+For where these states come from in the first place, see the [Quickstart](quickstart.md). For the argument behind the design, see [Architecture](../architecture.md).
