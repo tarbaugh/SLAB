@@ -273,7 +273,9 @@ def hpc_partitions() -> None:
 
 @hpc_app.command("render")
 def hpc_render(
-    command: Annotated[str, typer.Argument(help="Command the job runs, e.g. 'slab run relax.py'.")],
+    command: Annotated[
+        str, typer.Argument(help="Command the job runs, e.g. 'foundation run relax.py'.")
+    ],
     name: Annotated[str, typer.Option("--name", "-n", help="Job name.")] = "slab-job",
     partition: Annotated[
         str | None, typer.Option("--partition", "-p", help="Partition (default: config's).")
@@ -294,7 +296,9 @@ def hpc_render(
 
 @hpc_app.command("submit")
 def hpc_submit(
-    command: Annotated[str, typer.Argument(help="Command the job runs, e.g. 'slab run relax.py'.")],
+    command: Annotated[
+        str, typer.Argument(help="Command the job runs, e.g. 'foundation run relax.py'.")
+    ],
     name: Annotated[str, typer.Option("--name", "-n", help="Job name.")] = "slab-job",
     partition: Annotated[
         str | None, typer.Option("--partition", "-p", help="Partition (default: config's).")

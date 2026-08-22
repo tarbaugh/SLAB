@@ -679,7 +679,7 @@ def _add_hpc_tools(box: Toolbox, session: MasonSession) -> None:
         Tool(
             name="submit_job",
             description=(
-                "Submit a command as a SLURM batch job (typically 'slab run "
+                "Submit a command as a SLURM batch job (typically 'foundation run "
                 "workflow.py' so the result is still a traced, verified run)."
             ),
             parameters=_schema(

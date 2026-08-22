@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "slab"
+name = "slab-stack"
 version = "0.1.0"
-description = "Simplest Layer for Atomistic Backends — agent-native workflow orchestration for atomistic materials modeling"
+description = "Simplest Layer for Atomistic Backends — three packages for atomistic materials modeling: slab (engines), foundation (workflows and state), mason (the resident agent)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

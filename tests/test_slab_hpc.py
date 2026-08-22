@@ -302,10 +302,10 @@ def test_cli_hpc_partitions_none_declared(
 def test_cli_hpc_render(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _config_file(tmp_path)
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["hpc", "render", "slab run relax.py", "--name", "si"])
+    result = runner.invoke(app, ["hpc", "render", "foundation run relax.py", "--name", "si"])
     assert result.exit_code == 0
     assert "#SBATCH --job-name=si" in result.output
-    assert "slab run relax.py" in result.output
+    assert "foundation run relax.py" in result.output
 
 
 def test_cli_hpc_render_without_partitions_fails_loud(
@@ -325,7 +325,7 @@ def test_cli_hpc_submit_and_status_and_cancel(
     _fake(scheduler_bin, "sbatch", 'echo "31337"')
     _fake(scheduler_bin, "squeue", 'echo "PENDING"')
     _fake(scheduler_bin, "scancel", "true")
-    result = runner.invoke(app, ["hpc", "submit", "slab run relax.py", "--name", "si"])
+    result = runner.invoke(app, ["hpc", "submit", "foundation run relax.py", "--name", "si"])
     assert result.exit_code == 0
     assert "submitted job 31337 (si) to cpu" in result.output
     assert (tmp_path / "si-31337.sbatch").exists()  # kept under the job id
@@ -390,20 +390,24 @@ def test_driver_payload_is_never_launched() -> None:
             "partitions": {"cpu": {"launcher": "srun", "ntasks_per_node": 64}},
         }
     )
-    script = render_sbatch("slab run relax.py", job_name="wf", config=hpc)
-    assert "\nslab run relax.py" in script
-    assert "srun slab run" not in script
+    script = render_sbatch("foundation run relax.py", job_name="wf", config=hpc)
+    assert "\nfoundation run relax.py" in script
+    assert "srun foundation run" not in script
     assert "launcher omitted" in script
     engine_script = render_sbatch("pw.x -in si.pwi", job_name="pw", config=hpc)
     assert "srun pw.x -in si.pwi" in engine_script  # engines still get the launcher
     # An env assignment prefixing the payload must not hide the driver.
-    prefixed = render_sbatch("OMP_NUM_THREADS=4 slab run relax.py", job_name="env", config=hpc)
-    assert "\nOMP_NUM_THREADS=4 slab run relax.py" in prefixed
+    prefixed = render_sbatch(
+        "OMP_NUM_THREADS=4 foundation run relax.py", job_name="env", config=hpc
+    )
+    assert "\nOMP_NUM_THREADS=4 foundation run relax.py" in prefixed
     assert "srun OMP_NUM_THREADS" not in prefixed
     assert "launcher omitted" in prefixed
     # The explicit env wrapper is the same payload in different clothes.
-    wrapped = render_sbatch("env OMP_NUM_THREADS=4 slab run relax.py", job_name="w", config=hpc)
-    assert "\nenv OMP_NUM_THREADS=4 slab run relax.py" in wrapped
+    wrapped = render_sbatch(
+        "env OMP_NUM_THREADS=4 foundation run relax.py", job_name="w", config=hpc
+    )
+    assert "\nenv OMP_NUM_THREADS=4 foundation run relax.py" in wrapped
     assert "srun env" not in wrapped
     assert "launcher omitted" in wrapped
     # ...but an env-wrapped engine command still gets the launcher.
