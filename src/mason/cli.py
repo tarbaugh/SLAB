@@ -20,8 +20,9 @@ from typing import TYPE_CHECKING, Annotated, Any, NoReturn
 import typer
 
 if TYPE_CHECKING:
+    from mason.config import AgentConfig
     from mason.session import MasonSession
-    from slab.config import AgentConfig, HpcConfig
+    from slab.config import HpcConfig
 
 from foundation import _ops
 from foundation.errors import FoundationError
@@ -272,10 +273,15 @@ _TimeOpt = Annotated[str | None, typer.Option("--time", help="Override the job's
 
 
 def _serve_inputs(workspace: Path | None) -> tuple[AgentConfig, HpcConfig, Path]:
-    from slab.config import load_config
+    """The three things every serve verb needs, each from its owner."""
+    from mason.config import load_config
+    from slab.config import load_config as load_slab_config
 
-    config = load_config()
-    return config.agent, config.hpc, _ops.resolve_root(workspace)
+    return (
+        load_config().agent,
+        load_slab_config().hpc,
+        _ops.resolve_root(workspace),
+    )
 
 
 @serve_app.command("render")
@@ -415,12 +421,13 @@ def mason_doctor(
 ) -> None:
     """Check the model endpoint: reachable, model served, tool calls parsed."""
     from mason.client import ChatClient, LlmError
+    from mason.config import load_config
     from mason.serve import discover_endpoint
-    from slab.config import load_config
+    from slab.config import load_config as load_slab_config
 
     try:
-        doctor_config = load_config()
-        agent = doctor_config.agent
+        agent = load_config().agent
+        cluster = load_slab_config().hpc.cluster or ""
         root = _ops.resolve_root(workspace)
     except (MasonError, FoundationError, SlabError) as e:
         _fail(str(e))
@@ -458,7 +465,7 @@ def mason_doctor(
         typer.echo(f"[+] endpoint answers; {len(names)} model(s) served")
     except LlmError as e:
         typer.echo(f"[x] endpoint: {e}")
-        for line in _serve_hint(agent, root, origin, cluster=doctor_config.hpc.cluster or ""):
+        for line in _serve_hint(agent, root, origin, cluster=cluster):
             typer.echo(line)
         raise typer.Exit(code=1) from None
     if resolved_model is None:

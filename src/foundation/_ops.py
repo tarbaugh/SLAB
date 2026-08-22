@@ -40,7 +40,7 @@ _EFFECTIVELY_NOW = 1e-9  # ~90µs in days: "--older-than 0d" means "everything, 
 def resolve_root(explicit: str | os.PathLike[str] | None) -> Path:
     """Workspace root: explicit flag > $SLAB_WORKSPACE > config > ``./.slab``.
 
-    The config layer is ``[paths] workspace`` in :mod:`slab.config`.
+    The config layer is ``[workspace] root`` in :mod:`foundation.config`.
 
     Examples:
         >>> resolve_root("/tmp/ws")
@@ -58,9 +58,9 @@ def resolve_root(explicit: str | os.PathLike[str] | None) -> Path:
     from_env = os.environ.get("SLAB_WORKSPACE")
     if from_env:
         return Path(from_env)
-    from slab.config import config_value
+    from foundation.config import config_value
 
-    configured = config_value("paths.workspace")
+    configured = config_value("workspace.root")
     return Path(configured) if configured else Path(DEFAULT_ROOT)
 
 

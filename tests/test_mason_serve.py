@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 from conftest import LlmScript
 from mason import MasonSession
 from mason.cli import app
+from mason.config import AgentConfig, load_config
 from mason.serve import (
     ServeError,
     ServeRecord,
@@ -34,7 +35,7 @@ from mason.serve import (
     wait_for_record,
     wait_until_ready,
 )
-from slab.config import AgentConfig, HpcConfig, load_config
+from slab.config import HpcConfig
 from slab.errors import SlabError
 
 runner = CliRunner()

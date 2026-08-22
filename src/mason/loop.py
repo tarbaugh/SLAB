@@ -36,11 +36,11 @@ from mason.client import (
     parse_fenced_calls,
     parse_loose_calls,
 )
+from mason.config import AgentConfig
 from mason.errors import MasonError
 from mason.prompts import COMPACTION_PROMPT, system_messages
 from mason.session import MasonSession
 from mason.tools import Toolbox, build_toolbox
-from slab.config import AgentConfig
 
 _ERROR_STREAK_LIMIT = 5
 _COMPACTION_KEEP_MESSAGES = 6

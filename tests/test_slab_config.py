@@ -11,7 +11,6 @@ from typer.testing import CliRunner
 from slab.cli import app
 from slab.config import (
     CONFIG_TEMPLATE,
-    AgentConfig,
     ConfigError,
     HpcConfig,
     LammpsEngineConfig,
@@ -19,12 +18,12 @@ from slab.config import (
     PathsConfig,
     QeEngineConfig,
     RootstockEngineConfig,
-    ServeConfig,
     SlabConfig,
     config_value,
     find_config_files,
     load_config,
     load_config_with_origins,
+    load_merged,
     user_config_path,
     write_template,
 )
@@ -47,7 +46,8 @@ def _user_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, text: str) -> Pa
 def test_no_files_yields_pure_defaults(tmp_path: Path) -> None:
     config = load_config(tmp_path)
     assert config == SlabConfig()
-    assert config.agent.resolved_endpoint == "http://localhost:11434/v1"
+    assert config.paths.pseudos is None
+    assert config.hpc.partitions == {}
 
 
 def test_layers_merge_project_over_user_over_site(
@@ -55,21 +55,22 @@ def test_layers_merge_project_over_user_over_site(
 ) -> None:
     site = tmp_path / "site.toml"
     site.write_text(
-        '[paths]\nworkspace = "/site/ws"\npseudos = "/site/pseudos"\n'
+        '[paths]\nscratch = "/site/tmp"\npseudos = "/site/pseudos"\n'
         '[hpc]\ncluster = "delta"\n'
     )
     monkeypatch.setenv("SLAB_SITE_CONFIG", str(site))
-    _user_file(monkeypatch, tmp_path, '[paths]\nworkspace = "/user/ws"\n')
+    _user_file(monkeypatch, tmp_path, '[paths]\nscratch = "/user/tmp"\n')
     project_dir = tmp_path / "project"
     project_dir.mkdir()
     (project_dir / "slab.toml").write_text('[engines.qe]\ncommand = "srun pw.x"\n')
 
-    config, origins = load_config_with_origins(project_dir)
-    assert config.paths.workspace == "/user/ws"  # user beats site
+    config, merge = load_config_with_origins(project_dir)
+    origins = merge.origins
+    assert config.paths.scratch == "/user/tmp"  # user beats site
     assert config.paths.pseudos == "/site/pseudos"  # untouched site value survives
     assert config.hpc.cluster == "delta"
     assert config.engines.qe.command == "srun pw.x"
-    assert origins["paths.workspace"] == f"{_user_path(tmp_path)} (user)"
+    assert origins["paths.scratch"] == f"{_user_path(tmp_path)} (user)"
     assert origins["paths.pseudos"] == f"{site} (site)"
     assert origins["engines.qe.command"].endswith("(project)")
 
@@ -82,12 +83,12 @@ def test_slab_config_env_var_overrides_project_discovery(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     explicit = tmp_path / "elsewhere.toml"
-    explicit.write_text('[paths]\nworkspace = "/explicit/ws"\n')
+    explicit.write_text('[paths]\nscratch = "/explicit/tmp"\n')
     project_dir = tmp_path / "project"
     project_dir.mkdir()
-    (project_dir / "slab.toml").write_text('[paths]\nworkspace = "/discovered/ws"\n')
+    (project_dir / "slab.toml").write_text('[paths]\nscratch = "/discovered/tmp"\n')
     monkeypatch.setenv("SLAB_CONFIG", str(explicit))
-    assert load_config(project_dir).paths.workspace == "/explicit/ws"
+    assert load_config(project_dir).paths.scratch == "/explicit/tmp"
 
 
 def test_dangling_explicit_files_are_refused(
@@ -120,8 +121,8 @@ def test_malformed_toml_is_a_loud_config_error(tmp_path: Path) -> None:
 
 
 def test_unknown_key_is_refused_naming_the_file(tmp_path: Path) -> None:
-    (tmp_path / "slab.toml").write_text('[agent]\nmodle = "typo"\n')
-    with pytest.raises(ConfigError, match=r"agent\.modle") as excinfo:
+    (tmp_path / "slab.toml").write_text('[hpc]\nclustre = "typo"\n')
+    with pytest.raises(ConfigError, match=r"hpc\.clustre") as excinfo:
         load_config(tmp_path)
     assert "slab.toml" in str(excinfo.value)
     assert "unknown key" in str(excinfo.value)
@@ -138,7 +139,7 @@ def test_each_layer_declares_its_own_schema_version(
 ) -> None:
     """A project file must not mask a site file written for a newer slab."""
     site = tmp_path / "site.toml"
-    site.write_text('schema_version = 99\n[paths]\nworkspace = "/site/ws"\n')
+    site.write_text('schema_version = 99\n[paths]\nscratch = "/site/tmp"\n')
     monkeypatch.setenv("SLAB_SITE_CONFIG", str(site))
     (tmp_path / "slab.toml").write_text("schema_version = 1\n")
     with pytest.raises(ConfigError, match=r"site\.toml declares schema_version 99"):
@@ -146,8 +147,8 @@ def test_each_layer_declares_its_own_schema_version(
 
 
 def test_wrong_type_is_refused_naming_the_file(tmp_path: Path) -> None:
-    (tmp_path / "slab.toml").write_text('[agent]\nmax_turns = "many"\n')
-    with pytest.raises(ConfigError, match=r"agent\.max_turns"):
+    (tmp_path / "slab.toml").write_text('[hpc]\ncluster = 42\n')
+    with pytest.raises(ConfigError, match=r"hpc\.cluster"):
         load_config(tmp_path)
 
 
@@ -168,16 +169,16 @@ def test_path_values_expand_home_and_variables(
 ) -> None:
     monkeypatch.setenv("SLAB_TEST_SCRATCH", "/scratch/tom")
     (tmp_path / "slab.toml").write_text(
-        '[paths]\nworkspace = "${SLAB_TEST_SCRATCH}/ws"\npseudos = "~/pseudos"\n'
+        '[paths]\nscratch = "${SLAB_TEST_SCRATCH}/tmp"\npseudos = "~/pseudos"\n'
     )
     config = load_config(tmp_path)
-    assert config.paths.workspace == "/scratch/tom/ws"
+    assert config.paths.scratch == "/scratch/tom/tmp"
     assert config.paths.pseudos == str(Path("~/pseudos").expanduser())
 
 
 def test_unset_variable_in_path_is_refused(tmp_path: Path) -> None:
     os.environ.pop("SLAB_NO_SUCH_VAR", None)
-    (tmp_path / "slab.toml").write_text('[paths]\nworkspace = "/scratch/$SLAB_NO_SUCH_VAR/ws"\n')
+    (tmp_path / "slab.toml").write_text('[paths]\nscratch = "/scratch/$SLAB_NO_SUCH_VAR/tmp"\n')
     with pytest.raises(ConfigError, match=r"references \$SLAB_NO_SUCH_VAR"):
         load_config(tmp_path)
 
@@ -255,8 +256,12 @@ def test_template_declares_no_table_twice_even_in_comments(tmp_path: Path) -> No
 
 def test_every_key_the_template_shows_is_a_key_the_schema_accepts() -> None:
     """The template is documentation; a stale key in it teaches a load error."""
+    from foundation.config import WorkspaceConfig
+    from mason.config import AgentConfig, ServeConfig
+
     models = {
         "": SlabConfig,
+        "[workspace]": WorkspaceConfig,
         "[paths]": PathsConfig,
         "[engines.qe]": QeEngineConfig,
         "[engines.lammps]": LammpsEngineConfig,
@@ -313,21 +318,6 @@ def test_config_value_walks_dotted_paths(tmp_path: Path) -> None:
 
 # -- integration: resolution chains ------------------------------------------
 
-
-def test_resolve_root_uses_config_below_env(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    from foundation._ops import resolve_root
-
-    project = tmp_path / "project"
-    project.mkdir()
-    (project / "slab.toml").write_text('[paths]\nworkspace = "/config/ws"\n')
-    monkeypatch.chdir(project)
-    monkeypatch.delenv("SLAB_WORKSPACE", raising=False)
-    assert resolve_root(None) == Path("/config/ws")
-    monkeypatch.setenv("SLAB_WORKSPACE", "/env/ws")
-    assert resolve_root(None) == Path("/env/ws")  # env beats config
-    assert resolve_root("/explicit/ws") == Path("/explicit/ws")
 
 
 def test_pseudos_root_uses_config_below_env(
@@ -452,11 +442,11 @@ def test_cli_config_show_json_is_machine_readable(
 def test_cli_config_show_fails_loud_on_broken_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    (tmp_path / "slab.toml").write_text('[agent]\nmodle = "typo"\n')
+    (tmp_path / "slab.toml").write_text('[hpc]\nclustre = "typo"\n')
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["config", "show"])
     assert result.exit_code == 1
-    assert "agent.modle" in result.output
+    assert "hpc.clustre" in result.output
 
 
 def test_cli_config_init_writes_and_refuses_overwrite(
@@ -479,3 +469,48 @@ def test_cli_config_init_user_layer(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     assert result.exit_code == 0
     assert (tmp_path / "xdg" / "slab" / "config.toml").exists()
 
+
+
+# -- table ownership ----------------------------------------------------------
+
+
+def test_an_unknown_top_level_table_is_refused_naming_the_file(tmp_path: Path) -> None:
+    """No package owns it, so every view would ignore it. Refuse instead."""
+    (tmp_path / "slab.toml").write_text('[agnet]\nmodel = "x"\n')
+    with pytest.raises(ConfigError, match="unknown top-level key 'agnet'"):
+        load_merged(tmp_path)
+    with pytest.raises(ConfigError, match="known: agent, engines, hpc, paths"):
+        load_config(tmp_path)
+
+
+def test_several_unknown_tables_are_all_named(tmp_path: Path) -> None:
+    (tmp_path / "slab.toml").write_text("[nope]\na = 1\n\n[alsonope]\nb = 2\n")
+    with pytest.raises(ConfigError, match="unknown top-level keys 'alsonope', 'nope'"):
+        load_config(tmp_path)
+
+
+def test_slab_ignores_tables_it_does_not_own(tmp_path: Path) -> None:
+    """A typo inside [agent] is Mason's to refuse, not SLAB's to trip over."""
+    (tmp_path / "slab.toml").write_text(
+        '[hpc]\ncluster = "delta"\n\n[agent]\nmodle = "typo"\n\n[workspace]\nroot = "/ws"\n'
+    )
+    config = load_config(tmp_path)
+    assert config.hpc.cluster == "delta"
+    assert not hasattr(config, "agent")
+
+
+def test_config_show_reports_every_package_s_tables(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """One command answers 'why is it using that?' for all three packages."""
+    (tmp_path / "slab.toml").write_text(
+        '[workspace]\nroot = "/ws"\n\n[paths]\npseudos = "/p"\n\n'
+        '[hpc]\ncluster = "delta"\n\n[agent]\nmodel = "llama3.1:8b"\n'
+    )
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["config", "show"])
+    assert result.exit_code == 0
+    for line in ("workspace.root = '/ws'", "paths.pseudos = '/p'",
+                 "hpc.cluster = 'delta'", "agent.model = 'llama3.1:8b'"):
+        assert line in result.output, f"missing {line!r}"
+    assert "their owners validate them" in result.output

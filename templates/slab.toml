@@ -7,12 +7,20 @@
 # 'slab config show' prints the merged result with each value's origin.
 schema_version = 1
 
-[paths]
-# workspace = "/scratch/${USER}/slab-workspace"   # run database + artifacts
+# One file, three packages. Each table below is owned by exactly one of them:
+# [paths], [engines], and [hpc] by slab; [workspace] by foundation; [agent] by
+# mason. A table's owner validates it, so a typo inside [agent] is refused by
+# 'mason doctor' rather than by 'slab engines list'. A table name no package
+# owns is refused by every command that reads the file.
+
+[workspace]
+# root = "/scratch/${USER}/slab-workspace"        # run database + artifacts
 #                                      # (parallel scratch works — slab falls back
 #                                      # from WAL journaling automatically — but
 #                                      # avoid heavy login-node polling of a
 #                                      # workspace a running job is writing to)
+
+[paths]
 # pseudos = "/shared/sw/slab/pseudos"             # pseudopotential family root
 # engines = "/shared/sw/slab/engines.json"        # cluster engine registry
 # scratch = "/scratch/${USER}/slab-scratch"       # per-calculation scratch root:

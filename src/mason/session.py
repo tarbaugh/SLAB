@@ -27,8 +27,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from mason.config import AgentConfig, load_config
 from mason.errors import MasonError
-from slab.config import AgentConfig, HpcConfig, SlabConfig, load_config
+from slab.config import HpcConfig
+from slab.config import load_config as load_slab_config
 
 Approver = Callable[[str, str], bool]
 """``(tool_name, preview) -> allow?`` — the permission gate for mutating tools."""
@@ -66,14 +68,17 @@ class MasonSession:
         cwd: str | os.PathLike[str] | None = None,
         *,
         workspace_root: str | os.PathLike[str] | None = None,
-        config: SlabConfig | None = None,
+        agent: AgentConfig | None = None,
+        hpc: HpcConfig | None = None,
         approver: Approver | None = None,
         auto_approve: bool = False,
     ) -> None:
         self.cwd = Path(cwd if cwd is not None else Path.cwd()).resolve()
-        loaded = config if config is not None else load_config(self.cwd)
-        self.agent: AgentConfig = loaded.agent
-        self.hpc: HpcConfig = loaded.hpc
+        # Each table comes from the package that owns it. Passing one in skips
+        # only that package's file read, so a caller can pin the agent without
+        # inventing an [hpc] section it does not care about.
+        self.agent: AgentConfig = agent if agent is not None else load_config(self.cwd).agent
+        self.hpc: HpcConfig = hpc if hpc is not None else load_slab_config(self.cwd).hpc
         from foundation._ops import resolve_root
 
         self.workspace_root = (
@@ -140,10 +145,10 @@ class MasonSession:
         auto-approves — ``ls; rm -rf ~`` is not an ``ls``.
 
         Examples:
-            >>> from slab.config import SlabConfig
-            >>> config = SlabConfig.model_validate(
-            ...     {"agent": {"shell_allowlist": ["git status", "ls"]}})
-            >>> session = MasonSession("/tmp", config=config)
+            >>> from mason.config import AgentConfig
+            >>> agent = AgentConfig.model_validate(
+            ...     {"shell_allowlist": ["git status", "ls"]})
+            >>> session = MasonSession("/tmp", agent=agent)
             >>> session.shell_allowlisted("git status --short")
             True
             >>> session.shell_allowlisted("git push")

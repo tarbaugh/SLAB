@@ -360,27 +360,46 @@ config_app = typer.Typer(
 app.add_typer(config_app, name="config")
 
 
+_SLAB_TABLES = frozenset({"schema_version", "paths", "engines", "hpc"})
+
+
 @config_app.command("show")
 def config_show(
     as_json: Annotated[bool, typer.Option("--json", help="Emit machine-readable JSON.")] = False,
 ) -> None:
-    """Show the merged configuration and which file each value came from."""
-    from slab.config import find_config_files, load_config_with_origins
+    """Show the merged configuration and which file each value came from.
+
+    One file, three packages. SLAB's own tables print through their validated
+    models, so a ``~`` or ``$VAR`` shows the path it expanded to. The tables
+    Foundation and Mason own print as written, because SLAB does not import
+    their models — it knows their names, not their meanings. A value refused
+    by its owner therefore still appears here, which is what makes this the
+    command to reach for when asking why a setting did not take.
+    """
+    from slab.config import KNOWN_TOP_LEVEL_KEYS, load_config_with_origins
 
     try:
-        files = find_config_files()
-        merged, origins = load_config_with_origins()
+        config, merge = load_config_with_origins()
     except SlabError as e:
         _fail(str(e))
+    files, origins = merge.files, merge.origins
+
+    def value_of(dotted: str) -> object:
+        """SLAB's tables resolved; everyone else's exactly as the file says."""
+        owned = dotted.split(".", 1)[0] in _SLAB_TABLES
+        return _dig(config if owned else merge.raw, dotted)
+
     if as_json:
         typer.echo(
             json.dumps(
                 {
                     "files": [{"layer": layer, "path": str(path)} for layer, path in files],
-                    "config": merged.model_dump(mode="json"),
+                    "config": config.model_dump(mode="json"),
+                    "set": {dotted: value_of(dotted) for dotted in sorted(origins)},
                     "origins": origins,
                 },
                 indent=2,
+                default=str,
             )
         )
         return
@@ -394,8 +413,9 @@ def config_show(
     for layer, path in files:
         typer.echo(f"{layer}: {path}")
     for dotted in sorted(origins):
-        value = _dig(merged, dotted)
-        typer.echo(f"  {dotted} = {value!r}  [{origins[dotted]}]")
+        typer.echo(f"  {dotted} = {value_of(dotted)!r}  [{origins[dotted]}]")
+    unowned = ", ".join(sorted(KNOWN_TOP_LEVEL_KEYS - _SLAB_TABLES))
+    typer.echo(f"[{unowned}] print as written; their owners validate them")
     typer.echo("unset keys use built-in defaults ('slab config init' shows them all)")
 
 

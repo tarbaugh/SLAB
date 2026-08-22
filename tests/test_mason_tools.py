@@ -5,15 +5,16 @@ from pathlib import Path
 import pytest
 
 from mason.client import ToolCall
+from mason.config import MasonConfig
 from mason.session import MasonSession
 from mason.tools import Toolbox, _truncate_middle, build_toolbox
-from slab.config import SlabConfig
+from slab.config import HpcConfig
 
 
 def _session(tmp_path: Path, **agent: object) -> MasonSession:
-    config = SlabConfig.model_validate({"agent": agent} if agent else {})
+    config = MasonConfig.model_validate({"agent": agent} if agent else {})
     return MasonSession(
-        tmp_path, workspace_root=tmp_path / ".slab", config=config, auto_approve=True
+        tmp_path, workspace_root=tmp_path / ".slab", agent=config.agent, auto_approve=True
     )
 
 
@@ -75,10 +76,8 @@ def test_python_writes_get_an_immediate_syntax_check(box: Toolbox, tmp_path: Pat
 def test_hpc_tools_only_exist_with_partitions(tmp_path: Path) -> None:
     plain = build_toolbox(_session(tmp_path))
     assert "submit_job" not in plain.tools
-    config = SlabConfig.model_validate(
-        {"hpc": {"default_partition": "cpu", "partitions": {"cpu": {}}}}
-    )
-    session = MasonSession(tmp_path, workspace_root=tmp_path / ".slab", config=config)
+    hpc = HpcConfig.model_validate({"default_partition": "cpu", "partitions": {"cpu": {}}})
+    session = MasonSession(tmp_path, workspace_root=tmp_path / ".slab", hpc=hpc)
     clustered = build_toolbox(session)
     assert {"submit_job", "job_status", "cancel_job"} <= set(clustered.tools)
 
@@ -164,7 +163,9 @@ def test_search_works_when_the_project_lives_under_a_dotted_parent(tmp_path: Pat
 
 
 def _session_at(path: Path) -> MasonSession:
-    return MasonSession(path, workspace_root=path / ".slab", config=SlabConfig(), auto_approve=True)
+    return MasonSession(
+        path, workspace_root=path / ".slab", agent=MasonConfig().agent, auto_approve=True
+    )
 
 
 def test_list_dir_survives_a_dangling_symlink(box: Toolbox, tmp_path: Path) -> None:
@@ -183,7 +184,7 @@ def test_approval_preview_names_the_load_bearing_keys(tmp_path: Path) -> None:
         return False
 
     session = MasonSession(
-        tmp_path, workspace_root=tmp_path / ".slab", config=SlabConfig(), approver=approver
+        tmp_path, workspace_root=tmp_path / ".slab", agent=MasonConfig().agent, approver=approver
     )
     box = build_toolbox(session)
     box.dispatch(_call("write_file", content="x" * 5_000, path="important.py"))
@@ -222,9 +223,9 @@ def test_shell_approval_gate_and_allowlist(tmp_path: Path) -> None:
         asked.append(preview)
         return False
 
-    config = SlabConfig.model_validate({"agent": {"shell_allowlist": ["echo"]}})
+    config = MasonConfig.model_validate({"agent": {"shell_allowlist": ["echo"]}})
     session = MasonSession(
-        tmp_path, workspace_root=tmp_path / ".slab", config=config, approver=approver
+        tmp_path, workspace_root=tmp_path / ".slab", agent=config.agent, approver=approver
     )
     box = build_toolbox(session)
     assert box.dispatch(_call("shell", command="echo hi")).startswith("exit 0")  # allowlisted
@@ -238,7 +239,7 @@ def test_shell_approval_gate_and_allowlist(tmp_path: Path) -> None:
 
 
 def test_write_gated_when_not_auto(tmp_path: Path) -> None:
-    session = MasonSession(tmp_path, workspace_root=tmp_path / ".slab", config=SlabConfig())
+    session = MasonSession(tmp_path, workspace_root=tmp_path / ".slab", agent=MasonConfig().agent)
     box = build_toolbox(session)  # default approver refuses
     answer = box.dispatch(_call("write_file", path="x.txt", content="c"))
     assert "not approved" in answer
@@ -336,7 +337,7 @@ def test_crashing_approver_is_a_refusal_not_a_crash(tmp_path: Path) -> None:
         raise RuntimeError("stdin exploded")
 
     session = MasonSession(
-        tmp_path, workspace_root=tmp_path / ".slab", config=SlabConfig(), approver=broken
+        tmp_path, workspace_root=tmp_path / ".slab", agent=MasonConfig().agent, approver=broken
     )
     box = build_toolbox(session)
     answer = box.dispatch(_call("write_file", path="x.txt", content="c"))

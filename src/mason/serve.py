@@ -36,8 +36,9 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from mason.config import AgentConfig, ServeConfig
 from mason.errors import MasonError
-from slab.config import AgentConfig, HpcConfig, ServeConfig
+from slab.config import HpcConfig
 from slab.errors import SlabError
 from slab.hpc import SubmittedJob, job_state, render_sbatch, submit
 
@@ -166,7 +167,8 @@ def render_serve_script(
     just wrote into the record.
 
     Examples:
-        >>> from slab.config import AgentConfig, HpcConfig
+        >>> from mason.config import AgentConfig
+        >>> from slab.config import HpcConfig
         >>> agent = AgentConfig(model="meta-models/Muse-Glimmer-30B",
         ...                     serve={"partition": "gpu", "port": 8010,
         ...                            "tool_call_parser": "llama4_pythonic"})
