@@ -9,7 +9,9 @@ controlled vocabulary:
 - Prefer the active voice. Name the actor: SLAB, the CLI, `relax`, you.
 - Write instructions in the imperative ("Set `command` in `slab.toml`").
 - Keep sentences short. One instruction or one idea per sentence, roughly
-  25 words or fewer.
+  25 words or fewer. But keep a natural cadence: join closely related short
+  sentences with "and", "so", or "because" rather than leaving a staccato
+  run of fragments.
 - Do not attach a parenthetical clause with an em dash or a colon. Either
   cut it, or give it its own sentence. A colon may introduce a list or a
   code block.

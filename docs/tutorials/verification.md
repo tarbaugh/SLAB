@@ -10,18 +10,19 @@ escape hatch for when you overrule your own checks.
 Checks evaluate once, when the `with ws.start_run(...)` block exits cleanly.
 Three rules govern the outcome, and the runtime enforces all three:
 
-1. Every check passes **and at least one check exists**. The run moves
+1. Every check passes **and at least one check exists**, so the run moves
    `quarantined -> verified`.
-2. Zero checks. The run stays `quarantined`. Verification is earned, never
-   defaulted. A run that asserted nothing has proven nothing.
-3. The block raised. The run is marked `failed`, and checks are skipped
-   entirely. There is nothing to verify. The run carries a structured
+2. There are zero checks, so the run stays `quarantined`. Verification is
+   earned, never defaulted, and a run that asserted nothing has proven
+   nothing.
+3. The block raised, so the run is marked `failed` and checks are skipped
+   entirely. There is nothing to verify, and the run carries a structured
    failure record instead. See [Debugging failures](debugging-failures.md).
 
 Here is a relaxation that earns it. Each `@check` is a zero-argument function
-that closes over whatever it needs. The three below use the assertion
-vocabulary (`converged`, `within_bounds`, `finite`), imported from the
-package root.
+that closes over whatever it needs, and the three below use the assertion
+vocabulary (`converged`, `within_bounds`, `finite`) imported from the package
+root.
 
 ```python
 from ase.build import bulk
@@ -86,16 +87,16 @@ positions_finite: kind=finite passed=True
 ```
 
 `finite` elides `observed` for sequences longer than 8 elements. The message
-carries the count. A whole force array stored as check metadata would help
-no one.
+carries the count, and a whole force array stored as check metadata would
+help no one.
 
 ## Plain asserts work too
 
 A check does not have to return an `Assertion`. A raised `AssertionError`
-records a failure whose message is the assert's message. A returned `None`
-records a pass. A bare `bool` is also accepted. One failing check is enough
-to keep the run quarantined. The passing check is still recorded, but the
-gate needs all of them:
+records a failure whose message is the assert's message, a returned `None`
+records a pass, and a bare `bool` is also accepted. One failing check is
+enough to keep the run quarantined. The passing check is still recorded, but
+the gate needs all of them:
 
 ```python
 with ws.start_run(name="cu-relax-strict", intent="tighter bar") as run2:
@@ -121,15 +122,15 @@ forces_converged: passed=True  fmax=0.0388034 < 0.05
 ```
 
 Nothing bad happens to an unverified run. It sits in quarantine under its
-TTL and expires if nobody acts. That asymmetry is the point. A failed
-verification costs nothing to abandon.
+TTL and expires if nobody acts. That asymmetry is the point, because a
+failed verification costs nothing to abandon.
 
 ## Garbage in, failed assertion out
 
-The vocabulary never raises on a malformed observed value. A check that
-crashed on the NaN it was built to catch would defeat its purpose. So garbage
-input produces a failed `Assertion`, which is data you can record and read,
-not an exception:
+The vocabulary never raises on a malformed observed value, because a check
+that crashed on the NaN it was built to catch would defeat its purpose. So
+garbage input produces a failed `Assertion`, which is data you can record
+and read rather than an exception:
 
 ```python
 a = converged(float("nan"), below=0.05)
@@ -145,23 +146,24 @@ observed: nan  expected: {'below': 0.05}
 ```
 
 The same holds for `None`, strings, bools, and infinities. Malformed
-expectations are the opposite case. `converged(0.01, below="0.05")` is a
-programming error, and it raises `TypeError` immediately.
+expectations are the opposite case, so `converged(0.01, below="0.05")` is a
+programming error and raises `TypeError` immediately.
 
 One vocabulary function needs a disclaimer. `units(observed, expected)`
-compares producer-declared unit strings. The match is exact after whitespace
-stripping, and case matters. `units(info["energy_unit"], "eV")` therefore
-catches the "engine returned kcal/mol, workflow assumed eV" class of error,
-as long as producers record their units. It is annotation capture, not
-dimensional analysis. It does not convert, derive, or reason about units.
+compares producer-declared unit strings, with an exact match after
+whitespace stripping, and case matters. `units(info["energy_unit"], "eV")`
+therefore catches the "engine returned kcal/mol, workflow assumed eV" class
+of error, as long as producers record their units. It is annotation capture,
+not dimensional analysis, so it does not convert, derive, or reason about
+units.
 
 ## observed/expected is agent-facing data
 
 The stored `observed` and `expected` values are the numbers an agent computes
 a correction from. "fmax was 0.062 against 0.05" tells the agent to rerun
-with more steps or to loosen the threshold. A bare "check failed" tells it
-nothing. `slab show <id> --json` and the MCP `show_run` tool return both
-fields, next to the structured failure records described in
+with more steps or to loosen the threshold, while a bare "check failed"
+tells it nothing. `slab show <id> --json` and the MCP `show_run` tool return
+both fields, next to the structured failure records described in
 [Debugging failures](debugging-failures.md):
 
 ```json

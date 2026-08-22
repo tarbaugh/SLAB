@@ -6,11 +6,11 @@ Agent-native workflow orchestration for atomistic materials modeling.
 has the overview, the tutorials (every code block executed against the real
 API), and the architecture document.
 
-**Every run starts as temporary. A run becomes permanent only when you
+**Every run starts as temporary, and it becomes permanent only when you
 promote it.** Nothing is stored permanently by default and deleted later.
 Workflows are plain imperative Python, and SLAB traces the task graph as the
 script runs. Machine-checkable verification hooks decide when a run counts
-as verified. An explicit promotion command is the only action that makes
+as verified, and an explicit promotion command is the only action that makes
 data permanent. Everything else expires automatically.
 
 ```python
@@ -36,17 +36,17 @@ FireWorks) were designed for human experts. Three of their costs are fatal
 for agentic use:
 
 1. **Provenance totality.** Every intermediate is stored forever as an
-   immutable graph node. That includes retrieved wavefunctions,
-   trajectories, and charge densities that nobody ever reads. Deletion feels
-   like surgery instead of housekeeping.
+   immutable graph node, including retrieved wavefunctions, trajectories,
+   and charge densities that nobody ever reads. Deletion feels like surgery
+   instead of housekeeping.
 2. **Declaration-time epistemics.** You must decide whether a run is
-   "production" at submission time. But that information only exists at
+   "production" at submission time, but that information only exists at
    completion time, after you see convergence and output sanity. So debug
    work runs in the production profile, and the archive fills with failed
    attempts.
 3. **Ceremony-heavy APIs.** WorkChain-style declarative process classes are
-   hard for trained humans to read. They are also token-expensive for LLM
-   agents to generate, and to re-read while debugging.
+   hard for trained humans to read, and they are token-expensive for LLM
+   agents to generate and re-read while debugging.
 
 SLAB inverts all three. The full argument is in
 [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -62,13 +62,13 @@ quarantined ──checks pass──▶ verified ──promote──▶ promoted 
  expired ◀──────────────────────┘
 ```
 
-Two rules are structural, not policy. Promoted data cannot expire. The
-transition does not exist, and a retention policy with a TTL on `promoted`
-fails validation. Unpromoted data expires automatically.
+Two rules are structural, not policy. Promoted data cannot expire, because
+the transition does not exist and a retention policy with a TTL on
+`promoted` fails validation. Unpromoted data expires automatically.
 
 Retention is tiered by artifact role, not by data type. Promoted runs keep
 full bytes for **terminal** artifacts and **input** roots, so
-recompute-on-demand is a real promise. **Intermediate** bytes are
+recompute-on-demand is a real promise, while **intermediate** bytes are
 hash-and-discarded. Their content hash and the complete recipe (inputs, code
 version, engine versions, parameters) stay on the run forever.
 
@@ -82,9 +82,9 @@ pip install -e ".[mcp]"       # + MCP server for agents
 pip install -e ".[dev]"       # tests, lint, types
 ```
 
-Python ≥ 3.11. No daemon, no database server, no configuration. A workspace
-is a directory (`.slab/` by default) that holds a SQLite file and a
-content-addressed store.
+Python ≥ 3.11. There is no daemon, no database server, and no
+configuration. A workspace is a directory (`.slab/` by default) that holds a
+SQLite file and a content-addressed store.
 
 ## The demo
 
@@ -107,7 +107,7 @@ workspace: .slab   engine: mace   system: Si x 64 atoms
 lowest energy: run 01kzs2m7s1  (E = -343.628458 eV)
 ```
 
-Each variant is its own run with a stated intent. The convergence checks
+Each variant is its own run with a stated intent, and the convergence checks
 passed, so all five landed `verified`. Nothing is permanent yet. That
 decision happens now, after the results exist:
 
@@ -123,8 +123,8 @@ dropped 31 blob(s), freeing 444075 bytes; 8 kept
 ```
 
 The archive now contains exactly one run's terminal artifacts, plus its
-recompute roots. Everything else is a hash-and-recipe skeleton that remains
-fully queryable:
+recompute roots, while everything else is a hash-and-recipe skeleton that
+remains fully queryable:
 
 ```text
 $ slab show 01kzs2m7s1                      $ slab show 01kzs2mad3   # expired
@@ -155,32 +155,33 @@ Retention policy: `--policy file.json` > `<workspace>/policy.json` > defaults.
 ## Failure is evidence, not a status
 
 AiiDA-style engines handle errors through predefined protocols, such as
-exit codes and automated restart handlers. SLAB's user is an LLM agent. Such
-an agent can devise a niche correction, such as a smaller perturbation, a
-different engine, or a looser threshold, if it can see what actually
-happened. So SLAB's contract is evidence delivery, not an error protocol:
+exit codes and automated restart handlers. SLAB's user is an LLM agent, and
+such an agent can devise a niche correction, such as a smaller
+perturbation, a different engine, or a looser threshold, if it can see what
+actually happened. So SLAB's contract is evidence delivery, not an error
+protocol:
 
-- Failed runs and tasks carry a structured `failure` record. It holds the
+- Failed runs and tasks carry a structured `failure` record that holds the
   exception type, the message, and a traceback that keeps the entry point
   and the failure site but elides deep middles. It is information-rich and
   token-bounded.
 - Tasks annotate their exceptions with diagnostics via plain
-  `Exception.add_note`. `relax` notes the completed step count and the last
-  trajectory frame's energy and residual force. The notes land in the
+  `Exception.add_note`, so `relax` notes the completed step count and the
+  last trajectory frame's energy and residual force. The notes land in the
   record, listed separately, so an agent can act without parsing the
   traceback.
-- The scratch data that explains a failure survives it. A crash in the
+- The scratch data that explains a failure survives it, so a crash in the
   middle of an optimization keeps the partial trajectory as a
-  `relax-failed.traj` artifact. Retention makes this free. Failed runs sit
-  in quarantine with a TTL, so diagnostics self-clean instead of
+  `relax-failed.traj` artifact. Retention makes this free, because failed
+  runs sit in quarantine with a TTL, so diagnostics self-clean instead of
   accumulating forever.
 - Checks store the `observed` and `expected` values their assertions
   compared, and `slab show --json` and the MCP `show_run` tool return them.
-  Those are the numbers a correction is computed from. "fmax was 0.062
+  Those are the numbers a correction is computed from, so "fmax was 0.062
   against 0.05" leads to a rerun with more steps.
 
-Listings stay compact, with a one-line `error` per run. `show` fetches the
-full evidence for one run.
+Listings stay compact, with a one-line `error` per run, and `show` fetches
+the full evidence for one run.
 
 ## Retention policy as data
 
@@ -193,9 +194,9 @@ full evidence for one run.
 ```
 
 TTLs attach to lifecycle states, anchored to when the run entered its
-current state. Roles not listed in `keep` are hash-only. A TTL on `promoted`
-or `archived` is rejected at validation. The asymmetry is enforced, not
-conventional.
+current state, and roles not listed in `keep` are hash-only. A TTL on
+`promoted` or `archived` is rejected at validation, so the asymmetry is
+enforced, not conventional.
 
 ## Engines on HPC clusters
 
@@ -205,8 +206,8 @@ and it uses rootstock itself for the MLIP case.
 
 **MLIPs via rootstock, served by name.** On a cluster with a rootstock
 install, any canonical checkpoint id works directly as the engine name.
-Rootstock resolves the hosting environment and serves the model, and your
-Python environment stays free of torch and model packages.
+Rootstock resolves the hosting environment and serves the model, so your
+Python environment stays free of torch and model packages, and
 `pip install 'slab[rootstock]'` adds only a thin client:
 
 ```python
@@ -217,20 +218,20 @@ relaxed, info = relax(
 )
 ```
 
-Swapping models is a one-word change to `engine`. Because the engine name
-and options are traced task inputs, the checkpoint identity is automatically
-part of the cache key and the recipe. `slab engines list` shows every id the
-install declares. SLAB finds the install via `cluster=` or `root=` options,
-or via rootstock's own defaults (`$ROOTSTOCK_ROOT`,
-`~/.config/rootstock/config.toml`). `relax` closes the worker subprocess
-when the task finishes. The explicit `engine="rootstock"` form remains for
-full control (for example `checkpoint="uma:custom"` with your own
-`weights=`).
+Swapping models is a one-word change to `engine`, and because the engine
+name and options are traced task inputs, the checkpoint identity is
+automatically part of the cache key and the recipe. `slab engines list`
+shows every id the install declares. SLAB finds the install via `cluster=`
+or `root=` options, or via rootstock's own defaults (`$ROOTSTOCK_ROOT`,
+`~/.config/rootstock/config.toml`), and `relax` closes the worker
+subprocess when the task finishes. The explicit `engine="rootstock"` form
+remains for full control (for example `checkpoint="uma:custom"` with your
+own `weights=`).
 
 **Quantum ESPRESSO, built in.** `engine="qe"` drives `pw.x` through ASE's
 file-IO calculator wherever the executable and pseudopotentials exist, with
 no extra required. Point it at the code, or configure ASE's own config file
-once. Everything else is standard `Espresso` options.
+once, and everything else is standard `Espresso` options.
 `resolve_pseudopotentials` maps elements to `.upf` files, and it refuses
 ambiguity rather than guessing:
 
@@ -250,10 +251,10 @@ relaxed, info = relax(
 )
 ```
 
-Each calculation runs in a slab-managed scratch directory, never your cwd.
-The final SCF's `espresso.pwo` is kept as an intermediate artifact. The
+Each calculation runs in a slab-managed scratch directory, never your cwd,
+and the final SCF's `espresso.pwo` is kept as an intermediate artifact. The
 detected `pw.x` version, with the resolved command and `pseudo_dir`, lands
-in the recipe and the cache key. So an executable upgrade or a
+in the recipe and the cache key, so an executable upgrade or a
 pseudopotential-library switch honestly invalidates cached results.
 
 **Protocols and pseudopotential families, adopted from AiiDA.** Two more
@@ -267,8 +268,8 @@ cache identity is a digest of their contents, not a path. On top of that,
 the named input protocols from
 [aiida-quantumespresso](https://aiida-quantumespresso.readthedocs.io/en/stable/topics/protocol.html)
 (`fast`, `balanced`, `stringent`) expand a structure into concrete, curated
-pw.x inputs. Those are family-recommended cutoffs, a k-mesh from a
-reciprocal spacing, cold smearing, and per-atom-scaled thresholds:
+pw.x inputs, with family-recommended cutoffs, a k-mesh from a reciprocal
+spacing, cold smearing, and per-atom-scaled thresholds:
 
 ```python
 from slab.protocols import qe_protocol_options
@@ -279,29 +280,29 @@ relaxed, info = relax(atoms, engine="mace", fmax=0.02)      # cheap geometry
 final, dft = single_point(relaxed, engine="qe", calculator_options=options)
 ```
 
-`single_point` is `relax`'s sibling task. It is one energy and forces
-evaluation, with no optimizer. The pair makes the canonical two-fidelity
-chain. Relax under a universal MLIP, then run one DFT evaluation of the
-relaxed geometry, with the DFT residual force as the check that the cheap
-geometry held up.
+`single_point` is `relax`'s sibling task, one energy and forces evaluation
+with no optimizer, and the pair makes the canonical two-fidelity chain.
+Relax under a universal MLIP, then run one DFT evaluation of the relaxed
+geometry, with the DFT residual force as the check that the cheap geometry
+held up.
 
-A protocol is only ever applied by name, explicitly. The tracer hashes the
-expanded numbers, not the name, so a retuned protocol data file can never
-silently re-serve stale cached results. Protocol values live in a versioned
-data file (adapted from aiida-quantumespresso v4.10, MIT). AiiDA's
-pre-rename names (`moderate`/`precise`) are refused with a pointer rather
-than aliased, because the rename came with retuned values. When `pw.x`
-fails, the failure record speaks QE. The `Error in routine ...` block, or
-the `convergence NOT achieved` stop line, is parsed out of the output into
-the exception notes. The input, output, and `CRASH` files are kept as
-artifacts. Force printing (`tprnfor`) defaults on, because slab's tasks
-drive optimizers with forces.
+A protocol is only ever applied by name, explicitly, and the tracer hashes
+the expanded numbers rather than the name, so a retuned protocol data file
+can never silently re-serve stale cached results. Protocol values live in a
+versioned data file (adapted from aiida-quantumespresso v4.10, MIT), and
+AiiDA's pre-rename names (`moderate`/`precise`) are refused with a pointer
+rather than aliased, because the rename came with retuned values. When
+`pw.x` fails, the failure record speaks QE. The `Error in routine ...`
+block, or the `convergence NOT achieved` stop line, is parsed out of the
+output into the exception notes, and the input, output, and `CRASH` files
+are kept as artifacts. Force printing (`tprnfor`) defaults on, because
+slab's tasks drive optimizers with forces.
 
 **LAMMPS as a built-in.** `engine="lammps"` drives the `lmp` binary through
 ASE's `lammpsrun` calculator on the same terms. It needs just the executable
 (`command=`, `[engines.lammps]` in the slab config, or
-`$ASE_LAMMPSRUN_COMMAND`) plus your potential. The potential is required.
-`pair_style` and `pair_coeff` have no default, because ASE's silent fallback
+`$ASE_LAMMPSRUN_COMMAND`) plus your potential. The potential is required,
+because `pair_style` and `pair_coeff` have no default: ASE's silent fallback
 is a dimensionless `lj/cut` toy that would return meaningless numbers, and
 which potential describes a system is a science decision. `files=` entries
 are staged into the slab-managed scratch, and bare-basename `pair_coeff`
@@ -314,13 +315,13 @@ and data files as artifacts.
 
 **Everything else via the engine registry.** For VASP, site-specific MLIP
 aliases, and site-curated QE or LAMMPS setups, SLAB generalizes rootstock's
-pattern. The client is only a bootstrap. A registry file that lives with the
-cluster declares how each canonical engine name is built here. Workflow
+pattern. The client is only a bootstrap, and a registry file that lives with
+the cluster declares how each canonical engine name is built here. Workflow
 code says `engine="vasp"` and runs unchanged on any cluster whose registry
 declares `vasp`. Resolution order is built-ins, then registry, then
 rootstock checkpoint ids, so a maintainer's curated alias (with baked-in
 options) always beats bare checkpoint resolution. Entries may not shadow
-built-in names (`qe`, `lammps`, `mace`, ...). Site aliases pick distinct
+built-in names (`qe`, `lammps`, `mace`, ...), so site aliases pick distinct
 names.
 
 ```json
@@ -338,21 +339,21 @@ names.
 ```
 
 A maintainer ships this file at a shared path and exports `SLAB_ENGINES`
-from a module file. Discovery order is an explicit path, then
+from a module file, and discovery order is an explicit path, then
 `$SLAB_ENGINES`, then `~/.config/slab/engines.json`. See
 [examples/engines.example.json](examples/engines.example.json). A curated QE
 or LAMMPS alias goes through SLAB's own factories
 (`slab.backends.qe_calculator` / `lammps_calculator`), which carry the
 built-in engines' guards and take JSON-able options. An entry's `env` may
-only hold variables the calculator reads at run time (`VASP_PP_PATH`).
+only hold variables the calculator reads at run time (`VASP_PP_PATH`), and
 `ASE_CONFIG_PATH` is refused, because ASE parses that file once at import,
 before any registry entry runs. Every entry is a dotted path to an ASE
-calculator. The ASE `Calculator` contract stays SLAB's only engine seam.
+calculator, so the ASE `Calculator` contract stays SLAB's only engine seam.
 Declared `version`s land in task recipes as provenance and in the relax
-cache key. So bumping `qe-delta` from 7.3 to 7.4 in the registry honestly
+cache key, so bumping `qe-delta` from 7.3 to 7.4 in the registry honestly
 invalidates cached results instead of serving the old engine's numbers.
-Entries that shadow built-in names are rejected loudly. A registry with a
-newer `layout_version` than the client understands refuses rather than
+Entries that shadow built-in names are rejected loudly, and a registry with
+a newer `layout_version` than the client understands refuses rather than
 misreads.
 
 ```bash
@@ -362,20 +363,20 @@ slab engines verify    # run every entry's probe; exit nonzero on failure
 
 Trust model, stated plainly: registry entries execute maintainer-declared
 code and environment variables as the calling user. SLAB isolates
-configuration, not privilege. Trusting a cluster's `engines.json` is
+configuration, not privilege, so trusting a cluster's `engines.json` is
 trusting its module farm, exactly as with rootstock installs.
 
 ## Configuring for your HPC
 
 Everything machine-specific is **policy-as-data** in layered TOML. A site
 file is shipped by the cluster maintainer (`$SLAB_SITE_CONFIG`, exported
-from a module file). A user file lives at `~/.config/slab/config.toml`. A
-project `slab.toml` lives with the project. They merge key-by-key, with the
-project winning, and explicit environment variables above all of them.
-`slab config init` writes a commented template. `slab config show` prints
-the merged result with each value's origin. Fill-in-the-blank templates for
-the config file and the engine registry live in
-[`templates/`](templates/). A checkout gitignores every `slab.toml` and
+from a module file), a user file lives at `~/.config/slab/config.toml`, and
+a project `slab.toml` lives with the project. They merge key-by-key, with
+the project winning, and explicit environment variables above all of them.
+`slab config init` writes a commented template, and `slab config show`
+prints the merged result with each value's origin. Fill-in-the-blank
+templates for the config file and the engine registry live in
+[`templates/`](templates/), and a checkout gitignores every `slab.toml` and
 `engines.json`, so filled-in machine facts (accounts, partitions, paths)
 never end up in a commit.
 
@@ -390,11 +391,11 @@ slab hpc submit "slab run relax.py" --name si        # sbatch --parsable
 slab hpc status 4242314                              # squeue, then sacct
 ```
 
-Only fields the config sets become `#SBATCH` directives. There are no silent
-resource defaults. The submitted script is kept next to the job's outputs as
-provenance. Config never reaches a cache key. It supplies defaults that
-resolve into explicit values, and those resolved values are what recipes
-record.
+Only fields the config sets become `#SBATCH` directives, with no silent
+resource defaults, and the submitted script is kept next to the job's
+outputs as provenance. Config never reaches a cache key. It supplies
+defaults that resolve into explicit values, and those resolved values are
+what recipes record.
 
 ## Agent surface (MCP)
 
@@ -404,21 +405,21 @@ record.
 
 Tools: `launch_workflow`, `list_runs`, `show_run`, `promote_run`,
 `expire_runs`, `gc`, `list_engines`. They use the same code paths as the
-CLI and return structured JSON. Script output is captured into the result,
-so prints cannot corrupt the protocol channel.
+CLI and return structured JSON, and script output is captured into the
+result, so prints cannot corrupt the protocol channel.
 
 ## Mason: the resident research agent
 
 `slab mason` is a built-in Claude-Code-class agent harness for
-**open-weight models** on your own hardware. That means Ollama on a laptop,
-or vLLM on a compute node, through the OpenAI-compatible API with a stdlib
-HTTP client and no SDK. It is tuned for long atomistic research projects.
-Calculations run as SLAB workflow scripts through its `slab_launch` tool, so
-every number it reports traces to a run id and its `@check` assertions.
-Memory lives in `NOTEBOOK.md` and `PLAN.md` in the project directory,
-because files outlive context windows. History compacts into structured
-summaries well before the model's window fills. SLURM tools appear exactly
-when the config declares partitions.
+**open-weight models** on your own hardware, whether that is Ollama on a
+laptop or vLLM on a compute node, through the OpenAI-compatible API with a
+stdlib HTTP client and no SDK. It is tuned for long atomistic research
+projects. Calculations run as SLAB workflow scripts through its
+`slab_launch` tool, so every number it reports traces to a run id and its
+`@check` assertions. Memory lives in `NOTEBOOK.md` and `PLAN.md` in the
+project directory, because files outlive context windows, and history
+compacts into structured summaries well before the model's window fills.
+SLURM tools appear exactly when the config declares partitions.
 
 ```bash
 slab mason serve start --wait # start the model on a GPU node (a batch job)
@@ -431,37 +432,37 @@ On a cluster the endpoint is **discovered, not configured**. The GPU node is
 the scheduler's choice, so `[agent.serve]` declares the launch (partition,
 port, vLLM flags), and the job records the URL it landed on. The job deletes
 that record when the server exits, so a dead node never keeps answering for
-a live one. A written-down `[agent] endpoint` always outranks it.
+a live one, and a written-down `[agent] endpoint` always outranks it.
 
 `[agent] compute_profile` (`laptop`, `workstation`, or `cluster`, derived
 from your SLURM config when unset) tells the agent how big a calculation it
 may run. It also requires the agent to state plainly when a number is a
 laptop-sized smoke test rather than a production result. The loop is also
-provider-agnostic. `[agent] provider = "anthropic"` puts Claude behind the
-same harness where there is internet and billed API access. A Claude
+provider-agnostic, so `[agent] provider = "anthropic"` puts Claude behind
+the same harness where there is internet and billed API access. A Claude
 subscription is a separate product and does not include it.
 
-Mason is verified against a real Llama 3.1 8B via Ollama. An autonomous
-bulk-Cu relaxation reported an energy that matches an independent
-calculation exactly, with the run verified by its own checks. The design
-distills the 2024–2026 agent-harness literature (ReAct, MemGPT, SWE-agent's
-interface results, Anthropic's context-engineering and long-horizon harness
-guidance, Manus's cache-first lessons). Each mechanism and its source is
-documented in
+Mason is verified against a real Llama 3.1 8B via Ollama, where an
+autonomous bulk-Cu relaxation reported an energy that matches an
+independent calculation exactly, with the run verified by its own checks.
+The design distills the 2024–2026 agent-harness literature (ReAct, MemGPT,
+SWE-agent's interface results, Anthropic's context-engineering and
+long-horizon harness guidance, Manus's cache-first lessons), and each
+mechanism and its source is documented in
 [the Mason tutorial](https://tarbaugh.github.io/SLAB/tutorials/mason/).
 
 ## Non-goals
 
 - **No physics engines** and no new file-format parsers beyond what ASE
   provides. Backends are reached through the ASE `Calculator` contract.
-  LAMMPS, VASP, GROMACS, QE, and MLIPs are the BLAS. SLAB is the NumPy one
-  layer up.
+  LAMMPS, VASP, GROMACS, QE, and MLIPs are the BLAS, and SLAB is the NumPy
+  one layer up.
 - **No workflow-engine scheduler integration.** The SLURM layer is thin
   submission plumbing (`slab hpc`): render, submit, poll, cancel. Runs,
   caching, and verification stay in the workspace regardless of where the
-  process executes. There is no remote state machine.
+  process executes, and there is no remote state machine.
 - **No web UI.**
-- **No distributed daemon.** A workspace is a directory. Concurrency is
+- **No distributed daemon.** A workspace is a directory, and concurrency is
   handled at the SQLite transaction level.
 
 ## Status
@@ -485,8 +486,8 @@ doctests), ~96% coverage, mypy `--strict`, and adversarial multi-agent review
 passes whose confirmed findings are regression tests. The QE engine is
 verified against a real `pw.x` 7.4.1, the LAMMPS engine against a real
 `lmp`, the balanced protocol against a real SSSP install, and Mason against
-a real Llama via Ollama. The `RunStore` protocol is the seam for Postgres.
-The backend factory is the seam for more engines.
+a real Llama via Ollama. The `RunStore` protocol is the seam for Postgres,
+and the backend factory is the seam for more engines.
 
 ## Development
 

@@ -3,10 +3,10 @@
 To run Quantum ESPRESSO well, you must choose cutoffs, a k-mesh, smearing,
 and convergence thresholds. Those are physics decisions, and SLAB refuses to
 make them silently. This page covers the two pieces that make those
-decisions explicit, curated, and reproducible. Both are adopted from the
-AiiDA ecosystem. Named input **protocols** come from
-[aiida-quantumespresso](https://aiida-quantumespresso.readthedocs.io/en/stable/topics/protocol.html).
-Installable **pseudopotential families** come from
+decisions explicit, curated, and reproducible, both adopted from the AiiDA
+ecosystem. Named input **protocols** come from
+[aiida-quantumespresso](https://aiida-quantumespresso.readthedocs.io/en/stable/topics/protocol.html),
+and installable **pseudopotential families** come from
 [aiida-pseudo](https://github.com/aiidateam/aiida-pseudo).
 
 ## Pseudopotential families
@@ -29,12 +29,13 @@ installed SSSP/1.3.0/PBEsol/efficiency (103 elements, digest b20acfb68f77) at
 /Users/you/.local/share/slab/pseudos/SSSP_1.3.0_PBEsol_efficiency
 ```
 
-Families land under `$SLAB_PSEUDOS`. The default is
+Families land under `$SLAB_PSEUDOS`, which defaults to
 `$XDG_DATA_HOME/slab/pseudos`, that is `~/.local/share/slab/pseudos`. They
-are addressed by name, git-style on the version. `SSSP/1.3/PBEsol/efficiency`
-finds the installed `1.3.0` as long as exactly one `1.3.x` exists. Ambiguity
-is refused, never guessed. `slab pseudos list` shows the inventory.
-`slab pseudos verify <name>` re-hashes every file against the manifest.
+are addressed by name, git-style on the version, so
+`SSSP/1.3/PBEsol/efficiency` finds the installed `1.3.0` as long as exactly
+one `1.3.x` exists. Ambiguity is refused, never guessed. `slab pseudos list`
+shows the inventory, and `slab pseudos verify <name>` re-hashes every file
+against the manifest.
 
 From then on the `qe` engine takes the family instead of a directory:
 
@@ -47,20 +48,20 @@ relaxed, info = relax(
 )
 ```
 
-The element-to-file mapping comes from the family manifest. The cache
+The element-to-file mapping comes from the family manifest, and the cache
 identity upgrades from a directory path to the family name plus a **digest
-of its per-element checksums**. That identity is content-derived, and it is
+of its per-element checksums**. That identity is content-derived, so it is
 portable across machines.
 
 Only SSSP installs today. PseudoDojo's archives are served over unverified
 HTTP upstream, and SLAB does not download physics inputs over a channel it
-cannot authenticate. Point `pseudo_dir=` at your own files instead.
+cannot authenticate, so point `pseudo_dir=` at your own files instead.
 
 ## Protocols: fast, balanced, stringent
 
 A protocol is a named, versioned bundle of input choices. SLAB adopts the
-three from aiida-quantumespresso v4.10. The values live in
-[`slab/data/qe_protocols.json`](https://github.com/tarbaugh/SLAB/blob/main/src/slab/data/qe_protocols.json),
+three from aiida-quantumespresso v4.10, and the values live in
+[`slab/data/qe_protocols.json`](https://github.com/tarbaugh/SLAB/blob/main/src/slab/data/qe_protocols.json)
 as data, not code:
 
 ```python
@@ -87,9 +88,9 @@ smearing: cold
 
 Units are QE-native (Ry, Ry/atom, Ry/bohr; `kpoints_distance` in Å⁻¹).
 `fast` trades accuracy for speed, with a 0.30 Å⁻¹ mesh and loose
-thresholds. `stringent` tightens everything and switches to the `precision`
-family. AiiDA's pre-rename names are refused with a pointer, not aliased,
-because the rename came with retuned values:
+thresholds, while `stringent` tightens everything and switches to the
+`precision` family. AiiDA's pre-rename names are refused with a pointer, not
+aliased, because the rename came with retuned values:
 
 ```python
 from slab.protocols import ProtocolError, qe_protocol_options
@@ -106,10 +107,10 @@ protocol 'moderate' was renamed 'balanced' (and retuned) in aiida-quantumespress
 
 ## Expansion: from name to numbers
 
-A protocol is structure-dependent. Cutoffs come from the elements present,
-and the k-mesh from the cell. Expansion is therefore an explicit, atoms-aware
-call, and it returns a plain `calculator_options` dict of **concrete
-values**:
+A protocol is structure-dependent, because cutoffs come from the elements
+present and the k-mesh from the cell. Expansion is therefore an explicit,
+atoms-aware call, and it returns a plain `calculator_options` dict of
+**concrete values**:
 
 <!-- no-verify -->
 ```python
@@ -145,12 +146,13 @@ The arithmetic is exactly AiiDA's:
 
 - `ecutwfc` and `ecutrho` are element-wise maxima of the family's
   recommendations (Si: 30/240 Ry).
-- The mesh is `ceil(|b_i| / 0.15)` per reciprocal vector, with 2π included.
-  That gives 14³ for this 2-atom primitive cell.
+- The mesh is `ceil(|b_i| / 0.15)` per reciprocal vector, with 2π included,
+  which gives 14³ for this 2-atom primitive cell.
 - `etot_conv_thr` and `conv_thr` scale with the atom count (2 × 1e-5,
-  2 × 2e-10). `forc_conv_thr` does not, because it is per force component.
+  2 × 2e-10), while `forc_conv_thr` does not, because it is per force
+  component.
 
-Insulators drop the smearing.
+Insulators drop the smearing, so
 `qe_protocol_options(atoms, protocol="balanced", electronic_type="insulator")`
 sets fixed occupations. Overrides merge recursively, right wins, AiiDA-style:
 
@@ -161,12 +163,12 @@ options = qe_protocol_options(atoms, protocol="balanced",
 ```
 
 To drive relaxation with ASE optimizers instead of pw.x's internal loop, use
-the protocol's force threshold on the `fmax` scale. `protocol_details`
-reports it as `forc_conv_thr_ev_per_ang` (balanced ≈ 0.0026 eV/Å).
+the protocol's force threshold on the `fmax` scale, which `protocol_details`
+reports as `forc_conv_thr_ev_per_ang` (balanced ≈ 0.0026 eV/Å).
 
 The same expanded options drive `single_point`, the usual closing step of a
-two-fidelity chain. That chain relaxes under an MLIP, then runs one SCF
-under `qe` on the relaxed geometry. The executed chain is in
+two-fidelity chain that relaxes under an MLIP and then runs one SCF under
+`qe` on the relaxed geometry. The executed chain is in
 [Engines](engines.md#two-fidelities-one-run).
 
 ## Why the cache never sees a protocol's name
@@ -187,16 +189,17 @@ The expanded numbers flow into the task as traced inputs, not the word
 
 plus every expanded value in the traced `calculator_options`. If the protocol
 data file is ever retuned, previously cached results stay valid for the
-numbers they were computed with. Nothing is silently re-served under a new
-meaning. Record the protocol name in the run's `intent` for the narrative
-("balanced protocol on Si"). The recipe holds the physics.
+numbers they were computed with, and nothing is silently re-served under a
+new meaning. Record the protocol name in the run's `intent` for the
+narrative ("balanced protocol on Si"), because the recipe holds the physics.
 
 Scope, honestly stated: SLAB adopts the `pw` base protocol. AiiDA's
 spin/magnetization handling, 2D `assume_isolated` treatment, and the
-PwRelaxWorkChain meta-convergence loop are not adopted (yet). Structures must
-be fully periodic, and magnetism is yours to configure via `input_data`.
+PwRelaxWorkChain meta-convergence loop are not adopted (yet), so structures
+must be fully periodic, and magnetism is yours to configure via
+`input_data`.
 
 Where to go next: for the engine seam these options feed, see
-[Engines](engines.md#quantum-espresso). For what happens when pw.x rejects
-your protocol-expanded input, see
+[Engines](engines.md#quantum-espresso), and for what happens when pw.x
+rejects your protocol-expanded input, see
 [Debugging failures](debugging-failures.md#when-the-engine-writes-files).
