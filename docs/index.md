@@ -151,11 +151,13 @@ MVP vertical slice, working end to end. It includes:
 - layered HPC configuration with a SLURM submission layer;
 - the Mason agent harness, for open models self-served on a GPU node or for
   Claude, with its model server as a batch job;
-- a CLI and an MCP server.
+- three commands (`slab`, `foundation`, `mason`) and an MCP server.
 
-Quality gates: 900+ tests (every docstring example runs as a doctest), ~96%
+Quality gates: 1000+ tests (every docstring example runs as a doctest), ~95%
 coverage, mypy `--strict`, and adversarial multi-agent review passes whose
-confirmed findings became regression tests.
+confirmed findings became regression tests. A test reads the AST of every
+module and fails on an import that crosses the package layering the wrong
+way.
 
 Key paths are verified against real software, not only mocks:
 

@@ -13,7 +13,6 @@ scheduler are the ``slab`` command.
 from __future__ import annotations
 
 import os
-from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, NoReturn
 
@@ -26,7 +25,6 @@ if TYPE_CHECKING:
 
 from foundation import _ops
 from foundation.errors import FoundationError
-from foundation.models import utcnow
 from mason.errors import MasonError
 from slab._version import __version__
 from slab.errors import SlabError
@@ -51,17 +49,6 @@ _WorkspaceOpt = Annotated[
 def _fail(message: str) -> NoReturn:
     typer.echo(f"error: {message}", err=True)
     raise typer.Exit(code=1)
-
-
-def _age(moment: datetime) -> str:
-    seconds = max(0.0, (utcnow() - moment).total_seconds())
-    if seconds < 60:
-        return f"{int(seconds)}s"
-    if seconds < 3600:
-        return f"{int(seconds // 60)}m"
-    if seconds < 86_400:
-        return f"{int(seconds // 3600)}h"
-    return f"{int(seconds // 86_400)}d"
 
 
 def _print_version(value: bool) -> None:

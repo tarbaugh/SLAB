@@ -150,7 +150,7 @@ frame: E=-0.006493 eV, max|F|=0.4410 eV/Å; partial trajectory kept as
 artifact 'cu-failed.traj'"]
 ```
 
-That note alone often decides the correction. A residual force of 0.3 eV/Å
+That note alone often decides the correction. A residual force of 0.4 eV/Å
 after 3 steps on a gently rattled crystal says "engine hiccup: retry, or
 switch engine", while a max|F| in the hundreds says "the structure is
 unphysical: fix the input". Diagnostics capture is best-effort and never

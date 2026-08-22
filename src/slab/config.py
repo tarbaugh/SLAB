@@ -58,10 +58,6 @@ CONFIG_ENV_VAR = "SLAB_CONFIG"
 SITE_CONFIG_ENV_VAR = "SLAB_SITE_CONFIG"
 PROJECT_FILE_NAME = "slab.toml"
 
-# Path-valued keys get ~ and ${VAR} expanded at load time (the slab process
-# itself opens them). Everything else — notably [hpc] setup lines — is left
-# verbatim: those are shell fragments whose variables must expand on the
-# compute node at run time, not on the login node at load time.
 # Every table a config file may declare, and which package validates it.
 # SLAB holds the names as strings only: it lints the spelling of a table so a
 # typo cannot masquerade as a section owned by a package that is not loaded,
@@ -486,13 +482,29 @@ def config_value(dotted: str, cwd: str | os.PathLike[str] | None = None) -> Any:
 
 
 def _check_schema_version(raw: dict[str, Any], path: Path) -> None:
-    """Refuse one file written for a newer slab, before its keys are merged."""
-    declared = raw.get("schema_version")
-    if isinstance(declared, int) and declared > SCHEMA_VERSION:
+    """Refuse one file written for a newer slab, before its keys are merged.
+
+    This runs in :func:`load_merged`, so it is the check every package gets.
+    A view model can only refuse a version in a table it validates, and each
+    package validates only its own, so leaving the bound to ``SlabConfig``
+    would let Foundation and Mason read a future file's keys as if they meant
+    what they mean today.
+    """
+    if "schema_version" not in raw:
+        return
+    declared = raw["schema_version"]
+    if not isinstance(declared, int) or isinstance(declared, bool):
+        raise ConfigError(
+            f"{path} declares schema_version {declared!r}, which is not an "
+            f"integer; this slab understands {SCHEMA_VERSION}"
+        )
+    if declared > SCHEMA_VERSION:
         raise ConfigError(
             f"{path} declares schema_version {declared}, newer than this slab "
             f"understands ({SCHEMA_VERSION}); upgrade slab to read it"
         )
+    if declared < 1:
+        raise ConfigError(f"{path} declares schema_version {declared}; it must be >= 1")
 
 
 def _read_toml(path: Path) -> dict[str, Any]:

@@ -43,13 +43,25 @@ project: /home/tom/cu-project/slab.toml
   engines.qe.command = 'srun pw.x'  [/sw/slab/config.toml (site)]
   hpc.default_partition = 'cpu'  [/home/tom/cu-project/slab.toml (project)]
   ...
+[agent, workspace] print as written; their owners validate them
 unset keys use built-in defaults ('slab config init' shows them all)
 ```
 
+The last-but-one line is the split showing through. SLAB prints its own
+tables through their validated models, so a `~` or a `${VAR}` appears as the
+path it expanded to. It prints `[workspace]` and `[agent]` exactly as the
+file writes them, because SLAB knows those table names and not their
+meanings. A value their owners would refuse still appears here, which is why
+this stays the command to reach for when a setting did not take.
+
 Unknown keys are refused, and the refusal names the offending file, so a
 typo in a cluster config surfaces at load and never silently configures
-nothing. Path values expand `~` and `${VAR}`, and an **unset** variable is a
-loud error, where `os.path.expandvars` would quietly leave `$USRE` literal.
+nothing. A misspelled *table* is refused by every command, because no
+package owns it. A misspelled *key inside* a table is refused by the command
+whose package owns that table, so check `[agent]` with `mason doctor` and
+`[workspace]` with `foundation list`. Path values expand `~` and `${VAR}`,
+and an **unset** variable is a loud error, where `os.path.expandvars` would
+quietly leave `$USRE` literal.
 
 ## When an edit takes effect
 

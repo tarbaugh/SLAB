@@ -20,7 +20,6 @@ from pathlib import Path
 import pytest
 
 SRC = Path(__file__).resolve().parent.parent / "src"
-PACKAGES = ("slab", "foundation", "mason")
 
 # What each package is allowed to import from this repository, itself included.
 ALLOWED: dict[str, frozenset[str]] = {
@@ -28,16 +27,26 @@ ALLOWED: dict[str, frozenset[str]] = {
     "foundation": frozenset({"foundation", "slab"}),
     "mason": frozenset({"mason", "foundation", "slab"}),
 }
+PACKAGES = tuple(ALLOWED)
+
+
+def _packages_on_disk() -> set[str]:
+    """Every importable package under ``src/``, declared or not."""
+    return {p.name for p in SRC.iterdir() if p.is_dir() and (p / "__init__.py").is_file()}
 
 
 def _imported_roots(tree: ast.AST) -> set[tuple[str, int]]:
-    """Every in-repo package this module names, with the line that names it."""
+    """Every in-repo package this module names, with the line that names it.
+
+    "In-repo" is read from disk, not from the declared list, so an undeclared
+    package still registers as an edge rather than passing as third-party.
+    """
     found: set[tuple[str, int]] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 root = alias.name.split(".", 1)[0]
-                if root in PACKAGES:
+                if root in _packages_on_disk():
                     found.add((root, node.lineno))
         elif isinstance(node, ast.ImportFrom):
             if node.level:  # a relative import cannot leave its own package
@@ -45,7 +54,7 @@ def _imported_roots(tree: ast.AST) -> set[tuple[str, int]]:
             if node.module is None:
                 continue
             root = node.module.split(".", 1)[0]
-            if root in PACKAGES:
+            if root in _packages_on_disk():
                 found.add((root, node.lineno))
     return found
 
@@ -76,6 +85,24 @@ def test_every_package_is_actually_scanned() -> None:
         modules = _modules_of(package)
         assert modules, f"no modules found for {package} under {SRC}"
         assert (SRC / package / "__init__.py").is_file()
+
+
+def test_no_package_escapes_the_rule() -> None:
+    """A package nobody declared is a laundering route between the others.
+
+    Without this, adding ``src/thing`` that imports ``mason`` and is imported
+    by ``slab`` satisfies every per-package check while carrying a dependency
+    the whole point of the rule is to forbid: the scan only ever looked at the
+    three names it knew. Declaring a new package in ``ALLOWED`` is what makes
+    it visible, so the tuple and the directory must agree.
+    """
+    on_disk = _packages_on_disk()
+    declared = set(ALLOWED)
+    assert on_disk == declared, (
+        f"src/ holds {sorted(on_disk)} but the layering rule declares "
+        f"{sorted(declared)}; add the new package to ALLOWED with the "
+        f"packages it may import, and to pyproject's wheel packages"
+    )
 
 
 def test_slab_is_reached_from_foundation_and_mason() -> None:

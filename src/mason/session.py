@@ -55,7 +55,11 @@ class MasonSession:
         cwd: The project directory Mason works in (files, notebook, plan).
         workspace_root: The SLAB workspace for runs (default: resolved the
             usual way — flag > ``$SLAB_WORKSPACE`` > config > ``./.slab``).
-        config: The full slab config; loaded from *cwd* when omitted.
+        agent: The ``[agent]`` table (:mod:`mason.config`); read from *cwd*
+            when omitted.
+        hpc: The ``[hpc]`` table (:mod:`slab.config`); read from *cwd* when
+            omitted. Each table comes from the package that owns it, so
+            pinning one does not require inventing the other.
         approver: Callback deciding mutating tool calls when approval mode
             is ``"ask"``; the default refuses (safe for non-interactive
             runs — pass an interactive prompt or use approval ``"auto"``).

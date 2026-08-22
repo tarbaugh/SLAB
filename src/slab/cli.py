@@ -13,12 +13,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, NoReturn
+from typing import Annotated, NoReturn
 
 import typer
-
-if TYPE_CHECKING:
-    pass
 
 from slab._ops import engines_overview
 from slab._version import __version__
@@ -30,17 +27,6 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
-
-
-_WorkspaceOpt = Annotated[
-    Path | None,
-    typer.Option(
-        "--workspace",
-        "-w",
-        envvar="SLAB_WORKSPACE",
-        help="Workspace directory (default ./.slab).",
-    ),
-]
 
 
 def _fail(message: str) -> NoReturn:

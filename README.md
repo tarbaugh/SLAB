@@ -420,7 +420,7 @@ what recipes record.
 ## Agent surface (MCP)
 
 ```json
-{"mcpServers": {"slab": {"command": "slab", "args": ["mcp"]}}}
+{"mcpServers": {"foundation": {"command": "foundation", "args": ["mcp"]}}}
 ```
 
 Tools: `launch_workflow`, `list_runs`, `show_run`, `promote_run`,
