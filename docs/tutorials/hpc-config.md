@@ -58,7 +58,7 @@ Configuration is **re-read, not loaded once**. SLAB parses every layer of
 live for the next call, with no reload command and no restart. What SLAB
 does not re-read is a short list of memos, which exist so that a task does
 not pay for a login shell or a version probe every time it runs. A
-long-lived process (`slab mcp`, a Mason session) can hold a memo past its
+long-lived process (`foundation mcp`, a Mason session) can hold a memo past its
 truth, and that is the only reason to restart one.
 
 | you changed | picked up |
@@ -118,8 +118,10 @@ so a submitted job never inherits the residue.
 ```toml
 schema_version = 1
 
+[workspace]
+root = "/scratch/${USER}/slab-workspace"
+
 [paths]
-workspace = "/scratch/${USER}/slab-workspace"
 pseudos = "/shared/sw/slab/pseudos"          # pseudopotential family root
 engines = "/shared/sw/slab/engines.json"     # cluster engine registry
 
@@ -177,10 +179,10 @@ the URL it landed on. A serve job is an ordinary batch job that runs a
 server, and it reuses `[hpc.partitions]`.
 
 ```bash
-slab mason serve render          # the script, before you trust it
-slab mason serve start --wait    # submit, then follow it to a live endpoint
-slab mason serve status          # record + job state + a live probe
-slab mason serve stop            # cancel and clear the record
+mason serve render          # the script, before you trust it
+mason serve start --wait    # submit, then follow it to a live endpoint
+mason serve status          # record + job state + a live probe
+mason serve stop            # cancel and clear the record
 ```
 
 `[agent.serve]` values are shell for the compute node, so SLAB expands no
@@ -203,8 +205,8 @@ section drives four verbs:
 
 ```bash
 slab hpc partitions
-slab hpc render "slab run relax.py" --name si-relax
-slab hpc submit "slab run relax.py" --name si-relax --time 02:00:00
+slab hpc render "foundation run relax.py" --name si-relax
+slab hpc submit "foundation run relax.py" --name si-relax --time 02:00:00
 slab hpc status 4242314
 ```
 
@@ -226,14 +228,14 @@ before you trust it. Only fields the config sets become `#SBATCH` directives
 set -euo pipefail
 
 module load quantum-espresso/7.4
-# partition launcher omitted: 'slab' is a single-process driver;
+# partition launcher omitted: 'foundation' is a single-process driver;
 # engines bring their own MPI (e.g. [engines.qe] command = "srun pw.x")
-slab run relax.py
+foundation run relax.py
 ```
 
-The usual payload is `slab run workflow.py`. The scheduler moves the
+The usual payload is `foundation run workflow.py`. The scheduler moves the
 process, and the result is still a traced, check-gated run in the workspace.
-Note what the launcher did not touch. A `slab` payload is never prefixed
+Note what the launcher did not touch. A `foundation` payload is never prefixed
 with the partition's `launcher`, because `srun` on the Python driver would
 start one copy of the whole workflow per task, all writing one run database,
 and each deadlocked on its own nested engine `srun`. The launcher belongs on
@@ -271,7 +273,7 @@ reason, so an unknown is never presented as a known.
    `tool_call_parser` your vLLM build registers, and `setup` lines that
    activate the vLLM venv and point `HF_HOME` at a model cache
    pre-downloaded on the login node, with `HF_HUB_OFFLINE=1`.
-   `slab mason doctor` is how they confirm the parser name was right.
+   `mason doctor` is how they confirm the parser name was right.
 
 Users then override per project in `slab.toml`, and nothing about a
 cluster is baked into anyone's Python.

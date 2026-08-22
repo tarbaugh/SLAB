@@ -17,8 +17,8 @@ improvise a niche correction, such as a smaller perturbation, a different
 engine, or a looser threshold, if it can see what actually happened. So the
 contract is evidence delivery. Failed runs and tasks carry a structured
 `failure` record, and delivery is tiered so that listings stay cheap:
-`slab list` shows a one-line `error` per run, and `slab show <id>` fetches
-the full record for the one run you are debugging.
+`foundation list` shows a one-line `error` per run, and `foundation show <id>`
+fetches the full record for the one run you are debugging.
 
 ## A failing task
 
@@ -29,7 +29,7 @@ are still in scope, and the tracer does the rest. Here is a task that stands
 in for an engine call that diverges:
 
 ```python
-from slab import Workspace, task
+from foundation import Workspace, task
 
 @task
 def scf_energy(kpts: int) -> float:
@@ -146,7 +146,7 @@ except RuntimeError as e:
 
 ```text
 ["relax failed after 3 completed step(s); trajectory has 3 frame(s), last
-frame: E=-0.018471 eV, max|F|=0.3032 eV/Å; partial trajectory kept as
+frame: E=-0.006493 eV, max|F|=0.4410 eV/Å; partial trajectory kept as
 artifact 'cu-failed.traj'"]
 ```
 
@@ -225,7 +225,7 @@ their assertions compared, which are the numbers a correction is computed
 from:
 
 ```python
-from slab import check, converged
+from foundation import check, converged
 
 with ws.start_run(name="cu-verify", intent="threshold probe") as verify_run:
     fmax = 0.062
@@ -259,25 +259,25 @@ with more steps or a tighter optimizer, without re-reading the workflow.
 
 ## The surfaces
 
-`slab show` renders each traceback under its owner. The run's `failure`
+`foundation show` renders each traceback under its owner. The run's `failure`
 prints at run level unless a failed task carries the same exception, which
 is the usual case because the exception propagated, and then it renders
 once, under that task. For the failed relax run above:
 
 <!-- no-verify -->
 ```text
-$ slab show 01k...
-run 01k...  cu-relax
+$ foundation show 01m0m5gz
+run 01m0m5gza60x903wjk1dpkg1g4  cu-relax
   state:   quarantined    status: failed
   error:   RuntimeError: SCF diverged
-  created: 2026-08-12T02:06:21.820454+00:00
+  created: 2026-08-22T07:21:23.014396+00:00
   intent:  probe rattled Cu
   tasks:
-    1. relax  failed  0.011s  error: RuntimeError: SCF diverged
+    1. relax  failed  0.009s  error: RuntimeError: SCF diverged
        Traceback (most recent call last):
-         File ".../slab/tracing.py", line 223, in _traced_call
+         File ".../foundation/tracing.py", line 223, in _traced_call
            result = f(*args, **kwargs)
-         File ".../slab/tasks.py", line 119, in relax
+         File ".../foundation/tasks.py", line 137, in relax
            converged = bool(optimizer.run(fmax=fmax, steps=steps))
          File ".../ase/optimize/optimize.py", line 506, in run
            return Dynamics.run(self, steps=steps)
@@ -286,13 +286,13 @@ run 01k...  cu-relax
            self.calculate(atoms, [name], system_changes)
        RuntimeError: SCF diverged
        relax failed after 3 completed step(s); trajectory has 3 frame(s),
-       last frame: E=-0.018471 eV, max|F|=0.3032 eV/Å; partial trajectory
+       last frame: E=-0.006493 eV, max|F|=0.4410 eV/Å; partial trajectory
        kept as artifact 'cu-failed.traj'
   artifacts:
-    cu-failed.traj  intermediate  3581B  bytes  8c700c74ed78
+    cu-failed.traj  intermediate  2851B  bytes  2234b81f42cf
 ```
 
-`slab show <id> --json` emits the same details in machine-readable form,
+`foundation show <id> --json` emits the same details in machine-readable form,
 with `failure` keys on the run and on each task, and `observed` and
 `expected` on each check. Agents get identical structures without the CLI,
 because the MCP `show_run` tool returns this JSON, and `launch_workflow`

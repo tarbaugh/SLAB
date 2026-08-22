@@ -26,8 +26,8 @@ root.
 
 ```python
 from ase.build import bulk
-from slab import Workspace, check, converged, finite, within_bounds
-from slab.tasks import relax
+from foundation import Workspace, check, converged, finite, within_bounds
+from foundation.tasks import relax
 
 atoms = bulk("Cu", "fcc", a=3.58) * (2, 2, 2)
 atoms.rattle(stdev=0.05, seed=42)
@@ -162,8 +162,8 @@ units.
 The stored `observed` and `expected` values are the numbers an agent computes
 a correction from. "fmax was 0.062 against 0.05" tells the agent to rerun
 with more steps or to loosen the threshold, while a bare "check failed"
-tells it nothing. `slab show <id> --json` and the MCP `show_run` tool return
-both fields, next to the structured failure records described in
+tells it nothing. `foundation show <id> --json` and the MCP `show_run` tool
+return both fields, next to the structured failure records described in
 [Debugging failures](debugging-failures.md):
 
 ```json
@@ -190,7 +190,7 @@ ws.close()
 promoted forced: True
 ```
 
-The CLI spelling is `slab promote <id> --force --reason "..."`. For where
-promotion fits in the larger lifecycle (TTLs, expiry, and what promoted runs
-retain), see [Architecture](../architecture.md). For the happy path from
+The CLI spelling is `foundation promote <id> --force --reason "..."`. For
+where promotion fits in the larger lifecycle (TTLs, expiry, and what promoted
+runs retain), see [Architecture](../architecture.md). For the happy path from
 script to promoted result, start at the [Quickstart](quickstart.md).

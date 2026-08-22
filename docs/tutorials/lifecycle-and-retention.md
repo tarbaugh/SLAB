@@ -16,7 +16,7 @@ quarantined ──checks pass──▶ verified ──promote──▶ promoted 
 Two rules are structural, not policy. Nothing makes promoted or archived data expire, because the transition does not exist, with or without `force`. And `expired` and `archived` are terminal states. The relation itself is queryable:
 
 ```python
-from slab import LifecycleState, can_transition
+from foundation import LifecycleState, can_transition
 
 print(can_transition(LifecycleState.VERIFIED, LifecycleState.PROMOTED))
 print(can_transition(LifecycleState.QUARANTINED, LifecycleState.PROMOTED))
@@ -41,8 +41,8 @@ One workspace, three endings. A checked run lands `verified`, an unchecked probe
 
 ```python
 from ase.build import bulk
-from slab import Workspace, check, converged
-from slab.tasks import relax
+from foundation import Workspace, check, converged
+from foundation.tasks import relax
 
 atoms = bulk("Cu", "fcc", a=3.58, cubic=True)
 atoms.rattle(stdev=0.05, seed=42)
@@ -103,7 +103,7 @@ quarantined -> promoted  actor=agent  forced=True  reason='loose relax is good e
 A retention policy that puts a TTL on `promoted` is not a misconfiguration that SLAB warns about. It is unrepresentable:
 
 ```python
-from slab import RetentionPolicy
+from foundation import RetentionPolicy
 
 try:
     RetentionPolicy.model_validate({"promoted": {"ttl_days": 365}})
@@ -128,7 +128,7 @@ A `RetentionPolicy` maps lifecycle states to rules. `ttl_days` says how long a r
 - Promoted runs keep `terminal` outputs and `input` recompute roots, and let `intermediate` bytes go hash-only.
 
 ```python
-from slab import DEFAULT_POLICY
+from foundation import DEFAULT_POLICY
 
 print(DEFAULT_POLICY.quarantined.ttl_days, DEFAULT_POLICY.verified.ttl_days)
 print(sorted(role.value for role in DEFAULT_POLICY.promoted.keep))
@@ -160,11 +160,11 @@ TTLs anchor to `state_entered_at`, so the clock restarts when a run changes stat
 
 ## Expire, then gc
 
-Housekeeping has two deliberate phases. `expire_due` is the TTL sweep, and it is a state change only. `gc` reclaims artifact bytes that no run's retention rule demands. Both `expire_due` and its CLI counterpart `slab expire` take the sweep time as an argument (`now=` / `--older-than`), so the example can run a 40-day-later sweep without waiting:
+Housekeeping has two deliberate phases. `expire_due` is the TTL sweep, and it is a state change only. `gc` reclaims artifact bytes that no run's retention rule demands. Both `expire_due` and its CLI counterpart `foundation expire` take the sweep time as an argument (`now=` / `--older-than`), so the example can run a 40-day-later sweep without waiting:
 
 ```python
 from datetime import timedelta
-from slab import utcnow
+from foundation import utcnow
 
 print("probe bytes on disk:", ws.artifacts.has(scratch.hash))
 
@@ -197,7 +197,7 @@ At day 40, only `probe` is past its 30-day quarantine TTL. `baseline` has 50 day
 !!! note
     The exact byte count is stable here, because seeds are fixed and EMT is deterministic. Run ids and timestamps differ every run.
 
-The two phases exist because they carry different risk. Expiry is cheap and reviewable, since it is a state change that you can list (`slab list --state expired`) and inspect before any byte is touched, and `gc --dry-run` reports what would drop without dropping it. Byte deletion is the irreversible step, so it gets its own explicit command.
+The two phases exist because they carry different risk. Expiry is cheap and reviewable, since it is a state change that you can list (`foundation list --state expired`) and inspect before any byte is touched, and `gc --dry-run` reports what would drop without dropping it. Byte deletion is the irreversible step, so it gets its own explicit command.
 
 Two safety valves follow the same logic:
 
