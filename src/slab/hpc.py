@@ -1,7 +1,7 @@
 """SLURM, taken at its word: render sbatch scripts from config, submit, poll.
 
 This is deliberately a *thin* scheduler layer, not a workflow engine — runs,
-caching, and verification stay in :mod:`slab.runtime` regardless of where the
+caching, and verification stay in :mod:`foundation.runtime` regardless of where the
 Python process executes. What this module adds is the cluster-shaped plumbing
 around it, driven entirely by the ``[hpc]`` section of the slab config
 (:mod:`slab.config`):
@@ -10,7 +10,7 @@ around it, driven entirely by the ``[hpc]`` section of the slab config
   complete batch script. Only fields the config *sets* become ``#SBATCH``
   directives (Parsl's convention) — SLAB adds no silent resource defaults,
   and the rendered script is plain text anyone can read before trusting.
-  The usual payload is ``slab run workflow.py``: the scheduler moves the
+  The usual payload is ``foundation run workflow.py``: the scheduler moves the
   process; provenance is unchanged.
 * :func:`submit` writes the script next to the job's outputs and calls
   ``sbatch --parsable``.
@@ -146,8 +146,8 @@ def render_sbatch(
     Only declared fields become ``#SBATCH`` directives; the ``[hpc]``-level
     ``account`` and ``setup`` apply unless the partition sets its own. The
     partition's ``launcher`` (``srun``, ``mpirun -np 4`` ...) prefixes the
-    command — except a command invoking the slab driver itself
-    (``slab run ...``), which is always emitted unlaunched with an
+    command — except a command invoking one of the drivers
+    (``foundation run ...``), which is always emitted unlaunched with an
     explanatory comment: launching the driver replicates the whole workflow
     once per task and deadlocks the engines' own nested ``srun``.
     *time_limit* overrides the partition's; *output* defaults to
@@ -223,26 +223,33 @@ def render_sbatch(
     body.extend(spec.setup)
     body.extend(prologue)
     launcher = spec.launcher if use_launcher else None
-    if launcher and _is_driver_payload(command):
-        body.append("# partition launcher omitted: 'slab' is a single-process driver;")
+    driver = _driver_payload_name(command) if launcher else None
+    if driver is not None:
+        body.append(
+            f"# partition launcher omitted: '{driver}' is a single-process driver;"
+        )
         body.append('# engines bring their own MPI (e.g. [engines.qe] command = "srun pw.x")')
         launcher = None
     body.append(f"{launcher} {command}" if launcher else command)
     return "\n".join(lines + body)
 
 
-def _is_driver_payload(command: str) -> bool:
-    """True when *command* invokes the slab driver itself (``slab run ...``).
+_DRIVERS = frozenset({"slab", "foundation", "mason"})
 
-    ``srun``-launching the Python driver replicates the whole workflow once
-    per task — N concurrent writers on one runs database — and each
-    replica's own engine ``srun`` then deadlocks on the already-consumed
-    allocation. The launcher belongs on engine commands *inside* the driver
-    ([engines.qe] ``command = "srun pw.x"``), never on the driver.
+
+def _driver_payload_name(command: str) -> str | None:
+    """The driver *command* invokes (``foundation run ...``), or None.
+
+    All three console scripts are single-process drivers.
+    ``srun``-launching one replicates the whole workflow once per task — N
+    concurrent writers on one runs database — and each replica's own engine
+    ``srun`` then deadlocks on the already-consumed allocation. The launcher
+    belongs on engine commands *inside* the driver ([engines.qe]
+    ``command = "srun pw.x"``), never on the driver.
     """
     # Env assignments legitimately prefix shell payloads
-    # (OMP_NUM_THREADS=4 slab run ...), with or without the explicit 'env'
-    # wrapper (flags included: env -u VAR slab run ...); the driver check
+    # (OMP_NUM_THREADS=4 foundation run ...), with or without the explicit
+    # 'env' wrapper (flags included: env -u VAR foundation run ...); the check
     # must see through them all with the SAME parser the engine guards use,
     # or the launcher sneaks back onto the driver for a form one parser
     # accepts and the other does not.
@@ -250,12 +257,13 @@ def _is_driver_payload(command: str) -> bool:
 
     payload = _command_payload(command)
     if payload is None:
-        return False
+        return None
     for token in payload:
         if _SHELL_ENV_ASSIGNMENT.fullmatch(token):
             continue
-        return Path(token).name == "slab"
-    return False
+        name = Path(token).name
+        return name if name in _DRIVERS else None
+    return None
 
 
 def submit(

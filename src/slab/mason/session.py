@@ -74,7 +74,7 @@ class MasonSession:
         loaded = config if config is not None else load_config(self.cwd)
         self.agent: AgentConfig = loaded.agent
         self.hpc: HpcConfig = loaded.hpc
-        from slab._ops import resolve_root
+        from foundation._ops import resolve_root
 
         self.workspace_root = (
             Path(workspace_root) if workspace_root is not None else resolve_root(None)

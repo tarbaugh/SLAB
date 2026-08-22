@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from slab import SQLiteRunStore
+from foundation import SQLiteRunStore
 from slab.pseudos import PseudoFamily, family_dir_name
 
 

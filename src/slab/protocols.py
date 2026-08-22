@@ -23,7 +23,7 @@ results, because the cache never saw the protocol's name — only its numbers.
 Usage::
 
     from slab.protocols import qe_protocol_options
-    from slab.tasks import relax
+    from foundation.tasks import relax
 
     options = qe_protocol_options(atoms, protocol="balanced")
     relaxed, info = relax(atoms, engine="qe", calculator_options=options)

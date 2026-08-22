@@ -45,9 +45,10 @@ Source = "https://github.com/tarbaugh/SLAB"
 
 [project.scripts]
 slab = "slab.cli:app"
+foundation = "foundation.cli:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/slab"]
+packages = ["src/slab", "src/foundation"]
 
 [tool.hatch.build.targets.sdist]
 exclude = [".claude"]
@@ -56,6 +57,10 @@ exclude = [".claude"]
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
+# Recorded fixtures are historical artifacts. Their imports name the module
+# paths that existed when they were recorded, and reformatting them would
+# quietly edit the evidence.
+extend-exclude = ["tests/data"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF"]
@@ -75,12 +80,14 @@ ignore_missing_imports = true
 # These two modules call into ASE, which is only partially typed; everything
 # else about them stays strict.
 [[tool.mypy.overrides]]
-module = ["slab.tasks", "slab.backends"]
+module = ["foundation.tasks", "slab.backends"]
 disallow_untyped_calls = false
 
 [tool.pytest.ini_options]
-addopts = "-q --doctest-modules --cov=slab --cov-report=term-missing"
-testpaths = ["tests", "src/slab"]
+# --doctest-modules collects every .py file, so the recorded fixture workspace
+# (whose script imports the pre-split module paths on purpose) is skipped.
+addopts = "-q --doctest-modules --ignore=tests/data --cov=slab --cov=foundation --cov-report=term-missing"
+testpaths = ["tests", "src"]
 filterwarnings = [
     # ASE-internal numpy 2.5 deprecations; not ours to fix
     "ignore::DeprecationWarning:ase.*",

@@ -527,7 +527,7 @@ def _add_shell_tool(box: Toolbox, session: MasonSession) -> None:
 
 def _add_slab_tools(box: Toolbox, session: MasonSession) -> None:
     def slab_runs(arguments: dict[str, Any]) -> str:
-        from slab.runtime import Workspace
+        from foundation.runtime import Workspace
 
         state = arguments.get("state")
         limit = int(arguments.get("limit", 10))
@@ -561,8 +561,8 @@ def _add_slab_tools(box: Toolbox, session: MasonSession) -> None:
     )
 
     def slab_show(arguments: dict[str, Any]) -> str:
-        from slab._ops import run_details
-        from slab.runtime import Workspace
+        from foundation._ops import run_details
+        from foundation.runtime import Workspace
 
         with Workspace(session.workspace_root) as ws:
             details = run_details(ws, str(arguments["run_id"]))
@@ -582,7 +582,7 @@ def _add_slab_tools(box: Toolbox, session: MasonSession) -> None:
     )
 
     def slab_launch(arguments: dict[str, Any]) -> str:
-        from slab._ops import launch_script
+        from foundation._ops import launch_script
 
         script = _resolve(session, str(arguments["script"]))
         result = launch_script(

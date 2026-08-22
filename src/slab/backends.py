@@ -36,7 +36,7 @@ Engine choices worth knowing:
   ``device``, ``setup_kwargs``, ... The heavy MLIP dependencies live in the
   cluster's pre-built environments, not in your Python environment; the
   calculator spawns a worker subprocess, so it must be closed —
-  :func:`close_calculator` does this and :func:`slab.tasks.relax` calls it
+  :func:`close_calculator` does this and :func:`foundation.tasks.relax` calls it
   automatically.
 * ``mace`` — the MACE foundation model in-process; options are forwarded to
   ``mace.calculators.mace_mp`` (``model=``, ``device=``, ...). First use
@@ -410,7 +410,7 @@ def close_calculator(calculator: Any) -> None:
     without an explicit ``directory=``, ``lammps`` without an explicit
     ``tmp_dir=``) have that scratch removed here — capture any evidence you
     need first (:func:`collect_engine_outputs`,
-    :func:`collect_failure_evidence`); :func:`slab.tasks.relax` does both.
+    :func:`collect_failure_evidence`); :func:`foundation.tasks.relax` does both.
     Safe on all calculators, and safe to call twice.
 
     Examples:

@@ -326,8 +326,8 @@ def test_provider_drives_a_verified_relax_end_to_end(
     url, script = llm_server
     workflow = "\n".join(
         [
-            "from slab import check, converged",
-            "from slab.tasks import relax",
+            "from foundation import check, converged",
+            "from foundation.tasks import relax",
             "from ase.build import bulk",
             "atoms = bulk('Cu', 'fcc', a=3.6)",
             "relaxed, info = relax(atoms, engine='emt', fmax=0.05, label='cu')",
@@ -391,7 +391,7 @@ def test_provider_drives_a_verified_relax_end_to_end(
     )
     assert result.stop_reason == "answer"
 
-    from slab.runtime import Workspace
+    from foundation.runtime import Workspace
 
     with Workspace(tmp_path / ".slab") as ws:
         runs = ws.runs.list_runs()

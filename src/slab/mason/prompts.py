@@ -31,8 +31,8 @@ gate verification. A run whose checks pass becomes 'verified'; an unverified \
 number is a rumor. A minimal workflow script:
 
     from ase.build import bulk
-    from slab import check, converged
-    from slab.tasks import relax
+    from foundation import check, converged
+    from foundation.tasks import relax
 
     atoms = bulk("Si", "diamond", a=5.43)
     relaxed, info = relax(atoms, engine="emt", fmax=0.05, label="si")
@@ -56,7 +56,7 @@ partitions exist here before assuming any. For Quantum ESPRESSO, expand a \
 named protocol instead of inventing cutoffs:
 
     from slab.protocols import qe_protocol_options
-    from slab.tasks import single_point
+    from foundation.tasks import single_point
 
     options = qe_protocol_options(relaxed, protocol="balanced")
     final, dft = single_point(relaxed, engine="qe", calculator_options=options)

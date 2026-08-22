@@ -28,8 +28,8 @@ from pathlib import Path
 import ase.io
 from ase.build import bulk
 
-from slab import Workspace, check, converged, finite, units
-from slab.tasks import relax
+from foundation import Workspace, check, converged, finite, units
+from foundation.tasks import relax
 
 
 def build_base(engine: str):  # returns ase.Atoms

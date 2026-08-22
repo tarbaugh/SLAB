@@ -274,8 +274,8 @@ def test_slab_runs_empty_then_launch_then_show(box: Toolbox, tmp_path: Path) -> 
     assert box.dispatch(_call("slab_runs")) == "no runs in this workspace yet"
     script = tmp_path / "wf.py"
     script.write_text(
-        "from slab import check, converged\n"
-        "from slab.tasks import relax\n"
+        "from foundation import check, converged\n"
+        "from foundation.tasks import relax\n"
         "from ase.build import bulk\n"
         "atoms = bulk('Cu', 'fcc', a=3.6)\n"
         "relaxed, info = relax(atoms, engine='emt', fmax=0.05, label='cu')\n"
