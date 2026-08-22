@@ -17,11 +17,9 @@ import pytest
 from typer.testing import CliRunner
 
 from conftest import LlmScript
-from slab.cli import app
-from slab.config import AgentConfig, HpcConfig, load_config
-from slab.errors import SlabError
-from slab.mason import MasonSession
-from slab.mason.serve import (
+from mason import MasonSession
+from mason.cli import app
+from mason.serve import (
     ServeError,
     ServeRecord,
     clear_record,
@@ -36,6 +34,8 @@ from slab.mason.serve import (
     wait_for_record,
     wait_until_ready,
 )
+from slab.config import AgentConfig, HpcConfig, load_config
+from slab.errors import SlabError
 
 runner = CliRunner()
 
@@ -575,7 +575,7 @@ def test_cli_serve_render_prints_the_script(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     _project(tmp_path)
-    result = runner.invoke(app, ["mason", "serve", "render", "-w", str(tmp_path / ".slab")])
+    result = runner.invoke(app, ["serve", "render", "-w", str(tmp_path / ".slab")])
     assert result.exit_code == 0, result.output
     assert "#SBATCH --gres=gpu:a100:4" in result.output
     assert f"vllm serve {GLIMMER}" in result.output
@@ -589,7 +589,7 @@ def test_cli_serve_render_reports_a_missing_parser_as_an_error(
         f'[hpc.partitions.gpu]\n\n[agent]\nmodel = "{GLIMMER}"\n'
         '\n[agent.serve]\npartition = "gpu"\n'
     )
-    result = runner.invoke(app, ["mason", "serve", "render"])
+    result = runner.invoke(app, ["serve", "render"])
     assert result.exit_code == 1
     assert "tool_call_parser" in result.output
 
@@ -600,10 +600,10 @@ def test_cli_serve_start_reports_the_job_and_how_to_watch(
     monkeypatch.chdir(tmp_path)
     _project(tmp_path)
     _fake(scheduler_bin, "sbatch", 'echo "606060"')
-    result = runner.invoke(app, ["mason", "serve", "start", "-w", str(tmp_path / ".slab")])
+    result = runner.invoke(app, ["serve", "start", "-w", str(tmp_path / ".slab")])
     assert result.exit_code == 0, result.output
     assert "submitted job 606060" in result.output
-    assert "slab mason serve status" in result.output
+    assert "mason serve status" in result.output
 
 
 def test_cli_serve_start_wait_follows_the_job_to_a_live_endpoint(
@@ -629,7 +629,7 @@ def test_cli_serve_start_wait_follows_the_job_to_a_live_endpoint(
     )
     _fake(scheduler_bin, "squeue", 'echo "RUNNING"')
     result = runner.invoke(
-        app, ["mason", "serve", "start", "--wait", "-w", str(root)]
+        app, ["serve", "start", "--wait", "-w", str(root)]
     )
     assert result.exit_code == 0, result.output
     assert "gpu-07 announced" in result.output
@@ -646,12 +646,12 @@ def test_cli_serve_status_and_stop(
     _fake(scheduler_bin, "squeue", 'echo "RUNNING"')
     _fake(scheduler_bin, "scancel", "true")
 
-    status = runner.invoke(app, ["mason", "serve", "status", "-w", str(root)])
+    status = runner.invoke(app, ["serve", "status", "-w", str(root)])
     assert status.exit_code == 0, status.output
     assert "job 4242: running" in status.output
     assert "gpu-07" in status.output
 
-    stopped = runner.invoke(app, ["mason", "serve", "stop", "-w", str(root)])
+    stopped = runner.invoke(app, ["serve", "stop", "-w", str(root)])
     assert stopped.exit_code == 0, stopped.output
     assert "cancel requested for job 4242" in stopped.output
     assert read_record(root) is None
@@ -687,7 +687,7 @@ def test_cli_doctor_names_where_the_endpoint_came_from(
     ]
     root = tmp_path / ".slab"
     _write_record(root, endpoint)
-    result = runner.invoke(app, ["mason", "doctor", "-w", str(root)])
+    result = runner.invoke(app, ["doctor", "-w", str(root)])
     assert result.exit_code == 0, result.output
     assert "[job 4242 on gpu-07]" in result.output
     assert "native tool calls work" in result.output
@@ -702,10 +702,10 @@ def test_cli_doctor_points_at_serve_when_nothing_is_serving(
     (tmp_path / "slab.toml").write_text(
         f'[agent]\nmodel = "{GLIMMER}"\nendpoint = "http://127.0.0.1:1/v1"\n'
     )
-    result = runner.invoke(app, ["mason", "doctor", "-w", str(tmp_path)])
+    result = runner.invoke(app, ["doctor", "-w", str(tmp_path)])
     assert result.exit_code == 1
     assert "[[agent] endpoint]" in result.output
-    assert "slab mason serve start" in result.output
+    assert "mason serve start" in result.output
 
 
 def test_cli_doctor_does_not_nudge_when_an_endpoint_was_named(
@@ -715,11 +715,11 @@ def test_cli_doctor_does_not_nudge_when_an_endpoint_was_named(
     monkeypatch.chdir(tmp_path)
     _project(tmp_path)
     result = runner.invoke(
-        app, ["mason", "doctor", "--endpoint", "http://127.0.0.1:1/v1", "-w", str(tmp_path)]
+        app, ["doctor", "--endpoint", "http://127.0.0.1:1/v1", "-w", str(tmp_path)]
     )
     assert result.exit_code == 1
     assert "[--endpoint]" in result.output
-    assert "slab mason serve start" not in result.output
+    assert "mason serve start" not in result.output
 
 
 def test_cli_doctor_reports_a_stale_record_as_stale(
@@ -731,7 +731,7 @@ def test_cli_doctor_reports_a_stale_record_as_stale(
     _write_record(root, "http://127.0.0.1:1/v1")
     _fake(scheduler_bin, "squeue", "exit 1")
     _fake(scheduler_bin, "sacct", 'echo "COMPLETED|0:0"')
-    result = runner.invoke(app, ["mason", "doctor", "-w", str(root)])
+    result = runner.invoke(app, ["doctor", "-w", str(root)])
     assert result.exit_code == 1
     assert "ended as completed" in result.output
     assert "serve stop" in result.output
@@ -779,7 +779,7 @@ def test_a_goal_runs_against_an_endpoint_nobody_configured(
     root = tmp_path / ".slab"
     _write_record(root, endpoint)
 
-    result = runner.invoke(app, ["mason", "run", "measure a0", "--auto", "-w", str(root)])
+    result = runner.invoke(app, ["run", "measure a0", "--auto", "-w", str(root)])
     assert result.exit_code == 0, result.output
     assert report in result.output
     # The request really went to the served endpoint, with the served model name.
@@ -879,7 +879,7 @@ def test_record_carries_cluster_and_stop_refuses_foreign_records(
 ) -> None:
     """Job ids are per-cluster; on filesystems mounted across clusters,
     scancel on a foreign record's numeric id could kill someone else's job."""
-    from slab.mason.serve import ServeRecord, record_path, stop
+    from mason.serve import ServeRecord, record_path, stop
 
     hpc = HpcConfig.model_validate(
         {"cluster": "delta", "partitions": {"gpu": {"gres": "gpu:a100:4"}}}
@@ -904,7 +904,7 @@ def test_record_carries_cluster_and_stop_refuses_foreign_records(
 
 
 def test_describe_does_not_query_foreign_job_ids(tmp_path: Path) -> None:
-    from slab.mason.serve import ServeRecord, describe, record_path
+    from mason.serve import ServeRecord, describe, record_path
 
     record = record_path(tmp_path)
     record.parent.mkdir(parents=True, exist_ok=True)

@@ -29,18 +29,18 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
-from slab.config import AgentConfig
-from slab.errors import SlabError
-from slab.mason.client import (
+from mason.client import (
     ChatClient,
     ChatReply,
     ContextOverflowError,
     parse_fenced_calls,
     parse_loose_calls,
 )
-from slab.mason.prompts import COMPACTION_PROMPT, system_messages
-from slab.mason.session import MasonSession
-from slab.mason.tools import Toolbox, build_toolbox
+from mason.errors import MasonError
+from mason.prompts import COMPACTION_PROMPT, system_messages
+from mason.session import MasonSession
+from mason.tools import Toolbox, build_toolbox
+from slab.config import AgentConfig
 
 _ERROR_STREAK_LIMIT = 5
 _COMPACTION_KEEP_MESSAGES = 6
@@ -82,9 +82,9 @@ def client_from_config(agent: AgentConfig) -> ChatBackend:
     """
     if agent.model is None:
         served = (
-            "e.g. claude-opus-5" if agent.provider == "anthropic" else "'slab mason doctor' lists"
+            "e.g. claude-opus-5" if agent.provider == "anthropic" else "'mason doctor' lists"
         )
-        raise SlabError(
+        raise MasonError(
             f"no model configured: set [agent] model in the slab config "
             f"('slab config init' writes a template; {served} what the endpoint serves)"
         )
@@ -93,12 +93,12 @@ def client_from_config(agent: AgentConfig) -> ChatBackend:
     if key_var is not None:
         api_key = os.environ.get(key_var)
         if api_key is None:
-            raise SlabError(
+            raise MasonError(
                 f"the {agent.provider} provider needs an API key: ${key_var} is not set "
                 f"in the environment (name a different variable with [agent] api_key_env)"
             )
     if agent.provider == "anthropic":
-        from slab.mason.anthropic import AnthropicClient
+        from mason.anthropic import AnthropicClient
 
         assert api_key is not None  # resolved_api_key_env always names one here
         return AnthropicClient(

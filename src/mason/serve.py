@@ -36,6 +36,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from mason.errors import MasonError
 from slab.config import AgentConfig, HpcConfig, ServeConfig
 from slab.errors import SlabError
 from slab.hpc import SubmittedJob, job_state, render_sbatch, submit
@@ -43,7 +44,7 @@ from slab.hpc import SubmittedJob, job_state, render_sbatch, submit
 RECORD_NAME = "endpoint.json"
 _DEFAULT_POLL_S = 10.0
 # A model name reaches a shell command, a JSON heredoc, and the served-model
-# check in 'slab mason doctor' — so it must survive all three as *one* string,
+# check in 'mason doctor' — so it must survive all three as *one* string,
 # untransformed. Hugging Face ids and absolute paths fit; anything stranger is
 # refused rather than quoted-and-hoped-for (an explicit command is the escape).
 # '~' is excluded deliberately: expanding it would make the name the server
@@ -51,7 +52,7 @@ _DEFAULT_POLL_S = 10.0
 _MODEL_NAME = re.compile(r"[A-Za-z0-9/][A-Za-z0-9._/+:@=-]*")
 
 
-class ServeError(SlabError):
+class ServeError(MasonError):
     """The model server could not be described, started, or located."""
 
 
@@ -103,7 +104,7 @@ def read_record(workspace_root: str | os.PathLike[str]) -> ServeRecord | None:
     except (OSError, json.JSONDecodeError) as e:
         raise ServeError(
             f"{path} exists but is not readable JSON ({e}); the server job may be "
-            f"mid-write — retry, or remove it with 'slab mason serve stop'"
+            f"mid-write — retry, or remove it with 'mason serve stop'"
         ) from e
     try:
         return ServeRecord.model_validate(raw)
@@ -228,7 +229,7 @@ def start(
         raise ServeError(
             f"a server is already recorded at {record_path(workspace_root)} "
             f"({existing.model} on {existing.node or 'an unnamed node'}, "
-            f"job {existing.job_id or 'unknown'}); stop it with 'slab mason serve stop' "
+            f"job {existing.job_id or 'unknown'}); stop it with 'mason serve stop' "
             f"before starting another (two servers would overwrite each other's record)"
         )
     resolved, _spec = hpc.resolve_partition(partition or agent.serve.partition)
@@ -270,7 +271,7 @@ def stop(workspace_root: str | os.PathLike[str], *, cluster: str = "") -> str:
             f"the recorded server belongs to cluster {record.cluster!r}, but this "
             f"config names {named} — job ids are per-cluster, so cancelling job "
             f"{record.job_id} from here could kill an unrelated job. Run "
-            f"'slab mason serve stop' under a config with [hpc] cluster = "
+            f"'mason serve stop' under a config with [hpc] cluster = "
             f"{record.cluster!r} (on that cluster) to confirm"
         )
     # Cancel first: if cancellation fails, the record must survive, or the next
@@ -282,7 +283,7 @@ def stop(workspace_root: str | os.PathLike[str], *, cluster: str = "") -> str:
 
 def probe(endpoint: str, *, timeout_s: float = 20.0) -> list[str] | None:
     """The model names the endpoint serves, or None when it does not answer."""
-    from slab.mason.client import ChatClient, LlmError
+    from mason.client import ChatClient, LlmError
 
     try:
         return ChatClient(endpoint, "probe", timeout_s=timeout_s).model_names()
@@ -314,7 +315,7 @@ def wait_until_ready(
             raise ServeError(
                 f"{endpoint} did not answer within {timeout_s:.0f}s. A large model can "
                 f"take that long to load, but so can a job that never started: check "
-                f"'slab mason serve status' and the job's output file"
+                f"'mason serve status' and the job's output file"
             )
         sleep(min(poll_s, remaining))
 
@@ -351,7 +352,7 @@ def wait_for_record(
         if remaining <= 0:
             raise ServeError(
                 f"job {job_id} is {status.state.value} but has announced no endpoint "
-                f"after {timeout_s:.0f}s; check 'slab mason serve status'"
+                f"after {timeout_s:.0f}s; check 'mason serve status'"
             )
         sleep(min(poll_s, remaining))
 

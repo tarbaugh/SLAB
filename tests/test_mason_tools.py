@@ -4,10 +4,10 @@ from pathlib import Path
 
 import pytest
 
+from mason.client import ToolCall
+from mason.session import MasonSession
+from mason.tools import Toolbox, _truncate_middle, build_toolbox
 from slab.config import SlabConfig
-from slab.mason.client import ToolCall
-from slab.mason.session import MasonSession
-from slab.mason.tools import Toolbox, _truncate_middle, build_toolbox
 
 
 def _session(tmp_path: Path, **agent: object) -> MasonSession:
@@ -50,7 +50,7 @@ def test_missing_required_arguments_teach_the_schema(box: Toolbox) -> None:
     answer = box.dispatch(_call("read_file"))  # missing required 'path'
     assert "missing required argument(s) path" in answer
     assert "required: path" in answer and "optional: offset, limit" in answer
-    answer = box.dispatch(_call("slab_launch", intent="x"))
+    answer = box.dispatch(_call("launch_workflow", intent="x"))
     assert "missing required argument(s) script" in answer
 
 
@@ -87,7 +87,7 @@ def test_specs_and_catalog_render_every_tool(box: Toolbox) -> None:
     specs = box.specs()
     assert all(spec["type"] == "function" for spec in specs)
     names = {spec["function"]["name"] for spec in specs}
-    assert {"read_file", "edit_file", "shell", "slab_launch", "finish"} <= names
+    assert {"read_file", "edit_file", "shell", "launch_workflow", "finish"} <= names
     catalog = box.catalog_text()
     assert "- read_file(path: string, offset?: integer, limit?: integer)" in catalog
 
@@ -270,8 +270,8 @@ def test_truncate_middle_reports_exact_drop() -> None:
 # -- slab tools --------------------------------------------------------------
 
 
-def test_slab_runs_empty_then_launch_then_show(box: Toolbox, tmp_path: Path) -> None:
-    assert box.dispatch(_call("slab_runs")) == "no runs in this workspace yet"
+def test_list_runs_empty_then_launch_then_show(box: Toolbox, tmp_path: Path) -> None:
+    assert box.dispatch(_call("list_runs")) == "no runs in this workspace yet"
     script = tmp_path / "wf.py"
     script.write_text(
         "from foundation import check, converged\n"
@@ -284,29 +284,29 @@ def test_slab_runs_empty_then_launch_then_show(box: Toolbox, tmp_path: Path) -> 
         "def forces_converged():\n"
         "    return converged(info['fmax'], below=0.05)\n"
     )
-    answer = box.dispatch(_call("slab_launch", script="wf.py", intent="mason test"))
+    answer = box.dispatch(_call("launch_workflow", script="wf.py", intent="mason test"))
     assert "state=verified" in answer
     assert "checks=1/1" in answer
     assert "energy (eV):" in answer  # script output captured
-    run_line = box.dispatch(_call("slab_runs"))
+    run_line = box.dispatch(_call("list_runs"))
     assert "verified" in run_line and "wf" in run_line
     run_id = run_line.split()[0]
-    details = box.dispatch(_call("slab_show", run_id=run_id))
+    details = box.dispatch(_call("show_run", run_id=run_id))
     assert '"intent": "mason test"' in details
     assert '"passed": true' in details
 
 
-def test_slab_launch_failure_carries_the_record(box: Toolbox, tmp_path: Path) -> None:
+def test_launch_workflow_failure_carries_the_record(box: Toolbox, tmp_path: Path) -> None:
     script = tmp_path / "boom.py"
     script.write_text("raise ValueError('SCF exploded')\n")
-    answer = box.dispatch(_call("slab_launch", script="boom.py"))
+    answer = box.dispatch(_call("launch_workflow", script="boom.py"))
     assert "status=failed" in answer
     assert "failure record:" in answer
     assert "SCF exploded" in answer
 
 
-def test_slab_engines_reports_capabilities(box: Toolbox) -> None:
-    answer = box.dispatch(_call("slab_engines"))
+def test_list_engines_reports_capabilities(box: Toolbox) -> None:
+    answer = box.dispatch(_call("list_engines"))
     assert '"builtin"' in answer and '"qe"' in answer
 
 
@@ -346,7 +346,7 @@ def test_crashing_approver_is_a_refusal_not_a_crash(tmp_path: Path) -> None:
 
 def test_preview_shows_enough_content_to_review(tmp_path: Path) -> None:
     """Approving a workflow script means reading it: head AND tail survive."""
-    from slab.mason.tools import _preview
+    from mason.tools import _preview
 
     body = "\n".join(f"line {i}" for i in range(400))
     preview = _preview(_call("write_file", path="wf.py", content=body))

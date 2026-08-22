@@ -31,8 +31,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from slab.mason.client import ToolCall
-from slab.mason.session import MasonSession
+from mason.client import ToolCall
+from mason.session import MasonSession
 
 _MAX_READ_LINES = 400
 _MAX_LINE_CHARS = 500
@@ -192,7 +192,8 @@ def build_toolbox(session: MasonSession) -> Toolbox:
     box = Toolbox(session)
     _add_file_tools(box, session)
     _add_shell_tool(box, session)
-    _add_slab_tools(box, session)
+    _add_workflow_tools(box, session)
+    _add_engine_tools(box, session)
     if session.hpc.partitions:
         _add_hpc_tools(box, session)
     _add_memory_tools(box, session)
@@ -506,7 +507,7 @@ def _add_shell_tool(box: Toolbox, session: MasonSession) -> None:
             name="shell",
             description=(
                 "Run one shell command in the project directory (stdout+stderr, "
-                "with the exit code). Not for long calculations — use slab_launch "
+                "with the exit code). Not for long calculations — use launch_workflow "
                 "or submit_job for those."
             ),
             parameters=_schema(
@@ -522,11 +523,11 @@ def _add_shell_tool(box: Toolbox, session: MasonSession) -> None:
     )
 
 
-# -- slab --------------------------------------------------------------------
+# -- workflows (foundation) ---------------------------------------------------
 
 
-def _add_slab_tools(box: Toolbox, session: MasonSession) -> None:
-    def slab_runs(arguments: dict[str, Any]) -> str:
+def _add_workflow_tools(box: Toolbox, session: MasonSession) -> None:
+    def list_runs(arguments: dict[str, Any]) -> str:
         from foundation.runtime import Workspace
 
         state = arguments.get("state")
@@ -544,7 +545,7 @@ def _add_slab_tools(box: Toolbox, session: MasonSession) -> None:
 
     box.add(
         Tool(
-            name="slab_runs",
+            name="list_runs",
             description="List SLAB runs in this workspace, newest first.",
             parameters=_schema(
                 {
@@ -556,11 +557,11 @@ def _add_slab_tools(box: Toolbox, session: MasonSession) -> None:
                 },
                 [],
             ),
-            handler=slab_runs,
+            handler=list_runs,
         )
     )
 
-    def slab_show(arguments: dict[str, Any]) -> str:
+    def show_run(arguments: dict[str, Any]) -> str:
         from foundation._ops import run_details
         from foundation.runtime import Workspace
 
@@ -570,18 +571,18 @@ def _add_slab_tools(box: Toolbox, session: MasonSession) -> None:
 
     box.add(
         Tool(
-            name="slab_show",
+            name="show_run",
             description=(
                 "Everything about one run: checks with observed/expected values, "
                 "tasks, artifacts, failure records, history. Read this before "
                 "correcting a failed run."
             ),
             parameters=_schema({"run_id": {"type": "string"}}, ["run_id"]),
-            handler=slab_show,
+            handler=show_run,
         )
     )
 
-    def slab_launch(arguments: dict[str, Any]) -> str:
+    def launch_workflow(arguments: dict[str, Any]) -> str:
         from foundation._ops import launch_script
 
         script = _resolve(session, str(arguments["script"]))
@@ -609,7 +610,7 @@ def _add_slab_tools(box: Toolbox, session: MasonSession) -> None:
 
     box.add(
         Tool(
-            name="slab_launch",
+            name="launch_workflow",
             description=(
                 "Execute a SLAB workflow script (plain Python with @task calls and "
                 "@check verification) as a traced run. This is how calculations "
@@ -623,25 +624,30 @@ def _add_slab_tools(box: Toolbox, session: MasonSession) -> None:
                 },
                 ["script"],
             ),
-            handler=slab_launch,
+            handler=launch_workflow,
             requires_approval=True,
         )
     )
 
-    def slab_engines(arguments: dict[str, Any]) -> str:
+
+# -- engines (slab) -----------------------------------------------------------
+
+
+def _add_engine_tools(box: Toolbox, session: MasonSession) -> None:
+    def list_engines(arguments: dict[str, Any]) -> str:
         from slab._ops import engines_overview
 
         return json.dumps(engines_overview(), indent=1, ensure_ascii=False)
 
     box.add(
         Tool(
-            name="slab_engines",
+            name="list_engines",
             description=(
                 "What can be computed here: engines, QE protocols, pseudopotential "
                 "families, HPC partitions."
             ),
             parameters=_schema({}, []),
-            handler=slab_engines,
+            handler=list_engines,
         )
     )
 

@@ -16,9 +16,9 @@ from pathlib import Path
 
 import pytest
 
+from mason.loop import Mason
+from mason.session import MasonSession
 from slab.config import SlabConfig
-from slab.mason.loop import Mason
-from slab.mason.session import MasonSession
 
 ENDPOINT = os.environ.get("SLAB_TEST_LLM")
 MODEL = os.environ.get("SLAB_TEST_LLM_MODEL")
@@ -64,7 +64,7 @@ def test_real_model_is_reached_through_a_served_record(tmp_path: Path) -> None:
     writes. Writing one by hand and getting a real model to answer through it
     is the closest a laptop can come to the cluster handshake.
     """
-    from slab.mason.serve import discover_endpoint, record_path
+    from mason.serve import discover_endpoint, record_path
 
     assert ENDPOINT and MODEL  # guarded by pytestmark
     root = tmp_path / ".slab"

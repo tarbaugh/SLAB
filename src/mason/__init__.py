@@ -24,11 +24,11 @@ and its provenance is documented in ``docs/tutorials/mason.md``:
   discipline enforced by the harness, not the prompt alone.
 """
 
-from slab.mason.anthropic import AnthropicClient, ModelRefusalError
-from slab.mason.client import ChatClient, ChatReply, ContextOverflowError, LlmError, ToolCall
-from slab.mason.loop import Mason, TurnResult
-from slab.mason.session import MasonSession
-from slab.mason.tools import Tool, Toolbox, build_toolbox
+from mason.anthropic import AnthropicClient, ModelRefusalError
+from mason.client import ChatClient, ChatReply, ContextOverflowError, LlmError, ToolCall
+from mason.loop import Mason, TurnResult
+from mason.session import MasonSession
+from mason.tools import Tool, Toolbox, build_toolbox
 
 __all__ = [
     "AnthropicClient",

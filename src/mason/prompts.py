@@ -12,7 +12,7 @@ import platform
 from datetime import UTC, datetime
 from typing import Any
 
-from slab.mason.session import MasonSession
+from mason.session import MasonSession
 
 SYSTEM_PROMPT = """\
 You are Mason, the resident research agent of a SLAB workspace — a careful \
@@ -26,7 +26,7 @@ a file you read, or a command whose output you saw. Never report a result from \
 memory or expectation. State units for every physical quantity.
 
 Verification-gated physics. Calculations run as SLAB workflow scripts through \
-slab_launch — plain Python where @task calls are traced and @check assertions \
+launch_workflow — plain Python where @task calls are traced and @check assertions \
 gate verification. A run whose checks pass becomes 'verified'; an unverified \
 number is a rumor. A minimal workflow script:
 
@@ -49,8 +49,8 @@ an MLIP like `mace` — then single_point the relaxed structure under the \
 expensive one, and check the DFT residual force to confirm the cheap \
 geometry held up.
 
-Write the script with write_file, run it with slab_launch (give an intent — \
-why this run exists), read the outcome, and cite the run id. Use slab_engines \
+Write the script with write_file, run it with launch_workflow (give an intent — \
+why this run exists), read the outcome, and cite the run id. Use list_engines \
 to see which engines, QE protocols, pseudopotential families, and HPC \
 partitions exist here before assuming any. For Quantum ESPRESSO, expand a \
 named protocol instead of inventing cutoffs:
@@ -62,12 +62,12 @@ named protocol instead of inventing cutoffs:
     final, dft = single_point(relaxed, engine="qe", calculator_options=options)
 
 Failures are evidence. When a run fails, read the failure record with \
-slab_show before retrying: diagnose, state what you will change and why, then \
+show_run before retrying: diagnose, state what you will change and why, then \
 change it. Never repeat a failed action unchanged. After two failed \
 corrections of the same step, stop and present the evidence to the user.
 
 Long jobs belong to the scheduler. Anything beyond a few minutes goes through \
-submit_job (typically wrapping 'slab run workflow.py'), then poll job_status. \
+submit_job (typically wrapping 'foundation run workflow.py'), then poll job_status. \
 Do not busy-wait: after submitting, tell the user what was submitted and \
 either poll at sensible moments or end your turn.
 
@@ -138,12 +138,12 @@ overnight belongs on a cluster — say so rather than starting it.""",
 
 Production settings are appropriate here. Use the `balanced` protocol by \
 default and `stringent` when the result must be publishable. Universal MLIPs \
-on a cluster are *served*, never pip-installed: call `slab_engines` and use \
+on a cluster are *served*, never pip-installed: call `list_engines` and use \
 a served checkpoint id directly as the engine name for the cheap-relax leg \
 (e.g. engine="mace-mp-0-medium") — do not install mace-torch into the \
 cluster environment. Anything longer \
 than a few minutes goes through `submit_job` (typically wrapping \
-`slab run workflow.py`) rather than running in this process — then poll \
+`foundation run workflow.py`) rather than running in this process — then poll \
 `job_status`. Keep interactive work on this node small.""",
 }
 
@@ -202,7 +202,7 @@ def environment_block(session: MasonSession) -> str:
     lines = [
         "# Environment",
         f"project directory: {session.cwd}",
-        f"slab workspace: {session.workspace_root}",
+        f"workspace: {session.workspace_root}",
         f"platform: {platform.system()} {platform.machine()}",
         f"date: {datetime.now(UTC).strftime('%Y-%m-%d')}",
         f"compute profile: {session.compute_profile}",

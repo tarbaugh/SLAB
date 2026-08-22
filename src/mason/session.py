@@ -27,8 +27,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from mason.errors import MasonError
 from slab.config import AgentConfig, HpcConfig, SlabConfig, load_config
-from slab.errors import SlabError
 
 Approver = Callable[[str, str], bool]
 """``(tool_name, preview) -> allow?`` — the permission gate for mutating tools."""
@@ -37,7 +37,7 @@ Approver = Callable[[str, str], bool]
 _SHELL_CONTROL = re.compile(r"[;&|`<>\n]|\$\(")
 
 
-class SessionError(SlabError):
+class SessionError(MasonError):
     """A session could not be created or resumed."""
 
 
@@ -106,12 +106,12 @@ class MasonSession:
         """Settle which endpoint this session talks to, and remember why.
 
         A ``--endpoint`` flag outranks everything; otherwise the answer comes
-        from :func:`slab.mason.serve.discover_endpoint` — config, then the
+        from :func:`mason.serve.discover_endpoint` — config, then the
         record a running server job wrote, then the provider's default. Call
         again after changing ``provider`` or ``model``: which server is the
         right one depends on both.
         """
-        from slab.mason.serve import discover_endpoint
+        from mason.serve import discover_endpoint
 
         if override:
             self.agent = self.agent.model_copy(update={"endpoint": override})

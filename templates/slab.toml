@@ -90,11 +90,11 @@ schema_version = 1
 
 [agent]
 # provider = "openai"                       # "openai" = any OpenAI-compatible server; "anthropic"
-# model = "meta-models/Muse-Glimmer-30B"    # as the server names it ('slab mason doctor'
+# model = "meta-models/Muse-Glimmer-30B"    # as the server names it ('mason doctor'
 #                                           # lists); an absolute path to a downloaded
 #                                           # model directory also works, and never
 #                                           # touches the network
-# endpoint = "http://gpu-node-01:8000/v1"   # leave unset on a cluster: 'slab mason serve'
+# endpoint = "http://gpu-node-01:8000/v1"   # leave unset on a cluster: 'mason serve'
 #                                           # records the URL of the node it landed on
 # api_key_env = "SLAB_AGENT_API_KEY"        # NAME of the env var holding the key, never the key
 # context_window = 131072                   # tokens the endpoint actually serves
@@ -118,7 +118,7 @@ schema_version = 1
 # effort = "medium"                         # low | medium | high | xhigh | max
 # max_reply_tokens = 16000                  # bounds thinking AND reply together
 
-# How 'slab mason serve' starts that server as a batch job. The GPU node is the
+# How 'mason serve' starts that server as a batch job. The GPU node is the
 # scheduler's choice, so the endpoint URL is discovered, never configured.
 # Compute nodes rarely have internet: download the model once, on the login node
 # ('HF_HOME=/path/to/hf-cache hf download meta-models/Muse-Glimmer-30B'), and let

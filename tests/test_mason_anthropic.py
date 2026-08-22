@@ -6,14 +6,14 @@ from typing import Any
 import pytest
 
 from conftest import LlmScript
-from slab.config import SlabConfig
-from slab.mason.anthropic import (
+from mason.anthropic import (
     AnthropicClient,
     ModelRefusalError,
     parse_reply,
     translate_messages,
 )
-from slab.mason.client import ContextOverflowError, LlmError
+from mason.client import ContextOverflowError, LlmError
+from slab.config import SlabConfig
 
 # -- message translation -----------------------------------------------------
 
@@ -320,8 +320,8 @@ def test_provider_drives_a_verified_relax_end_to_end(
     The scripted answers use the documented Messages wire shape, so this
     exercises the translation in both directions across a whole turn.
     """
-    from slab.mason.loop import Mason
-    from slab.mason.session import MasonSession
+    from mason.loop import Mason
+    from mason.session import MasonSession
 
     url, script = llm_server
     workflow = "\n".join(
@@ -362,7 +362,7 @@ def test_provider_drives_a_verified_relax_end_to_end(
                         {
                             "type": "tool_use",
                             "id": "toolu_2",
-                            "name": "slab_launch",
+                            "name": "launch_workflow",
                             "input": {"script": "wf.py", "intent": "laptop smoke test"},
                         }
                     ],
@@ -410,7 +410,7 @@ def test_provider_drives_a_verified_relax_end_to_end(
 
 
 def test_provider_selects_the_client(monkeypatch: pytest.MonkeyPatch) -> None:
-    from slab.mason.loop import client_from_config
+    from mason.loop import client_from_config
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
     config = SlabConfig.model_validate(
@@ -422,7 +422,7 @@ def test_provider_selects_the_client(monkeypatch: pytest.MonkeyPatch) -> None:
     assert client.effort == "high"
 
     openai_config = SlabConfig.model_validate({"agent": {"model": "llama3.1:8b"}})
-    from slab.mason.client import ChatClient
+    from mason.client import ChatClient
 
     assert isinstance(client_from_config(openai_config.agent), ChatClient)
 
@@ -430,14 +430,14 @@ def test_provider_selects_the_client(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_anthropic_without_a_key_refuses_before_any_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from slab.errors import SlabError
-    from slab.mason.loop import client_from_config
+    from mason.errors import MasonError
+    from mason.loop import client_from_config
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     config = SlabConfig.model_validate(
         {"agent": {"provider": "anthropic", "model": "claude-opus-5"}}
     )
-    with pytest.raises(SlabError, match=r"\$ANTHROPIC_API_KEY is not set"):
+    with pytest.raises(MasonError, match=r"\$ANTHROPIC_API_KEY is not set"):
         client_from_config(config.agent)
 
 
@@ -446,7 +446,7 @@ def test_cli_doctor_speaks_to_the_anthropic_provider(
 ) -> None:
     from typer.testing import CliRunner
 
-    from slab.cli import app
+    from mason.cli import app
 
     url, script = llm_server
     script.get_response = (200, {"data": [{"id": "claude-opus-5"}]})
@@ -464,7 +464,7 @@ def test_cli_doctor_speaks_to_the_anthropic_provider(
     result = CliRunner().invoke(
         app,
         [
-            "mason", "doctor",
+            "doctor",
             "--provider", "anthropic",
             "--endpoint", url,
             "--model", "claude-opus-5",
@@ -481,11 +481,11 @@ def test_cli_doctor_refuses_anthropic_without_a_key(
 ) -> None:
     from typer.testing import CliRunner
 
-    from slab.cli import app
+    from mason.cli import app
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    result = CliRunner().invoke(app, ["mason", "doctor", "--provider", "anthropic"])
+    result = CliRunner().invoke(app, ["doctor", "--provider", "anthropic"])
     assert result.exit_code == 1
     assert "$ANTHROPIC_API_KEY is not set" in result.output
 

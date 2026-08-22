@@ -1,7 +1,7 @@
 """The Anthropic Messages API as a Mason backend: Claude for the thinking.
 
-Mason's loop is provider-agnostic — it needs a :class:`~slab.mason.loop.ChatBackend`,
-one method, OpenAI-shaped messages in and a :class:`~slab.mason.client.ChatReply`
+Mason's loop is provider-agnostic — it needs a :class:`~mason.loop.ChatBackend`,
+one method, OpenAI-shaped messages in and a :class:`~mason.client.ChatReply`
 out. This module implements that against ``POST /v1/messages``, so the same
 harness — same tools, same notebook, same verification gates, same provenance —
 runs on Claude instead of a locally served open model. The open-model path stays
@@ -35,7 +35,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from slab.mason.client import ChatReply, LlmError, ToolCall, request_json
+from mason.client import ChatReply, LlmError, ToolCall, request_json
 
 ANTHROPIC_ENDPOINT = "https://api.anthropic.com/v1"
 ANTHROPIC_VERSION = "2023-06-01"

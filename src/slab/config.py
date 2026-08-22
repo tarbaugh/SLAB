@@ -247,7 +247,7 @@ class ServeConfig(BaseModel):
     on a GPU node the scheduler picks — so the URL cannot be written in a
     config file. This section declares the launch (which partition, which
     port, which flags); the node and the URL are discovered at run time from
-    the record the job writes (:mod:`slab.mason.serve`).
+    the record the job writes (:mod:`mason.serve`).
 
     ``command`` is the escape hatch for a server this schema does not model;
     it may reference ``$port``, which the rendered script binds. Everything
@@ -286,13 +286,13 @@ class AgentConfig(BaseModel):
     Messages API, which needs reachable internet and *billed API access* (a
     Claude subscription is a separate product and does not grant it).
 
-    ``endpoint`` may be left unset on a cluster: :func:`slab.mason.serve.
+    ``endpoint`` may be left unset on a cluster: :func:`mason.serve.
     discover_endpoint` reads the URL from the running server job's record.
 
     ``api_key_env`` names an environment variable holding the key; the key
     itself never belongs in a config file (config files get committed and
     shipped). ``compute_profile`` shapes what the agent *chooses* to run, not
-    what SLAB permits — see :func:`slab.mason.prompts.compute_profile_block`.
+    what SLAB permits — see :func:`mason.prompts.compute_profile_block`.
 
     Examples:
         >>> AgentConfig().resolved_endpoint
@@ -684,11 +684,11 @@ schema_version = 1
 
 [agent]
 # provider = "openai"                       # "openai" = any OpenAI-compatible server; "anthropic"
-# model = "meta-models/Muse-Glimmer-30B"    # as the server names it ('slab mason doctor'
+# model = "meta-models/Muse-Glimmer-30B"    # as the server names it ('mason doctor'
 #                                           # lists); an absolute path to a downloaded
 #                                           # model directory also works, and never
 #                                           # touches the network
-# endpoint = "http://gpu-node-01:8000/v1"   # leave unset on a cluster: 'slab mason serve'
+# endpoint = "http://gpu-node-01:8000/v1"   # leave unset on a cluster: 'mason serve'
 #                                           # records the URL of the node it landed on
 # api_key_env = "SLAB_AGENT_API_KEY"        # NAME of the env var holding the key, never the key
 # context_window = 131072                   # tokens the endpoint actually serves
@@ -712,7 +712,7 @@ schema_version = 1
 # effort = "medium"                         # low | medium | high | xhigh | max
 # max_reply_tokens = 16000                  # bounds thinking AND reply together
 
-# How 'slab mason serve' starts that server as a batch job. The GPU node is the
+# How 'mason serve' starts that server as a batch job. The GPU node is the
 # scheduler's choice, so the endpoint URL is discovered, never configured.
 # Compute nodes rarely have internet: download the model once, on the login node
 # ('HF_HOME=/path/to/hf-cache hf download meta-models/Muse-Glimmer-30B'), and let

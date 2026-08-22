@@ -33,7 +33,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from slab.errors import SlabError
+from mason.errors import MasonError
 
 _RETRIES = 3
 _BACKOFF_S = (1.0, 4.0)  # between attempts 1->2 and 2->3
@@ -47,7 +47,7 @@ _CONTEXT_OVERFLOW_HINTS = (
 )
 
 
-class LlmError(SlabError):
+class LlmError(MasonError):
     """The model endpoint refused, misbehaved, or could not be reached."""
 
 

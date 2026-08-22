@@ -6,10 +6,10 @@ from typing import Any
 
 import pytest
 
+from mason.client import ChatReply, ContextOverflowError, ToolCall
+from mason.loop import Mason
+from mason.session import MasonSession
 from slab.config import SlabConfig
-from slab.mason.client import ChatReply, ContextOverflowError, ToolCall
-from slab.mason.loop import Mason
-from slab.mason.session import MasonSession
 
 
 class FakeClient:
@@ -433,17 +433,17 @@ def test_compaction_boundary_never_orphans_tool_messages(tmp_path: Path) -> None
 
 
 def test_client_from_config_refusals(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from slab.errors import SlabError
-    from slab.mason.loop import client_from_config
+    from mason.errors import MasonError
+    from mason.loop import client_from_config
 
     config = SlabConfig()
-    with pytest.raises(SlabError, match="no model configured"):
+    with pytest.raises(MasonError, match="no model configured"):
         client_from_config(config.agent)
     monkeypatch.delenv("MISSING_KEY_VAR", raising=False)
     config = SlabConfig.model_validate(
         {"agent": {"model": "m", "api_key_env": "MISSING_KEY_VAR"}}
     )
-    with pytest.raises(SlabError, match=r"\$MISSING_KEY_VAR"):
+    with pytest.raises(MasonError, match=r"\$MISSING_KEY_VAR"):
         client_from_config(config.agent)
     monkeypatch.setenv("MISSING_KEY_VAR", "sk-123")
     client = client_from_config(config.agent)
