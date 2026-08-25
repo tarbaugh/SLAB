@@ -19,7 +19,7 @@ alternative, not the plan.
 
 What makes Mason a research agent rather than a generic coder is the floor
 it stands on. Calculations run as SLAB workflow scripts through
-`slab_launch`, so every number Mason reports traces to a run id, its recipe,
+`launch_workflow`, so every number Mason reports traces to a run id, its recipe,
 and its `@check` assertions. An unverified number is a rumor, and the system
 prompt says so.
 
@@ -31,8 +31,8 @@ Describe the machine once, as in
 ```toml
 schema_version = 1
 
-[paths]
-workspace = "/scratch/${USER}/slab-workspace"
+[workspace]
+root = "/scratch/${USER}/slab-workspace"
 
 [hpc]
 cluster = "delta"
@@ -85,21 +85,23 @@ scheduler's choice, so the URL cannot be written down in advance. It is
 discovered.
 
 ```bash
-slab mason serve render     # read the batch script before trusting it
-slab mason serve start --wait
-slab mason doctor
-slab mason chat
+mason serve render     # read the batch script before trusting it
+mason serve start --wait
+mason doctor
+mason chat
 ```
 
 `serve start` submits the server as an ordinary batch job. Its first act on
 the node is to write its own endpoint into `<workspace>/mason/endpoint.json`,
 and it deletes that record when the server exits, so a dead node can never
 keep answering for a live one. `--wait` follows the job to a live endpoint,
-and it gives up early if the job dies instead of burning the whole timeout:
+and it gives up early if the job dies instead of burning the whole timeout.
+This capture and the `doctor` capture below are from a session recorded
+before the package split; only the command names were updated:
 
 <!-- no-verify -->
 ```text
-$ slab mason serve start --wait
+$ mason serve start --wait
 submitted job 4242314 (mason-serve) to gpu
 script: /scratch/tom/slab-workspace/mason/mason-serve-4242314.sbatch
 waiting for the endpoint (up to 1800s)...
@@ -112,7 +114,7 @@ where it found it:
 
 <!-- no-verify -->
 ```text
-$ slab mason doctor
+$ mason doctor
 provider: openai
 endpoint: http://gpu-07.delta.internal:8000/v1  [job 4242314 on gpu-07.delta.internal]
 model:    meta-models/Muse-Glimmer-30B
@@ -130,8 +132,8 @@ set the parser, switch to the fenced text protocol, or give an explicit
 `command`. The doctor's probe is the empirical check that the name was
 right.
 
-`slab mason serve status` reports the record, the job's state, and a live
-probe, and `slab mason serve stop` cancels the job and clears the record.
+`mason serve status` reports the record, the job's state, and a live
+probe, and `mason serve stop` cancels the job and clears the record.
 When you want to point Mason at a server you started yourself,
 `[agent] endpoint` or `--endpoint` outranks any discovered record, so a
 written-down endpoint is never overridden by a background job.
@@ -144,7 +146,7 @@ Four sources, highest first:
 |---|---|
 | `--endpoint` | one command, overriding everything |
 | `[agent] endpoint` | you run your own server, or a persistent one exists |
-| the serve record | a `slab mason serve` job is running for this workspace |
+| the serve record | a `mason serve` job is running for this workspace |
 | the provider default | `http://localhost:11434/v1` (Ollama), or the Claude API |
 
 The record is the only coupling between the login node and the compute
@@ -157,7 +159,7 @@ A serve job is a job. It has a wall clock, and when the wall clock expires
 the agent's model disappears mid-session, so give it a generous
 `[agent.serve] time_limit`. Remember, too, that Mason's memory is files.
 `NOTEBOOK.md`, `PLAN.md`, and the transcript survive the server, so
-`slab mason chat --resume` after you restart the server picks the project
+`mason chat --resume` after you restart the server picks the project
 back up.
 
 ## A smaller loop, on a laptop
@@ -176,17 +178,18 @@ model = "llama3.1:8b"
 ```
 
 ```bash
-slab mason doctor
-slab mason run "..." --auto
+mason doctor
+mason run "..." --auto
 ```
 
-A real session, with Llama 3.1 8B, locally, unedited:
+A real session, with Llama 3.1 8B, locally. The transcript is unedited
+apart from the tool and command names, which the package split changed:
 
 <!-- no-verify -->
 ```text
-$ slab mason run "Relax bulk Cu (fcc, a=3.6) with the emt engine: write a SLAB
+$ mason run "Relax bulk Cu (fcc, a=3.6) with the emt engine: write a SLAB
   workflow script with a @check that fmax converged below 0.05, run it with
-  slab_launch, then finish with the verified total energy in eV and the run id." --auto
+  launch_workflow, then finish with the verified total energy in eV and the run id." --auto
 
 The total energy of bulk Cu is verified to be -0.0067 eV, run id: 01m06tadrfzwg799ecqevcwff7
 [finish after 6 step(s); tokens 11016+723; transcript .slab/mason/sessions/20260817-025503-51252.jsonl]
@@ -196,7 +199,7 @@ The claim survives auditing, which is the point:
 
 <!-- no-verify -->
 ```text
-$ slab show 01m06tadrfzwg799ecqevcwff7
+$ foundation show 01m06tadrfzwg799ecqevcwff7
 run 01m06tadrfzwg799ecqevcwff7  workflow
   state:   verified    status: completed
   intent:  relax bulk Cu with emt engine
@@ -247,8 +250,8 @@ more than model choice.
 | `write_file` / `edit_file` | edit is exact-string replacement, unique match or `replace_all`; Python files get an immediate syntax check after every write |
 | `list_dir`, `search` | listing and recursive regex search, output-capped |
 | `shell` | one command, merged output + exit code, timeout-capped; **not** for long calculations |
-| `slab_launch` | run a workflow script as a traced, check-gated run; this is how physics happens |
-| `slab_runs`, `slab_show`, `slab_engines` | the workspace's evidence surface: runs, checks with observed/expected values, failure records, capabilities |
+| `launch_workflow` | run a workflow script as a traced, check-gated run; this is how physics happens |
+| `list_runs`, `show_run`, `list_engines` | the workspace's evidence surface: runs, checks with observed/expected values, failure records, capabilities |
 | `submit_job`, `job_status`, `cancel_job` | SLURM plumbing, present only when the config declares partitions |
 | `notebook`, `plan` | the memory instruments (below) |
 | `finish` | end the task with a report citing run ids |
@@ -261,14 +264,14 @@ auto-approve at word boundaries, but a command that contains shell control
 operators (`;`, `|`, `&`, redirection, and so on) never auto-approves.
 
 Plan the gate before an interactive session. `write_file`, `edit_file`,
-`shell`, `slab_launch`, `submit_job`, and `cancel_job` ask, and everything
-else (reads, `slab_engines`, `job_status`, the memory instruments) never
+`shell`, `launch_workflow`, `submit_job`, and `cancel_job` ask, and everything
+else (reads, `list_engines`, `job_status`, the memory instruments) never
 does. A multi-step goal therefore prompts several times, every shell probe
 included, because the default allowlist is empty. At the prompt, **Enter
 refuses**, because the default is "no", and five straight refusals abort
 the turn. Either answer `y` deliberately, run with `--auto`, or set
 `[agent] shell_allowlist` to your read-only probes so only the real
-mutations ask. `slab mason run` without `--auto` refuses every mutating
+mutations ask. `mason run` without `--auto` refuses every mutating
 tool, so batch use needs `--auto`.
 
 ## Memory that outlives the context window
@@ -286,7 +289,7 @@ under version control, readable by humans:
   which is the "recitation" trick that holds long goals stable.
 * **`.slab/mason/sessions/*.jsonl`** are append-only transcripts of every
   message, tool result, compaction, and token count, and
-  `slab mason chat --resume` replays the newest one.
+  `mason chat --resume` replays the newest one.
 * **`AGENTS.md`** is the cross-tool conventions standard, and if the project
   has one, it enters the system prompt every session.
 
@@ -305,7 +308,7 @@ Open-weight tool calling is uneven, and the harness plans for it:
 
 * **Native tool calls** are the default, which means
   `vllm serve ... --enable-auto-tool-choice --tool-call-parser <family>`,
-  the command that `slab mason serve` renders. Ollama parses natively.
+  the command that `mason serve` renders. Ollama parses natively.
 * **`tool_protocol = "fenced"`** switches to a plain-text protocol, with one
   fenced ````tool```` block per message, for servers with no tool-call parser
   at all. That is the mini-swe-agent lesson, that a text protocol is the
@@ -329,7 +332,7 @@ when a run whose recorded energy was `-0.0015020475862299598` eV was
 reported as "-0.15 eV". The run was genuinely `verified`, and its value
 matched an independent EMT evaluation exactly, so only the sentence was
 wrong. This is why traceability, not model accuracy, is what SLAB
-guarantees, because `slab show <run id>` had the right number the whole
+guarantees, because `foundation show <run id>` had the right number the whole
 time. The prompt now requires numbers to be copied from run output rather
 than retyped, which fixed it on the same model and goal, but the audit
 trail is the actual defense. Prefer the largest model your hardware serves
@@ -372,7 +375,7 @@ Two caveats, both load-bearing:
 **This path needs billed API access, which a Claude subscription does not
 include.** Claude.ai and Claude Code subscriptions are separate products from
 API credit, so `$ANTHROPIC_API_KEY` has to come from an API account with
-billing enabled. If `slab mason doctor --provider anthropic` reports an
+billing enabled. If `mason doctor --provider anthropic` reports an
 authentication failure on a valid-looking key, that is usually why.
 
 **Developing exclusively against Claude lets the open-model path rot
@@ -459,7 +462,7 @@ What has and has not been exercised against reality, precisely:
   where a serve job would write one, after which `doctor`, `serve status`,
   and two autonomous Al relaxations reached `verified` with no `endpoint`
   configured anywhere. What no test here can cover is a real `sbatch` on a
-  real GPU node, so the first `slab mason serve start` on your cluster is
+  real GPU node, so the first `mason serve start` on your cluster is
   that test, which is why `serve render` exists.
 * **Not verified against the live API.** The Anthropic provider is tested
   against a mock that reproduces the documented Messages wire shape,

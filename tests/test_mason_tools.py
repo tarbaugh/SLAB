@@ -4,16 +4,17 @@ from pathlib import Path
 
 import pytest
 
-from slab.config import SlabConfig
-from slab.mason.client import ToolCall
-from slab.mason.session import MasonSession
-from slab.mason.tools import Toolbox, _truncate_middle, build_toolbox
+from mason.client import ToolCall
+from mason.config import MasonConfig
+from mason.session import MasonSession
+from mason.tools import Toolbox, _truncate_middle, build_toolbox
+from slab.config import HpcConfig
 
 
 def _session(tmp_path: Path, **agent: object) -> MasonSession:
-    config = SlabConfig.model_validate({"agent": agent} if agent else {})
+    config = MasonConfig.model_validate({"agent": agent} if agent else {})
     return MasonSession(
-        tmp_path, workspace_root=tmp_path / ".slab", config=config, auto_approve=True
+        tmp_path, workspace_root=tmp_path / ".slab", agent=config.agent, auto_approve=True
     )
 
 
@@ -50,7 +51,7 @@ def test_missing_required_arguments_teach_the_schema(box: Toolbox) -> None:
     answer = box.dispatch(_call("read_file"))  # missing required 'path'
     assert "missing required argument(s) path" in answer
     assert "required: path" in answer and "optional: offset, limit" in answer
-    answer = box.dispatch(_call("slab_launch", intent="x"))
+    answer = box.dispatch(_call("launch_workflow", intent="x"))
     assert "missing required argument(s) script" in answer
 
 
@@ -75,10 +76,8 @@ def test_python_writes_get_an_immediate_syntax_check(box: Toolbox, tmp_path: Pat
 def test_hpc_tools_only_exist_with_partitions(tmp_path: Path) -> None:
     plain = build_toolbox(_session(tmp_path))
     assert "submit_job" not in plain.tools
-    config = SlabConfig.model_validate(
-        {"hpc": {"default_partition": "cpu", "partitions": {"cpu": {}}}}
-    )
-    session = MasonSession(tmp_path, workspace_root=tmp_path / ".slab", config=config)
+    hpc = HpcConfig.model_validate({"default_partition": "cpu", "partitions": {"cpu": {}}})
+    session = MasonSession(tmp_path, workspace_root=tmp_path / ".slab", hpc=hpc)
     clustered = build_toolbox(session)
     assert {"submit_job", "job_status", "cancel_job"} <= set(clustered.tools)
 
@@ -87,7 +86,7 @@ def test_specs_and_catalog_render_every_tool(box: Toolbox) -> None:
     specs = box.specs()
     assert all(spec["type"] == "function" for spec in specs)
     names = {spec["function"]["name"] for spec in specs}
-    assert {"read_file", "edit_file", "shell", "slab_launch", "finish"} <= names
+    assert {"read_file", "edit_file", "shell", "launch_workflow", "finish"} <= names
     catalog = box.catalog_text()
     assert "- read_file(path: string, offset?: integer, limit?: integer)" in catalog
 
@@ -164,7 +163,9 @@ def test_search_works_when_the_project_lives_under_a_dotted_parent(tmp_path: Pat
 
 
 def _session_at(path: Path) -> MasonSession:
-    return MasonSession(path, workspace_root=path / ".slab", config=SlabConfig(), auto_approve=True)
+    return MasonSession(
+        path, workspace_root=path / ".slab", agent=MasonConfig().agent, auto_approve=True
+    )
 
 
 def test_list_dir_survives_a_dangling_symlink(box: Toolbox, tmp_path: Path) -> None:
@@ -183,7 +184,7 @@ def test_approval_preview_names_the_load_bearing_keys(tmp_path: Path) -> None:
         return False
 
     session = MasonSession(
-        tmp_path, workspace_root=tmp_path / ".slab", config=SlabConfig(), approver=approver
+        tmp_path, workspace_root=tmp_path / ".slab", agent=MasonConfig().agent, approver=approver
     )
     box = build_toolbox(session)
     box.dispatch(_call("write_file", content="x" * 5_000, path="important.py"))
@@ -222,9 +223,9 @@ def test_shell_approval_gate_and_allowlist(tmp_path: Path) -> None:
         asked.append(preview)
         return False
 
-    config = SlabConfig.model_validate({"agent": {"shell_allowlist": ["echo"]}})
+    config = MasonConfig.model_validate({"agent": {"shell_allowlist": ["echo"]}})
     session = MasonSession(
-        tmp_path, workspace_root=tmp_path / ".slab", config=config, approver=approver
+        tmp_path, workspace_root=tmp_path / ".slab", agent=config.agent, approver=approver
     )
     box = build_toolbox(session)
     assert box.dispatch(_call("shell", command="echo hi")).startswith("exit 0")  # allowlisted
@@ -238,7 +239,7 @@ def test_shell_approval_gate_and_allowlist(tmp_path: Path) -> None:
 
 
 def test_write_gated_when_not_auto(tmp_path: Path) -> None:
-    session = MasonSession(tmp_path, workspace_root=tmp_path / ".slab", config=SlabConfig())
+    session = MasonSession(tmp_path, workspace_root=tmp_path / ".slab", agent=MasonConfig().agent)
     box = build_toolbox(session)  # default approver refuses
     answer = box.dispatch(_call("write_file", path="x.txt", content="c"))
     assert "not approved" in answer
@@ -270,12 +271,12 @@ def test_truncate_middle_reports_exact_drop() -> None:
 # -- slab tools --------------------------------------------------------------
 
 
-def test_slab_runs_empty_then_launch_then_show(box: Toolbox, tmp_path: Path) -> None:
-    assert box.dispatch(_call("slab_runs")) == "no runs in this workspace yet"
+def test_list_runs_empty_then_launch_then_show(box: Toolbox, tmp_path: Path) -> None:
+    assert box.dispatch(_call("list_runs")) == "no runs in this workspace yet"
     script = tmp_path / "wf.py"
     script.write_text(
-        "from slab import check, converged\n"
-        "from slab.tasks import relax\n"
+        "from foundation import check, converged\n"
+        "from foundation.tasks import relax\n"
         "from ase.build import bulk\n"
         "atoms = bulk('Cu', 'fcc', a=3.6)\n"
         "relaxed, info = relax(atoms, engine='emt', fmax=0.05, label='cu')\n"
@@ -284,29 +285,29 @@ def test_slab_runs_empty_then_launch_then_show(box: Toolbox, tmp_path: Path) -> 
         "def forces_converged():\n"
         "    return converged(info['fmax'], below=0.05)\n"
     )
-    answer = box.dispatch(_call("slab_launch", script="wf.py", intent="mason test"))
+    answer = box.dispatch(_call("launch_workflow", script="wf.py", intent="mason test"))
     assert "state=verified" in answer
     assert "checks=1/1" in answer
     assert "energy (eV):" in answer  # script output captured
-    run_line = box.dispatch(_call("slab_runs"))
+    run_line = box.dispatch(_call("list_runs"))
     assert "verified" in run_line and "wf" in run_line
     run_id = run_line.split()[0]
-    details = box.dispatch(_call("slab_show", run_id=run_id))
+    details = box.dispatch(_call("show_run", run_id=run_id))
     assert '"intent": "mason test"' in details
     assert '"passed": true' in details
 
 
-def test_slab_launch_failure_carries_the_record(box: Toolbox, tmp_path: Path) -> None:
+def test_launch_workflow_failure_carries_the_record(box: Toolbox, tmp_path: Path) -> None:
     script = tmp_path / "boom.py"
     script.write_text("raise ValueError('SCF exploded')\n")
-    answer = box.dispatch(_call("slab_launch", script="boom.py"))
+    answer = box.dispatch(_call("launch_workflow", script="boom.py"))
     assert "status=failed" in answer
     assert "failure record:" in answer
     assert "SCF exploded" in answer
 
 
-def test_slab_engines_reports_capabilities(box: Toolbox) -> None:
-    answer = box.dispatch(_call("slab_engines"))
+def test_list_engines_reports_capabilities(box: Toolbox) -> None:
+    answer = box.dispatch(_call("list_engines"))
     assert '"builtin"' in answer and '"qe"' in answer
 
 
@@ -336,7 +337,7 @@ def test_crashing_approver_is_a_refusal_not_a_crash(tmp_path: Path) -> None:
         raise RuntimeError("stdin exploded")
 
     session = MasonSession(
-        tmp_path, workspace_root=tmp_path / ".slab", config=SlabConfig(), approver=broken
+        tmp_path, workspace_root=tmp_path / ".slab", agent=MasonConfig().agent, approver=broken
     )
     box = build_toolbox(session)
     answer = box.dispatch(_call("write_file", path="x.txt", content="c"))
@@ -346,7 +347,7 @@ def test_crashing_approver_is_a_refusal_not_a_crash(tmp_path: Path) -> None:
 
 def test_preview_shows_enough_content_to_review(tmp_path: Path) -> None:
     """Approving a workflow script means reading it: head AND tail survive."""
-    from slab.mason.tools import _preview
+    from mason.tools import _preview
 
     body = "\n".join(f"line {i}" for i in range(400))
     preview = _preview(_call("write_file", path="wf.py", content=body))

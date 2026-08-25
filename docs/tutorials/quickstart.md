@@ -32,8 +32,8 @@ Three things happen in the `with` block:
 ```python
 from ase.build import bulk
 
-from slab import Workspace, check, converged
-from slab.tasks import relax
+from foundation import Workspace, check, converged
+from foundation.tasks import relax
 
 atoms = bulk("Cu", "fcc", a=3.58, cubic=True) * (2, 2, 2)   # 32 atoms
 atoms.rattle(stdev=0.05, seed=42)
@@ -129,19 +129,20 @@ queryable and recomputable. The full model is in
 
 Every verb goes through the same operations layer as the Python API. A
 zero-ceremony script, one with no `start_run` of its own, launches with
-`slab run` and lands in quarantine. The rest of the loop is one command each:
+`foundation run` and lands in quarantine. The rest of the loop is one
+command each:
 
 <!-- no-verify -->
 ```bash
-slab run relax_cu.py --intent "baseline"    # traced run, lands quarantined
-slab list                                   # runs, newest first
-slab show 01kzsm                            # ids accept unique prefixes, git-style
-slab promote 01kzsm --reason "worth keeping"
-slab expire --older-than 0d                 # everything unpromoted, now
-slab gc
+foundation run relax_cu.py --intent "baseline"    # traced run, lands quarantined
+foundation list                                   # runs, newest first
+foundation show 01kzsm                            # ids accept unique prefixes, git-style
+foundation promote 01kzsm --reason "worth keeping"
+foundation expire --older-than 0d                 # everything unpromoted, now
+foundation gc
 ```
 
-`slab show` prints the state, the intent, the checks with their compared
+`foundation show` prints the state, the intent, the checks with their compared
 values, the tasks, the artifacts (with `bytes` or `hash-only` presence), and
 the full transition history. Agents get the identical surface as MCP tools,
 as described in [Agents over MCP](agents-mcp.md). To swap EMT for MACE or a

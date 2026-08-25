@@ -1,70 +1,37 @@
 """The ``slab`` command-line interface.
 
-Verbs mirror the lifecycle: ``run`` lands work in quarantine, ``list``/``show``
-inspect it, ``promote`` makes it permanent, ``expire`` and ``gc`` are the
-two-phase housekeeping. Every verb goes through :mod:`slab._ops`, the same
-code paths the MCP server exposes to agents.
+Verbs describe what can be computed here and how to reach it: ``engines``
+inspects and verifies the cluster registry, ``pseudos`` installs and checks
+pseudopotential families, ``protocols`` shows the named Quantum ESPRESSO
+input protocols, ``hpc`` renders and submits SLURM jobs, and ``config``
+explains where every setting came from.
+
+Runs, artifacts, and verification are the ``foundation`` command.
 """
 
 from __future__ import annotations
 
 import json
-import os
-from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, NoReturn
+from typing import Annotated, NoReturn
 
 import typer
 
-if TYPE_CHECKING:
-    from slab.config import AgentConfig, HpcConfig
-    from slab.mason.session import MasonSession
-
-from slab import _ops
+from slab._ops import engines_overview
 from slab._version import __version__
 from slab.errors import SlabError
-from slab.lifecycle import LifecycleState
-from slab.models import utcnow
-from slab.runtime import Workspace
 
 app = typer.Typer(
-    help="SLAB — agent-native workflow orchestration for atomistic materials modeling.",
+    help="SLAB — access to atomistic engines, registries, protocols, "
+    "pseudopotentials, and the scheduler.",
     no_args_is_help=True,
     add_completion=False,
 )
-
-_WorkspaceOpt = Annotated[
-    Path | None,
-    typer.Option(
-        "--workspace",
-        "-w",
-        envvar="SLAB_WORKSPACE",
-        help="Workspace directory (default ./.slab).",
-    ),
-]
-
-
-def _open(workspace: Path | None) -> Workspace:
-    try:
-        return Workspace(_ops.resolve_root(workspace))
-    except SlabError as e:  # e.g. a broken config file resolving the root
-        _fail(str(e))
 
 
 def _fail(message: str) -> NoReturn:
     typer.echo(f"error: {message}", err=True)
     raise typer.Exit(code=1)
-
-
-def _age(moment: datetime) -> str:
-    seconds = max(0.0, (utcnow() - moment).total_seconds())
-    if seconds < 60:
-        return f"{int(seconds)}s"
-    if seconds < 3600:
-        return f"{int(seconds // 60)}m"
-    if seconds < 86_400:
-        return f"{int(seconds // 3600)}h"
-    return f"{int(seconds // 86_400)}d"
 
 
 def _print_version(value: bool) -> None:
@@ -85,271 +52,7 @@ def _main(
         ),
     ] = False,
 ) -> None:
-    """SLAB — runs are born ephemeral and promoted to permanent."""
-
-
-@app.command()
-def run(
-    script: Annotated[Path, typer.Argument(help="Workflow script (plain Python).")],
-    args: Annotated[
-        list[str] | None, typer.Argument(help="Arguments passed to the script.")
-    ] = None,
-    workspace: _WorkspaceOpt = None,
-    name: Annotated[str | None, typer.Option(help="Run name (default: script stem).")] = None,
-    intent: Annotated[
-        str | None, typer.Option(help="Why this run exists — narrative provenance.")
-    ] = None,
-) -> None:
-    """Execute a workflow script; the run lands in quarantine.
-
-    The script is plain Python: ``@task`` calls are traced and ``@check``
-    declarations gate verification. Scripts that call ``start_run`` themselves
-    should be executed with plain ``python`` instead.
-    """
-    try:
-        result = _ops.launch_script(
-            _ops.resolve_root(workspace),
-            script,
-            name=name,
-            intent=intent,
-            argv=tuple(args or ()),
-        )
-    except (SlabError, FileNotFoundError) as e:
-        _fail(str(e))
-    failure = result.get("failure")
-    if failure:
-        typer.echo(failure["traceback"], err=True)
-    elif result.get("traceback"):
-        typer.echo(result["traceback"], err=True, nl=False)
-    typer.echo(
-        f"run {result['run_id']}  {result['name']}  "
-        f"state={result['state']} status={result['status']} "
-        f"checks={result['checks_passed']}/{result['checks_total']} "
-        f"tasks={result['tasks_recorded']}"
-    )
-    # Anything but a clean completion exits nonzero — including a run left at
-    # status 'running' because recording its failure itself failed.
-    if result["status"] != "completed":
-        raise typer.Exit(code=1)
-
-
-@app.command("list")
-def list_(
-    workspace: _WorkspaceOpt = None,
-    state: Annotated[
-        str | None, typer.Option(help="Filter by lifecycle state (e.g. quarantined).")
-    ] = None,
-    status: Annotated[
-        str | None, typer.Option(help="Filter by execution status (e.g. completed).")
-    ] = None,
-    limit: Annotated[int, typer.Option(help="Maximum rows.")] = 20,
-    quiet: Annotated[bool, typer.Option("--quiet", "-q", help="Print run ids only.")] = False,
-) -> None:
-    """List runs, newest first."""
-    with _open(workspace) as ws:
-        try:
-            runs = ws.runs.list_runs(state=state, status=status, limit=limit)
-        except ValueError as e:
-            _fail(str(e))
-        if quiet:
-            for item in runs:
-                typer.echo(item.id)
-            return
-        if not runs:
-            typer.echo("no runs")
-            return
-        header = f"{'ID':<12} {'STATE':<12} {'STATUS':<10} {'AGE':>5}  {'NAME':<20} INTENT"
-        typer.echo(header)
-        for item in runs:
-            intent_text = (item.intent or "")[:40]
-            typer.echo(
-                f"{item.id[:10]:<12} {item.state.value:<12} {item.status.value:<10} "
-                f"{_age(item.created_at):>5}  {item.name[:20]:<20} {intent_text}"
-            )
-
-
-@app.command()
-def show(
-    run_id: Annotated[str, typer.Argument(help="Run id or unique prefix.")],
-    workspace: _WorkspaceOpt = None,
-    as_json: Annotated[bool, typer.Option("--json", help="Emit machine-readable JSON.")] = False,
-) -> None:
-    """Show one run: state, intent, checks, tasks, artifacts, history."""
-    with _open(workspace) as ws:
-        try:
-            details = _ops.run_details(ws, run_id)
-        except SlabError as e:
-            _fail(str(e))
-        if as_json:
-            typer.echo(json.dumps(details, indent=2))
-            return
-        _render_details(details)
-
-
-def _render_details(details: dict[str, object]) -> None:
-    run = details["run"]
-    assert isinstance(run, dict)
-    tasks = details["tasks"]
-    assert isinstance(tasks, list)
-    typer.echo(f"run {run['id']}  {run['name']}")
-    typer.echo(f"  state:   {run['state']}    status: {run['status']}")
-    if run.get("error"):
-        typer.echo(f"  error:   {run['error']}")
-    # The run's failure renders here unless a failed task carries the SAME
-    # exception (it propagated; that task renders it below). A task failure
-    # the script caught before failing differently must not hide the run's.
-    run_failure = run.get("failure")
-    if isinstance(run_failure, dict) and not _explained_by_task(run_failure, tasks):
-        _echo_failure(run_failure, indent="    ")
-    typer.echo(f"  created: {run['created_at']}")
-    if run.get("intent"):
-        typer.echo(f"  intent:  {run['intent']}")
-
-    checks = details["checks"]
-    assert isinstance(checks, list)
-    if checks:
-        passed = sum(1 for c in checks if c["passed"])
-        typer.echo(f"  checks:  {passed}/{len(checks)} passed")
-        for c in checks:
-            mark = "+" if c["passed"] else "x"
-            typer.echo(f"    [{mark}] {c['name']}: {c['message']}")
-
-    if tasks:
-        typer.echo("  tasks:")
-        for position, t in enumerate(tasks, start=1):
-            cached = " (cached)" if t["cache_hit"] else ""
-            duration = "" if t["duration_s"] is None else f"  {t['duration_s']}s"
-            error = "" if not t["error"] else f"  error: {t['error']}"
-            typer.echo(f"    {position}. {t['name']}  {t['status']}{cached}{duration}{error}")
-            if t.get("failure"):
-                _echo_failure(t["failure"], indent="       ")
-
-    artifacts = details["artifacts"]
-    assert isinstance(artifacts, list)
-    if artifacts:
-        typer.echo("  artifacts:")
-        for a in artifacts:
-            presence = "bytes" if a["bytes_available"] else "hash-only"
-            typer.echo(
-                f"    {a['name']}  {a['role']}  {a['size_bytes']}B  {presence}  {a['hash'][:12]}"
-            )
-
-    history = details["history"]
-    assert isinstance(history, list)
-    if history:
-        typer.echo("  history:")
-        for h in history:
-            forced = " (forced)" if h["forced"] else ""
-            reason = "" if not h["reason"] else f": {h['reason']}"
-            typer.echo(f"    {h['from']} -> {h['to']}{forced}  by {h['actor']}{reason}")
-
-
-def _explained_by_task(run_failure: dict[str, object], tasks: list[dict[str, object]]) -> bool:
-    """True if a failed task carries the same exception as the run failure."""
-    return any(
-        (f := t.get("failure")) is not None
-        and isinstance(f, dict)
-        and f.get("type") == run_failure.get("type")
-        and f.get("message") == run_failure.get("message")
-        for t in tasks
-    )
-
-
-def _echo_failure(failure: object, indent: str) -> None:
-    """Print a failure record's traceback, indented (notes appear at its end)."""
-    assert isinstance(failure, dict)
-    for line in str(failure.get("traceback") or "").splitlines():
-        typer.echo(f"{indent}{line}")
-
-
-@app.command()
-def promote(
-    run_id: Annotated[str, typer.Argument(help="Run id or unique prefix.")],
-    workspace: _WorkspaceOpt = None,
-    reason: Annotated[str | None, typer.Option(help="Why this run is worth keeping.")] = None,
-    force: Annotated[
-        bool, typer.Option("--force", help="Promote a run that was never verified.")
-    ] = False,
-) -> None:
-    """Make a run permanent: verified -> promoted (--force: quarantined -> promoted)."""
-    with _open(workspace) as ws:
-        try:
-            updated = ws.runs.transition(
-                run_id, LifecycleState.PROMOTED, actor="user", reason=reason, force=force
-            )
-        except SlabError as e:
-            _fail(str(e))
-        typer.echo(f"promoted {updated.id}  {updated.name}")
-
-
-@app.command()
-def expire(
-    workspace: _WorkspaceOpt = None,
-    older_than: Annotated[
-        str | None,
-        typer.Option(
-            "--older-than",
-            help="Override policy TTLs, e.g. 30d / 12h (0d = everything unpromoted).",
-        ),
-    ] = None,
-    policy_file: Annotated[
-        Path | None, typer.Option("--policy", help="Retention policy JSON file.")
-    ] = None,
-    include_running: Annotated[
-        bool,
-        typer.Option(
-            "--include-running",
-            help="Also expire overdue runs stuck at status 'running' (a hard-killed "
-            "process never advances its own status). They are marked failed first.",
-        ),
-    ] = False,
-) -> None:
-    """Expire unpromoted runs that outlived their TTL (state change only; see gc)."""
-    try:
-        root = _ops.resolve_root(workspace)
-        if older_than is not None:
-            policy = _ops.ttl_override_policy(_ops.parse_duration_days(older_than))
-        else:
-            policy = _ops.load_policy(root, policy_file)
-    except (SlabError, ValueError, OSError) as e:
-        _fail(str(e))
-    with Workspace(root) as ws:
-        expired = ws.expire_due(policy, include_running=include_running)
-        for item in expired:
-            typer.echo(f"expired {item.id}  {item.name}")
-        typer.echo(f"{len(expired)} run(s) expired")
-
-
-@app.command()
-def gc(
-    workspace: _WorkspaceOpt = None,
-    dry_run: Annotated[
-        bool, typer.Option("--dry-run", help="Report what would be dropped; delete nothing.")
-    ] = False,
-    policy_file: Annotated[
-        Path | None, typer.Option("--policy", help="Retention policy JSON file.")
-    ] = None,
-) -> None:
-    """Drop artifact bytes no retention rule demands (hashes and recipes survive)."""
-    try:
-        root = _ops.resolve_root(workspace)
-        policy = _ops.load_policy(root, policy_file)
-    except (SlabError, ValueError, OSError) as e:
-        _fail(str(e))
-    with Workspace(root) as ws:
-        report = ws.gc(policy, dry_run=dry_run)
-    verb = "would drop" if dry_run else "dropped"
-    typer.echo(
-        f"{verb} {len(report.dropped)} blob(s), freeing {report.freed_bytes} bytes; "
-        f"{len(report.kept)} kept"
-    )
-    if report.orphans:
-        typer.echo(f"orphans (unreferenced, not deleted): {len(report.orphans)}")
-    if report.missing:
-        typer.echo(
-            f"WARNING: {len(report.missing)} demanded blob(s) missing from the store",
-            err=True,
-        )
+    """SLAB — the simplest layer for atomistic backends."""
 
 
 engines_app = typer.Typer(
@@ -371,7 +74,7 @@ _RegistryOpt = Annotated[
 def engines_list(registry_path: _RegistryOpt = None) -> None:
     """List available engines: built-ins plus everything this cluster declares."""
     try:
-        overview = _ops.engines_overview(registry_path)
+        overview = engines_overview(registry_path)
     except (SlabError, OSError, ValueError) as e:
         _fail(str(e))
     typer.echo(f"built-in: {', '.join(overview['builtin'])}")
@@ -556,7 +259,9 @@ def hpc_partitions() -> None:
 
 @hpc_app.command("render")
 def hpc_render(
-    command: Annotated[str, typer.Argument(help="Command the job runs, e.g. 'slab run relax.py'.")],
+    command: Annotated[
+        str, typer.Argument(help="Command the job runs, e.g. 'foundation run relax.py'.")
+    ],
     name: Annotated[str, typer.Option("--name", "-n", help="Job name.")] = "slab-job",
     partition: Annotated[
         str | None, typer.Option("--partition", "-p", help="Partition (default: config's).")
@@ -577,7 +282,9 @@ def hpc_render(
 
 @hpc_app.command("submit")
 def hpc_submit(
-    command: Annotated[str, typer.Argument(help="Command the job runs, e.g. 'slab run relax.py'.")],
+    command: Annotated[
+        str, typer.Argument(help="Command the job runs, e.g. 'foundation run relax.py'.")
+    ],
     name: Annotated[str, typer.Option("--name", "-n", help="Job name.")] = "slab-job",
     partition: Annotated[
         str | None, typer.Option("--partition", "-p", help="Partition (default: config's).")
@@ -647,23 +354,43 @@ app.add_typer(config_app, name="config")
 def config_show(
     as_json: Annotated[bool, typer.Option("--json", help="Emit machine-readable JSON.")] = False,
 ) -> None:
-    """Show the merged configuration and which file each value came from."""
-    from slab.config import find_config_files, load_config_with_origins
+    """Show the merged configuration and which file each value came from.
+
+    One file, three packages. SLAB's own tables print through their validated
+    model, so a ``~`` or ``$VAR`` shows the path it expanded to. The tables
+    Foundation and Mason own print as written, because SLAB does not import
+    their models — it knows their names, not their meanings. A value refused
+    by its owner therefore still appears here, which keeps this the command
+    that answers why a setting was not applied.
+    """
+    from slab.config import KNOWN_TOP_LEVEL_KEYS, SlabConfig, load_config_with_origins
 
     try:
-        files = find_config_files()
-        merged, origins = load_config_with_origins()
+        config, merge = load_config_with_origins()
     except SlabError as e:
         _fail(str(e))
+    files, origins = merge.files, merge.origins
+    # Ownership comes from the model itself, so a table added to SlabConfig
+    # can never be misrouted here by a stale hand-kept list.
+    slab_tables = frozenset(SlabConfig.model_fields)
+    resolved = config.model_dump()
+
+    def value_of(dotted: str) -> object:
+        """SLAB's tables resolved; everyone else's exactly as the file says."""
+        owned = dotted.split(".", 1)[0] in slab_tables
+        return _dig(resolved if owned else merge.raw, dotted)
+
     if as_json:
         typer.echo(
             json.dumps(
                 {
                     "files": [{"layer": layer, "path": str(path)} for layer, path in files],
-                    "config": merged.model_dump(mode="json"),
+                    "config": config.model_dump(mode="json"),
+                    "set": {dotted: value_of(dotted) for dotted in sorted(origins)},
                     "origins": origins,
                 },
                 indent=2,
+                default=str,
             )
         )
         return
@@ -677,16 +404,25 @@ def config_show(
     for layer, path in files:
         typer.echo(f"{layer}: {path}")
     for dotted in sorted(origins):
-        value = _dig(merged, dotted)
-        typer.echo(f"  {dotted} = {value!r}  [{origins[dotted]}]")
+        typer.echo(f"  {dotted} = {value_of(dotted)!r}  [{origins[dotted]}]")
+    unowned = ", ".join(sorted(KNOWN_TOP_LEVEL_KEYS - slab_tables))
+    typer.echo(f"[{unowned}] print as written; their owners validate them")
     typer.echo("unset keys use built-in defaults ('slab config init' shows them all)")
 
 
-def _dig(model: object, dotted: str) -> object:
-    """Fetch a dotted key path off the validated config model."""
-    node = model
+def _dig(mapping: object, dotted: str) -> object:
+    """Fetch a dotted key path out of nested mappings, and only mappings.
+
+    Both sources are plain dicts (the model is dumped first), so a path that
+    leaves the mapping world answers None rather than reaching into whatever
+    Python object happens to sit there. A config value must never render as
+    a bound method.
+    """
+    node = mapping
     for part in dotted.split("."):
-        node = node.get(part) if isinstance(node, dict) else getattr(node, part, None)
+        if not isinstance(node, dict):
+            return None
+        node = node.get(part)
     return node
 
 
@@ -747,439 +483,6 @@ def protocols_show(
         typer.echo(f"{key}: {details[key]}")
 
 
-mason_app = typer.Typer(
-    help="Mason, the resident research agent — a coding-agent harness for open models.",
-    no_args_is_help=True,
-)
-app.add_typer(mason_app, name="mason")
-
-
-def _ask_approval(tool_name: str, preview: str) -> bool:
-    from click.exceptions import Abort
-
-    typer.echo(f"\n[approval] {tool_name}: {preview}")
-    try:
-        return typer.confirm("allow?", default=False)
-    except (Abort, EOFError):
-        # stdin is not interactive (sbatch, piped input, closed terminal):
-        # refusing is the documented degradation; dying mid-turn is not.
-        typer.echo("[approval] no interactive stdin — refused")
-        return False
-
-
-def _mason_session(
-    workspace: Path | None,
-    *,
-    auto: bool,
-    model: str | None,
-    endpoint: str | None,
-    provider: str | None = None,
-    max_turns: int | None = None,
-    interactive: bool = True,
-) -> MasonSession:
-    from slab.mason import MasonSession
-
-    # Non-interactive entry points (mason run) get the refuse-everything
-    # gate instead of a terminal prompt, matching mason_run's docstring:
-    # without --auto, mutating tools are refused — there is no one to ask.
-    session = MasonSession(
-        workspace_root=_ops.resolve_root(workspace),
-        approver=_ask_approval if interactive else None,
-        auto_approve=auto,
-    )
-    updates: dict[str, object] = {}
-    if model is not None:
-        updates["model"] = model
-    if provider is not None:
-        updates["provider"] = provider
-    if max_turns is not None:
-        updates["max_turns"] = max_turns
-    if updates:
-        session.agent = session.agent.model_copy(update=updates)
-    # After a provider change, which endpoint is right changes too; a
-    # --endpoint flag outranks both the config and any discovered server.
-    if updates or endpoint is not None:
-        session.resolve_endpoint(endpoint)
-    return session
-
-
-_ModelOpt = Annotated[str | None, typer.Option("--model", help="Override [agent] model.")]
-_EndpointOpt = Annotated[
-    str | None,
-    typer.Option("--endpoint", help="Override [agent] endpoint and any served endpoint."),
-]
-_AutoOpt = Annotated[
-    bool, typer.Option("--auto", help="Approve every tool call (batch/HPC use).")
-]
-_ProviderOpt = Annotated[
-    str | None,
-    typer.Option("--provider", help="Override [agent] provider: openai or anthropic."),
-]
-
-
-@mason_app.command("chat")
-def mason_chat(
-    workspace: _WorkspaceOpt = None,
-    auto: _AutoOpt = False,
-    model: _ModelOpt = None,
-    endpoint: _EndpointOpt = None,
-    provider: _ProviderOpt = None,
-    resume: Annotated[
-        bool, typer.Option("--resume", help="Continue the newest session in this workspace.")
-    ] = False,
-) -> None:
-    """Interactive session ( /quit to leave, /status for token counts )."""
-    from slab.mason import Mason
-
-    try:
-        session = _mason_session(
-            workspace, auto=auto, model=model, endpoint=endpoint, provider=provider
-        )
-        resume_from = None
-        if resume:
-            latest = session.latest_transcript()
-            if latest is None:
-                _fail("nothing to resume: no session transcripts in this workspace")
-            resume_from = session.load_messages(latest)
-            typer.echo(f"resuming {latest.name} ({len(resume_from)} messages)")
-        mason = Mason(session, resume_from=resume_from)
-    except SlabError as e:
-        _fail(str(e))
-    typer.echo(
-        f"mason ready: {session.agent.model} at {session.endpoint} "
-        f"[{session.endpoint_origin}]"
-    )
-    typer.echo(f"workspace {session.workspace_root}; notebook {session.notebook_path}")
-    while True:
-        try:
-            text = input("\nmason> ").strip()
-        except (EOFError, KeyboardInterrupt):  # pragma: no cover - terminal signals
-            typer.echo("")
-            break
-        if not text:
-            continue
-        if text in ("/quit", "/exit"):
-            break
-        if text == "/status":
-            typer.echo(
-                f"tokens: {session.prompt_tokens} prompt, "
-                f"{session.completion_tokens} completion; "
-                f"transcript {session.transcript_path}"
-            )
-            continue
-        if text == "/compact":
-            mason._compact()
-            typer.echo("history compacted; summary appended to the notebook")
-            continue
-        try:
-            result = mason.run_turn(text)
-        except KeyboardInterrupt:  # pragma: no cover - terminal signals
-            typer.echo("\n[turn interrupted; state kept]")
-            continue
-        except SlabError as e:
-            typer.echo(f"error: {e}", err=True)
-            continue
-        typer.echo(f"\n{result.text}")
-        if result.stop_reason not in ("answer", "finish"):
-            typer.echo(f"[stopped: {result.stop_reason} after {result.steps} steps]", err=True)
-
-
-@mason_app.command("run")
-def mason_run(
-    goal: Annotated[str, typer.Argument(help="The research goal for this run.")],
-    workspace: _WorkspaceOpt = None,
-    auto: _AutoOpt = False,
-    model: _ModelOpt = None,
-    endpoint: _EndpointOpt = None,
-    provider: _ProviderOpt = None,
-    max_turns: Annotated[
-        int | None, typer.Option("--max-turns", help="Model-call budget for this goal.")
-    ] = None,
-) -> None:
-    """One autonomous goal: loop until finish, an answer, or a harness stop.
-
-    Without --auto, mutating tools are refused (there is no one to ask);
-    reads still work, so inspection goals run safely by default.
-    """
-    from slab.mason import Mason
-
-    try:
-        session = _mason_session(
-            workspace,
-            auto=auto,
-            model=model,
-            endpoint=endpoint,
-            provider=provider,
-            max_turns=max_turns,
-            interactive=False,
-        )
-        mason = Mason(session)
-        result = mason.run_turn(goal)
-    except SlabError as e:
-        _fail(str(e))
-    typer.echo(result.text)
-    typer.echo(
-        f"[{result.stop_reason} after {result.steps} step(s); "
-        f"tokens {session.prompt_tokens}+{session.completion_tokens}; "
-        f"transcript {session.transcript_path}]",
-        err=True,
-    )
-    if result.stop_reason not in ("answer", "finish"):
-        raise typer.Exit(code=1)
-
-
-serve_app = typer.Typer(
-    help="The agent's model server as a batch job: render, start, watch, stop.",
-    no_args_is_help=True,
-)
-mason_app.add_typer(serve_app, name="serve")
-
-_PartitionOpt = Annotated[
-    str | None, typer.Option("--partition", "-p", help="Partition (default: [agent.serve]'s).")
-]
-_PortOpt = Annotated[int | None, typer.Option("--port", help="Override [agent.serve] port.")]
-_TimeOpt = Annotated[str | None, typer.Option("--time", help="Override the job's time limit.")]
-
-
-def _serve_inputs(workspace: Path | None) -> tuple[AgentConfig, HpcConfig, Path]:
-    from slab.config import load_config
-
-    config = load_config()
-    return config.agent, config.hpc, _ops.resolve_root(workspace)
-
-
-@serve_app.command("render")
-def mason_serve_render(
-    workspace: _WorkspaceOpt = None,
-    partition: _PartitionOpt = None,
-    port: _PortOpt = None,
-    time_limit: _TimeOpt = None,
-) -> None:
-    """Print the batch script 'serve start' would submit — read it first."""
-    from slab.mason.serve import render_serve_script
-
-    try:
-        agent, hpc, root = _serve_inputs(workspace)
-        script = render_serve_script(
-            agent, hpc, root, partition=partition, port=port, time_limit=time_limit
-        )
-    except SlabError as e:
-        _fail(str(e))
-    typer.echo(script)
-
-
-@serve_app.command("start")
-def mason_serve_start(
-    workspace: _WorkspaceOpt = None,
-    partition: _PartitionOpt = None,
-    port: _PortOpt = None,
-    time_limit: _TimeOpt = None,
-    wait: Annotated[
-        bool, typer.Option("--wait", help="Block until the endpoint answers (or time out).")
-    ] = False,
-) -> None:
-    """Submit the model server as a batch job; it records the URL it lands on."""
-    from slab.mason.serve import start, wait_for_record, wait_until_ready
-
-    try:
-        agent, hpc, root = _serve_inputs(workspace)
-        job = start(agent, hpc, root, partition=partition, port=port, time_limit=time_limit)
-    except SlabError as e:
-        _fail(str(e))
-    typer.echo(f"submitted job {job.job_id} ({job.job_name}) to {job.partition}")
-    typer.echo(f"script: {job.script_path}")
-    if not wait:
-        typer.echo(
-            "the endpoint appears once the model finishes loading; "
-            "watch it with 'slab mason serve status'"
-        )
-        return
-    budget = agent.serve.ready_timeout_s
-    typer.echo(f"waiting for the queue, then for the model to load (up to {budget:.0f}s each)...")
-    try:
-        record = wait_for_record(root, job.job_id, timeout_s=budget)
-        typer.echo(f"node {record.node or 'unnamed'} announced {record.endpoint}; loading...")
-        names = wait_until_ready(record.endpoint, timeout_s=budget)
-    except SlabError as e:
-        _fail(str(e))
-    typer.echo(f"[+] {record.endpoint} answers; serving: {', '.join(names) or 'none'}")
-
-
-@serve_app.command("status")
-def mason_serve_status(
-    workspace: _WorkspaceOpt = None,
-) -> None:
-    """What the recorded server is: endpoint, job state, and a live probe."""
-    from slab.mason.serve import describe
-
-    try:
-        agent, hpc, root = _serve_inputs(workspace)
-        for line in describe(agent, root, cluster=hpc.cluster or ""):
-            typer.echo(line)
-    except SlabError as e:
-        _fail(str(e))
-
-
-@serve_app.command("stop")
-def mason_serve_stop(
-    workspace: _WorkspaceOpt = None,
-) -> None:
-    """Cancel the recorded server job and remove its endpoint record."""
-    from slab.mason.serve import stop
-
-    try:
-        _agent, hpc, root = _serve_inputs(workspace)
-        typer.echo(stop(root, cluster=hpc.cluster or ""))
-    except SlabError as e:
-        _fail(str(e))
-
-
-def _serve_hint(agent: AgentConfig, root: Path, origin: str, *, cluster: str = "") -> list[str]:
-    """Why an unreachable endpoint might be unreachable, when we can tell."""
-    from slab.hpc import job_state
-    from slab.mason.serve import read_record
-
-    if agent.provider != "openai":
-        return []
-    try:
-        record = read_record(root)
-    except SlabError as e:
-        return [f"    (the endpoint record is unreadable: {e})"]
-    if record is None:
-        # A one-shot --endpoint meant that server, so 'start your own' is noise.
-        # A *configured* endpoint that no longer answers is the opposite case:
-        # it is usually last allocation's node, and serve start is the fix.
-        if origin == "--endpoint":
-            return []
-        return [
-            "    no server is recorded here; start one with 'slab mason serve start' "
-            "(or point [agent] endpoint at a server you started yourself)"
-        ]
-    if not record.job_id:
-        return [f"    a record exists ({record.endpoint}) but names no job to ask about"]
-    if record.cluster and record.cluster != cluster:
-        # A job id is only meaningful on its own cluster; asking this one
-        # would describe an unrelated job that happens to share the number.
-        return [
-            f"    the record belongs to cluster {record.cluster!r}; job "
-            f"{record.job_id} is not queried from here (job ids are per-cluster)"
-        ]
-    try:
-        status = job_state(record.job_id)
-    except SlabError as e:
-        return [f"    job {record.job_id}: state unknown — {e}"]
-    if status.state.is_terminal:
-        return [
-            f"    job {record.job_id} ended as {status.state.value}; the record is "
-            f"stale — 'slab mason serve stop' clears it"
-        ]
-    return [f"    job {record.job_id} is {status.state.value}; the model may still be loading"]
-
-
-@mason_app.command("doctor")
-def mason_doctor(
-    workspace: _WorkspaceOpt = None,
-    model: _ModelOpt = None,
-    endpoint: _EndpointOpt = None,
-    provider: _ProviderOpt = None,
-) -> None:
-    """Check the model endpoint: reachable, model served, tool calls parsed."""
-    from slab.config import load_config
-    from slab.mason.client import ChatClient, LlmError
-    from slab.mason.serve import discover_endpoint
-
-    try:
-        doctor_config = load_config()
-        agent = doctor_config.agent
-        root = _ops.resolve_root(workspace)
-    except SlabError as e:
-        _fail(str(e))
-    if provider is not None:
-        agent = agent.model_copy(update={"provider": provider})
-    if endpoint is not None:
-        agent = agent.model_copy(update={"endpoint": endpoint})
-    try:
-        resolved_endpoint, origin = discover_endpoint(agent, root)
-    except SlabError as e:
-        _fail(str(e))
-    if endpoint is not None:
-        origin = "--endpoint"
-    resolved_model = model or agent.model
-    typer.echo(f"provider: {agent.provider}")
-    typer.echo(f"endpoint: {resolved_endpoint}  [{origin}]")
-    typer.echo(f"model:    {resolved_model or '(not configured)'}")
-    client: Any
-    if agent.provider == "anthropic":
-        from slab.mason.anthropic import AnthropicClient
-
-        key_var = agent.resolved_api_key_env or "ANTHROPIC_API_KEY"
-        api_key = os.environ.get(key_var)
-        if not api_key:
-            typer.echo(f"[x] ${key_var} is not set — the Anthropic provider needs a key")
-            raise typer.Exit(code=1)
-        client = AnthropicClient(
-            resolved_model or "unconfigured", api_key, endpoint=resolved_endpoint, timeout_s=60.0
-        )
-    else:
-        client = ChatClient(resolved_endpoint, resolved_model or "unconfigured", timeout_s=60.0)
-    failed = 0
-    try:
-        names = client.model_names()
-        typer.echo(f"[+] endpoint answers; {len(names)} model(s) served")
-    except LlmError as e:
-        typer.echo(f"[x] endpoint: {e}")
-        for line in _serve_hint(agent, root, origin, cluster=doctor_config.hpc.cluster or ""):
-            typer.echo(line)
-        raise typer.Exit(code=1) from None
-    if resolved_model is None:
-        typer.echo(f"[x] no model configured; served here: {', '.join(names) or 'none'}")
-        raise typer.Exit(code=1)
-    if resolved_model in names:
-        typer.echo(f"[+] model {resolved_model!r} is served")
-    else:
-        failed += 1
-        typer.echo(f"[x] model {resolved_model!r} not served; available: {', '.join(names)}")
-    ping = {
-        "type": "function",
-        "function": {
-            "name": "ping",
-            "description": "Reply with a pong.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    }
-    try:
-        reply = client.chat(
-            [{"role": "user", "content": "Call the ping tool now."}], tools=[ping]
-        )
-        if reply.tool_calls:
-            typer.echo("[+] native tool calls work")
-        else:
-            failed += 1
-            typer.echo(
-                "[x] the model answered without a tool call — the server may lack a "
-                "tool-call parser; try [agent] tool_protocol = \"fenced\""
-            )
-    except LlmError as e:
-        failed += 1
-        typer.echo(f"[x] tool-call probe: {e}")
-    if failed:
-        raise typer.Exit(code=1)
-
-
-@app.command()
-def mcp(
-    workspace: _WorkspaceOpt = None,
-) -> None:
-    """Serve the workspace to agents over MCP (stdio transport)."""
-    try:
-        from slab.mcp_server import serve
-    except ImportError:
-        _fail("the MCP server needs the mcp package: pip install 'slab[mcp]'")
-    try:
-        root = _ops.resolve_root(workspace)
-    except SlabError as e:
-        _fail(str(e))
-    serve(root)  # pragma: no cover - blocks on stdio
 
 
 def main() -> None:  # pragma: no cover - console-script shim

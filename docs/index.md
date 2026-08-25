@@ -10,9 +10,10 @@ script runs. Machine-checkable verification hooks decide when a run counts
 as verified, and an explicit promotion command is the only action that makes
 data permanent. Everything else expires automatically.
 
+<!-- no-verify -->
 ```python
-from slab import Workspace, check, converged
-from slab.tasks import relax
+from foundation import Workspace, check, converged
+from foundation.tasks import relax
 
 ws = Workspace(".slab")
 with ws.start_run(name="si-relax", intent="baseline lattice constant") as run:
@@ -25,6 +26,22 @@ with ws.start_run(name="si-relax", intent="baseline lattice constant") as run:
     run.keep("relaxed.xyz", relaxed)                          # declared terminal artifact
 # exit: checks evaluated -> quarantined becomes verified; promote it when you decide it matters
 ```
+
+## Three packages
+
+SLAB is three packages in one distribution, `slab-stack`. Each installs a
+command of the same name.
+
+- **`slab`** gives access to computational software: engines and
+  calculators, the cluster engine registry, Quantum ESPRESSO protocols,
+  pseudopotential families, and the SLURM layer.
+- **`foundation`** keeps state and runs workflows: runs, artifacts, caching,
+  verification, retention, and the MCP server.
+- **`mason`** is the resident research agent.
+
+`mason` depends on `foundation` and `slab`, `foundation` depends on `slab`,
+and `slab` depends on neither. So you can drive an engine without a
+workspace, and keep a workspace without an agent.
 
 ## Why another workflow engine?
 
@@ -89,6 +106,8 @@ pip install -e ".[rootstock]" # + cluster-served MLIPs (thin client, no torch)
 pip install -e ".[mcp]"       # + MCP server for agents
 ```
 
+One install brings all three packages and all three commands.
+
 Python ≥ 3.11. There is no daemon, no database server, and no required
 configuration. A workspace is a directory (`.slab/` by default) that holds a
 SQLite file and a content-addressed store, and a cluster describes itself in
@@ -132,11 +151,13 @@ MVP vertical slice, working end to end. It includes:
 - layered HPC configuration with a SLURM submission layer;
 - the Mason agent harness, for open models self-served on a GPU node or for
   Claude, with its model server as a batch job;
-- a CLI and an MCP server.
+- three commands (`slab`, `foundation`, `mason`) and an MCP server.
 
-Quality gates: 900+ tests (every docstring example runs as a doctest), ~96%
+Quality gates: 1000+ tests (every docstring example runs as a doctest), ~95%
 coverage, mypy `--strict`, and adversarial multi-agent review passes whose
-confirmed findings became regression tests.
+confirmed findings became regression tests. A test reads the AST of every
+module and fails on an import that crosses the package layering the wrong
+way.
 
 Key paths are verified against real software, not only mocks:
 

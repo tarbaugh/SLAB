@@ -1,6 +1,6 @@
 # Agents over MCP
 
-LLM agents are SLAB's primary user, so the workspace speaks their native protocol. `slab mcp` serves the same operations as the CLI as MCP tools over stdio, with one shared code path in `slab._ops` and two skins, and the tools return structured JSON instead of formatted text.
+LLM agents are SLAB's primary user, so the workspace speaks their native protocol. `foundation mcp` serves the same operations as the CLI as MCP tools over stdio, with one shared code path in `foundation._ops` and two skins, and the tools return structured JSON instead of formatted text.
 
 ## Setup
 
@@ -8,12 +8,12 @@ The server ships as an extra, and any MCP client launches it as a subprocess:
 
 <!-- no-verify -->
 ```bash
-pip install 'slab[mcp]'
+pip install 'slab-stack[mcp]'
 ```
 
 <!-- no-verify -->
 ```json
-{"mcpServers": {"slab": {"command": "slab", "args": ["mcp"]}}}
+{"mcpServers": {"foundation": {"command": "foundation", "args": ["mcp"]}}}
 ```
 
 The workspace is resolved exactly as for the CLI: `-w/--workspace` flag > `$SLAB_WORKSPACE` > `./.slab`. So `{"args": ["mcp", "-w", "/scratch/proj/.slab"]}` pins a specific one. There is no daemon and no database server, because the workspace is a directory, and concurrent CLI and MCP access coexist at the SQLite transaction level.
@@ -105,18 +105,18 @@ Promotion is the only path to permanence, so an agent that never promotes leaves
 
 ## Under the hood
 
-Every tool calls `slab._ops`, and the functions below are exactly what `launch_workflow` and `show_run` run, so you can reproduce the agent's view without an MCP client. First, the workflow script an agent would launch. It has zero ceremony, with no `Workspace` and no `start_run`, because the runner supplies both:
+Every tool calls `foundation._ops`, and the functions below are exactly what `launch_workflow` and `show_run` run, so you can reproduce the agent's view without an MCP client. First, the workflow script an agent would launch. It has zero ceremony, with no `Workspace` and no `start_run`, because the runner supplies both:
 
 ```python
 from pathlib import Path
 
-from slab import Workspace
-from slab._ops import launch_script, run_details
+from foundation import Workspace
+from foundation._ops import launch_script, run_details
 
 Path("relax_cu.py").write_text('''\
 from ase.build import bulk
-from slab import check, converged, current_run
-from slab.tasks import relax
+from foundation import check, converged, current_run
+from foundation.tasks import relax
 
 atoms = bulk("Cu", "fcc", a=3.58, cubic=True)
 atoms.rattle(stdev=0.05, seed=42)

@@ -12,9 +12,9 @@ to cluster registries.
 calculator. Three sources feed the mapping, tried in order:
 
 1. **Built-ins.** `emt` and `lj` (ASE toys), `mace` (in-process,
-   `slab[mace]`), `qe` (Quantum ESPRESSO's `pw.x`, no extra needed),
+   `slab-stack[mace]`), `qe` (Quantum ESPRESSO's `pw.x`, no extra needed),
    `lammps` (the `lmp` binary, likewise no extra), and `rootstock`
-   (cluster-served MLIPs, `slab[rootstock]`).
+   (cluster-served MLIPs, `slab-stack[rootstock]`).
 2. **The cluster engine registry.** Names that a cluster maintainer declared
    in an `engines.json` that lives with the install, such as `vasp`, curated
    site aliases like `qe-delta`, and MLIP aliases.
@@ -51,8 +51,8 @@ the engine factory, and stamps the resolved identity into its `info` dict:
 
 ```python
 from ase.build import bulk
-from slab import Workspace
-from slab.tasks import relax
+from foundation import Workspace
+from foundation.tasks import relax
 
 atoms = bulk("Cu", "fcc", a=3.58) * (2, 2, 2)
 atoms.rattle(stdev=0.05, seed=42)
@@ -109,7 +109,7 @@ use is a science decision:
 <!-- no-verify -->
 ```python
 from slab.backends import resolve_pseudopotentials
-from slab.tasks import relax
+from foundation.tasks import relax
 
 pseudos = resolve_pseudopotentials(atoms, "/opt/pseudos/sssp")  # {'Si': 'Si.pz-vbc.UPF'}
 relaxed, info = relax(
@@ -345,7 +345,7 @@ Three boundaries to know about:
 
 ## Two fidelities, one run
 
-The seam's payoff is that engines compose. `slab.tasks` ships two traced
+The seam's payoff is that engines compose. `foundation.tasks` ships two traced
 tasks that take the same `engine` argument: `relax` runs BFGS on positions,
 and `single_point` runs one energy and forces evaluation with no
 optimization. The canonical workflow is therefore a chain that relaxes under
@@ -356,9 +356,9 @@ geometry held up:
 <!-- no-verify -->
 ```python
 from ase.build import bulk
-from slab import check, converged
+from foundation import check, converged
 from slab.protocols import qe_protocol_options
-from slab.tasks import relax, single_point
+from foundation.tasks import relax, single_point
 
 atoms = bulk("Si", "diamond", a=5.43)
 atoms.rattle(stdev=0.05, seed=11)
@@ -533,7 +533,7 @@ On a cluster with a [Garden-AI/rootstock](https://github.com/Garden-AI/rootstock
 install, any canonical checkpoint id works directly as the engine name.
 Rootstock resolves the hosting environment and serves the model from a worker
 subprocess, so your Python environment stays free of torch and model
-packages, and `pip install 'slab[rootstock]'` adds only a thin client:
+packages, and `pip install 'slab-stack[rootstock]'` adds only a thin client:
 
 <!-- no-verify -->
 ```python

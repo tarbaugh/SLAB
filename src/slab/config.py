@@ -37,10 +37,19 @@ from __future__ import annotations
 import os
 import re
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+)
 
 from slab.errors import SlabError
 
@@ -49,26 +58,69 @@ CONFIG_ENV_VAR = "SLAB_CONFIG"
 SITE_CONFIG_ENV_VAR = "SLAB_SITE_CONFIG"
 PROJECT_FILE_NAME = "slab.toml"
 
-# Path-valued keys get ~ and ${VAR} expanded at load time (the slab process
-# itself opens them). Everything else — notably [hpc] setup lines — is left
-# verbatim: those are shell fragments whose variables must expand on the
-# compute node at run time, not on the login node at load time.
-_PATH_KEYS = frozenset(
-    {
-        "paths.workspace",
-        "paths.pseudos",
-        "paths.engines",
-        "paths.scratch",
-        "engines.qe.pseudo_dir",
-        "engines.rootstock.root",
-    }
+# Every table a config file may declare, and which package validates it.
+# SLAB holds the names as strings only: it lints the spelling of a table so a
+# typo cannot masquerade as a section owned by a package that is not loaded,
+# and it never imports the owners' models.
+KNOWN_TOP_LEVEL_KEYS = frozenset(
+    {"schema_version", "paths", "engines", "hpc", "workspace", "agent"}
 )
+
+# Keys that moved between packages. Refusing them by name is the migration:
+# every view ignores tables it does not own, so a key left where it used to be
+# would be ignored by all of them and configure nothing in silence. The check
+# belongs here, in the one read every package shares, and not on the model
+# that used to hold the key — only one package validates that model.
+_MOVED_KEYS = {
+    "paths.workspace": "[workspace] root, which foundation owns",
+}
+
 _VAR_PATTERN = re.compile(r"\$\{(\w+)\}|\$(\w+)")
-_OLLAMA = "http://localhost:11434/v1"
 
 
 class ConfigError(SlabError):
     """A configuration file is missing, malformed, or declares the impossible."""
+
+
+def _expand_path(text: str, info: ValidationInfo) -> str:
+    """``~`` and ``${VAR}``/``$VAR`` expansion that refuses unset variables.
+
+    ``os.path.expandvars`` leaves unknown variables literal — a path like
+    ``/scratch/$USRE/slab`` would quietly become a directory named ``$USRE``.
+    Loud beats quiet.
+
+    This is a field type, not a pass over the merged dictionary, so only the
+    fields declared :data:`ExpandedPath` expand. Shell that runs on a compute
+    node (``[hpc] setup``, ``[engines.qe] setup``, a serve ``command``) keeps
+    its variables literal by construction rather than by being left off a
+    list. The file that supplied the value is added by
+    :func:`_describe_validation_error`, which knows every value's origin.
+
+    Examples:
+        >>> import os
+        >>> os.environ["SLAB_DOCTEST_USER"] = "tom"
+        >>> from pydantic import TypeAdapter
+        >>> TypeAdapter(ExpandedPath).validate_python("/scratch/${SLAB_DOCTEST_USER}/x")
+        '/scratch/tom/x'
+        >>> del os.environ["SLAB_DOCTEST_USER"]
+    """
+    key = info.field_name or "path"
+
+    def substitute(match: re.Match[str]) -> str:
+        name = match.group(1) or match.group(2)
+        value = os.environ.get(name)
+        if value is None:
+            raise ValueError(
+                f"{key} = {text!r} references ${name}, "
+                f"which is not set in the environment"
+            )
+        return value
+
+    return os.path.expanduser(_VAR_PATTERN.sub(substitute, text))
+
+
+ExpandedPath = Annotated[str, AfterValidator(_expand_path)]
+"""A config string holding a filesystem path: ``~`` and ``$VAR`` expand."""
 
 
 class QeEngineConfig(BaseModel):
@@ -83,7 +135,7 @@ class QeEngineConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     command: str | None = None
-    pseudo_dir: str | None = None
+    pseudo_dir: ExpandedPath | None = None
     setup: tuple[str, ...] = ()
 
 
@@ -122,7 +174,7 @@ class RootstockEngineConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    root: str | None = None
+    root: ExpandedPath | None = None
     cluster: str | None = None
 
 
@@ -148,10 +200,9 @@ class PathsConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    workspace: str | None = None
-    pseudos: str | None = None
-    engines: str | None = None
-    scratch: str | None = None
+    pseudos: ExpandedPath | None = None
+    engines: ExpandedPath | None = None
+    scratch: ExpandedPath | None = None
 
 
 class Partition(BaseModel):
@@ -239,119 +290,26 @@ class HpcConfig(BaseModel):
         return target, self.partitions[target]
 
 
-class ServeConfig(BaseModel):
-    """How to stand the agent's own model server up on this cluster (``[agent.serve]``).
-
-    Mason talks to an OpenAI-compatible endpoint. On a laptop that endpoint is
-    Ollama at a fixed localhost URL; on a cluster it is a server *you* start,
-    on a GPU node the scheduler picks — so the URL cannot be written in a
-    config file. This section declares the launch (which partition, which
-    port, which flags); the node and the URL are discovered at run time from
-    the record the job writes (:mod:`slab.mason.serve`).
-
-    ``command`` is the escape hatch for a server this schema does not model;
-    it may reference ``$port``, which the rendered script binds. Everything
-    here is shell for the *compute node*, so no variable is expanded at load.
-
-    Examples:
-        >>> ServeConfig(partition="gpu", tool_call_parser="llama4_pythonic").port
-        8000
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    partition: str | None = None
-    time_limit: str | None = None
-    port: int = Field(default=8000, ge=1024, le=65535)
-    job_name: str = "mason-serve"
-    tool_call_parser: str | None = None
-    args: tuple[str, ...] = ()
-    setup: tuple[str, ...] = ()
-    command: str | None = None
-    ready_timeout_s: float = Field(default=1800.0, gt=0)
-    # The serve job brings a self-contained environment (its own venv via
-    # setup), and [hpc]-level setup exists to load ENGINE software — module
-    # stacks whose libraries fight the server's. So global setup is excluded
-    # by default; the partition's own setup (GPU drivers) still applies.
-    include_hpc_setup: bool = False
-
-
-class AgentConfig(BaseModel):
-    """The resident research agent's model connection and budgets (``[agent]``).
-
-    Two providers, one harness. ``provider = "openai"`` (the default) talks to
-    any OpenAI-compatible ``/v1`` server — vLLM on a compute node, Ollama on a
-    laptop — and keeps working where compute nodes have no internet, which is
-    the normal HPC case. ``provider = "anthropic"`` talks to the Claude
-    Messages API, which needs reachable internet and *billed API access* (a
-    Claude subscription is a separate product and does not grant it).
-
-    ``endpoint`` may be left unset on a cluster: :func:`slab.mason.serve.
-    discover_endpoint` reads the URL from the running server job's record.
-
-    ``api_key_env`` names an environment variable holding the key; the key
-    itself never belongs in a config file (config files get committed and
-    shipped). ``compute_profile`` shapes what the agent *chooses* to run, not
-    what SLAB permits — see :func:`slab.mason.prompts.compute_profile_block`.
-
-    Examples:
-        >>> AgentConfig().resolved_endpoint
-        'http://localhost:11434/v1'
-        >>> AgentConfig(provider="anthropic").resolved_endpoint
-        'https://api.anthropic.com/v1'
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    provider: Literal["openai", "anthropic"] = "openai"
-    endpoint: str | None = None
-    model: str | None = None
-    api_key_env: str | None = None
-    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
-    compute_profile: Literal["laptop", "workstation", "cluster"] | None = None
-    context_window: int = Field(default=65_536, ge=4_096)
-    compact_at: float = Field(default=0.7, gt=0.0, le=1.0)
-    max_turns: int = Field(default=60, ge=1)
-    temperature: float = Field(default=0.2, ge=0.0, le=2.0)
-    request_timeout_s: float = Field(default=600.0, gt=0)
-    max_reply_tokens: int | None = Field(default=None, ge=256)
-    max_tool_output_chars: int = Field(default=24_000, ge=1_000)
-    shell_timeout_s: float = Field(default=120.0, gt=0)
-    tool_protocol: Literal["native", "fenced"] = "native"
-    approval: Literal["ask", "auto"] = "ask"
-    shell_allowlist: tuple[str, ...] = ()
-    serve: ServeConfig = ServeConfig()
-
-    @property
-    def resolved_endpoint(self) -> str:
-        """The endpoint to call: explicit, else the provider's own default."""
-        if self.endpoint:
-            return self.endpoint
-        return "https://api.anthropic.com/v1" if self.provider == "anthropic" else _OLLAMA
-
-    @property
-    def resolved_api_key_env(self) -> str | None:
-        """The env var holding the key — Anthropic's is required and defaulted."""
-        if self.api_key_env:
-            return self.api_key_env
-        return "ANTHROPIC_API_KEY" if self.provider == "anthropic" else None
-
-
 class SlabConfig(BaseModel):
-    """The merged, validated configuration — every section optional.
+    """The SLAB view of the merged configuration — every section optional.
+
+    ``extra="ignore"`` at this level, because one file carries every
+    package's tables and SLAB validates only its own. A table name that no
+    package owns is still refused, by :func:`load_merged`, before any view
+    sees it. Inside SLAB's own tables unknown keys stay forbidden, so a typo
+    in ``[hpc]`` is refused naming the file.
 
     Examples:
-        >>> SlabConfig().agent.resolved_endpoint
-        'http://localhost:11434/v1'
+        >>> SlabConfig().hpc.partitions
+        {}
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="ignore")
 
     schema_version: int = 1
     paths: PathsConfig = PathsConfig()
     engines: EnginesConfig = EnginesConfig()
     hpc: HpcConfig = HpcConfig()
-    agent: AgentConfig = AgentConfig()
 
     @field_validator("schema_version")
     @classmethod
@@ -359,7 +317,7 @@ class SlabConfig(BaseModel):
         if value > SCHEMA_VERSION:
             raise ValueError(
                 f"config schema_version {value} is newer than this slab understands "
-                f"({SCHEMA_VERSION}); upgrade slab to read it"
+                f"({SCHEMA_VERSION}); upgrade slab-stack to read it"
             )
         if value < 1:
             raise ValueError(f"config schema_version must be >= 1, got {value}")
@@ -411,51 +369,108 @@ def find_config_files(cwd: str | os.PathLike[str] | None = None) -> list[tuple[s
     return found
 
 
-def load_config(cwd: str | os.PathLike[str] | None = None) -> SlabConfig:
-    """Load and merge every layer into one validated :class:`SlabConfig`.
+T = TypeVar("T", bound=BaseModel)
 
-    No files at all is the normal laptop case and yields pure defaults.
+
+@dataclass(frozen=True)
+class MergedConfig:
+    """Every layer, merged and attributed, before any package validates it.
+
+    One read of the files serves all three packages: ``raw`` is the deep
+    merge, ``origins`` maps each dotted key to the file that supplied it, and
+    ``files`` lists the layers in the order they were applied.
+    """
+
+    raw: dict[str, Any]
+    origins: dict[str, str]
+    files: tuple[tuple[str, Path], ...]
+
+
+def load_merged(cwd: str | os.PathLike[str] | None = None) -> MergedConfig:
+    """Read, version-check, and merge every layer, without validating tables.
+
+    No files at all is the normal laptop case and yields an empty merge.
     A malformed file is a loud :class:`ConfigError` naming the file — a
     broken cluster config must surface, not degrade to defaults.
+
+    A top-level key no package owns is refused here rather than by a view
+    model. Each view ignores tables it does not own, so an unknown table
+    would otherwise be ignored by all of them and configure nothing in
+    silence.
     """
-    merged, _ = load_config_with_origins(cwd)
-    return merged
-
-
-def load_config_with_origins(
-    cwd: str | os.PathLike[str] | None = None,
-) -> tuple[SlabConfig, dict[str, str]]:
-    """:func:`load_config`, plus ``{dotted.key: "path (layer)"}`` for each value set."""
     merged: dict[str, Any] = {}
     origins: dict[str, str] = {}
-    for layer, path in find_config_files(cwd):
+    files = tuple(find_config_files(cwd))
+    for layer, path in files:
         raw = _read_toml(path)
         # Each layer declares its own schema version, and each is checked:
         # merging first would let a project file's `schema_version = 1` mask a
         # site file written for a newer slab (whose other keys we would then
         # misread as if they meant what they mean today).
         _check_schema_version(raw, path)
+        unknown = sorted(set(raw) - KNOWN_TOP_LEVEL_KEYS)
+        if unknown:
+            known = ", ".join(sorted(KNOWN_TOP_LEVEL_KEYS))
+            raise ConfigError(
+                f"{path} declares unknown top-level "
+                f"{'keys' if len(unknown) > 1 else 'key'} {', '.join(repr(k) for k in unknown)}; "
+                f"known: {known}"
+            )
         _merge_into(merged, raw, origins, f"{path} ({layer})", prefix="")
-    _expand_path_values(merged, origins)
+    for dotted, moved_to in _MOVED_KEYS.items():
+        if _has_dotted(merged, dotted):
+            raise ConfigError(
+                f"{_origin_for(dotted, origins)}: {dotted} moved to "
+                f"{moved_to}; move the value into that table"
+            )
+    return MergedConfig(raw=merged, origins=origins, files=files)
+
+
+def _has_dotted(raw: dict[str, Any], dotted: str) -> bool:
+    """True when the merged mapping actually sets this dotted key."""
+    node: Any = raw
+    *parents, leaf = dotted.split(".")
+    for part in parents:
+        if not isinstance(node, dict):
+            return False
+        node = node.get(part)
+    return isinstance(node, dict) and leaf in node
+
+
+def validate(merged: MergedConfig, model: type[T]) -> T:
+    """Validate one package's view of *merged*, naming the file on failure."""
     try:
-        return SlabConfig.model_validate(merged), origins
+        return model.model_validate(merged.raw)
     except ValidationError as e:
-        raise ConfigError(_describe_validation_error(e, origins)) from e
+        raise ConfigError(_describe_validation_error(e, merged.origins)) from e
+
+
+def load_config(cwd: str | os.PathLike[str] | None = None) -> SlabConfig:
+    """Load every layer and validate the tables SLAB owns."""
+    return validate(load_merged(cwd), SlabConfig)
+
+
+def load_config_with_origins(
+    cwd: str | os.PathLike[str] | None = None,
+) -> tuple[SlabConfig, MergedConfig]:
+    """:func:`load_config`, plus the merge that produced it (files, origins)."""
+    merged = load_merged(cwd)
+    return validate(merged, SlabConfig), merged
 
 
 def config_value(dotted: str, cwd: str | os.PathLike[str] | None = None) -> Any:
-    """One value from the merged config by dotted key, or None when unset.
+    """One value from SLAB's own config by dotted key, or None when unset.
 
-    The convenience accessor integration points use (``resolve_root``,
-    ``pseudos_root``, the qe engine): a missing file or unset key is None;
-    a *broken* file still raises.
+    The convenience accessor SLAB's integration points use (``pseudos_root``,
+    the qe and lammps engines): a missing file or unset key is None; a
+    *broken* file still raises. Foundation and Mason have their own.
 
     Examples:
         >>> import os, tempfile
         >>> os.environ.pop("SLAB_SITE_CONFIG", None) and None
         >>> os.environ.pop("SLAB_CONFIG", None) and None
         >>> os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp()
-        >>> config_value("paths.workspace", tempfile.mkdtemp()) is None
+        >>> config_value("paths.pseudos", tempfile.mkdtemp()) is None
         True
     """
     node: Any = load_config(cwd)
@@ -467,13 +482,29 @@ def config_value(dotted: str, cwd: str | os.PathLike[str] | None = None) -> Any:
 
 
 def _check_schema_version(raw: dict[str, Any], path: Path) -> None:
-    """Refuse one file written for a newer slab, before its keys are merged."""
-    declared = raw.get("schema_version")
-    if isinstance(declared, int) and declared > SCHEMA_VERSION:
+    """Refuse one file written for a newer slab, before its keys are merged.
+
+    This runs in :func:`load_merged`, so it is the check every package gets.
+    A view model can only refuse a version in a table it validates, and each
+    package validates only its own, so leaving the bound to ``SlabConfig``
+    would let Foundation and Mason read a future file's keys as if they meant
+    what they mean today.
+    """
+    if "schema_version" not in raw:
+        return
+    declared = raw["schema_version"]
+    if not isinstance(declared, int) or isinstance(declared, bool):
+        raise ConfigError(
+            f"{path} declares schema_version {declared!r}, which is not an "
+            f"integer; this slab understands {SCHEMA_VERSION}"
+        )
+    if declared > SCHEMA_VERSION:
         raise ConfigError(
             f"{path} declares schema_version {declared}, newer than this slab "
-            f"understands ({SCHEMA_VERSION}); upgrade slab to read it"
+            f"understands ({SCHEMA_VERSION}); upgrade slab-stack to read it"
         )
+    if declared < 1:
+        raise ConfigError(f"{path} declares schema_version {declared}; it must be >= 1")
 
 
 def _read_toml(path: Path) -> dict[str, Any]:
@@ -502,6 +533,12 @@ def _merge_into(
         ):
             _merge_into(target[key], value, origins, source, prefix=f"{dotted}.")
         else:
+            if isinstance(target.get(key), dict) and not isinstance(value, dict):
+                # A scalar replacing a whole table erases the table's leaves;
+                # their origins must go with them, or the show command reports
+                # phantom keys with confident attributions.
+                for stale in [k for k in origins if k.startswith(f"{dotted}.")]:
+                    del origins[stale]
             target[key] = value
             _set_origin_tree(origins, dotted, value, source)
 
@@ -513,51 +550,6 @@ def _set_origin_tree(origins: dict[str, str], dotted: str, value: Any, source: s
             _set_origin_tree(origins, f"{dotted}.{key}", child, source)
     else:
         origins[dotted] = source
-
-
-def _expand_path_values(merged: dict[str, Any], origins: dict[str, str]) -> None:
-    """Expand ``~`` and ``${VAR}`` in path-valued keys; unset variables refuse."""
-    for dotted in _PATH_KEYS:
-        parts = dotted.split(".")
-        node: Any = merged
-        for part in parts[:-1]:
-            if not isinstance(node, dict):
-                return  # a type error the schema will report properly
-            node = node.get(part)
-            if node is None:
-                break
-        else:
-            leaf = parts[-1]
-            if isinstance(node, dict) and isinstance(node.get(leaf), str):
-                node[leaf] = _expand_path(node[leaf], dotted, origins.get(dotted, "config"))
-
-
-def _expand_path(text: str, dotted: str, source: str) -> str:
-    """``~`` and ``${VAR}``/``$VAR`` expansion that refuses unset variables.
-
-    ``os.path.expandvars`` leaves unknown variables literal — a path like
-    ``/scratch/$USRE/slab`` would quietly become a directory named ``$USRE``.
-    Loud beats quiet.
-
-    Examples:
-        >>> import os
-        >>> os.environ["SLAB_DOCTEST_USER"] = "tom"
-        >>> _expand_path("/scratch/${SLAB_DOCTEST_USER}/x", "paths.workspace", "demo")
-        '/scratch/tom/x'
-        >>> del os.environ["SLAB_DOCTEST_USER"]
-    """
-
-    def substitute(match: re.Match[str]) -> str:
-        name = match.group(1) or match.group(2)
-        value = os.environ.get(name)
-        if value is None:
-            raise ConfigError(
-                f"{source}: {dotted} = {text!r} references ${name}, "
-                f"which is not set in the environment"
-            )
-        return value
-
-    return os.path.expanduser(_VAR_PATTERN.sub(substitute, text))
 
 
 def _origin_for(dotted: str, origins: dict[str, str]) -> str:
@@ -601,12 +593,20 @@ CONFIG_TEMPLATE = '''\
 # 'slab config show' prints the merged result with each value's origin.
 schema_version = 1
 
-[paths]
-# workspace = "/scratch/${USER}/slab-workspace"   # run database + artifacts
+# One file, three packages. Each table below is owned by exactly one of them:
+# [paths], [engines], and [hpc] by slab; [workspace] by foundation; [agent] by
+# mason. A table's owner validates it, so a typo inside [agent] is refused by
+# 'mason doctor' rather than by 'slab engines list'. A table name no package
+# owns is refused by every command that reads the file.
+
+[workspace]
+# root = "/scratch/${USER}/slab-workspace"        # run database + artifacts
 #                                      # (parallel scratch works — slab falls back
 #                                      # from WAL journaling automatically — but
 #                                      # avoid heavy login-node polling of a
 #                                      # workspace a running job is writing to)
+
+[paths]
 # pseudos = "/shared/sw/slab/pseudos"             # pseudopotential family root
 # engines = "/shared/sw/slab/engines.json"        # cluster engine registry
 # scratch = "/scratch/${USER}/slab-scratch"       # per-calculation scratch root:
@@ -684,11 +684,11 @@ schema_version = 1
 
 [agent]
 # provider = "openai"                       # "openai" = any OpenAI-compatible server; "anthropic"
-# model = "meta-models/Muse-Glimmer-30B"    # as the server names it ('slab mason doctor'
+# model = "meta-models/Muse-Glimmer-30B"    # as the server names it ('mason doctor'
 #                                           # lists); an absolute path to a downloaded
 #                                           # model directory also works, and never
 #                                           # touches the network
-# endpoint = "http://gpu-node-01:8000/v1"   # leave unset on a cluster: 'slab mason serve'
+# endpoint = "http://gpu-node-01:8000/v1"   # leave unset on a cluster: 'mason serve'
 #                                           # records the URL of the node it landed on
 # api_key_env = "SLAB_AGENT_API_KEY"        # NAME of the env var holding the key, never the key
 # context_window = 131072                   # tokens the endpoint actually serves
@@ -712,7 +712,7 @@ schema_version = 1
 # effort = "medium"                         # low | medium | high | xhigh | max
 # max_reply_tokens = 16000                  # bounds thinking AND reply together
 
-# How 'slab mason serve' starts that server as a batch job. The GPU node is the
+# How 'mason serve' starts that server as a batch job. The GPU node is the
 # scheduler's choice, so the endpoint URL is discovered, never configured.
 # Compute nodes rarely have internet: download the model once, on the login node
 # ('HF_HOME=/path/to/hf-cache hf download meta-models/Muse-Glimmer-30B'), and let

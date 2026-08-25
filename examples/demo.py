@@ -5,18 +5,18 @@ stated intent. Verification checks (force convergence, finite energy, declared
 units) gate each run to `verified`. Nothing here is "production" — that
 decision happens *after* the results exist, from the CLI:
 
-    python examples/demo.py                 # MACE + Si (needs: pip install 'slab[mace]')
+    python examples/demo.py                 # MACE + Si (needs: pip install 'slab-stack[mace]')
     python examples/demo.py --engine emt    # EMT + Cu, no extra install, seconds
 
-    slab list
-    slab show <best-run-id>
-    slab promote <best-run-id> --reason "lowest energy of 5 variants"
-    slab expire --older-than 0d
-    slab gc
-    slab list --state expired               # hash-only skeletons remain queryable
+    foundation list
+    foundation show <best-run-id>
+    foundation promote <best-run-id> --reason "lowest energy of 5 variants"
+    foundation expire --older-than 0d
+    foundation gc
+    foundation list --state expired               # hash-only skeletons remain queryable
 
 This script manages its own runs (five of them), so it is executed with plain
-``python``, not ``slab run`` — SLAB is a library first.
+``python``, not ``foundation run`` — SLAB is a library first.
 """
 
 from __future__ import annotations
@@ -28,8 +28,8 @@ from pathlib import Path
 import ase.io
 from ase.build import bulk
 
-from slab import Workspace, check, converged, finite, units
-from slab.tasks import relax
+from foundation import Workspace, check, converged, finite, units
+from foundation.tasks import relax
 
 
 def build_base(engine: str):  # returns ase.Atoms
@@ -108,9 +108,9 @@ def main() -> None:
     print()
     print(f"lowest energy: run {best_id[:10]}  (E = {best_info['energy']:.6f} eV)")
     print("decide what deserves permanence, then clean up:")
-    print(f"  slab promote {best_id[:10]} --reason 'lowest energy of 5 variants'")
-    print("  slab expire --older-than 0d")
-    print("  slab gc")
+    print(f"  foundation promote {best_id[:10]} --reason 'lowest energy of 5 variants'")
+    print("  foundation expire --older-than 0d")
+    print("  foundation gc")
 
 
 if __name__ == "__main__":

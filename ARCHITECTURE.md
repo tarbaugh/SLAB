@@ -126,7 +126,7 @@ irreplaceable data, only the compute to regenerate it (see §4).
 **Curation must be the path of least resistance.** In a keep-everything
 system, hygiene requires ongoing effort, so entropy wins. In SLAB, hygiene is
 the automatic outcome and *keeping* is the deliberate one-command act
-(`slab promote <id> --reason ...`), performed exactly when the user knows why.
+(`foundation promote <id> --reason ...`), performed exactly when the user knows why.
 The archive converges toward being a set of things someone chose, each
 carrying the reason it was chosen.
 
@@ -311,7 +311,7 @@ material system and the actual failure — but only from evidence. So the
 failure surface delivers evidence and stops there:
 
 - **Structured failure records.** A failed run or task stores, next to its
-  one-line `error`, a `failure` record built by `slab.errors.failure_record`:
+  one-line `error`, a `failure` record built by `foundation.errors.failure_record`:
   exception type, message, and traceback with chained causes. The record is
   deliberately token-bounded — messages clip at 2 kchars, deep frame runs keep
   the entry point and the failure site with the middle elided, the whole text
@@ -340,26 +340,57 @@ failure surface delivers evidence and stops there:
 - **Checks report their numbers.** `CheckResult` always stored
   `observed`/`expected`; `run_details` now surfaces them over the CLI's
   `--json` and MCP, so "fmax 0.062 vs 0.05" is data, not prose.
-- **Tiered delivery.** `slab list` shows one line per run; the full evidence
+- **Tiered delivery.** `foundation list` shows one line per run; the full evidence
   is fetched per-run by `show`. Best-effort capture never masks the original
   exception: if keeping diagnostics itself fails, the failure record says so
   and the real error still propagates.
 
 ## 7. The layers
 
+Three packages ship as one distribution (`slab-stack`), each with a command
+of the same name. The boundary between them is a dependency rule, and the
+rule points one way only:
+
 ```
-CLI (typer)          MCP server (stdio)      ← two skins, one behavior
-         \                /
-          slab._ops                          ← shared operations
-              |
-   Workspace / ActiveRun / @task / @check     ← runtime (contextvar-scoped)
-              |
-   RunStore protocol ──── SQLiteRunStore      ← metadata: runs, transitions,
-              |                                 tasks, checks, artifact refs
-   ArtifactStore (CAS)                        ← bytes, content-addressed
-              |
-   backends.get_calculator("mace"|"qe"|"emt") ← ASE Calculator seam
+┌─ mason ─────────────────────────────────────────────────────────┐
+│  ReAct loop · tools · session · prompts · served model endpoint │
+└───────────────────────┬─────────────────────────────────────────┘
+                        │ depends on
+┌─ foundation ──────────▼─────────────────────────────────────────┐
+│  CLI (typer)        MCP server (stdio)   ← two skins, one behavior│
+│           \             /                                        │
+│            foundation._ops               ← shared operations     │
+│                 |                                                │
+│  Workspace / ActiveRun / @task / @check   ← runtime (contextvar) │
+│                 |                                                │
+│  RunStore protocol ── SQLiteRunStore      ← runs, transitions,   │
+│                 |                            tasks, checks, refs │
+│  ArtifactStore (CAS)                      ← bytes, hash-addressed│
+└───────────────────────┬─────────────────────────────────────────┘
+                        │ depends on
+┌─ slab ────────────────▼─────────────────────────────────────────┐
+│  backends.get_calculator("mace"|"qe"|"lammps"|"emt")             │
+│                                           ← ASE Calculator seam  │
+│  engine registry · QE protocols · pseudo families · SLURM · config│
+└─────────────────────────────────────────────────────────────────┘
 ```
+
+The split follows from what each layer is allowed to know. `slab` reaches
+computational software and knows nothing about runs; it is usable with no
+workspace at all. `foundation` is everything between the calculator and the
+agent — state, provenance, workflows, and the surfaces that expose them —
+and it is usable with no agent at all. `mason` is one way to drive the
+stack, not the only way, which is exactly why it is a peer of `foundation`
+rather than a layer inside it: the CLI and the MCP server are the other two,
+and none of the three belongs inside another.
+
+That rule is not a convention. `tests/test_layering.py` walks the AST of
+every module and fails on an upward import, including one inside a function,
+under `if TYPE_CHECKING:`, or in a `try/except ImportError` fallback — the
+places a violation hides from a passing test suite. The single shared file
+(`slab.toml`) is partitioned the same way: each package owns whole tables and
+validates only its own, so a typo in `[agent]` is Mason's to refuse and
+invisible to `slab engines list`.
 
 - **Storage.** One SQLite file (WAL, `BEGIN IMMEDIATE` writes, in-transaction
   revalidation; tested against racing threads and stale cross-process
@@ -372,8 +403,8 @@ CLI (typer)          MCP server (stdio)      ← two skins, one behavior
   cluster-served, ASE's toys) and the cluster engine registry (§7a). SLAB
   implements no physics; adding VASP means adding a registry entry, and
   nothing in tracing, lifecycle, or retention changes. Heavy imports (ASE, torch) are
-  quarantined behind `slab.tasks`/`slab.backends` so the core package and CLI
-  stay import-light.
+  quarantined behind `foundation.tasks`/`slab.backends`, so importing either
+  package root — and every CLI that does — stays cheap.
 - **Local-first execution.** The MVP runs tasks in-process. Checkpointing and
   restart come from the cache (§5), not from an executor: rerunning a script
   *is* the resume mechanism. A SLURM executor can slot behind `@task` later
@@ -501,12 +532,12 @@ no silent resource defaults), submit with `--parsable`, poll `squeue` with
 an `sacct` fallback onto a seven-state enum (raw SLURM state preserved as
 evidence; the unanswerable reported `undetermined`, never guessed), cancel
 idempotently. There is no remote state machine — the payload is typically
-`slab run workflow.py`, so runs, caching, and verification stay in the
+`foundation run workflow.py`, so runs, caching, and verification stay in the
 workspace wherever the process executes.
 
 ### 7d. Mason: the harness above the layer
 
-`slab.mason` is the complement of the MCP server: MCP serves *external*
+`mason` is the complement of the MCP server: MCP serves *external*
 agents a workspace; Mason is the *resident* agent — a Claude-Code-class
 harness for open-weight models (stdlib client over the OpenAI-compatible
 API; vLLM, Ollama) tuned for long research projects. Its load-bearing
@@ -514,9 +545,9 @@ choices are distilled from the 2024-2026 harness literature and cited in
 the Mason tutorial (docs/tutorials/mason.md); the ones that are
 SLAB-shaped:
 
-- **Physics through `slab_launch` only.** The agent writes workflow
+- **Physics through `launch_workflow` only.** The agent writes workflow
   scripts and runs them as traced, check-gated runs; every reported number
-  carries a run id an auditor can `slab show`. The harness does not grant
+  carries a run id an auditor can `foundation show`. The harness does not grant
   the model a faster, unprovenanced path to a calculator.
 - **Memory is files in the project** — an append-only `NOTEBOOK.md`, a
   living `PLAN.md`, append-only JSONL transcripts. Compaction summaries

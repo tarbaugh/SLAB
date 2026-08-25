@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from conftest import LlmScript
-from slab.mason.client import (
+from mason.client import (
     ChatClient,
     ContextOverflowError,
     LlmError,
@@ -147,7 +147,7 @@ def test_unreachable_endpoint_teaches_and_bounds_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sleeps: list[float] = []
-    monkeypatch.setattr("slab.mason.client.time.sleep", sleeps.append)
+    monkeypatch.setattr("mason.client.time.sleep", sleeps.append)
     client = ChatClient("http://127.0.0.1:9", "m", timeout_s=2)
     with pytest.raises(LlmError, match="is the model server running"):
         client.chat([])
@@ -196,21 +196,21 @@ def test_fenced_calls_require_the_documented_shape() -> None:
 
 
 def test_loose_calls_catch_llama_style_text_json() -> None:
-    from slab.mason.client import parse_loose_calls
+    from mason.client import parse_loose_calls
 
-    known = frozenset({"slab_launch", "shell"})
+    known = frozenset({"launch_workflow", "shell"})
     content = (
-        "I will run it with slab_launch:\n\n"
-        '{"name": "slab_launch", "parameters": {"script": "wf.py", "intent": "relax Cu"}}'
+        "I will run it with launch_workflow:\n\n"
+        '{"name": "launch_workflow", "parameters": {"script": "wf.py", "intent": "relax Cu"}}'
     )
     calls = parse_loose_calls(content, known)
     assert len(calls) == 1
-    assert calls[0].name == "slab_launch"
+    assert calls[0].name == "launch_workflow"
     assert calls[0].arguments == {"script": "wf.py", "intent": "relax Cu"}
 
 
 def test_loose_calls_ignore_prose_and_bad_shapes() -> None:
-    from slab.mason.client import parse_loose_calls
+    from mason.client import parse_loose_calls
 
     known = frozenset({"shell"})
     assert parse_loose_calls('the {"name": "field"} key is prose', known) == ()
@@ -223,7 +223,7 @@ def test_loose_calls_ignore_prose_and_bad_shapes() -> None:
 
 
 def test_loose_calls_never_execute_quoted_examples() -> None:
-    from slab.mason.client import parse_loose_calls
+    from mason.client import parse_loose_calls
 
     known = frozenset({"finish", "shell"})
     quoted = (
@@ -241,7 +241,7 @@ def test_5xx_answers_are_retried_then_surfaced(
     llm_server: tuple[str, LlmScript], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     url, script = llm_server
-    monkeypatch.setattr("slab.mason.client.time.sleep", lambda s: None)
+    monkeypatch.setattr("mason.client.time.sleep", lambda s: None)
     script.responses.append((503, {"error": {"message": "overloaded"}}))
     script.responses.append((503, {"error": {"message": "overloaded"}}))
     script.responses.append((200, _reply({"content": "recovered"})))
@@ -253,7 +253,7 @@ def test_5xx_answers_are_retried_then_surfaced(
 def test_loose_calls_surface_hallucinated_tool_names_for_teaching() -> None:
     """A well-shaped call naming an unknown tool reaches dispatch, whose
     'unknown tool' answer lists the real catalog — better than a dead end."""
-    from slab.mason.client import parse_loose_calls
+    from mason.client import parse_loose_calls
 
     known = frozenset({"shell"})
     calls = parse_loose_calls('{"name": "slab_run", "parameters": {"path": "x"}}', known)

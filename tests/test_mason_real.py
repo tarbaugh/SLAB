@@ -16,9 +16,9 @@ from pathlib import Path
 
 import pytest
 
-from slab.config import SlabConfig
-from slab.mason.loop import Mason
-from slab.mason.session import MasonSession
+from mason.config import MasonConfig
+from mason.loop import Mason
+from mason.session import MasonSession
 
 ENDPOINT = os.environ.get("SLAB_TEST_LLM")
 MODEL = os.environ.get("SLAB_TEST_LLM_MODEL")
@@ -34,7 +34,7 @@ def test_real_model_reads_a_file_and_answers(tmp_path: Path) -> None:
     # has returned") is what makes 8B-class models take the tool path reliably;
     # softer phrasings make them guess. One retry absorbs residual sampling noise.
     (tmp_path / "data.txt").write_text("the secret word is perovskite\n")
-    config = SlabConfig.model_validate(
+    config = MasonConfig.model_validate(
         {"agent": {"endpoint": ENDPOINT, "model": MODEL, "max_turns": 6, "temperature": 0.0}}
     )
     goal = (
@@ -44,7 +44,7 @@ def test_real_model_reads_a_file_and_answers(tmp_path: Path) -> None:
     last = ""
     for _attempt in range(2):
         session = MasonSession(
-            tmp_path, workspace_root=tmp_path / ".slab", config=config, auto_approve=True
+            tmp_path, workspace_root=tmp_path / ".slab", agent=config.agent, auto_approve=True
         )
         result = Mason(session).run_turn(goal)
         assert result.stop_reason in ("answer", "finish")
@@ -64,7 +64,7 @@ def test_real_model_is_reached_through_a_served_record(tmp_path: Path) -> None:
     writes. Writing one by hand and getting a real model to answer through it
     is the closest a laptop can come to the cluster handshake.
     """
-    from slab.mason.serve import discover_endpoint, record_path
+    from mason.serve import discover_endpoint, record_path
 
     assert ENDPOINT and MODEL  # guarded by pytestmark
     root = tmp_path / ".slab"
@@ -83,11 +83,11 @@ def test_real_model_is_reached_through_a_served_record(tmp_path: Path) -> None:
     )
     (tmp_path / "data.txt").write_text("the secret word is perovskite\n")
     # No [agent] endpoint: the record is the only route to the server.
-    config = SlabConfig.model_validate(
+    config = MasonConfig.model_validate(
         {"agent": {"model": MODEL, "max_turns": 6, "temperature": 0.0}}
     )
     assert discover_endpoint(config.agent, root) == (ENDPOINT, "job 8675309 on test-node")
-    session = MasonSession(tmp_path, workspace_root=root, config=config, auto_approve=True)
+    session = MasonSession(tmp_path, workspace_root=root, agent=config.agent, auto_approve=True)
     assert session.endpoint == ENDPOINT
     result = Mason(session).run_turn(
         "Use the read_file tool on data.txt. You may not call finish until "
@@ -114,7 +114,7 @@ def test_real_anthropic_provider_reads_a_file_and_answers(tmp_path: Path) -> Non
     Override the model with ``$SLAB_TEST_ANTHROPIC_MODEL``.
     """
     (tmp_path / "data.txt").write_text("the secret word is perovskite\n")
-    config = SlabConfig.model_validate(
+    config = MasonConfig.model_validate(
         {
             "agent": {
                 "provider": "anthropic",
@@ -125,7 +125,7 @@ def test_real_anthropic_provider_reads_a_file_and_answers(tmp_path: Path) -> Non
         }
     )
     session = MasonSession(
-        tmp_path, workspace_root=tmp_path / ".slab", config=config, auto_approve=True
+        tmp_path, workspace_root=tmp_path / ".slab", agent=config.agent, auto_approve=True
     )
     result = Mason(session).run_turn(
         "Use the read_file tool on data.txt, then call finish reporting the secret word."

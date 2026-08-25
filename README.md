@@ -13,9 +13,10 @@ script runs. Machine-checkable verification hooks decide when a run counts
 as verified, and an explicit promotion command is the only action that makes
 data permanent. Everything else expires automatically.
 
+<!-- no-verify -->
 ```python
-from slab import Workspace, task, check, converged
-from slab.tasks import relax
+from foundation import Workspace, task, check, converged
+from foundation.tasks import relax
 
 ws = Workspace(".slab")
 with ws.start_run(name="si-relax", intent="baseline lattice constant") as run:
@@ -28,6 +29,21 @@ with ws.start_run(name="si-relax", intent="baseline lattice constant") as run:
     run.keep("relaxed.xyz", relaxed)                          # declared terminal artifact
 # exit: checks evaluated -> quarantined becomes verified; promote it when you decide it matters
 ```
+
+## Three packages
+
+SLAB is three packages in one distribution, `slab-stack`. Each installs a
+command of the same name.
+
+| Package | What it gives you |
+|---|---|
+| `slab` | Access to computational software: engines and calculators, the cluster engine registry, QE protocols, pseudopotential families, and the SLURM layer. |
+| `foundation` | Workflows and state: runs, artifacts, caching, verification, retention, and the MCP server. |
+| `mason` | The resident research agent. |
+
+`mason` depends on `foundation` and `slab`, `foundation` depends on `slab`,
+and `slab` depends on neither. So you can drive an engine without a
+workspace, and keep a workspace without an agent.
 
 ## Why
 
@@ -82,9 +98,10 @@ pip install -e ".[mcp]"       # + MCP server for agents
 pip install -e ".[dev]"       # tests, lint, types
 ```
 
-Python ≥ 3.11. There is no daemon, no database server, and no
-configuration. A workspace is a directory (`.slab/` by default) that holds a
-SQLite file and a content-addressed store.
+One install brings all three packages and all three commands. Python ≥
+3.11. There is no daemon, no database server, and no configuration. A
+workspace is a directory (`.slab/` by default) that holds a SQLite file and
+a content-addressed store.
 
 ## The demo
 
@@ -96,15 +113,21 @@ python examples/demo.py                # MACE + Si (downloads the model on first
 python examples/demo.py --engine emt   # EMT + Cu: no extras, runs in seconds
 ```
 
+The output, with MACE's own loader messages omitted:
+
 ```text
 workspace: .slab   engine: mace   system: Si x 64 atoms
-  run 01kzs2m7s1  E = -343.628458 eV  fmax = 0.0382  steps = 10  -> verified
-  run 01kzs2mad3  E = -343.626565 eV  fmax = 0.0442  steps = 14  -> verified
-  run 01kzs2mbwn  E = -343.628352 eV  fmax = 0.0417  steps = 19  -> verified
-  run 01kzs2mdw7  E = -343.626973 eV  fmax = 0.0472  steps = 20  -> verified
-  run 01kzs2mfwn  E = -343.626718 eV  fmax = 0.0450  steps = 21  -> verified
+  run 01m0v7tefx  E = -343.628458 eV  fmax = 0.0382  steps = 10  -> verified
+  run 01m0v7th31  E = -343.626565 eV  fmax = 0.0442  steps = 14  -> verified
+  run 01m0v7tjhz  E = -343.628352 eV  fmax = 0.0417  steps = 19  -> verified
+  run 01m0v7tmg4  E = -343.626973 eV  fmax = 0.0472  steps = 20  -> verified
+  run 01m0v7tph3  E = -343.626718 eV  fmax = 0.0450  steps = 21  -> verified
 
-lowest energy: run 01kzs2m7s1  (E = -343.628458 eV)
+lowest energy: run 01m0v7tefx  (E = -343.628458 eV)
+decide what deserves permanence, then clean up:
+  foundation promote 01m0v7tefx --reason 'lowest energy of 5 variants'
+  foundation expire --older-than 0d
+  foundation gc
 ```
 
 Each variant is its own run with a stated intent, and the convergence checks
@@ -112,22 +135,28 @@ passed, so all five landed `verified`. Nothing is permanent yet. That
 decision happens now, after the results exist:
 
 ```bash
-$ slab promote 01kzs2m7s1 --reason "lowest energy of 5 variants"
-promoted 01kzs2m7s1gd2dr127x58azfqk  si-relax-0
+$ foundation promote 01m0v7tefx --reason "lowest energy of 5 variants"
+promoted 01m0v7tefx69nvg32fs2tjdjze  si-relax-0
 
-$ slab expire --older-than 0d
+$ foundation expire --older-than 0d
+expired 01m0v7tph3bwc3dwtya44tb0f4  si-relax-4
+expired 01m0v7tmg4gj4af1b8yk9t3ty3  si-relax-3
+expired 01m0v7tjhzacze4rw6w52h4k6k  si-relax-2
+expired 01m0v7th3146ysdd274zb5b8sp  si-relax-1
 4 run(s) expired
 
-$ slab gc
-dropped 31 blob(s), freeing 444075 bytes; 8 kept
+$ foundation gc
+dropped 31 blob(s), freeing 444335 bytes; 8 kept
 ```
 
 The archive now contains exactly one run's terminal artifacts, plus its
 recompute roots, while everything else is a hash-and-recipe skeleton that
-remains fully queryable:
+remains fully queryable. The two `show` views below are condensed side by
+side; the values come from those runs:
 
+<!-- no-verify -->
 ```text
-$ slab show 01kzs2m7s1                      $ slab show 01kzs2mad3   # expired
+$ foundation show 01m0v7tefx          $ foundation show 01m0v7th31   # expired
   state:   promoted                           state:   expired
   checks:  3/3 passed                         checks:  3/3 passed
   artifacts:                                  artifacts:
@@ -140,14 +169,14 @@ $ slab show 01kzs2m7s1                      $ slab show 01kzs2mad3   # expired
 
 | Verb | What it does |
 | --- | --- |
-| `slab run script.py` | Execute a zero-ceremony workflow script inside a traced run (lands in quarantine). Scripts that manage their own runs are executed with plain `python`. |
-| `slab list [--state S] [--status S] [-q]` | List runs, newest first. |
-| `slab show <id> [--json]` | One run: state, intent, checks, tasks, artifacts, history. Ids accept unique prefixes, git-style. |
-| `slab promote <id> [--reason ...] [--force]` | Make a run permanent. `--force` promotes an unverified run and is recorded as forced. |
-| `slab expire [--older-than 30d] [--include-running]` | Expire unpromoted runs past their TTL (state change only). `0d` = everything unpromoted, now. Runs at status `running` are protected unless `--include-running` (for hard-killed processes that can never advance their own status; they are marked failed first). |
-| `slab gc [--dry-run]` | Drop artifact bytes no retention rule demands. |
+| `foundation run script.py` | Execute a zero-ceremony workflow script inside a traced run (lands in quarantine). Scripts that manage their own runs are executed with plain `python`. |
+| `foundation list [--state S] [--status S] [-q]` | List runs, newest first. |
+| `foundation show <id> [--json]` | One run: state, intent, checks, tasks, artifacts, history. Ids accept unique prefixes, git-style. |
+| `foundation promote <id> [--reason ...] [--force]` | Make a run permanent. `--force` promotes an unverified run and is recorded as forced. |
+| `foundation expire [--older-than 30d] [--include-running]` | Expire unpromoted runs past their TTL (state change only). `0d` = everything unpromoted, now. Runs at status `running` are protected unless `--include-running` (for hard-killed processes that can never advance their own status; they are marked failed first). |
+| `foundation gc [--dry-run]` | Drop artifact bytes no retention rule demands. |
 | `slab engines list` / `slab engines verify` | Inspect / smoke-test the cluster engine registry. |
-| `slab mcp` | Serve the workspace to agents over MCP (stdio). |
+| `foundation mcp` | Serve the workspace to agents over MCP (stdio). |
 
 Workspace resolution: `-w/--workspace` flag > `$SLAB_WORKSPACE` > `./.slab`.
 Retention policy: `--policy file.json` > `<workspace>/policy.json` > defaults.
@@ -176,7 +205,7 @@ protocol:
   runs sit in quarantine with a TTL, so diagnostics self-clean instead of
   accumulating forever.
 - Checks store the `observed` and `expected` values their assertions
-  compared, and `slab show --json` and the MCP `show_run` tool return them.
+  compared, and `foundation show --json` and the MCP `show_run` tool return them.
   Those are the numbers a correction is computed from, so "fmax was 0.062
   against 0.05" leads to a rerun with more steps.
 
@@ -208,8 +237,9 @@ and it uses rootstock itself for the MLIP case.
 install, any canonical checkpoint id works directly as the engine name.
 Rootstock resolves the hosting environment and serves the model, so your
 Python environment stays free of torch and model packages, and
-`pip install 'slab[rootstock]'` adds only a thin client:
+`pip install 'slab-stack[rootstock]'` adds only a thin client:
 
+<!-- no-verify -->
 ```python
 relaxed, info = relax(
     atoms,
@@ -235,6 +265,7 @@ once, and everything else is standard `Espresso` options.
 `resolve_pseudopotentials` maps elements to `.upf` files, and it refuses
 ambiguity rather than guessing:
 
+<!-- no-verify -->
 ```python
 from slab.backends import resolve_pseudopotentials
 
@@ -271,9 +302,10 @@ the named input protocols from
 pw.x inputs, with family-recommended cutoffs, a k-mesh from a reciprocal
 spacing, cold smearing, and per-atom-scaled thresholds:
 
+<!-- no-verify -->
 ```python
 from slab.protocols import qe_protocol_options
-from slab.tasks import single_point
+from foundation.tasks import single_point
 
 options = qe_protocol_options(atoms, protocol="balanced")   # explicit, never a default
 relaxed, info = relax(atoms, engine="mace", fmax=0.02)      # cheap geometry
@@ -386,8 +418,8 @@ partitions. The partitions drive a deliberately thin scheduler layer:
 
 ```bash
 slab hpc partitions                                  # what the config declares
-slab hpc render "slab run relax.py" --name si        # the exact sbatch script
-slab hpc submit "slab run relax.py" --name si        # sbatch --parsable
+slab hpc render "foundation run relax.py" --name si        # the exact sbatch script
+slab hpc submit "foundation run relax.py" --name si        # sbatch --parsable
 slab hpc status 4242314                              # squeue, then sacct
 ```
 
@@ -400,7 +432,7 @@ what recipes record.
 ## Agent surface (MCP)
 
 ```json
-{"mcpServers": {"slab": {"command": "slab", "args": ["mcp"]}}}
+{"mcpServers": {"foundation": {"command": "foundation", "args": ["mcp"]}}}
 ```
 
 Tools: `launch_workflow`, `list_runs`, `show_run`, `promote_run`,
@@ -410,22 +442,22 @@ result, so prints cannot corrupt the protocol channel.
 
 ## Mason: the resident research agent
 
-`slab mason` is a built-in Claude-Code-class agent harness for
+`mason` is a built-in Claude-Code-class agent harness for
 **open-weight models** on your own hardware, whether that is Ollama on a
 laptop or vLLM on a compute node, through the OpenAI-compatible API with a
 stdlib HTTP client and no SDK. It is tuned for long atomistic research
 projects. Calculations run as SLAB workflow scripts through its
-`slab_launch` tool, so every number it reports traces to a run id and its
+`launch_workflow` tool, so every number it reports traces to a run id and its
 `@check` assertions. Memory lives in `NOTEBOOK.md` and `PLAN.md` in the
 project directory, because files outlive context windows, and history
 compacts into structured summaries well before the model's window fills.
 SLURM tools appear exactly when the config declares partitions.
 
 ```bash
-slab mason serve start --wait # start the model on a GPU node (a batch job)
-slab mason doctor             # endpoint reachable? model served? tool calls parsed?
-slab mason chat               # interactive session
-slab mason run "..." --auto   # one autonomous goal
+mason serve start --wait # start the model on a GPU node (a batch job)
+mason doctor                  # endpoint reachable? model served? tool calls parsed?
+mason chat                    # interactive session
+mason run "..." --auto   # one autonomous goal
 ```
 
 On a cluster the endpoint is **discovered, not configured**. The GPU node is
@@ -479,14 +511,15 @@ MVP vertical slice, working end to end. It includes:
 - layered HPC configuration with a SLURM submission layer;
 - the Mason agent harness, for open models self-served on a GPU node or for
   Claude, with its model server as a batch job;
-- a CLI and an MCP server.
+- three commands (`slab`, `foundation`, `mason`) and an MCP server.
 
-Quality gates: 900+ tests (including every docstring example, executed as
-doctests), ~96% coverage, mypy `--strict`, and adversarial multi-agent review
-passes whose confirmed findings are regression tests. The QE engine is
-verified against a real `pw.x` 7.4.1, the LAMMPS engine against a real
-`lmp`, the balanced protocol against a real SSSP install, and Mason against
-a real Llama via Ollama. The `RunStore` protocol is the seam for Postgres,
+Quality gates: 1000+ tests (including every docstring example, executed as
+doctests), ~95% coverage, mypy `--strict`, and adversarial multi-agent review
+passes whose confirmed findings are regression tests. A test reads the AST of
+every module and fails on an import that crosses the package layering the
+wrong way. The QE engine is verified against a real `pw.x` 7.4.1, the LAMMPS
+engine against a real `lmp`, the balanced protocol against a real SSSP
+install, and Mason against a real Llama via Ollama. The `RunStore` protocol is the seam for Postgres,
 and the backend factory is the seam for more engines.
 
 ## Development
@@ -495,7 +528,7 @@ and the backend factory is the seam for more engines.
 python -m venv .venv && .venv/bin/pip install -e ".[dev,mcp]"
 .venv/bin/pytest          # tests + doctests + coverage
 .venv/bin/mypy            # strict on src/
-.venv/bin/ruff check src tests
+.venv/bin/ruff check .
 ```
 
 Docstring examples are executed as doctests on every test run, so the API

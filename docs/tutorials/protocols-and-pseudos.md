@@ -116,7 +116,7 @@ atoms-aware call, and it returns a plain `calculator_options` dict of
 ```python
 from ase.build import bulk
 from slab.protocols import qe_protocol_options
-from slab.tasks import relax
+from foundation.tasks import relax
 
 atoms = bulk("Si", "diamond", a=5.43)
 options = qe_protocol_options(atoms, protocol="balanced")

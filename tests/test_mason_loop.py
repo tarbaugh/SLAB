@@ -6,10 +6,11 @@ from typing import Any
 
 import pytest
 
-from slab.config import SlabConfig
-from slab.mason.client import ChatReply, ContextOverflowError, ToolCall
-from slab.mason.loop import Mason
-from slab.mason.session import MasonSession
+from mason.client import ChatReply, ContextOverflowError, ToolCall
+from mason.config import MasonConfig
+from mason.loop import Mason
+from mason.session import MasonSession
+from slab.config import HpcConfig
 
 
 class FakeClient:
@@ -30,9 +31,9 @@ class FakeClient:
 
 
 def _session(tmp_path: Path, **agent: object) -> MasonSession:
-    config = SlabConfig.model_validate({"agent": {"model": "fake", **agent}})
+    config = MasonConfig.model_validate({"agent": {"model": "fake", **agent}})
     return MasonSession(
-        tmp_path, workspace_root=tmp_path / ".slab", config=config, auto_approve=True
+        tmp_path, workspace_root=tmp_path / ".slab", agent=config.agent, auto_approve=True
     )
 
 
@@ -285,14 +286,14 @@ def test_compute_profile_shapes_the_prompt_and_defaults_to_laptop(tmp_path: Path
 
 
 def test_compute_profile_follows_the_cluster_when_partitions_exist(tmp_path: Path) -> None:
-    config = SlabConfig.model_validate(
-        {
-            "agent": {"model": "fake"},
-            "hpc": {"default_partition": "cpu", "partitions": {"cpu": {}}},
-        }
-    )
+    config = MasonConfig.model_validate({"agent": {"model": "fake"}})
+    hpc = HpcConfig.model_validate({"default_partition": "cpu", "partitions": {"cpu": {}}})
     session = MasonSession(
-        tmp_path, workspace_root=tmp_path / ".slab", config=config, auto_approve=True
+        tmp_path,
+        workspace_root=tmp_path / ".slab",
+        agent=config.agent,
+        hpc=hpc,
+        auto_approve=True,
     )
     client = FakeClient([_text_reply("ok")])
     Mason(session, client=client).run_turn("hi")
@@ -303,13 +304,13 @@ def test_compute_profile_follows_the_cluster_when_partitions_exist(tmp_path: Pat
 
 
 def test_explicit_compute_profile_wins_over_the_derived_one(tmp_path: Path) -> None:
-    config = SlabConfig.model_validate(
-        {
-            "agent": {"model": "fake", "compute_profile": "workstation"},
-            "hpc": {"default_partition": "cpu", "partitions": {"cpu": {}}},
-        }
+    config = MasonConfig.model_validate(
+        {"agent": {"model": "fake", "compute_profile": "workstation"}}
     )
-    session = MasonSession(tmp_path, workspace_root=tmp_path / ".slab", config=config)
+    hpc = HpcConfig.model_validate({"default_partition": "cpu", "partitions": {"cpu": {}}})
+    session = MasonSession(
+        tmp_path, workspace_root=tmp_path / ".slab", agent=config.agent, hpc=hpc
+    )
     assert session.compute_profile == "workstation"
 
 
@@ -433,17 +434,17 @@ def test_compaction_boundary_never_orphans_tool_messages(tmp_path: Path) -> None
 
 
 def test_client_from_config_refusals(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from slab.errors import SlabError
-    from slab.mason.loop import client_from_config
+    from mason.errors import MasonError
+    from mason.loop import client_from_config
 
-    config = SlabConfig()
-    with pytest.raises(SlabError, match="no model configured"):
+    config = MasonConfig()
+    with pytest.raises(MasonError, match="no model configured"):
         client_from_config(config.agent)
     monkeypatch.delenv("MISSING_KEY_VAR", raising=False)
-    config = SlabConfig.model_validate(
+    config = MasonConfig.model_validate(
         {"agent": {"model": "m", "api_key_env": "MISSING_KEY_VAR"}}
     )
-    with pytest.raises(SlabError, match=r"\$MISSING_KEY_VAR"):
+    with pytest.raises(MasonError, match=r"\$MISSING_KEY_VAR"):
         client_from_config(config.agent)
     monkeypatch.setenv("MISSING_KEY_VAR", "sk-123")
     client = client_from_config(config.agent)

@@ -7,12 +7,20 @@
 # 'slab config show' prints the merged result with each value's origin.
 schema_version = 1
 
-[paths]
-# workspace = "/scratch/${USER}/slab-workspace"   # run database + artifacts
+# One file, three packages. Each table below is owned by exactly one of them:
+# [paths], [engines], and [hpc] by slab; [workspace] by foundation; [agent] by
+# mason. A table's owner validates it, so a typo inside [agent] is refused by
+# 'mason doctor' rather than by 'slab engines list'. A table name no package
+# owns is refused by every command that reads the file.
+
+[workspace]
+# root = "/scratch/${USER}/slab-workspace"        # run database + artifacts
 #                                      # (parallel scratch works — slab falls back
 #                                      # from WAL journaling automatically — but
 #                                      # avoid heavy login-node polling of a
 #                                      # workspace a running job is writing to)
+
+[paths]
 # pseudos = "/shared/sw/slab/pseudos"             # pseudopotential family root
 # engines = "/shared/sw/slab/engines.json"        # cluster engine registry
 # scratch = "/scratch/${USER}/slab-scratch"       # per-calculation scratch root:
@@ -90,11 +98,11 @@ schema_version = 1
 
 [agent]
 # provider = "openai"                       # "openai" = any OpenAI-compatible server; "anthropic"
-# model = "meta-models/Muse-Glimmer-30B"    # as the server names it ('slab mason doctor'
+# model = "meta-models/Muse-Glimmer-30B"    # as the server names it ('mason doctor'
 #                                           # lists); an absolute path to a downloaded
 #                                           # model directory also works, and never
 #                                           # touches the network
-# endpoint = "http://gpu-node-01:8000/v1"   # leave unset on a cluster: 'slab mason serve'
+# endpoint = "http://gpu-node-01:8000/v1"   # leave unset on a cluster: 'mason serve'
 #                                           # records the URL of the node it landed on
 # api_key_env = "SLAB_AGENT_API_KEY"        # NAME of the env var holding the key, never the key
 # context_window = 131072                   # tokens the endpoint actually serves
@@ -118,7 +126,7 @@ schema_version = 1
 # effort = "medium"                         # low | medium | high | xhigh | max
 # max_reply_tokens = 16000                  # bounds thinking AND reply together
 
-# How 'slab mason serve' starts that server as a batch job. The GPU node is the
+# How 'mason serve' starts that server as a batch job. The GPU node is the
 # scheduler's choice, so the endpoint URL is discovered, never configured.
 # Compute nodes rarely have internet: download the model once, on the login node
 # ('HF_HOME=/path/to/hf-cache hf download meta-models/Muse-Glimmer-30B'), and let

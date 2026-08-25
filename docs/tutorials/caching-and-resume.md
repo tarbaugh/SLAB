@@ -37,7 +37,7 @@ The tracer is inert outside a run. A decorated function called at module
 scope is just the function, so nothing is hashed and nothing is recorded:
 
 ```python
-from slab import Workspace, task
+from foundation import Workspace, task
 
 @task
 def scale(x):
@@ -179,7 +179,7 @@ invalidates the same way. See [Engines](engines.md) for the registry itself.
 
 ```python
 from ase.build import bulk
-from slab.tasks import relax
+from foundation.tasks import relax
 
 atoms = bulk("Cu", "fcc", a=3.58) * (2, 2, 2)
 atoms.rattle(stdev=0.05, seed=42)
