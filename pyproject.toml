@@ -14,6 +14,7 @@ dependencies = [
     "pydantic>=2.5",
     "typer>=0.12",
     "ase>=3.23",
+    "pyyaml>=6",
 ]
 
 [project.optional-dependencies]
@@ -33,6 +34,7 @@ dev = [
     "mypy>=1.11",
     "mcp>=1.2",
     "rootstock>=1.4",
+    "types-PyYAML>=6",
 ]
 docs = [
     "mkdocs-material>=9.5",
@@ -52,7 +54,8 @@ mason = "mason.cli:app"
 packages = ["src/slab", "src/foundation", "src/mason"]
 
 [tool.hatch.build.targets.sdist]
-exclude = [".claude"]
+# Plan files are working documents for the repository, not for the package.
+exclude = [".claude", "*-PLAN.md"]
 
 [tool.ruff]
 line-length = 100
@@ -86,8 +89,10 @@ disallow_untyped_calls = false
 
 [tool.pytest.ini_options]
 # --doctest-modules collects every .py file, so the recorded fixture workspace
-# (whose script imports the pre-split module paths on purpose) is skipped.
-addopts = "-q --doctest-modules --ignore=tests/data --cov=slab --cov=foundation --cov=mason --cov-report=term-missing"
+# (whose script imports the pre-split module paths on purpose) is skipped, and
+# so are the built-in skills: their scripts are argparse programs with
+# repeating shapes across skill directories, exercised through runpy instead.
+addopts = "-q --doctest-modules --ignore=tests/data --ignore=src/mason/skills --cov=slab --cov=foundation --cov=mason --cov-report=term-missing"
 testpaths = ["tests", "src"]
 filterwarnings = [
     # ASE-internal numpy 2.5 deprecations; not ours to fix
