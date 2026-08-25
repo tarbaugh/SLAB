@@ -74,6 +74,24 @@ class TurnResult(BaseModel):
         return self.stop_reason == "finish"
 
 
+def connection_profile(agent: AgentConfig) -> tuple[object, ...]:
+    """What must match for two agents to share one chat client.
+
+    Everything the client constructor bakes in: a delegation whose
+    specialist matches the parent on all of these reuses the parent's
+    client (one connection, one server); anything else builds its own.
+    """
+    return (
+        agent.provider,
+        agent.resolved_endpoint,
+        agent.model,
+        agent.temperature,
+        agent.effort,
+        agent.max_reply_tokens,
+        agent.request_timeout_s,
+    )
+
+
 def client_from_config(agent: AgentConfig) -> ChatBackend:
     """Build the client the config describes, refusing the unconfigured.
 
@@ -171,7 +189,14 @@ class Mason:
         self.toolbox = (
             toolbox
             if toolbox is not None
-            else build_toolbox(session, spec, depth=depth, skills=self.skills)
+            else build_toolbox(
+                session,
+                spec,
+                depth=depth,
+                skills=self.all_skills,
+                roster=self.roster,
+                parent_client=self.client,
+            )
         )
         self.fenced = session.agent.tool_protocol == "fenced"
         catalog = self.toolbox.catalog_text() if self.fenced else None

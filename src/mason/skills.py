@@ -227,6 +227,20 @@ def discover_skills(cwd: Path) -> dict[str, Skill]:
     return skills
 
 
+def visible_catalog(
+    skills: dict[str, Skill], agent_name: str, scope: str = "matching"
+) -> dict[str, Skill]:
+    """The slice of the catalog one agent sees.
+
+    ``scope="all"`` is the full catalog (the PI's view, so solo mode loses
+    nothing to categorization); ``"matching"`` keeps the skills whose
+    ``mason-agents`` include *agent_name*, plus the unrestricted ones.
+    """
+    if scope == "all":
+        return dict(skills)
+    return {name: skill for name, skill in skills.items() if skill.visible_to(agent_name)}
+
+
 def catalog_block(skills: dict[str, Skill]) -> str:
     """The ``# Skills`` section of the system prompt, or empty when none apply.
 

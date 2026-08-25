@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
 from mason.client import ToolCall
 from mason.session import MasonSession
-from mason.skills import Skill, discover_skills, listing
+from mason.skills import Skill, discover_skills, listing, visible_catalog
 
 #: Every tool name any session can build. Agent cards validate their
 #: ``tools:`` allowlists against this set, so a typo is refused even when the
@@ -60,6 +60,7 @@ TOOL_VOCABULARY = frozenset(
         "notebook",
         "plan",
         "skill",
+        "delegate",
         "finish",
     }
 )
@@ -151,7 +152,7 @@ class Toolbox:
                 + (f"; optional: {', '.join(optional)}" if optional else "")
                 + ")"
             )
-        preview = _preview(call)
+        preview = self.session.attribution() + _preview(call)
         if tool.needs_approval(call.arguments):
             try:
                 approved = self.session.allows(call.name, preview, requires_approval=True)
@@ -223,19 +224,28 @@ def build_toolbox(
     *,
     depth: int = 0,
     skills: dict[str, Skill] | None = None,
+    roster: dict[str, AgentSpec] | None = None,
+    parent_client: Any | None = None,
 ) -> Toolbox:
     """Every tool this session gets; SLURM tools only where partitions exist.
 
     *spec* is the agent card in force: its ``tools`` allowlist narrows the
     box (``finish`` always stays), and ``None`` means no narrowing. *depth*
     is the delegation depth: a delegated agent (depth > 0) loses ``plan``,
-    because ``PLAN.md`` belongs to the turn owner. *skills* is the skill
-    catalog for this agent (the ``skill`` tool appears only when it is
-    non-empty); ``None`` discovers the full catalog from the session's
-    project directory.
+    because ``PLAN.md`` belongs to the turn owner, and can never delegate
+    onward. *skills* is the full catalog: the ``skill`` tool sees the
+    card's slice of it, while ``delegate`` hands the whole catalog down so
+    each child re-narrows by its own card; ``None`` discovers the catalog
+    from the session's project directory. *roster* and *parent_client*
+    feed the ``delegate`` tool, which exists only when the card delegates,
+    the depth is zero, ``[agent] delegation`` is on, and the roster holds
+    someone to delegate to.
     """
     if skills is None:
         skills = discover_skills(session.cwd)
+    visible = (
+        visible_catalog(skills, spec.name, spec.skills_scope) if spec is not None else skills
+    )
     box = Toolbox(session)
     _add_file_tools(box, session)
     _add_shell_tool(box, session)
@@ -244,8 +254,17 @@ def build_toolbox(
     if session.hpc.partitions:
         _add_hpc_tools(box, session)
     _add_memory_tools(box, session)
-    if skills:
-        _add_skill_tool(box, session, skills)
+    if visible:
+        _add_skill_tool(box, session, visible)
+    if (
+        spec is not None
+        and spec.delegates
+        and depth == 0
+        and session.agent.delegation
+        and roster is not None
+        and len(roster) > 1
+    ):
+        _add_delegate_tool(box, session, spec, roster, skills, parent_client)
     if spec is not None and spec.tools is not None:
         for name in [n for n in box.tools if n not in spec.tools and n != "finish"]:
             del box.tools[name]
@@ -783,6 +802,96 @@ def _add_hpc_tools(box: Toolbox, session: MasonSession) -> None:
             parameters=_schema({"job_id": {"type": "string"}}, ["job_id"]),
             handler=cancel_job,
             requires_approval=True,
+        )
+    )
+
+
+# -- delegation ---------------------------------------------------------------
+
+
+def _add_delegate_tool(
+    box: Toolbox,
+    session: MasonSession,
+    spec: AgentSpec,
+    roster: dict[str, AgentSpec],
+    skills: dict[str, Skill],
+    parent_client: Any | None,
+) -> None:
+    def delegate(arguments: dict[str, Any]) -> str:
+        # Local imports: tools must not import the loop at module scope
+        # (the loop imports tools), and delegation is the one place a tool
+        # spins a loop of its own.
+        from mason.config import override_agent, roster_agent_config
+        from mason.loop import Mason, client_from_config, connection_profile
+
+        name = str(arguments["agent"])
+        target = roster.get(name)
+        others = ", ".join(sorted(n for n in roster if n != spec.name))
+        if name == spec.name:
+            return f"you cannot delegate to yourself; your team: {others}"
+        if target is None:
+            return f"no agent named {name!r}; your team: {others}"
+        task = str(arguments["task"])
+        context = arguments.get("context")
+        # The child derives from the *base* config so the entry agent's own
+        # [agent.roster] table never leaks into a specialist; CLI flags are
+        # re-asserted on top because a flag outranks config for everyone.
+        effective = roster_agent_config(session.base_agent, name)
+        if session.flag_updates:
+            effective = override_agent(effective, dict(session.flag_updates))
+        child_session = session.spawn(name, effective)
+        reuse = parent_client is not None and connection_profile(
+            child_session.agent
+        ) == connection_profile(session.agent)
+        client = parent_client if reuse else client_from_config(child_session.agent)
+        child = Mason(
+            child_session, client=client, skills=skills, spec=target, roster=roster, depth=1
+        )
+        brief = task if not context else f"{task}\n\nContext from {spec.name}:\n{context}"
+        result = child.run_turn(brief)
+        session.record(
+            {
+                "type": "delegate",
+                "agent": name,
+                "task": task,
+                "transcript": child_session.transcript_path.name,
+                "stop": result.stop_reason,
+                "steps": result.steps,
+            }
+        )
+        footer = (
+            f"[{name}: {result.stop_reason} after {result.steps} step(s); "
+            f"tokens {child_session.prompt_tokens}+{child_session.completion_tokens}; "
+            f"transcript {child_session.transcript_path.name}]"
+        )
+        return f"{result.text}\n\n{footer}"
+
+    box.add(
+        Tool(
+            name="delegate",
+            description=(
+                "Hand one scoped task to a specialist from your team. The "
+                "specialist runs its own tool loop against the shared workspace "
+                "and notebook, and you receive its final report. Brief it with "
+                "the goal, the constraints (engine, protocol, budget), and what "
+                "to return; its report ends with a bracketed harness line "
+                "stating how it stopped."
+            ),
+            parameters=_schema(
+                {
+                    "agent": {"type": "string", "description": "a name from Your team"},
+                    "task": {
+                        "type": "string",
+                        "description": "the scoped goal, self-contained and checkable",
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "optional background the task needs",
+                    },
+                },
+                ["agent", "task"],
+            ),
+            handler=delegate,
         )
     )
 

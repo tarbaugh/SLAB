@@ -38,6 +38,10 @@ Approver = Callable[[str, str], bool]
 # Shell control operators disqualify a command from allowlist auto-approval.
 _SHELL_CONTROL = re.compile(r"[;&|`<>\n]|\$\(")
 
+# What a conversation transcript is named; delegation transcripts append
+# the agent name and an ordinal and are never resumed as conversations.
+_CONVERSATION_TRANSCRIPT = re.compile(r"^\d{8}-\d{6}-\d+\.jsonl$")
+
 
 class SessionError(MasonError):
     """A session could not be created or resumed."""
@@ -82,6 +86,11 @@ class MasonSession:
         # only that package's file read, so a caller can pin the agent without
         # inventing an [hpc] section it does not care about.
         self.agent: AgentConfig = agent if agent is not None else load_config(self.cwd).agent
+        # The configuration as loaded, before flags, roster tables, or
+        # endpoint discovery mutate self.agent. Delegated agents derive
+        # their effective config from this, so one agent's table never
+        # leaks into another's.
+        self.base_agent: AgentConfig = self.agent
         self.hpc: HpcConfig = hpc if hpc is not None else load_slab_config(self.cwd).hpc
         from foundation._ops import resolve_root
 
@@ -97,6 +106,8 @@ class MasonSession:
         # CLI flag overrides, kept so they can be re-asserted over
         # [agent.roster.<name>] tables: a flag outranks config.
         self.flag_updates: dict[str, object] = {}
+        self._parent: MasonSession | None = None
+        self._children_spawned = 0
         # Unset compute_profile derives from the machine: a config that declares
         # SLURM partitions is a cluster, anything else is treated as a laptop —
         # the conservative guess, since over-sizing a calculation wastes hours
@@ -137,6 +148,43 @@ class MasonSession:
         if endpoint != self.agent.resolved_endpoint:
             self.agent = self.agent.model_copy(update={"endpoint": endpoint})
         self.endpoint, self.endpoint_origin = endpoint, origin
+
+    # -- delegation -----------------------------------------------------------
+
+    def spawn(self, agent_name: str, agent: AgentConfig) -> MasonSession:
+        """A delegated child session: shared gate and memory, its own transcript.
+
+        The child shares the project directory, the workspace, the ``[hpc]``
+        view, the approver, and the auto-approve policy — one permission
+        regime per session, whoever asks. Its token usage chains upward so
+        the parent's totals stay whole-session truths. Fresh per child: the
+        read-files staleness guard (a specialist must read a file before
+        editing it even when the parent read it), and the transcript, named
+        after the parent's with the agent and an ordinal so ``--resume``
+        can tell conversations from delegations apart.
+        """
+        child = MasonSession(
+            self.cwd,
+            workspace_root=self.workspace_root,
+            agent=agent,
+            hpc=self.hpc,
+            approver=self.approver,
+            auto_approve=self.auto_approve,
+        )
+        child.agent_name = agent_name
+        child._parent = self
+        # A flag outranks config for everyone: the child's loop re-asserts
+        # these over its own [agent.roster] table exactly as the parent did.
+        child.flag_updates = dict(self.flag_updates)
+        self._children_spawned += 1
+        child.transcript_path = self.transcript_path.with_name(
+            f"{self.transcript_path.stem}-{agent_name}-{self._children_spawned}.jsonl"
+        )
+        return child
+
+    def attribution(self) -> str:
+        """The ``[agent]`` marker for approval previews — children only."""
+        return f"[{self.agent_name}] " if self._parent is not None else ""
 
     # -- permission gate ------------------------------------------------------
 
@@ -185,7 +233,10 @@ class MasonSession:
         """Append one entry to the lab notebook (created on first write)."""
         stamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
         title = f" — {heading}" if heading else ""
-        block = f"\n## {stamp}{title}\n\n{entry.rstrip()}\n"
+        # The notebook is shared across the whole session (it is the group's
+        # blackboard), so a delegated agent's entries carry its name.
+        label = f" [{self.agent_name}]" if self._parent is not None else ""
+        block = f"\n## {stamp}{title}{label}\n\n{entry.rstrip()}\n"
         if not self.notebook_path.exists():
             block = "# Lab notebook\n" + block
         with open(self.notebook_path, "a", encoding="utf-8") as handle:
@@ -220,12 +271,24 @@ class MasonSession:
             self.prompt_tokens += prompt_tokens
         if completion_tokens:
             self.completion_tokens += completion_tokens
+        if self._parent is not None:
+            self._parent.count_usage(prompt_tokens, completion_tokens)
 
     def latest_transcript(self) -> Path | None:
-        """The newest transcript in this workspace, or None."""
+        """The newest conversation transcript in this workspace, or None.
+
+        Delegation transcripts (``<stamp>-<pid>-<agent>-<n>.jsonl``) are
+        archives of one errand, not conversations; resuming one would
+        replay a specialist's context as if it were the session. Only
+        parent-pattern names qualify.
+        """
         if not self.sessions_dir.is_dir():
             return None
-        candidates = sorted(p for p in self.sessions_dir.glob("*.jsonl") if p.is_file())
+        candidates = sorted(
+            p
+            for p in self.sessions_dir.glob("*.jsonl")
+            if p.is_file() and _CONVERSATION_TRANSCRIPT.match(p.name)
+        )
         return candidates[-1] if candidates else None
 
     def load_messages(self, transcript: Path) -> list[dict[str, Any]]:

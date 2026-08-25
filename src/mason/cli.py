@@ -591,8 +591,80 @@ def mason_doctor(
     except LlmError as e:
         failed += 1
         typer.echo(f"[x] tool-call probe: {e}")
+    primary = (agent.provider, resolved_endpoint, resolved_model)
+    failed += _doctor_roster(agent, root, seen={primary})
     if failed:
         raise typer.Exit(code=1)
+
+
+def _doctor_roster(
+    agent: AgentConfig, root: Path, *, seen: set[tuple[str, str, str | None]]
+) -> int:
+    """Probe the roster's distinct model connections; return the failure count.
+
+    A specialist pinned to an unserved model should fail the doctor, not
+    the first delegation. Only ``[agent.roster.<name>]`` tables are probed —
+    an agent without a table shares the primary connection checked above.
+    """
+    if not agent.roster:
+        return 0
+    from mason.client import ChatClient, LlmError
+    from mason.config import roster_agent_config
+    from mason.roster import check_overrides, discover_roster
+    from mason.serve import discover_endpoint
+
+    try:
+        check_overrides(agent, discover_roster(Path.cwd()))
+    except (MasonError, FoundationError, SlabError) as e:
+        typer.echo(f"[x] roster: {e}")
+        return 1
+    failures = 0
+    for name in sorted(agent.roster):
+        effective = roster_agent_config(agent, name)
+        try:
+            endpoint, _origin = discover_endpoint(effective, root)
+        except (MasonError, FoundationError, SlabError) as e:
+            typer.echo(f"[x] {name}: {e}")
+            failures += 1
+            continue
+        key = (effective.provider, endpoint, effective.model)
+        if key in seen:
+            continue
+        seen.add(key)
+        if effective.model is None:
+            typer.echo(f"[x] {name}: no model configured for its connection")
+            failures += 1
+            continue
+        client: Any
+        if effective.provider == "anthropic":
+            from mason.anthropic import AnthropicClient
+
+            key_var = effective.resolved_api_key_env or "ANTHROPIC_API_KEY"
+            api_key = os.environ.get(key_var)
+            if not api_key:
+                typer.echo(f"[x] {name}: ${key_var} is not set for its Anthropic connection")
+                failures += 1
+                continue
+            client = AnthropicClient(
+                effective.model, api_key, endpoint=endpoint, timeout_s=60.0
+            )
+        else:
+            client = ChatClient(endpoint, effective.model, timeout_s=60.0)
+        try:
+            names = client.model_names()
+        except LlmError as e:
+            typer.echo(f"[x] {name}: endpoint {endpoint}: {e}")
+            failures += 1
+            continue
+        if effective.model in names:
+            typer.echo(f"[+] {name}: model {effective.model!r} is served at {endpoint}")
+        else:
+            typer.echo(
+                f"[x] {name}: model {effective.model!r} not served at {endpoint}; "
+                f"available: {', '.join(names) or 'none'}"
+            )
+            failures += 1
+    return failures
 
 
 def main() -> None:  # pragma: no cover - console-script shim

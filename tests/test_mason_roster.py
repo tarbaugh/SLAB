@@ -203,7 +203,10 @@ def test_mason_defaults_to_the_pi_card(tmp_path: Path) -> None:
     (system,) = mason.messages
     content = system["content"]
     assert content.index("You are Mason") < content.index("# How you work")
-    assert "# Your team" not in content  # no delegate tool yet, no promise
+    # The delegate tool exists for the pi, so the team block is promised.
+    assert "delegate" in mason.toolbox.tools
+    assert "# Your team" in content
+    assert "- dft-expert:" in content
 
 
 def test_specialist_prompt_carries_its_role_and_filtered_skills(tmp_path: Path) -> None:

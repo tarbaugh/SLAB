@@ -44,7 +44,7 @@ from typing import Any, Literal
 
 from mason.config import AgentConfig
 from mason.errors import MasonError
-from mason.skills import Skill, SkillError, split_frontmatter, valid_name
+from mason.skills import Skill, SkillError, split_frontmatter, valid_name, visible_catalog
 from mason.tools import TOOL_VOCABULARY
 from slab.config import user_config_path
 
@@ -195,6 +195,4 @@ def check_overrides(agent: AgentConfig, roster: dict[str, AgentSpec]) -> None:
 
 def skills_for(spec: AgentSpec, skills: dict[str, Skill]) -> dict[str, Skill]:
     """The slice of the skill catalog this agent sees in its prompt and tool."""
-    if spec.skills_scope == "all":
-        return dict(skills)
-    return {name: skill for name, skill in skills.items() if skill.visible_to(spec.name)}
+    return visible_catalog(skills, spec.name, spec.skills_scope)
