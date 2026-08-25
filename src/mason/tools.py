@@ -33,6 +33,33 @@ from typing import Any
 
 from mason.client import ToolCall
 from mason.session import MasonSession
+from mason.skills import Skill, discover_skills, listing
+
+#: Every tool name any session can build. Agent cards validate their
+#: ``tools:`` allowlists against this set, so a typo is refused even when the
+#: tool it misspells is absent from the current session (no partitions, no
+#: skills). Keep it in step with the builders below; a test enforces that.
+TOOL_VOCABULARY = frozenset(
+    {
+        "read_file",
+        "write_file",
+        "edit_file",
+        "list_dir",
+        "search",
+        "shell",
+        "list_runs",
+        "show_run",
+        "launch_workflow",
+        "list_engines",
+        "submit_job",
+        "job_status",
+        "cancel_job",
+        "notebook",
+        "plan",
+        "skill",
+        "finish",
+    }
+)
 
 _MAX_READ_LINES = 400
 _MAX_LINE_CHARS = 500
@@ -187,8 +214,17 @@ def _schema(properties: dict[str, dict[str, Any]], required: list[str]) -> dict[
     return {"type": "object", "properties": properties, "required": required}
 
 
-def build_toolbox(session: MasonSession) -> Toolbox:
-    """Every tool this session gets; SLURM tools only where partitions exist."""
+def build_toolbox(
+    session: MasonSession, *, skills: dict[str, Skill] | None = None
+) -> Toolbox:
+    """Every tool this session gets; SLURM tools only where partitions exist.
+
+    *skills* is the skill catalog for this agent (the ``skill`` tool appears
+    only when it is non-empty); ``None`` discovers the full catalog from the
+    session's project directory.
+    """
+    if skills is None:
+        skills = discover_skills(session.cwd)
     box = Toolbox(session)
     _add_file_tools(box, session)
     _add_shell_tool(box, session)
@@ -197,6 +233,8 @@ def build_toolbox(session: MasonSession) -> Toolbox:
     if session.hpc.partitions:
         _add_hpc_tools(box, session)
     _add_memory_tools(box, session)
+    if skills:
+        _add_skill_tool(box, session, skills)
     box.add(
         Tool(
             name="finish",
@@ -729,6 +767,34 @@ def _add_hpc_tools(box: Toolbox, session: MasonSession) -> None:
             parameters=_schema({"job_id": {"type": "string"}}, ["job_id"]),
             handler=cancel_job,
             requires_approval=True,
+        )
+    )
+
+
+# -- skills ------------------------------------------------------------------
+
+
+def _add_skill_tool(box: Toolbox, session: MasonSession, skills: dict[str, Skill]) -> None:
+    def skill_tool(arguments: dict[str, Any]) -> str:
+        name = str(arguments["name"])
+        found = skills.get(name)
+        if found is None:
+            known = ", ".join(sorted(skills))
+            return f"no skill named {name!r}; available skills: {known}"
+        session.record({"type": "skill", "name": name, "source": found.source})
+        return listing(found)
+
+    box.add(
+        Tool(
+            name="skill",
+            description=(
+                "Load a skill by name: returns its full instructions, its root "
+                "path, and its bundled files (scripts, references, assets). Call "
+                "this before doing a task a listed skill covers, and prefer its "
+                "bundled scripts over writing your own."
+            ),
+            parameters=_schema({"name": {"type": "string"}}, ["name"]),
+            handler=skill_tool,
         )
     )
 

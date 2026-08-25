@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from mason.session import MasonSession
+from mason.skills import Skill, catalog_block
 
 SYSTEM_PROMPT = """\
 You are Mason, the resident research agent of a SLAB workspace — a careful \
@@ -197,7 +198,7 @@ Do not invent anything not in the transcript. Do not soften failures.
 """
 
 
-def environment_block(session: MasonSession) -> str:
+def environment_block(session: MasonSession, skills: dict[str, Skill] | None = None) -> str:
     """The per-session context: where we are, what exists here, what memory says."""
     lines = [
         "# Environment",
@@ -215,6 +216,8 @@ def environment_block(session: MasonSession) -> str:
         lines.append(f"cluster: {cluster}; partitions: {partitions}{suffix}")
     else:
         lines.append("cluster: none configured (no SLURM tools this session)")
+    if skills:
+        lines.append("\n" + catalog_block(skills))
     agents_md = _conventions_text(session)
     if agents_md:
         lines.append("\n# Project conventions (AGENTS.md)\n" + agents_md)
@@ -238,7 +241,12 @@ def _conventions_text(session: MasonSession, max_chars: int = 6_000) -> str:
     return text
 
 
-def system_messages(session: MasonSession, catalog: str | None = None) -> list[dict[str, Any]]:
+def system_messages(
+    session: MasonSession,
+    catalog: str | None = None,
+    *,
+    skills: dict[str, Skill] | None = None,
+) -> list[dict[str, Any]]:
     """The system prompt: static core, compute budget, protocol, environment."""
     prompt = SYSTEM_PROMPT
     budget = compute_profile_block(session.compute_profile)
@@ -246,4 +254,6 @@ def system_messages(session: MasonSession, catalog: str | None = None) -> list[d
         prompt += "\n" + budget + "\n"
     if catalog is not None:
         prompt += FENCED_PROTOCOL.replace("{catalog}", catalog)
-    return [{"role": "system", "content": prompt + "\n" + environment_block(session)}]
+    return [
+        {"role": "system", "content": prompt + "\n" + environment_block(session, skills)}
+    ]

@@ -87,6 +87,13 @@ ignore_missing_imports = true
 module = ["foundation.tasks", "slab.backends"]
 disallow_untyped_calls = false
 
+# Built-in skill scripts and templates also call into ASE. They sit outside
+# the package tree (no __init__.py on the path), so mypy sees them as
+# top-level modules named by file. List each; keep basenames unique.
+[[tool.mypy.overrides]]
+module = ["fit_eos", "eos_scan"]
+disallow_untyped_calls = false
+
 [tool.pytest.ini_options]
 # --doctest-modules collects every .py file, so the recorded fixture workspace
 # (whose script imports the pre-split module paths on purpose) is skipped, and

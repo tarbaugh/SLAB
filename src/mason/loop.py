@@ -40,6 +40,7 @@ from mason.config import AgentConfig
 from mason.errors import MasonError
 from mason.prompts import COMPACTION_PROMPT, system_messages
 from mason.session import MasonSession
+from mason.skills import Skill, discover_skills
 from mason.tools import Toolbox, build_toolbox
 
 _ERROR_STREAK_LIMIT = 5
@@ -137,15 +138,21 @@ class Mason:
         client: ChatBackend | None = None,
         toolbox: Toolbox | None = None,
         resume_from: list[dict[str, Any]] | None = None,
+        skills: dict[str, Skill] | None = None,
     ) -> None:
         self.session = session
         self.client: ChatBackend = (
             client if client is not None else client_from_config(session.agent)
         )
-        self.toolbox = toolbox if toolbox is not None else build_toolbox(session)
+        self.skills = skills if skills is not None else discover_skills(session.cwd)
+        self.toolbox = (
+            toolbox if toolbox is not None else build_toolbox(session, skills=self.skills)
+        )
         self.fenced = session.agent.tool_protocol == "fenced"
         catalog = self.toolbox.catalog_text() if self.fenced else None
-        self.messages: list[dict[str, Any]] = system_messages(session, catalog)
+        self.messages: list[dict[str, Any]] = system_messages(
+            session, catalog, skills=self.skills
+        )
         self._catalog = catalog
         self._last_prompt_tokens: int | None = None
         self._messages_at_last_compaction = 0
@@ -353,7 +360,7 @@ class Mason:
         summary = (summary_reply.content or "").strip() or "(the summarizer said nothing)"
         self.session.count_usage(summary_reply.prompt_tokens, summary_reply.completion_tokens)
         self.session.notebook_append(summary, heading="context compaction")
-        rebuilt = system_messages(self.session, self._catalog)
+        rebuilt = system_messages(self.session, self._catalog, skills=self.skills)
         tail = self.messages[boundary:]
         self.messages = [
             *rebuilt,
