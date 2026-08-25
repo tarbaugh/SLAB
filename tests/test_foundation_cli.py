@@ -441,7 +441,11 @@ def _future_workspace(tmp_path: Path) -> Path:
 
     root = tmp_path / "future"
     root.mkdir()
-    with sqlite3.connect(root / "runs.db") as db:
+    # contextlib.closing, not the connection's own context manager: sqlite3's
+    # only wraps a transaction and leaves the handle open.
+    from contextlib import closing
+
+    with closing(sqlite3.connect(root / "runs.db")) as db:
         db.execute("PRAGMA user_version = 99")
     return root
 
