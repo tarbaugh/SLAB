@@ -285,3 +285,10 @@ def test_cli_unknown_agent_lists_the_roster(
     assert result.exit_code == 1
     assert "no agent named 'dft-exprt'" in result.output
     assert "dft-expert" in result.output
+
+
+def test_a_readme_beside_cards_is_not_a_card(tmp_path: Path) -> None:
+    (tmp_path / "agents").mkdir()
+    (tmp_path / "agents" / "README.md").write_text("about these cards\n")
+    roster = discover_roster(tmp_path)
+    assert "readme" not in roster and "README" not in roster

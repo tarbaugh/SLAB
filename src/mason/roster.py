@@ -156,7 +156,9 @@ def _layer(root: Path, source: Source) -> dict[str, AgentSpec]:
         return {}
     found: dict[str, AgentSpec] = {}
     for path in sorted(root.glob("*.md")):
-        if path.name.startswith((".", "_")) or path.name == "AGENTS.md":
+        # Well-known non-card files may sit beside cards; anything else that
+        # fails to parse is a loud error, never a silent skip.
+        if path.name.startswith((".", "_")) or path.name in ("AGENTS.md", "README.md"):
             continue
         spec = parse_agent_card(path, source)
         found[spec.name] = spec

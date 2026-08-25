@@ -371,3 +371,17 @@ def test_shell_timeout_kills_the_whole_process_group(tmp_path: Path) -> None:
     time.sleep(2.5)  # give the would-be orphan time to prove itself
     assert not marker.exists()
     assert time.monotonic() - started < 20
+
+
+def test_the_vocabulary_matches_an_all_features_toolbox(tmp_path: Path) -> None:
+    """TOOL_VOCABULARY is what cards validate against, so it must equal what a
+    session with everything enabled actually builds — no phantom names, no
+    unlisted tools."""
+    from mason.roster import discover_roster
+    from mason.tools import TOOL_VOCABULARY
+
+    hpc = HpcConfig.model_validate({"default_partition": "cpu", "partitions": {"cpu": {}}})
+    session = MasonSession(tmp_path, workspace_root=tmp_path / ".slab", hpc=hpc)
+    roster = discover_roster(tmp_path)
+    box = build_toolbox(session, roster["pi"], roster=roster)
+    assert set(box.tools) == TOOL_VOCABULARY
