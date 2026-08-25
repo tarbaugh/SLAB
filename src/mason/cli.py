@@ -20,6 +20,7 @@ import typer
 
 if TYPE_CHECKING:
     from mason.config import AgentConfig
+    from mason.roster import AgentSpec
     from mason.session import MasonSession
     from slab.config import HpcConfig
 
@@ -88,17 +89,18 @@ def _ask_approval(tool_name: str, preview: str) -> bool:
 def _override_agent(agent: AgentConfig, updates: dict[str, object]) -> AgentConfig:
     """Apply CLI overrides through the model's own validation.
 
-    ``model_copy(update=...)`` skips validation, so a mistyped
-    ``--provider anthorpic`` would silently probe the openai branch instead
-    of being refused. Rebuilding through ``model_validate`` keeps every
-    ``Literal`` and bound on the schema in force for flag values too.
+    ``mason.config.override_agent`` does the validated rebuild — a mistyped
+    ``--provider anthorpic`` is refused, never silently probed — and this
+    wrapper names the flag that supplied the bad value.
     """
     if not updates:
         return agent
     from pydantic import ValidationError
 
+    from mason.config import override_agent
+
     try:
-        return type(agent).model_validate({**agent.model_dump(), **updates})
+        return override_agent(agent, updates)
     except ValidationError as e:
         flags = ", ".join(f"--{key.replace('_', '-')}" for key in updates)
         first = e.errors()[0]
@@ -135,11 +137,26 @@ def _mason_session(
         updates["max_turns"] = max_turns
     if updates:
         session.agent = _override_agent(session.agent, updates)
+        # Remembered so the loop can re-assert them over any
+        # [agent.roster.<name>] table: a flag outranks config.
+        session.flag_updates = updates
     # After a provider change, which endpoint is right changes too; a
     # --endpoint flag outranks both the config and any discovered server.
     if updates or endpoint is not None:
         session.resolve_endpoint(endpoint)
     return session
+
+
+def _resolve_spec(agent_name: str | None) -> tuple[AgentSpec, dict[str, AgentSpec]]:
+    """The entry agent's card and the roster, refusing unknown names loudly."""
+    from mason.roster import discover_roster
+
+    roster = discover_roster(Path.cwd())
+    chosen = agent_name or "pi"
+    spec = roster.get(chosen)
+    if spec is None:
+        _fail(f"no agent named {chosen!r}; the roster: {', '.join(sorted(roster))}")
+    return spec, roster
 
 
 _ModelOpt = Annotated[str | None, typer.Option("--model", help="Override [agent] model.")]
@@ -154,6 +171,10 @@ _ProviderOpt = Annotated[
     str | None,
     typer.Option("--provider", help="Override [agent] provider: openai or anthropic."),
 ]
+_AgentOpt = Annotated[
+    str | None,
+    typer.Option("--agent", help="Agent card to run as (default pi); 'mason roster' lists them."),
+]
 
 
 @app.command("chat")
@@ -166,6 +187,7 @@ def mason_chat(
     resume: Annotated[
         bool, typer.Option("--resume", help="Continue the newest session in this workspace.")
     ] = False,
+    agent: _AgentOpt = None,
 ) -> None:
     """Interactive session ( /quit to leave, /status for token counts )."""
     from mason import Mason
@@ -174,6 +196,7 @@ def mason_chat(
         session = _mason_session(
             workspace, auto=auto, model=model, endpoint=endpoint, provider=provider
         )
+        spec, roster = _resolve_spec(agent)
         resume_from = None
         if resume:
             latest = session.latest_transcript()
@@ -181,12 +204,12 @@ def mason_chat(
                 _fail("nothing to resume: no session transcripts in this workspace")
             resume_from = session.load_messages(latest)
             typer.echo(f"resuming {latest.name} ({len(resume_from)} messages)")
-        mason = Mason(session, resume_from=resume_from)
+        mason = Mason(session, resume_from=resume_from, spec=spec, roster=roster)
     except (MasonError, FoundationError, SlabError) as e:
         _fail(str(e))
     typer.echo(
-        f"mason ready: {session.agent.model} at {session.endpoint} "
-        f"[{session.endpoint_origin}]"
+        f"mason ready: {session.agent_name} — {session.agent.model} at "
+        f"{session.endpoint} [{session.endpoint_origin}]"
     )
     typer.echo(f"workspace {session.workspace_root}; notebook {session.notebook_path}")
     while True:
@@ -234,6 +257,7 @@ def mason_run(
     max_turns: Annotated[
         int | None, typer.Option("--max-turns", help="Model-call budget for this goal.")
     ] = None,
+    agent: _AgentOpt = None,
 ) -> None:
     """One autonomous goal: loop until finish, an answer, or a harness stop.
 
@@ -252,7 +276,8 @@ def mason_run(
             max_turns=max_turns,
             interactive=False,
         )
-        mason = Mason(session)
+        spec, roster = _resolve_spec(agent)
+        mason = Mason(session, spec=spec, roster=roster)
         result = mason.run_turn(goal)
     except (MasonError, FoundationError, SlabError) as e:
         _fail(str(e))
@@ -265,6 +290,66 @@ def mason_run(
     )
     if result.stop_reason not in ("answer", "finish"):
         raise typer.Exit(code=1)
+
+
+@app.command("roster")
+def mason_roster() -> None:
+    """The agents: name, layer, effective model, and the skills each sees."""
+    from mason.config import load_config, roster_agent_config
+    from mason.roster import check_overrides, discover_roster, skills_for
+    from mason.skills import discover_skills
+
+    try:
+        agent = load_config().agent
+        roster = discover_roster(Path.cwd())
+        check_overrides(agent, roster)
+        skills = discover_skills(Path.cwd())
+    except (MasonError, FoundationError, SlabError) as e:
+        _fail(str(e))
+    for name in sorted(roster, key=lambda n: (n != "pi", n)):
+        spec = roster[name]
+        effective = roster_agent_config(agent, name)
+        model = effective.model or "(model not configured)"
+        visible = len(skills_for(spec, skills))
+        marker = "  [delegates]" if spec.delegates else ""
+        typer.echo(
+            f"{name:<18} {spec.source:<9} {model:<28} {visible} skill(s){marker}"
+        )
+
+
+@app.command("skills")
+def mason_skills(
+    agent: Annotated[
+        str | None,
+        typer.Option("--agent", help="Show only the skills this agent card sees."),
+    ] = None,
+) -> None:
+    """The skills: name, layer, which agents see them, bundled scripts."""
+    from mason.roster import discover_roster, skills_for
+    from mason.skills import discover_skills
+
+    try:
+        skills = discover_skills(Path.cwd())
+        if agent is not None:
+            roster = discover_roster(Path.cwd())
+            spec = roster.get(agent)
+            if spec is None:
+                _fail(f"no agent named {agent!r}; the roster: {', '.join(sorted(roster))}")
+            skills = skills_for(spec, skills)
+    except (MasonError, FoundationError, SlabError) as e:
+        _fail(str(e))
+    if not skills:
+        typer.echo("no skills visible here; add <project>/skills/<name>/SKILL.md")
+        return
+    for name in sorted(skills):
+        skill = skills[name]
+        agents = "all agents" if skill.agents is None else " ".join(sorted(skill.agents))
+        scripts_dir = skill.root / "scripts"
+        scripts = sum(1 for p in scripts_dir.iterdir() if p.is_file()) if (
+            scripts_dir.is_dir()
+        ) else 0
+        note = "  [allowed-tools ignored]" if skill.ignored_allowed_tools else ""
+        typer.echo(f"{name:<26} {skill.source:<9} {agents:<28} {scripts} script(s){note}")
 
 
 serve_app = typer.Typer(
@@ -506,8 +591,80 @@ def mason_doctor(
     except LlmError as e:
         failed += 1
         typer.echo(f"[x] tool-call probe: {e}")
+    primary = (agent.provider, resolved_endpoint, resolved_model)
+    failed += _doctor_roster(agent, root, seen={primary})
     if failed:
         raise typer.Exit(code=1)
+
+
+def _doctor_roster(
+    agent: AgentConfig, root: Path, *, seen: set[tuple[str, str, str | None]]
+) -> int:
+    """Probe the roster's distinct model connections; return the failure count.
+
+    A specialist pinned to an unserved model should fail the doctor, not
+    the first delegation. Only ``[agent.roster.<name>]`` tables are probed —
+    an agent without a table shares the primary connection checked above.
+    """
+    if not agent.roster:
+        return 0
+    from mason.client import ChatClient, LlmError
+    from mason.config import roster_agent_config
+    from mason.roster import check_overrides, discover_roster
+    from mason.serve import discover_endpoint
+
+    try:
+        check_overrides(agent, discover_roster(Path.cwd()))
+    except (MasonError, FoundationError, SlabError) as e:
+        typer.echo(f"[x] roster: {e}")
+        return 1
+    failures = 0
+    for name in sorted(agent.roster):
+        effective = roster_agent_config(agent, name)
+        try:
+            endpoint, _origin = discover_endpoint(effective, root)
+        except (MasonError, FoundationError, SlabError) as e:
+            typer.echo(f"[x] {name}: {e}")
+            failures += 1
+            continue
+        key = (effective.provider, endpoint, effective.model)
+        if key in seen:
+            continue
+        seen.add(key)
+        if effective.model is None:
+            typer.echo(f"[x] {name}: no model configured for its connection")
+            failures += 1
+            continue
+        client: Any
+        if effective.provider == "anthropic":
+            from mason.anthropic import AnthropicClient
+
+            key_var = effective.resolved_api_key_env or "ANTHROPIC_API_KEY"
+            api_key = os.environ.get(key_var)
+            if not api_key:
+                typer.echo(f"[x] {name}: ${key_var} is not set for its Anthropic connection")
+                failures += 1
+                continue
+            client = AnthropicClient(
+                effective.model, api_key, endpoint=endpoint, timeout_s=60.0
+            )
+        else:
+            client = ChatClient(endpoint, effective.model, timeout_s=60.0)
+        try:
+            names = client.model_names()
+        except LlmError as e:
+            typer.echo(f"[x] {name}: endpoint {endpoint}: {e}")
+            failures += 1
+            continue
+        if effective.model in names:
+            typer.echo(f"[+] {name}: model {effective.model!r} is served at {endpoint}")
+        else:
+            typer.echo(
+                f"[x] {name}: model {effective.model!r} not served at {endpoint}; "
+                f"available: {', '.join(names) or 'none'}"
+            )
+            failures += 1
+    return failures
 
 
 def main() -> None:  # pragma: no cover - console-script shim

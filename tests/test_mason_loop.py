@@ -323,7 +323,9 @@ def test_truncated_answers_are_reported_not_passed_off_as_finished(tmp_path: Pat
 
 
 def test_short_circuit_answers_every_tool_call(tmp_path: Path) -> None:
-    """finish mid-list must not leave later tool_call ids unanswered."""
+    """Every declared tool_call id gets a result: a finish sharing its reply
+    is answered (not honored) instead of closing over unread calls, and the
+    turn ends on the next, lone finish."""
     reply = ChatReply(
         content=None,
         tool_calls=(
@@ -339,11 +341,14 @@ def test_short_circuit_answers_every_tool_call(tmp_path: Path) -> None:
         completion_tokens=5,
     )
     session = _session(tmp_path)
-    mason = Mason(session, client=FakeClient([reply]))
+    mason = Mason(session, client=FakeClient([reply, _tool_reply("finish", report="done")]))
     result = mason.run_turn("go")
     assert result.stop_reason == "finish"
+    assert result.steps == 2
     answered = {m["tool_call_id"] for m in mason.messages if m.get("role") == "tool"}
-    assert answered == {"f1", "c2"}  # every declared call has a result
+    assert answered == {"f1", "c2", "call_finish"}  # every declared call has a result
+    premature = next(m for m in mason.messages if m.get("tool_call_id") == "f1")
+    assert "finish not honored" in premature["content"]
 
 
 def test_missing_arguments_count_toward_the_error_streak(tmp_path: Path) -> None:
@@ -449,3 +454,56 @@ def test_client_from_config_refusals(tmp_path: Path, monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("MISSING_KEY_VAR", "sk-123")
     client = client_from_config(config.agent)
     assert client.api_key == "sk-123"
+
+
+def test_finish_alongside_other_calls_is_not_honored(tmp_path: Path) -> None:
+    """A finish sharing its reply with other calls was written before their
+    results existed (open models emit read_file+finish in one message, with
+    placeholder text where the evidence should be); only a lone finish ends
+    the turn."""
+    (tmp_path / "hello.txt").write_text("materials\n")
+    premature = ChatReply(
+        content=None,
+        tool_calls=(
+            ToolCall(
+                id="r1", name="read_file",
+                arguments={"path": "hello.txt"}, arguments_raw="{}",
+            ),
+            ToolCall(
+                id="f1", name="finish",
+                arguments={"report": "the file says [insert output here]"},
+                arguments_raw="{}",
+            ),
+        ),
+        prompt_tokens=100,
+        completion_tokens=10,
+    )
+    client = FakeClient([premature, _tool_reply("finish", report="the file says materials")])
+    result = Mason(_session(tmp_path), client=client).run_turn("what does hello.txt say?")
+    assert result.stop_reason == "finish"
+    assert result.text == "the file says materials"
+    assert result.steps == 2
+    followup = client.requests[1][0]
+    slots = {m["tool_call_id"]: m["content"] for m in followup if m.get("role") == "tool"}
+    assert "materials" in slots["r1"]
+    assert "finish not honored" in slots["f1"]
+
+
+def test_finish_without_a_report_is_not_honored(tmp_path: Path) -> None:
+    """finish gets the same required-argument contract dispatch gives every
+    other tool: an empty report closes nothing (loose-parsed finishes from
+    open models arrive with mangled argument keys and would otherwise end
+    the turn with an empty answer)."""
+    client = FakeClient(
+        [
+            _tool_reply("finish"),  # no report argument at all
+            _tool_reply("finish", report="a0 = 3.615 A (run ab12)"),
+        ]
+    )
+    result = Mason(_session(tmp_path), client=client).run_turn("measure a0")
+    assert result.stop_reason == "finish"
+    assert result.text == "a0 = 3.615 A (run ab12)"
+    assert result.steps == 2
+    followup = client.requests[1][0]
+    slots = [m["content"] for m in followup if m.get("role") == "tool"]
+    assert any("'report' argument is missing or empty" in s for s in slots)

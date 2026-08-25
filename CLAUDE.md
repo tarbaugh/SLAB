@@ -41,7 +41,7 @@ import packages. Each has a console script of the same name.
 |---|---|---|
 | `slab` | Access to computational software: engines and calculators, the engine registry, QE protocols, pseudopotential families, the SLURM layer, the config loader | nothing else here |
 | `foundation` | Workflows and state: runs, lifecycle, the artifact store, retention, tracing and caching, verification, the ready-made tasks, the MCP server | `slab` |
-| `mason` | The resident research agent: LLM clients, the ReAct loop, tools, session, prompts, model serving | `foundation`, `slab` |
+| `mason` | The resident research agent: LLM clients, the ReAct loop, tools, session, prompts, model serving, the roster of agent cards, skills, delegation | `foundation`, `slab` |
 
 The dependency direction is a hard rule, and `tests/test_layering.py`
 enforces it by reading the AST. That catches imports which only execute on
@@ -63,3 +63,10 @@ model, or the loader refuses the table.
 
 On-disk names stay under the SLAB umbrella and do not follow the package
 split: `slab.toml`, `$SLAB_*`, `.slab/`, and `~/.config/slab/`.
+
+Built-in agent cards (`src/mason/agents/`) and skills
+(`src/mason/skills/`) are package data. Skills follow the Agent Skills
+specification exactly, and mason-specific keys ride in the spec's
+`metadata` map. Every bundled skill script is an argparse CLI that the
+test suite executes on real data. Do not add or change a script without
+its test.

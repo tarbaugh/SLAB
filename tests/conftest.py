@@ -12,6 +12,20 @@ from foundation import SQLiteRunStore
 from slab.pseudos import PseudoFamily, family_dir_name
 
 
+@pytest.fixture(autouse=True)
+def _isolated_user_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """Every test sees an empty user config layer.
+
+    Skill and roster discovery read ``~/.config/slab/`` through
+    ``$XDG_CONFIG_HOME``, so without this a developer's real user files
+    would leak into assertions. A test that wants a user layer sets
+    ``XDG_CONFIG_HOME`` itself, which overrides this fixture's value.
+    """
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path_factory.mktemp("xdg")))
+
+
 class LlmScript:
     """What the fake OpenAI-compatible server should answer, and what it saw."""
 

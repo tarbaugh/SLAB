@@ -474,6 +474,38 @@ provider-agnostic, so `[agent] provider = "anthropic"` puts Claude behind
 the same harness where there is internet and billed API access. A Claude
 subscription is a separate product and does not include it.
 
+Mason is a research group, not one agent. Agent cards define a roster: a
+principal investigator (`pi`, the default) and specialists it can hand a
+scoped task to with a `delegate` tool, one level deep, under the same
+approval gate and the same shared notebook. Skills in the open
+[Agent Skills format](https://agentskills.io/specification) give every
+agent reusable procedures with tested analysis scripts (equation-of-state
+fits, convergence tables, RDF, MSD), categorized per specialist. Project
+directories can add or replace both: `agents/` and `skills/` shadow the
+user layer, which shadows the built-ins.
+
+```bash
+mason roster                  # the agents: card, layer, model, skills
+mason skills                  # the skills: layer, audience, scripts
+mason run --agent dft-expert "..."   # enter as a specialist
+```
+
+`mason roster` on a laptop serving `llama3.1:8b` through Ollama:
+
+```text
+pi                 built-in  llama3.1:8b                  5 skill(s)  [delegates]
+analysis-expert    built-in  llama3.1:8b                  3 skill(s)
+dft-expert         built-in  llama3.1:8b                  3 skill(s)
+md-expert          built-in  llama3.1:8b                  2 skill(s)
+```
+
+Per-agent models live in config, so a strong model can orchestrate while
+a local model executes: `[agent.roster.pi]` can point at
+`provider = "anthropic"` while the specialists stay on the served
+open-weight model. [The roster & skills
+tutorial](https://tarbaugh.github.io/SLAB/tutorials/roster-and-skills/)
+holds the full story, including a captured delegated run.
+
 Mason is verified against a real Llama 3.1 8B via Ollama, where an
 autonomous bulk-Cu relaxation reported an energy that matches an
 independent calculation exactly, with the run verified by its own checks.

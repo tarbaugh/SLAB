@@ -254,7 +254,13 @@ more than model choice.
 | `list_runs`, `show_run`, `list_engines` | the workspace's evidence surface: runs, checks with observed/expected values, failure records, capabilities |
 | `submit_job`, `job_status`, `cancel_job` | SLURM plumbing, present only when the config declares partitions |
 | `notebook`, `plan` | the memory instruments (below) |
-| `finish` | end the task with a report citing run ids |
+| `skill` | load a skill: its instructions, root path, and bundled files; the catalog is per-agent |
+| `delegate` | hand one scoped task to a specialist's own loop; the PI only, one level deep, sequential |
+| `finish` | end the task with a report citing run ids; honored only as the sole call of its reply, and only with a report |
+
+The last three belong to the roster: Mason is a research group of agent
+cards with per-specialist skills, described in
+[The roster and skills](roster-and-skills.md).
 
 Every tool failure is returned as the tool result, as evidence the model
 reads, and never as an exception that kills the loop. Mutating tools pass
@@ -381,8 +387,12 @@ authentication failure on a valid-looking key, that is usually why.
 **Developing exclusively against Claude lets the open-model path rot
 silently.** Every open-model bug fixed so far is something Claude would never
 have done, from llama-style tool JSON leaking into message text, to useless
-missing-argument errors, to Python written with literal `\n`. Keep the gated
-`SLAB_TEST_LLM` test as the acceptance gate before Mason changes land.
+missing-argument errors, to Python written with literal `\n`, to `finish`
+emitted in the same reply as the tool calls whose results its report
+pretends to cite (the harness now honors `finish` only alone, and only
+with a report). Keep the gated `SLAB_TEST_LLM` test as the acceptance
+gate before Mason changes land; the `finish` rule was caught exactly
+there, when a model update started batching its calls.
 
 ## Harness discipline, in code
 
@@ -399,11 +409,31 @@ and recorded in the transcript.
 Mason is a deliberate distillation of the 2024–2026 agent-harness literature
 onto SLAB's philosophy. The load-bearing choices and their sources:
 
-* **Single ReAct-style loop** ([Yao et al. 2022, arXiv:2210.03629](https://arxiv.org/abs/2210.03629)),
-  with no default multi-agent orchestration. Orchestrator-worker systems pay
-  off on breadth-first search, not tightly interdependent research work, and
-  they cost ~15× the tokens ([Anthropic, *Building a multi-agent research
-  system*](https://www.anthropic.com/engineering/multi-agent-research-system)).
+* **One ReAct-style loop as the unit of work** ([Yao et al. 2022,
+  arXiv:2210.03629](https://arxiv.org/abs/2210.03629)). The first release
+  omitted multi-agent orchestration entirely, citing the finding that
+  orchestrator-worker systems pay off on breadth-first search, not tightly
+  interdependent work, at ~15× the tokens ([Anthropic, *Building a
+  multi-agent research system*](https://www.anthropic.com/engineering/multi-agent-research-system)).
+  [The roster](roster-and-skills.md) amends that decision in the open, for
+  the case the same report endorses: context isolation for *separable*
+  subtasks — a convergence ladder fills a context with tables when only its
+  conclusion matters upstream. The composition stays deliberately austere
+  (one level deep, sequential, delegation always optional, a config
+  switch to off), and the PI-plus-specialists shape is now the domain
+  norm: Agent Laboratory below, the Virtual Lab's PI agent and specialist
+  scientists with experimentally validated designs ([Swanson et al.
+  2024](https://doi.org/10.1101/2024.11.11.623004)), and
+  Google's AI co-scientist ([Gottweis et al. 2025,
+  arXiv:2502.18864](https://arxiv.org/abs/2502.18864)).
+* **Skills instead of regenerated code** ([Anthropic, *Equipping agents
+  for the real world with Agent Skills*](https://www.anthropic.com/engineering/equipping-agents-for-the-real-world-with-agent-skills)),
+  in the open [Agent Skills format](https://agentskills.io/specification),
+  adopted verbatim: procedures and tested scripts ship as files an agent
+  loads on demand, with the spec's progressive disclosure keeping the
+  always-loaded cost to one line per skill. The shared notebook doubles as
+  the group's blackboard, the oldest multi-agent pattern there is
+  (Hearsay-II, Erman et al. 1980).
 * **Compaction + structured note-taking + file memory** as the three
   context-pollution countermeasures ([Anthropic, *Effective context engineering
   for AI agents*](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents)).
@@ -441,12 +471,15 @@ rather than summarizing linearly, follows the context-folding line
 
 ## Limitations, honestly stated
 
-Mason is single-loop, with no subagents yet, and it does not stream tokens,
+Mason's roster delegates one level deep and sequentially: no parallel
+delegation, no specialist-to-specialist messaging, no recursive teams.
+Delegation quality is bounded by the served model, and an 8B-class model
+handles only small, explicit briefs. Mason does not stream tokens,
 because an agent loop consumes whole turns. Its judgment is the served
 model's, so SLAB guarantees that what Mason reports is traceable and
 verified, not that its research taste is good. And the approval gate is a
 workflow control for your own account on your own machine, not a security
-sandbox, so `--auto` means what it says.
+sandbox, so `--auto` means what it says — for every agent on the roster.
 
 What has and has not been exercised against reality, precisely:
 

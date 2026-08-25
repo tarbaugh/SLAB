@@ -192,3 +192,23 @@ def test_importing_slab_stays_light() -> None:
         f"importing slab and foundation pulled in {result.stdout.strip()}; the "
         f"heavy dependencies must stay behind slab.backends / foundation.tasks"
     )
+
+
+def test_builtin_cards_and_skills_ship_inside_the_package() -> None:
+    """The roster's built-ins are package data: they must live under src/mason
+    (hatchling ships whole package directories, the py.typed precedent), and
+    every built-in skill must carry its manifest."""
+    cards = sorted(p.name for p in (SRC / "mason" / "agents").glob("*.md"))
+    assert cards == ["analysis-expert.md", "dft-expert.md", "md-expert.md", "pi.md"]
+    skills = sorted(
+        p.name for p in (SRC / "mason" / "skills").iterdir() if p.is_dir()
+    )
+    assert skills == [
+        "convergence-study",
+        "equation-of-state",
+        "msd-diffusion",
+        "radial-distribution",
+        "surface-energy",
+    ]
+    for name in skills:
+        assert (SRC / "mason" / "skills" / name / "SKILL.md").is_file()

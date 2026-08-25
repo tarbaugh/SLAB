@@ -12,13 +12,14 @@ import platform
 from datetime import UTC, datetime
 from typing import Any
 
+from mason.roster import AgentSpec
 from mason.session import MasonSession
+from mason.skills import Skill, catalog_block
 
-SYSTEM_PROMPT = """\
-You are Mason, the resident research agent of a SLAB workspace — a careful \
-computational materials scientist working inside a project directory on the \
-user's machine or HPC cluster.
-
+#: The harness discipline shared by every agent card. A card's body supplies
+#: identity and domain doctrine; this supplies how work is done here. The
+#: two concatenate into one system message, role first.
+CORE_PROMPT = """\
 # How you work
 
 Evidence first. Every number you report must trace to evidence: a SLAB run id, \
@@ -197,7 +198,34 @@ Do not invent anything not in the transcript. Do not soften failures.
 """
 
 
-def environment_block(session: MasonSession) -> str:
+def team_block(spec: AgentSpec, roster: dict[str, AgentSpec]) -> str:
+    """The ``# Your team`` section for a delegating agent, or empty.
+
+    One line per other card — the descriptions are written as delegation
+    triggers, so this list is what the PI reads when deciding whom to hand
+    a task to. Rendered only when the ``delegate`` tool actually exists in
+    the session, so the prompt never promises an absent tool.
+    """
+    others = [card for name, card in sorted(roster.items()) if name != spec.name]
+    if not others:
+        return ""
+    lines = [
+        "# Your team",
+        "",
+        "Specialists you can hand a scoped task to with the delegate tool. "
+        "Delegate work that is separable and would crowd your context; brief "
+        "them with the goal, the constraints, and what to return.",
+        "",
+    ]
+    lines.extend(f"- {card.name}: {card.description}" for card in others)
+    return "\n".join(lines)
+
+
+def environment_block(
+    session: MasonSession,
+    skills: dict[str, Skill] | None = None,
+    team: str | None = None,
+) -> str:
     """The per-session context: where we are, what exists here, what memory says."""
     lines = [
         "# Environment",
@@ -215,6 +243,10 @@ def environment_block(session: MasonSession) -> str:
         lines.append(f"cluster: {cluster}; partitions: {partitions}{suffix}")
     else:
         lines.append("cluster: none configured (no SLURM tools this session)")
+    if skills:
+        lines.append("\n" + catalog_block(skills))
+    if team:
+        lines.append("\n" + team)
     agents_md = _conventions_text(session)
     if agents_md:
         lines.append("\n# Project conventions (AGENTS.md)\n" + agents_md)
@@ -238,12 +270,27 @@ def _conventions_text(session: MasonSession, max_chars: int = 6_000) -> str:
     return text
 
 
-def system_messages(session: MasonSession, catalog: str | None = None) -> list[dict[str, Any]]:
-    """The system prompt: static core, compute budget, protocol, environment."""
-    prompt = SYSTEM_PROMPT
+def system_messages(
+    session: MasonSession,
+    spec: AgentSpec | None = None,
+    catalog: str | None = None,
+    *,
+    skills: dict[str, Skill] | None = None,
+    team: str | None = None,
+) -> list[dict[str, Any]]:
+    """The system prompt: role, static core, compute budget, protocol, environment.
+
+    *spec* supplies the role block (the agent card's body); ``None`` yields
+    the bare harness voice. Layers are ordered by change frequency so a
+    prefix-caching server reuses the KV cache: the role and core never
+    change; the environment (with the *skills* catalog and the *team*
+    block) is stable within one session.
+    """
+    prompt = (spec.prompt.rstrip() + "\n\n" + CORE_PROMPT) if spec is not None else CORE_PROMPT
     budget = compute_profile_block(session.compute_profile)
     if budget:
         prompt += "\n" + budget + "\n"
     if catalog is not None:
         prompt += FENCED_PROTOCOL.replace("{catalog}", catalog)
-    return [{"role": "system", "content": prompt + "\n" + environment_block(session)}]
+    environment = environment_block(session, skills, team)
+    return [{"role": "system", "content": prompt + "\n" + environment}]

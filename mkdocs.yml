@@ -55,4 +55,5 @@ nav:
       - Debugging failures: tutorials/debugging-failures.md
       - Agents over MCP: tutorials/agents-mcp.md
       - Mason, the resident agent: tutorials/mason.md
+      - The roster & skills: tutorials/roster-and-skills.md
   - Architecture: architecture.md

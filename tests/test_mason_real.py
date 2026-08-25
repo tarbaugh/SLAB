@@ -135,3 +135,37 @@ def test_real_anthropic_provider_reads_a_file_and_answers(tmp_path: Path) -> Non
     events = [json.loads(line) for line in session.transcript_path.read_text().splitlines()]
     usage = [event for event in events if event["type"] == "usage"]
     assert usage and any(event["prompt_tokens"] for event in usage)
+
+
+def test_real_model_delegates_a_read_to_a_specialist(tmp_path: Path) -> None:
+    """The delegation smoke: the PI hands a one-file read to a specialist.
+
+    The word can only arrive through the child loop, because the goal forbids
+    the PI from reading the file itself and small models follow the explicit
+    sequencing (see the note on the first test).
+    """
+    (tmp_path / "data.txt").write_text("the secret word is perovskite\n")
+    config = MasonConfig.model_validate(
+        {"agent": {"endpoint": ENDPOINT, "model": MODEL, "max_turns": 8, "temperature": 0.0}}
+    )
+    goal = (
+        "Use the delegate tool to send analysis-expert this task: 'Use read_file "
+        "on data.txt, then call finish reporting the secret word verbatim.' You "
+        "may not call read_file yourself. After the specialist's report arrives, "
+        "call finish reporting the word it returned."
+    )
+    last = ""
+    for _attempt in range(2):
+        session = MasonSession(
+            tmp_path, workspace_root=tmp_path / ".slab", agent=config.agent, auto_approve=True
+        )
+        result = Mason(session).run_turn(goal)
+        assert result.stop_reason in ("answer", "finish")
+        last = result.text
+        if "perovskite" in last.lower():
+            break
+    assert "perovskite" in last.lower()
+    events = [json.loads(line) for line in session.transcript_path.read_text().splitlines()]
+    delegations = [event for event in events if event["type"] == "delegate"]
+    assert delegations, "the PI never used the delegate tool"
+    assert delegations[0]["agent"] == "analysis-expert"

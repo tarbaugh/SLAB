@@ -91,7 +91,7 @@ def test_mason_chat_status_and_quit(monkeypatch: pytest.MonkeyPatch, tmp_path: P
         input="hi\n/status\n/quit\n",
     )
     assert result.exit_code == 0
-    assert "mason ready: fake" in result.output
+    assert "mason ready: pi — fake" in result.output
     assert "hello!" in result.output
     assert "tokens: 10 prompt, 2 completion" in result.output
 
@@ -227,3 +227,68 @@ def test_max_turns_below_one_is_refused(tmp_path: Path) -> None:
     )
     assert result.exit_code == 1
     assert "invalid --max-turns" in result.output
+
+
+def _tool_probe_response() -> tuple[int, dict[str, Any]]:
+    return (
+        200,
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {"id": "p1", "function": {"name": "ping", "arguments": "{}"}}
+                        ],
+                    }
+                }
+            ]
+        },
+    )
+
+
+def test_mason_doctor_probes_roster_connections(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, llm_server: tuple[str, LlmScript]
+) -> None:
+    """A specialist pinned to a served model gets a [+]; the doctor stays green."""
+    url, script = llm_server
+    script.get_response = (200, {"data": [{"id": "primary"}, {"id": "bigger"}]})
+    script.responses.append(_tool_probe_response())
+    (tmp_path / "slab.toml").write_text(
+        '[agent]\nmodel = "primary"\n\n[agent.roster.dft-expert]\nmodel = "bigger"\n'
+    )
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["doctor", "--endpoint", url])
+    assert result.exit_code == 0
+    assert "[+] dft-expert: model 'bigger' is served" in result.output
+
+
+def test_mason_doctor_fails_a_specialist_pinned_to_an_unserved_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, llm_server: tuple[str, LlmScript]
+) -> None:
+    url, script = llm_server
+    script.get_response = (200, {"data": [{"id": "primary"}]})
+    script.responses.append(_tool_probe_response())
+    (tmp_path / "slab.toml").write_text(
+        '[agent]\nmodel = "primary"\n\n[agent.roster.dft-expert]\nmodel = "missing"\n'
+    )
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["doctor", "--endpoint", url])
+    assert result.exit_code == 1
+    assert "[x] dft-expert: model 'missing' not served" in result.output
+
+
+def test_mason_doctor_flags_a_roster_table_without_a_card(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, llm_server: tuple[str, LlmScript]
+) -> None:
+    url, script = llm_server
+    script.get_response = (200, {"data": [{"id": "primary"}]})
+    script.responses.append(_tool_probe_response())
+    (tmp_path / "slab.toml").write_text(
+        '[agent]\nmodel = "primary"\n\n[agent.roster.nobody]\nmodel = "primary"\n'
+    )
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["doctor", "--endpoint", url])
+    assert result.exit_code == 1
+    assert "[x] roster: " in result.output
+    assert "[agent.roster.nobody]" in result.output
