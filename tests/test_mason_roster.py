@@ -292,3 +292,23 @@ def test_a_readme_beside_cards_is_not_a_card(tmp_path: Path) -> None:
     (tmp_path / "agents" / "README.md").write_text("about these cards\n")
     roster = discover_roster(tmp_path)
     assert "readme" not in roster and "README" not in roster
+
+
+def test_an_unreadable_card_is_an_error_line_not_a_traceback(tmp_path: Path) -> None:
+    path = _write_card(tmp_path / "agents", "locked-card")
+    path.chmod(0o000)
+    try:
+        with pytest.raises(RosterError, match="cannot read it"):
+            discover_roster(tmp_path)
+    finally:
+        path.chmod(0o644)
+
+
+def test_a_wrong_typed_description_names_the_actual_problem(tmp_path: Path) -> None:
+    directory = tmp_path / "agents"
+    directory.mkdir()
+    (directory / "listy.md").write_text(
+        "---\nname: listy\ndescription:\n  - a\n  - b\n---\nrole\n"
+    )
+    with pytest.raises(RosterError, match="must be a non-empty string"):
+        parse_agent_card(directory / "listy.md", "project")

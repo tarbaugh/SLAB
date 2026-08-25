@@ -166,7 +166,13 @@ def parse_skill(skill_dir: Path, source: Source) -> Skill:
     try:
         if not manifest.is_file():
             raise SkillError("the directory has no SKILL.md")
-        meta, _ = split_frontmatter(manifest.read_text(encoding="utf-8"))
+        try:
+            text = manifest.read_text(encoding="utf-8")
+        except OSError as e:
+            # An unreadable manifest must surface as an error line, not a
+            # traceback: the CLI catches SkillError, never a bare OSError.
+            raise SkillError(f"cannot read it: {e}") from e
+        meta, _ = split_frontmatter(text)
         name = _string_field(meta, "name", limit=64, required=True)
         assert name is not None  # required=True raised otherwise
         if not valid_name(name):

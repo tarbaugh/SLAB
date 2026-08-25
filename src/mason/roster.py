@@ -73,8 +73,10 @@ class AgentSpec:
 
 def _required_string(meta: dict[str, Any], key: str, limit: int) -> str:
     value = meta.get(key)
-    if not isinstance(value, str) or not value.strip():
+    if value is None:
         raise RosterError(f"frontmatter is missing the required {key!r} field")
+    if not isinstance(value, str) or not value.strip():
+        raise RosterError(f"frontmatter {key!r} must be a non-empty string")
     if len(value) > limit:
         raise RosterError(f"frontmatter {key!r} exceeds {limit} characters ({len(value)})")
     return value
@@ -103,7 +105,13 @@ def parse_agent_card(path: Path, source: Source) -> AgentSpec:
     """Read and validate one agent card, or raise a :class:`RosterError`."""
     try:
         try:
-            meta, body = split_frontmatter(path.read_text(encoding="utf-8"))
+            text = path.read_text(encoding="utf-8")
+        except OSError as e:
+            # An unreadable card must surface as an error line, not a
+            # traceback: the CLI catches RosterError, never a bare OSError.
+            raise RosterError(f"cannot read it: {e}") from e
+        try:
+            meta, body = split_frontmatter(text)
         except SkillError as e:
             raise RosterError(str(e)) from None
         unknown = sorted(set(meta) - _KNOWN_KEYS)

@@ -342,3 +342,14 @@ def test_a_scripted_turn_loads_a_skill_and_reads_its_script(tmp_path: Path) -> N
         m for m in client.requests[2] if m.get("role") == "tool" and m.get("tool_call_id") == "c2"
     )
     assert "EquationOfState" in str(read_result["content"])
+
+
+def test_an_unreadable_manifest_is_an_error_line_not_a_traceback(tmp_path: Path) -> None:
+    """The CLI catches SkillError; a permissions problem must arrive as one."""
+    directory = _write_skill(tmp_path / "skills", "locked-away")
+    (directory / "SKILL.md").chmod(0o000)
+    try:
+        with pytest.raises(SkillError, match="cannot read it"):
+            discover_skills(tmp_path)
+    finally:
+        (directory / "SKILL.md").chmod(0o644)
