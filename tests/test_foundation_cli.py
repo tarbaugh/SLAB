@@ -430,3 +430,52 @@ def test_gc_reports_orphans(root: Path) -> None:
     result = runner.invoke(app, ["gc", "-w", str(root)])
     assert "orphans (unreferenced, not deleted): 1" in result.output
 
+
+
+# -- every verb reports workspace-open failures as error lines ---------------
+
+
+def _future_workspace(tmp_path: Path) -> Path:
+    """A runs.db written by a newer foundation than this one."""
+    import sqlite3
+
+    root = tmp_path / "future"
+    root.mkdir()
+    with sqlite3.connect(root / "runs.db") as db:
+        db.execute("PRAGMA user_version = 99")
+    return root
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["list"],
+        ["show", "01xxxxxxxx"],
+        ["promote", "01xxxxxxxx"],
+        ["expire", "--older-than", "0d"],
+        ["gc"],
+    ],
+)
+def test_a_future_schema_workspace_fails_as_an_error_line(
+    tmp_path: Path, argv: list[str]
+) -> None:
+    """SchemaVersionError must print `error: ...`, never a traceback.
+
+    Before this test, `expire` and `gc` opened the Workspace outside their
+    try block, so exactly these two verbs crashed with a raw traceback while
+    the rest reported cleanly.
+    """
+    result = runner.invoke(app, [*argv, "-w", str(_future_workspace(tmp_path))])
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "error:" in result.output
+    assert "schema version 99" in result.output
+
+
+def test_a_workspace_path_that_is_a_file_fails_as_an_error_line(tmp_path: Path) -> None:
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("occupied")
+    result = runner.invoke(app, ["gc", "-w", str(blocker)])
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "error:" in result.output

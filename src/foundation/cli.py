@@ -61,9 +61,17 @@ def _age(moment: datetime) -> str:
 
 
 def _open(workspace: Path | None) -> Workspace:
+    """Open the workspace, reporting every failure as an error line.
+
+    ``Workspace`` creates directories and opens SQLite, so beyond the domain
+    errors (a broken config file, a database from a newer foundation) the
+    open can raise the OSError family: the path is a file, or its parent is
+    not writable. The CLI's contract is that all of them print ``error: ...``
+    and exit 1, never a traceback.
+    """
     try:
         return Workspace(_ops.resolve_root(workspace))
-    except (FoundationError, SlabError) as e:  # e.g. a broken config file
+    except (FoundationError, SlabError, OSError) as e:
         _fail(str(e))
 
 
@@ -313,11 +321,14 @@ def expire(
             policy = _ops.load_policy(root, policy_file)
     except (FoundationError, SlabError, ValueError, OSError) as e:
         _fail(str(e))
-    with Workspace(root) as ws:
-        expired = ws.expire_due(policy, include_running=include_running)
-        for item in expired:
-            typer.echo(f"expired {item.id}  {item.name}")
-        typer.echo(f"{len(expired)} run(s) expired")
+    try:
+        with Workspace(root) as ws:
+            expired = ws.expire_due(policy, include_running=include_running)
+    except (FoundationError, SlabError, OSError) as e:
+        _fail(str(e))
+    for item in expired:
+        typer.echo(f"expired {item.id}  {item.name}")
+    typer.echo(f"{len(expired)} run(s) expired")
 
 
 @app.command()
@@ -336,8 +347,11 @@ def gc(
         policy = _ops.load_policy(root, policy_file)
     except (FoundationError, SlabError, ValueError, OSError) as e:
         _fail(str(e))
-    with Workspace(root) as ws:
-        report = ws.gc(policy, dry_run=dry_run)
+    try:
+        with Workspace(root) as ws:
+            report = ws.gc(policy, dry_run=dry_run)
+    except (FoundationError, SlabError, OSError) as e:
+        _fail(str(e))
     verb = "would drop" if dry_run else "dropped"
     typer.echo(
         f"{verb} {len(report.dropped)} blob(s), freeing {report.freed_bytes} bytes; "
