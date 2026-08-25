@@ -275,7 +275,9 @@ def build_toolbox(
             name="finish",
             description=(
                 "End the current task with a final report. Cite run ids for every "
-                "number; list what was verified and what remains open."
+                "number; list what was verified and what remains open. Call it "
+                "alone, as the only tool call of its message, after the evidence "
+                "it cites has been read."
             ),
             parameters=_schema({"report": {"type": "string"}}, ["report"]),
             handler=lambda arguments: str(arguments.get("report", "")),

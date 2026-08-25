@@ -268,7 +268,33 @@ class Mason:
                 return TurnResult(text=text, stop_reason="answer", steps=step)
             for position, call in enumerate(calls):
                 if call.name == "finish" and call.arguments_error is None:
-                    report = str(call.arguments.get("report", ""))
+                    if len(calls) > 1:
+                        # A finish sharing its reply with other tool calls was
+                        # written before their results existed — its report
+                        # can only be a guess (open models emit exactly this,
+                        # with placeholder text where the evidence should be).
+                        self._append_tool_result(
+                            call,
+                            "finish not honored: it arrived in the same reply as "
+                            "other tool calls, so its report was written before "
+                            "their results existed; read the results, then call "
+                            "finish alone",
+                            as_text=from_text,
+                        )
+                        continue
+                    report = str(call.arguments.get("report", "") or "").strip()
+                    if not report:
+                        # Every other tool gets required-argument validation in
+                        # dispatch; finish is handled here, so it gets the same
+                        # contract here. An empty report closes nothing.
+                        self._append_tool_result(
+                            call,
+                            "finish not honored: the required 'report' argument is "
+                            "missing or empty; call finish again with the full "
+                            "report text",
+                            as_text=from_text,
+                        )
+                        continue
                     self._append_tool_result(call, "task closed", as_text=from_text)
                     self._answer_unrun(calls[position + 1 :], from_text=from_text)
                     self.session.record({"type": "finish", "report": report})
