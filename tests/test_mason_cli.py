@@ -91,7 +91,7 @@ def test_mason_chat_status_and_quit(monkeypatch: pytest.MonkeyPatch, tmp_path: P
         input="hi\n/status\n/quit\n",
     )
     assert result.exit_code == 0
-    assert "mason ready: fake" in result.output
+    assert "mason ready: pi — fake" in result.output
     assert "hello!" in result.output
     assert "tokens: 10 prompt, 2 completion" in result.output
 

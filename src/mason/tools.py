@@ -29,7 +29,10 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from mason.roster import AgentSpec
 
 from mason.client import ToolCall
 from mason.session import MasonSession
@@ -215,13 +218,21 @@ def _schema(properties: dict[str, dict[str, Any]], required: list[str]) -> dict[
 
 
 def build_toolbox(
-    session: MasonSession, *, skills: dict[str, Skill] | None = None
+    session: MasonSession,
+    spec: AgentSpec | None = None,
+    *,
+    depth: int = 0,
+    skills: dict[str, Skill] | None = None,
 ) -> Toolbox:
     """Every tool this session gets; SLURM tools only where partitions exist.
 
-    *skills* is the skill catalog for this agent (the ``skill`` tool appears
-    only when it is non-empty); ``None`` discovers the full catalog from the
-    session's project directory.
+    *spec* is the agent card in force: its ``tools`` allowlist narrows the
+    box (``finish`` always stays), and ``None`` means no narrowing. *depth*
+    is the delegation depth: a delegated agent (depth > 0) loses ``plan``,
+    because ``PLAN.md`` belongs to the turn owner. *skills* is the skill
+    catalog for this agent (the ``skill`` tool appears only when it is
+    non-empty); ``None`` discovers the full catalog from the session's
+    project directory.
     """
     if skills is None:
         skills = discover_skills(session.cwd)
@@ -235,6 +246,11 @@ def build_toolbox(
     _add_memory_tools(box, session)
     if skills:
         _add_skill_tool(box, session, skills)
+    if spec is not None and spec.tools is not None:
+        for name in [n for n in box.tools if n not in spec.tools and n != "finish"]:
+            del box.tools[name]
+    if depth > 0:
+        box.tools.pop("plan", None)
     box.add(
         Tool(
             name="finish",

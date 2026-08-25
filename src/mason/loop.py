@@ -36,9 +36,10 @@ from mason.client import (
     parse_fenced_calls,
     parse_loose_calls,
 )
-from mason.config import AgentConfig
+from mason.config import AgentConfig, override_agent, roster_agent_config
 from mason.errors import MasonError
-from mason.prompts import COMPACTION_PROMPT, system_messages
+from mason.prompts import COMPACTION_PROMPT, system_messages, team_block
+from mason.roster import AgentSpec, check_overrides, discover_roster, skills_for
 from mason.session import MasonSession
 from mason.skills import Skill, discover_skills
 from mason.tools import Toolbox, build_toolbox
@@ -121,15 +122,24 @@ def client_from_config(agent: AgentConfig) -> ChatBackend:
 
 
 class Mason:
-    """One conversation with the resident research agent.
+    """One conversation with one agent of the roster (the PI by default).
 
     Args:
         session: The project/session state (paths, config, transcript).
         client: A chat backend; built from the session's config when omitted.
-        toolbox: The tool set; built for the session when omitted.
+        toolbox: The tool set; built for the session's card when omitted.
         resume_from: Messages replayed from an earlier transcript (the system
             message is always rebuilt fresh — plan, notebook, and environment
             re-enter current, not as they were).
+        skills: The full skill catalog; discovered from the project directory
+            when omitted. The card's scope narrows it to what this agent sees.
+        spec: The agent card to run as; ``None`` resolves the roster and uses
+            ``pi``. ``[agent.roster.<name>]`` overrides apply to the session's
+            config, and CLI flag overrides stay on top of them.
+        roster: The full roster; discovered when omitted.
+        depth: Delegation depth. At 0 the card's ``delegates`` flag can grant
+            the ``delegate`` tool; below that it never does, and ``plan`` is
+            withheld — the plan belongs to the turn owner.
     """
 
     def __init__(
@@ -139,19 +149,35 @@ class Mason:
         toolbox: Toolbox | None = None,
         resume_from: list[dict[str, Any]] | None = None,
         skills: dict[str, Skill] | None = None,
+        spec: AgentSpec | None = None,
+        roster: dict[str, AgentSpec] | None = None,
+        depth: int = 0,
     ) -> None:
         self.session = session
+        self.roster = roster if roster is not None else discover_roster(session.cwd)
+        if spec is None:
+            spec = self.roster["pi"]  # the built-in layer guarantees pi exists
+        self.spec = spec
+        self.depth = depth
+        if depth == 0:
+            check_overrides(session.agent, self.roster)
+        session.agent_name = spec.name
+        self._apply_roster_override()
         self.client: ChatBackend = (
             client if client is not None else client_from_config(session.agent)
         )
-        self.skills = skills if skills is not None else discover_skills(session.cwd)
+        self.all_skills = skills if skills is not None else discover_skills(session.cwd)
+        self.skills = skills_for(spec, self.all_skills)
         self.toolbox = (
-            toolbox if toolbox is not None else build_toolbox(session, skills=self.skills)
+            toolbox
+            if toolbox is not None
+            else build_toolbox(session, spec, depth=depth, skills=self.skills)
         )
         self.fenced = session.agent.tool_protocol == "fenced"
         catalog = self.toolbox.catalog_text() if self.fenced else None
+        self._team = team_block(spec, self.roster) if "delegate" in self.toolbox.tools else None
         self.messages: list[dict[str, Any]] = system_messages(
-            session, catalog, skills=self.skills
+            session, spec, catalog, skills=self.skills, team=self._team
         )
         self._catalog = catalog
         self._last_prompt_tokens: int | None = None
@@ -163,6 +189,26 @@ class Mason:
             self.session.record({"type": "resume", "messages": len(resume_from)})
             for message in resume_from:
                 self._append(message)
+
+    def _apply_roster_override(self) -> None:
+        """``[agent.roster.<name>]`` under the flags: config per agent, flags on top.
+
+        The session's config arrives with CLI flag overrides already applied;
+        the card's roster table must sit *under* those flags, so the merge
+        order is base, then the table, then the flags again. When anything
+        changed, the endpoint is resolved again — which server is right
+        depends on the provider and model — except a ``--endpoint`` flag,
+        which stays pinned.
+        """
+        session = self.session
+        effective = roster_agent_config(session.agent, self.spec.name)
+        if session.flag_updates:
+            effective = override_agent(effective, session.flag_updates)
+        if effective == session.agent:
+            return
+        session.agent = effective
+        pinned = session.endpoint if session.endpoint_origin == "--endpoint" else None
+        session.resolve_endpoint(pinned)
 
     # -- the loop -------------------------------------------------------------
 
@@ -360,7 +406,9 @@ class Mason:
         summary = (summary_reply.content or "").strip() or "(the summarizer said nothing)"
         self.session.count_usage(summary_reply.prompt_tokens, summary_reply.completion_tokens)
         self.session.notebook_append(summary, heading="context compaction")
-        rebuilt = system_messages(self.session, self._catalog, skills=self.skills)
+        rebuilt = system_messages(
+            self.session, self.spec, self._catalog, skills=self.skills, team=self._team
+        )
         tail = self.messages[boundary:]
         self.messages = [
             *rebuilt,

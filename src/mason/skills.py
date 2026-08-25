@@ -75,7 +75,7 @@ class Skill:
 
     def body(self) -> str:
         """The instructions: everything in ``SKILL.md`` after the frontmatter."""
-        _, text = _split_frontmatter((self.root / "SKILL.md").read_text(encoding="utf-8"))
+        _, text = split_frontmatter((self.root / "SKILL.md").read_text(encoding="utf-8"))
         return text
 
 
@@ -100,11 +100,11 @@ def valid_name(name: str) -> bool:
     return len(name) <= 64 and bool(_NAME.match(name))
 
 
-def _split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
+def split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     """Split ``SKILL.md`` text into (frontmatter mapping, body).
 
     Examples:
-        >>> meta, body = _split_frontmatter("---\\nname: eos\\n---\\nSteps.\\n")
+        >>> meta, body = split_frontmatter("---\\nname: eos\\n---\\nSteps.\\n")
         >>> meta["name"], body
         ('eos', 'Steps.\\n')
     """
@@ -166,7 +166,7 @@ def parse_skill(skill_dir: Path, source: Source) -> Skill:
     try:
         if not manifest.is_file():
             raise SkillError("the directory has no SKILL.md")
-        meta, _ = _split_frontmatter(manifest.read_text(encoding="utf-8"))
+        meta, _ = split_frontmatter(manifest.read_text(encoding="utf-8"))
         name = _string_field(meta, "name", limit=64, required=True)
         assert name is not None  # required=True raised otherwise
         if not valid_name(name):

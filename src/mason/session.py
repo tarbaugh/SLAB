@@ -90,6 +90,13 @@ class MasonSession:
         )
         self.approver: Approver = approver if approver is not None else _approve_nothing
         self.auto_approve = auto_approve
+        # Which agent card this session runs as; the loop sets it from the
+        # spec it resolves. Delegated child sessions carry the specialist's
+        # name for attribution in approvals and notebook entries.
+        self.agent_name = "pi"
+        # CLI flag overrides, kept so they can be re-asserted over
+        # [agent.roster.<name>] tables: a flag outranks config.
+        self.flag_updates: dict[str, object] = {}
         # Unset compute_profile derives from the machine: a config that declares
         # SLURM partitions is a cluster, anything else is treated as a laptop —
         # the conservative guess, since over-sizing a calculation wastes hours

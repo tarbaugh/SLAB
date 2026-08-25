@@ -60,6 +60,38 @@ class ServeConfig(BaseModel):
     include_hpc_setup: bool = False
 
 
+class RosterOverride(BaseModel):
+    """Per-agent overrides of connection and budget fields (``[agent.roster.<name>]``).
+
+    Agent cards are portable content and never name models; model names and
+    budgets are machine facts and live here. Every field is optional; a set
+    field replaces the ``[agent]`` value for that one agent. Session policy
+    stays session-wide with one owner, so ``approval``, ``shell_allowlist``,
+    ``serve``, and ``compute_profile`` cannot be overridden per agent.
+
+    Examples:
+        >>> RosterOverride(model="claude-opus-5").model_dump(exclude_none=True)
+        {'model': 'claude-opus-5'}
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    provider: Literal["openai", "anthropic"] | None = None
+    endpoint: str | None = None
+    model: str | None = None
+    api_key_env: str | None = None
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+    context_window: int | None = Field(default=None, ge=4_096)
+    compact_at: float | None = Field(default=None, gt=0.0, le=1.0)
+    max_turns: int | None = Field(default=None, ge=1)
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    request_timeout_s: float | None = Field(default=None, gt=0)
+    max_reply_tokens: int | None = Field(default=None, ge=256)
+    max_tool_output_chars: int | None = Field(default=None, ge=1_000)
+    shell_timeout_s: float | None = Field(default=None, gt=0)
+    tool_protocol: Literal["native", "fenced"] | None = None
+
+
 class AgentConfig(BaseModel):
     """The resident research agent's model connection and budgets (``[agent]``).
 
@@ -105,6 +137,11 @@ class AgentConfig(BaseModel):
     approval: Literal["ask", "auto"] = "ask"
     shell_allowlist: tuple[str, ...] = ()
     serve: ServeConfig = ServeConfig()
+    # The roster: whether the entry agent may delegate at all, and per-agent
+    # overrides keyed by card name. The cards themselves are markdown files
+    # (mason.roster); config holds only the machine facts about them.
+    delegation: bool = True
+    roster: dict[str, RosterOverride] = Field(default_factory=dict)
 
     @property
     def resolved_endpoint(self) -> str:
@@ -142,5 +179,50 @@ class MasonConfig(BaseModel):
 def load_config(cwd: str | os.PathLike[str] | None = None) -> MasonConfig:
     """Load every layer and validate the tables Mason owns."""
     return validate(load_merged(cwd), MasonConfig)
+
+
+def override_agent(agent: AgentConfig, updates: dict[str, object]) -> AgentConfig:
+    """Rebuild *agent* with *updates* through the model's own validation.
+
+    ``model_copy(update=...)`` skips validation, so a mistyped value would
+    silently take effect. Rebuilding through ``model_validate`` keeps every
+    ``Literal`` and bound on the schema in force for overrides too. Raises
+    :class:`pydantic.ValidationError`; callers name the flag or table that
+    supplied the bad value.
+
+    Examples:
+        >>> override_agent(AgentConfig(), {"temperature": 0.0}).temperature
+        0.0
+    """
+    if not updates:
+        return agent
+    return type(agent).model_validate({**agent.model_dump(), **updates})
+
+
+def roster_agent_config(agent: AgentConfig, name: str) -> AgentConfig:
+    """The effective configuration for one roster agent: base plus its table.
+
+    A table that sets ``provider`` without ``endpoint`` also clears the
+    endpoint, so the new provider's default (or discovery) applies instead
+    of the old provider's URL — a vLLM endpoint must not survive a switch
+    to the Anthropic API.
+
+    Examples:
+        >>> base = AgentConfig.model_validate(
+        ...     {"model": "m", "roster": {"pi": {"temperature": 0.0}}})
+        >>> roster_agent_config(base, "pi").temperature
+        0.0
+        >>> roster_agent_config(base, "dft-expert").temperature
+        0.2
+    """
+    override = agent.roster.get(name)
+    if override is None:
+        return agent
+    updates: dict[str, object] = override.model_dump(exclude_none=True)
+    if not updates:
+        return agent
+    if "provider" in updates and "endpoint" not in updates:
+        updates["endpoint"] = None
+    return override_agent(agent, updates)
 
 
