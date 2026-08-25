@@ -317,7 +317,7 @@ class SlabConfig(BaseModel):
         if value > SCHEMA_VERSION:
             raise ValueError(
                 f"config schema_version {value} is newer than this slab understands "
-                f"({SCHEMA_VERSION}); upgrade slab to read it"
+                f"({SCHEMA_VERSION}); upgrade slab-stack to read it"
             )
         if value < 1:
             raise ValueError(f"config schema_version must be >= 1, got {value}")
@@ -420,7 +420,7 @@ def load_merged(cwd: str | os.PathLike[str] | None = None) -> MergedConfig:
     for dotted, moved_to in _MOVED_KEYS.items():
         if _has_dotted(merged, dotted):
             raise ConfigError(
-                f"{origins.get(dotted, 'configuration')}: {dotted} moved to "
+                f"{_origin_for(dotted, origins)}: {dotted} moved to "
                 f"{moved_to}; move the value into that table"
             )
     return MergedConfig(raw=merged, origins=origins, files=files)
@@ -501,7 +501,7 @@ def _check_schema_version(raw: dict[str, Any], path: Path) -> None:
     if declared > SCHEMA_VERSION:
         raise ConfigError(
             f"{path} declares schema_version {declared}, newer than this slab "
-            f"understands ({SCHEMA_VERSION}); upgrade slab to read it"
+            f"understands ({SCHEMA_VERSION}); upgrade slab-stack to read it"
         )
     if declared < 1:
         raise ConfigError(f"{path} declares schema_version {declared}; it must be >= 1")
@@ -533,6 +533,12 @@ def _merge_into(
         ):
             _merge_into(target[key], value, origins, source, prefix=f"{dotted}.")
         else:
+            if isinstance(target.get(key), dict) and not isinstance(value, dict):
+                # A scalar replacing a whole table erases the table's leaves;
+                # their origins must go with them, or the show command reports
+                # phantom keys with confident attributions.
+                for stale in [k for k in origins if k.startswith(f"{dotted}.")]:
+                    del origins[stale]
             target[key] = value
             _set_origin_tree(origins, dotted, value, source)
 

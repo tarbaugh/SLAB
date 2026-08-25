@@ -1,6 +1,6 @@
 """Mason — the resident research agent: a coding-agent harness for open models.
 
-The mason works the slab. This subpackage is a Claude-Code-class agent loop
+The mason works the slab. This package is a Claude-Code-class agent loop
 built directly on SLAB's own operations and tuned for long-running atomistic
 research projects, designed to run against *open-weight* models served on
 your own hardware (vLLM on a compute node, Ollama on a laptop) through the
@@ -26,9 +26,11 @@ and its provenance is documented in ``docs/tutorials/mason.md``:
 
 from mason.anthropic import AnthropicClient, ModelRefusalError
 from mason.client import ChatClient, ChatReply, ContextOverflowError, LlmError, ToolCall
+from mason.errors import MasonError
 from mason.loop import Mason, TurnResult
 from mason.session import MasonSession
 from mason.tools import Tool, Toolbox, build_toolbox
+from slab._version import __version__
 
 __all__ = [
     "AnthropicClient",
@@ -37,11 +39,13 @@ __all__ = [
     "ContextOverflowError",
     "LlmError",
     "Mason",
+    "MasonError",
     "MasonSession",
     "ModelRefusalError",
     "Tool",
     "ToolCall",
     "Toolbox",
     "TurnResult",
+    "__version__",
     "build_toolbox",
 ]

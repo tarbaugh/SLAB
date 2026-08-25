@@ -350,9 +350,6 @@ config_app = typer.Typer(
 app.add_typer(config_app, name="config")
 
 
-_SLAB_TABLES = frozenset({"schema_version", "paths", "engines", "hpc"})
-
-
 @config_app.command("show")
 def config_show(
     as_json: Annotated[bool, typer.Option("--json", help="Emit machine-readable JSON.")] = False,
@@ -360,24 +357,28 @@ def config_show(
     """Show the merged configuration and which file each value came from.
 
     One file, three packages. SLAB's own tables print through their validated
-    models, so a ``~`` or ``$VAR`` shows the path it expanded to. The tables
+    model, so a ``~`` or ``$VAR`` shows the path it expanded to. The tables
     Foundation and Mason own print as written, because SLAB does not import
     their models — it knows their names, not their meanings. A value refused
-    by its owner therefore still appears here, which is what makes this the
-    command to reach for when asking why a setting did not take.
+    by its owner therefore still appears here, which keeps this the command
+    that answers why a setting was not applied.
     """
-    from slab.config import KNOWN_TOP_LEVEL_KEYS, load_config_with_origins
+    from slab.config import KNOWN_TOP_LEVEL_KEYS, SlabConfig, load_config_with_origins
 
     try:
         config, merge = load_config_with_origins()
     except SlabError as e:
         _fail(str(e))
     files, origins = merge.files, merge.origins
+    # Ownership comes from the model itself, so a table added to SlabConfig
+    # can never be misrouted here by a stale hand-kept list.
+    slab_tables = frozenset(SlabConfig.model_fields)
+    resolved = config.model_dump()
 
     def value_of(dotted: str) -> object:
         """SLAB's tables resolved; everyone else's exactly as the file says."""
-        owned = dotted.split(".", 1)[0] in _SLAB_TABLES
-        return _dig(config if owned else merge.raw, dotted)
+        owned = dotted.split(".", 1)[0] in slab_tables
+        return _dig(resolved if owned else merge.raw, dotted)
 
     if as_json:
         typer.echo(
@@ -404,16 +405,24 @@ def config_show(
         typer.echo(f"{layer}: {path}")
     for dotted in sorted(origins):
         typer.echo(f"  {dotted} = {value_of(dotted)!r}  [{origins[dotted]}]")
-    unowned = ", ".join(sorted(KNOWN_TOP_LEVEL_KEYS - _SLAB_TABLES))
+    unowned = ", ".join(sorted(KNOWN_TOP_LEVEL_KEYS - slab_tables))
     typer.echo(f"[{unowned}] print as written; their owners validate them")
     typer.echo("unset keys use built-in defaults ('slab config init' shows them all)")
 
 
-def _dig(model: object, dotted: str) -> object:
-    """Fetch a dotted key path off the validated config model."""
-    node = model
+def _dig(mapping: object, dotted: str) -> object:
+    """Fetch a dotted key path out of nested mappings, and only mappings.
+
+    Both sources are plain dicts (the model is dumped first), so a path that
+    leaves the mapping world answers None rather than reaching into whatever
+    Python object happens to sit there. A config value must never render as
+    a bound method.
+    """
+    node = mapping
     for part in dotted.split("."):
-        node = node.get(part) if isinstance(node, dict) else getattr(node, part, None)
+        if not isinstance(node, dict):
+            return None
+        node = node.get(part)
     return node
 
 

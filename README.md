@@ -113,15 +113,21 @@ python examples/demo.py                # MACE + Si (downloads the model on first
 python examples/demo.py --engine emt   # EMT + Cu: no extras, runs in seconds
 ```
 
+The output, with MACE's own loader messages omitted:
+
 ```text
 workspace: .slab   engine: mace   system: Si x 64 atoms
-  run 01kzs2m7s1  E = -343.628458 eV  fmax = 0.0382  steps = 10  -> verified
-  run 01kzs2mad3  E = -343.626565 eV  fmax = 0.0442  steps = 14  -> verified
-  run 01kzs2mbwn  E = -343.628352 eV  fmax = 0.0417  steps = 19  -> verified
-  run 01kzs2mdw7  E = -343.626973 eV  fmax = 0.0472  steps = 20  -> verified
-  run 01kzs2mfwn  E = -343.626718 eV  fmax = 0.0450  steps = 21  -> verified
+  run 01m0v7tefx  E = -343.628458 eV  fmax = 0.0382  steps = 10  -> verified
+  run 01m0v7th31  E = -343.626565 eV  fmax = 0.0442  steps = 14  -> verified
+  run 01m0v7tjhz  E = -343.628352 eV  fmax = 0.0417  steps = 19  -> verified
+  run 01m0v7tmg4  E = -343.626973 eV  fmax = 0.0472  steps = 20  -> verified
+  run 01m0v7tph3  E = -343.626718 eV  fmax = 0.0450  steps = 21  -> verified
 
-lowest energy: run 01kzs2m7s1  (E = -343.628458 eV)
+lowest energy: run 01m0v7tefx  (E = -343.628458 eV)
+decide what deserves permanence, then clean up:
+  foundation promote 01m0v7tefx --reason 'lowest energy of 5 variants'
+  foundation expire --older-than 0d
+  foundation gc
 ```
 
 Each variant is its own run with a stated intent, and the convergence checks
@@ -129,22 +135,28 @@ passed, so all five landed `verified`. Nothing is permanent yet. That
 decision happens now, after the results exist:
 
 ```bash
-$ foundation promote 01kzs2m7s1 --reason "lowest energy of 5 variants"
-promoted 01kzs2m7s1gd2dr127x58azfqk  si-relax-0
+$ foundation promote 01m0v7tefx --reason "lowest energy of 5 variants"
+promoted 01m0v7tefx69nvg32fs2tjdjze  si-relax-0
 
 $ foundation expire --older-than 0d
+expired 01m0v7tph3bwc3dwtya44tb0f4  si-relax-4
+expired 01m0v7tmg4gj4af1b8yk9t3ty3  si-relax-3
+expired 01m0v7tjhzacze4rw6w52h4k6k  si-relax-2
+expired 01m0v7th3146ysdd274zb5b8sp  si-relax-1
 4 run(s) expired
 
 $ foundation gc
-dropped 31 blob(s), freeing 444075 bytes; 8 kept
+dropped 31 blob(s), freeing 444335 bytes; 8 kept
 ```
 
 The archive now contains exactly one run's terminal artifacts, plus its
 recompute roots, while everything else is a hash-and-recipe skeleton that
-remains fully queryable:
+remains fully queryable. The two `show` views below are condensed side by
+side; the values come from those runs:
 
+<!-- no-verify -->
 ```text
-$ foundation show 01kzs2m7s1          $ foundation show 01kzs2mad3   # expired
+$ foundation show 01m0v7tefx          $ foundation show 01m0v7th31   # expired
   state:   promoted                           state:   expired
   checks:  3/3 passed                         checks:  3/3 passed
   artifacts:                                  artifacts:

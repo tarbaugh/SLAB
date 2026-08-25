@@ -1977,7 +1977,7 @@ def _mace_calculator(**options: Any) -> Any:
         except ImportError:
             pass
         raise EngineNotAvailableError(
-            f"engine 'mace' needs the mace-torch package: pip install 'slab[mace]'{hint}"
+            f"engine 'mace' needs the mace-torch package: pip install 'slab-stack[mace]'{hint}"
         ) from e
     options.setdefault("model", "small")
     options.setdefault("device", "cpu")
@@ -2070,7 +2070,7 @@ def _rootstock_calculator(**options: Any) -> Any:
         from rootstock import RootstockCalculator
     except ImportError as e:
         raise EngineNotAvailableError(
-            "engine 'rootstock' needs the rootstock package: pip install 'slab[rootstock]'"
+            "engine 'rootstock' needs the rootstock package: pip install 'slab-stack[rootstock]'"
         ) from e
     if "checkpoint" not in options:
         raise EngineNotAvailableError(

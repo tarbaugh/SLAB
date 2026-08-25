@@ -207,3 +207,23 @@ def test_mason_run_gets_the_refusing_gate_not_a_prompt(
     assert batch.approver.__name__ == "_approve_nothing"
     chat = _mason_session(tmp_path / "ws", auto=False, model=None, endpoint=None)
     assert chat.approver.__name__ == "_ask_approval"
+
+
+def test_provider_typo_is_refused_not_rerouted(tmp_path: Path) -> None:
+    """CLI overrides go through the model's validation, so a mistyped
+    provider is refused by name instead of silently probing the openai
+    branch with an Anthropic model."""
+    result = runner.invoke(
+        app, ["doctor", "--provider", "anthorpic", "-w", str(tmp_path / ".slab")]
+    )
+    assert result.exit_code == 1
+    assert "invalid --provider" in result.output
+    assert "'openai' or 'anthropic'" in result.output
+
+
+def test_max_turns_below_one_is_refused(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app, ["run", "hi", "--max-turns", "0", "-w", str(tmp_path / ".slab")]
+    )
+    assert result.exit_code == 1
+    assert "invalid --max-turns" in result.output

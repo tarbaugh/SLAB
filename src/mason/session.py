@@ -150,9 +150,10 @@ class MasonSession:
 
         Examples:
             >>> from mason.config import AgentConfig
+            >>> from slab.config import HpcConfig
             >>> agent = AgentConfig.model_validate(
             ...     {"shell_allowlist": ["git status", "ls"]})
-            >>> session = MasonSession("/tmp", agent=agent)
+            >>> session = MasonSession("/tmp", agent=agent, hpc=HpcConfig())
             >>> session.shell_allowlisted("git status --short")
             True
             >>> session.shell_allowlisted("git push")

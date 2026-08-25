@@ -47,12 +47,13 @@ project: /home/tom/cu-project/slab.toml
 unset keys use built-in defaults ('slab config init' shows them all)
 ```
 
-The last-but-one line is the split showing through. SLAB prints its own
-tables through their validated models, so a `~` or a `${VAR}` appears as the
-path it expanded to. It prints `[workspace]` and `[agent]` exactly as the
-file writes them, because SLAB knows those table names and not their
-meanings. A value their owners would refuse still appears here, which is why
-this stays the command to reach for when a setting did not take.
+The last-but-one line reports the table ownership that the package split
+introduced. SLAB prints its own tables through their validated models, so a
+`~` or a `${VAR}` appears as the path it expanded to. It prints
+`[workspace]` and `[agent]` exactly as the file writes them, because SLAB
+knows those table names and not their meanings. A value their owners would
+refuse still appears here, so use this command first when a setting was not
+applied.
 
 Unknown keys are refused, and the refusal names the offending file, so a
 typo in a cluster config surfaces at load and never silently configures

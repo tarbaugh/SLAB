@@ -51,7 +51,7 @@ def test_mace_missing_gives_install_hint(monkeypatch: pytest.MonkeyPatch) -> Non
         return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(builtins, "__import__", hide_mace)
-    with pytest.raises(EngineNotAvailableError, match=r"pip install 'slab\[mace\]'"):
+    with pytest.raises(EngineNotAvailableError, match=r"pip install 'slab-stack\[mace\]'"):
         get_calculator("mace")
 
 

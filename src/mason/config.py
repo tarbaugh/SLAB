@@ -18,7 +18,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from slab.config import MergedConfig, load_merged, validate
+from slab.config import load_merged, validate
 
 _OLLAMA = "http://localhost:11434/v1"
 
@@ -144,9 +144,3 @@ def load_config(cwd: str | os.PathLike[str] | None = None) -> MasonConfig:
     return validate(load_merged(cwd), MasonConfig)
 
 
-def load_config_with_origins(
-    cwd: str | os.PathLike[str] | None = None,
-) -> tuple[MasonConfig, MergedConfig]:
-    """:func:`load_config`, plus the merge that produced it (files, origins)."""
-    merged = load_merged(cwd)
-    return validate(merged, MasonConfig), merged

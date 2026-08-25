@@ -20,7 +20,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from slab.config import ExpandedPath, MergedConfig, load_merged, validate
+from slab.config import ExpandedPath, load_merged, validate
 
 
 class WorkspaceConfig(BaseModel):
@@ -56,14 +56,6 @@ class FoundationConfig(BaseModel):
 def load_config(cwd: str | os.PathLike[str] | None = None) -> FoundationConfig:
     """Load every layer and validate the tables Foundation owns."""
     return validate(load_merged(cwd), FoundationConfig)
-
-
-def load_config_with_origins(
-    cwd: str | os.PathLike[str] | None = None,
-) -> tuple[FoundationConfig, MergedConfig]:
-    """:func:`load_config`, plus the merge that produced it (files, origins)."""
-    merged = load_merged(cwd)
-    return validate(merged, FoundationConfig), merged
 
 
 def config_value(dotted: str, cwd: str | os.PathLike[str] | None = None) -> Any:

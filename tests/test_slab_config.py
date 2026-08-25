@@ -514,3 +514,47 @@ def test_config_show_reports_every_package_s_tables(
                  "hpc.cluster = 'delta'", "agent.model = 'llama3.1:8b'"):
         assert line in result.output, f"missing {line!r}"
     assert "their owners validate them" in result.output
+
+
+def test_config_show_never_renders_python_internals(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A scalar overriding a whole table must not expose attribute lookups.
+
+    The raw side of the display walks plain mappings only. Before this test,
+    `agent.serve.partition` under the config below rendered as
+    `<built-in method partition of str object ...>`, and the replaced
+    table's leaves kept their origins as phantom keys.
+    """
+    site = tmp_path / "site.toml"
+    site.write_text('[agent.serve]\npartition = "gpu"\nport = 8123\n')
+    monkeypatch.setenv("SLAB_SITE_CONFIG", str(site))
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "slab.toml").write_text('[agent]\nserve = "use-the-default"\n')
+    monkeypatch.chdir(project)
+
+    result = runner.invoke(app, ["config", "show"])
+    assert result.exit_code == 0
+    assert "built-in method" not in result.output
+    assert "agent.serve = 'use-the-default'" in result.output
+    # The overridden table's leaves are gone, origins included.
+    assert "agent.serve.partition" not in result.output
+    assert "agent.serve.port" not in result.output
+
+
+def test_config_show_expands_slab_paths_but_not_foreign_tables(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Ownership routing is derived from the model, and it shows: slab's own
+    path keys print expanded, a foreign table prints exactly as written."""
+    monkeypatch.setenv("SLAB_TEST_SCRATCH", "/scratch/tom")
+    (tmp_path / "slab.toml").write_text(
+        '[paths]\nscratch = "${SLAB_TEST_SCRATCH}/tmp"\n\n'
+        '[workspace]\nroot = "${SLAB_TEST_SCRATCH}/ws"\n'
+    )
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["config", "show"])
+    assert result.exit_code == 0
+    assert "paths.scratch = '/scratch/tom/tmp'" in result.output
+    assert "workspace.root = '${SLAB_TEST_SCRATCH}/ws'" in result.output

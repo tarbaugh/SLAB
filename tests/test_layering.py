@@ -13,6 +13,7 @@ fallbacks. Those are exactly where a violation hides from a passing suite.
 from __future__ import annotations
 
 import ast
+import functools
 import sys
 import tomllib
 from pathlib import Path
@@ -30,9 +31,16 @@ ALLOWED: dict[str, frozenset[str]] = {
 PACKAGES = tuple(ALLOWED)
 
 
-def _packages_on_disk() -> set[str]:
-    """Every importable package under ``src/``, declared or not."""
-    return {p.name for p in SRC.iterdir() if p.is_dir() and (p / "__init__.py").is_file()}
+@functools.cache
+def _packages_on_disk() -> frozenset[str]:
+    """Every importable package under ``src/``, declared or not.
+
+    Cached: the import scan asks once per import statement, and ``src/``
+    does not change during a test run.
+    """
+    return frozenset(
+        p.name for p in SRC.iterdir() if p.is_dir() and (p / "__init__.py").is_file()
+    )
 
 
 def _imported_roots(tree: ast.AST) -> set[tuple[str, int]]:

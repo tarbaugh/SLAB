@@ -95,7 +95,9 @@ mason chat
 the node is to write its own endpoint into `<workspace>/mason/endpoint.json`,
 and it deletes that record when the server exits, so a dead node can never
 keep answering for a live one. `--wait` follows the job to a live endpoint,
-and it gives up early if the job dies instead of burning the whole timeout:
+and it gives up early if the job dies instead of burning the whole timeout.
+This capture and the `doctor` capture below are from a session recorded
+before the package split; only the command names were updated:
 
 <!-- no-verify -->
 ```text

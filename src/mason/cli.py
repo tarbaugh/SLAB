@@ -85,6 +85,27 @@ def _ask_approval(tool_name: str, preview: str) -> bool:
         return False
 
 
+def _override_agent(agent: AgentConfig, updates: dict[str, object]) -> AgentConfig:
+    """Apply CLI overrides through the model's own validation.
+
+    ``model_copy(update=...)`` skips validation, so a mistyped
+    ``--provider anthorpic`` would silently probe the openai branch instead
+    of being refused. Rebuilding through ``model_validate`` keeps every
+    ``Literal`` and bound on the schema in force for flag values too.
+    """
+    if not updates:
+        return agent
+    from pydantic import ValidationError
+
+    try:
+        return type(agent).model_validate({**agent.model_dump(), **updates})
+    except ValidationError as e:
+        flags = ", ".join(f"--{key.replace('_', '-')}" for key in updates)
+        first = e.errors()[0]
+        field = ".".join(str(piece) for piece in first["loc"]) or "value"
+        _fail(f"invalid {flags}: {field}: {first['msg']}")
+
+
 def _mason_session(
     workspace: Path | None,
     *,
@@ -113,7 +134,7 @@ def _mason_session(
     if max_turns is not None:
         updates["max_turns"] = max_turns
     if updates:
-        session.agent = session.agent.model_copy(update=updates)
+        session.agent = _override_agent(session.agent, updates)
     # After a provider change, which endpoint is right changes too; a
     # --endpoint flag outranks both the config and any discovered server.
     if updates or endpoint is not None:
@@ -408,20 +429,19 @@ def mason_doctor(
 ) -> None:
     """Check the model endpoint: reachable, model served, tool calls parsed."""
     from mason.client import ChatClient, LlmError
-    from mason.config import load_config
     from mason.serve import discover_endpoint
-    from slab.config import load_config as load_slab_config
 
     try:
-        agent = load_config().agent
-        cluster = load_slab_config().hpc.cluster or ""
-        root = _ops.resolve_root(workspace)
+        agent, hpc, root = _serve_inputs(workspace)
     except (MasonError, FoundationError, SlabError) as e:
         _fail(str(e))
+    cluster = hpc.cluster or ""
+    overrides: dict[str, object] = {}
     if provider is not None:
-        agent = agent.model_copy(update={"provider": provider})
+        overrides["provider"] = provider
     if endpoint is not None:
-        agent = agent.model_copy(update={"endpoint": endpoint})
+        overrides["endpoint"] = endpoint
+    agent = _override_agent(agent, overrides)
     try:
         resolved_endpoint, origin = discover_endpoint(agent, root)
     except (MasonError, FoundationError, SlabError) as e:
