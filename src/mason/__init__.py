@@ -9,9 +9,12 @@ OpenAI-compatible chat-completions API — stdlib HTTP only, no SDK.
 The design distills the 2025-2026 agent-harness literature; each mechanism
 and its provenance is documented in ``docs/tutorials/mason.md``:
 
-* a single ReAct-style tool loop (multi-agent orchestration deliberately
-  omitted — it pays off for breadth-first search, not interdependent
-  research work),
+* one ReAct-style tool loop as the unit of work, composed one level deep
+  by the roster: agent cards (a PI and specialists) whose ``delegate``
+  tool runs a specialist's own loop and returns its report — sequential,
+  depth-limited in code, never a swarm,
+* skills in the open Agent Skills format, categorized per specialist,
+  carrying tested analysis scripts an agent loads instead of re-deriving,
 * context as a budgeted resource: token-accounted turns, compaction well
   below the window, notes that outlive the context,
 * file-first memory: a lab notebook (``NOTEBOOK.md``) and a living plan
@@ -28,11 +31,14 @@ from mason.anthropic import AnthropicClient, ModelRefusalError
 from mason.client import ChatClient, ChatReply, ContextOverflowError, LlmError, ToolCall
 from mason.errors import MasonError
 from mason.loop import Mason, TurnResult
+from mason.roster import AgentSpec, RosterError, discover_roster
 from mason.session import MasonSession
+from mason.skills import Skill, SkillError, discover_skills
 from mason.tools import Tool, Toolbox, build_toolbox
 from slab._version import __version__
 
 __all__ = [
+    "AgentSpec",
     "AnthropicClient",
     "ChatClient",
     "ChatReply",
@@ -42,10 +48,15 @@ __all__ = [
     "MasonError",
     "MasonSession",
     "ModelRefusalError",
+    "RosterError",
+    "Skill",
+    "SkillError",
     "Tool",
     "ToolCall",
     "Toolbox",
     "TurnResult",
     "__version__",
     "build_toolbox",
+    "discover_roster",
+    "discover_skills",
 ]

@@ -2,6 +2,8 @@
 
 LLM agents are SLAB's primary user, so the workspace speaks their native protocol. `foundation mcp` serves the same operations as the CLI as MCP tools over stdio, with one shared code path in `foundation._ops` and two skins, and the tools return structured JSON instead of formatted text.
 
+This page is for *external* agents such as Claude. The *resident* agent is Mason, with its own [roster of specialists and skills](roster-and-skills.md); both drive the same workspace.
+
 ## Setup
 
 The server ships as an extra, and any MCP client launches it as a subprocess:

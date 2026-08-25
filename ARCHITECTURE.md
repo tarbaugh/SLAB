@@ -578,6 +578,24 @@ SLAB-shaped:
   `calculator_options`, so an audit reads the actual cutoffs, not a profile
   name. Faster reasoning and smaller calculations are separate levers, and
   SLAB keeps them separate.
+- **The roster composes loops; it does not replace the loop.** Mason's
+  unit of work stays one ReAct loop; the roster is agent cards — markdown
+  files whose body is the role prompt — and a `delegate` tool that runs a
+  specialist's loop one level down, sequentially, and returns its report
+  with an honest harness footer. The depth limit, the child's loss of
+  `plan` and `delegate`, the shared approval gate with attributed
+  previews, and the delegation kill switch are all code, not prompt text,
+  in the house style. The shared notebook is the blackboard: attributed
+  entries carry state between agents so briefs stay small. Skills follow
+  the open Agent Skills format verbatim (per-specialist categorization
+  rides in the spec's `metadata` map), and their bundled scripts execute
+  through the ordinary `shell` tool under the ordinary gate — reuse of an
+  existing, audited surface instead of a second execution path. Cards and
+  skills are data (project shadows user shadows built-in), so extending
+  the group is writing files, not code; machine facts (which model per
+  agent, budgets) stay in config as `[agent.roster.<name>]` tables that
+  merge under CLI flags through the same validated-rebuild path as every
+  other override.
 - **The model's endpoint is discovered, not configured.** On a cluster the
   agent's own server is a batch job on a node the scheduler chooses, so its
   URL does not exist at configuration time; writing one down is a guess that
