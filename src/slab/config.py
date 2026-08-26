@@ -729,10 +729,14 @@ schema_version = 1
 # partition = "gpu"                         # a partition from [hpc.partitions]
 # time_limit = "08:00:00"                   # serve jobs are long-lived
 # port = 8000
-# tool_call_parser = "llama4_pythonic"      # vLLM's --tool-call-parser: model-specific,
+# tool_call_parser = "muse_glimmer"         # vLLM's --tool-call-parser: model-specific,
 #                                           # and required for native tool calls
 #                                           # ('vllm serve --help' lists your build's)
-# args = ["--tensor-parallel-size 4", "--max-model-len 131072"]   # extra vllm flags
+# args = [                                  # extra vllm flags. Some models pair the tool
+#   "--reasoning-parser muse_glimmer",      # parser with a reasoning parser (Muse Glimmer
+#   "--tensor-parallel-size 2",             # does; its vLLM recipe names both) — without
+#   "--max-model-len 131072",               # the pair, tool calls arrive as broken markup
+# ]
 # setup = [                                 # compute-node shell, run before the server
 #   "source /path/to/venvs/vllm/bin/activate",  # vLLM gets its own venv (its torch
 #                                               # pin and mace-torch's rarely agree)
