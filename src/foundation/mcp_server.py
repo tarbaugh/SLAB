@@ -17,18 +17,48 @@ Requires the ``mcp`` extra: ``pip install 'slab-stack[mcp]'``.
 
 from __future__ import annotations
 
+import functools
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 try:  # mcp >= 2.0
     from mcp.server.mcpserver import MCPServer
+    from mcp.server.mcpserver.exceptions import ToolError
 except ImportError:  # pragma: no cover - mcp 1.x fallback
     from mcp.server.fastmcp import FastMCP as MCPServer  # type: ignore[no-redef]
+    from mcp.server.fastmcp.exceptions import ToolError  # type: ignore[no-redef]
 
 from foundation import _ops
+from foundation.errors import FoundationError
 from foundation.lifecycle import LifecycleState
 from foundation.runtime import Workspace
 from slab._ops import engines_overview
+from slab.errors import SlabError
+
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def _surfaced(fn: _F) -> _F:
+    """Re-raise SLAB's own errors as ``ToolError`` so agents read them.
+
+    ``ToolError`` is the SDK's contract for a message meant for the client;
+    any other exception type is masked to a generic "Error executing tool
+    ..." by mcp >= 2.1 (an internals-leak guard). SLAB's error messages ARE
+    the product — "no run matches 'zzzz'" is the evidence an agent corrects
+    from — so they must travel under the pass-through type. Unexpected
+    exceptions stay masked, which is the guard working as intended.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return fn(*args, **kwargs)
+        except (FoundationError, SlabError) as e:
+            raise ToolError(str(e)) from e
+
+    return wrapper  # type: ignore[return-value]
+
 
 _INSTRUCTIONS = """\
 SLAB tracks materials-modeling runs through a lifecycle:
@@ -44,6 +74,7 @@ def build_server(root: Path) -> MCPServer:
     server = MCPServer("foundation", instructions=_INSTRUCTIONS)
 
     @server.tool()
+    @_surfaced
     def list_runs(
         state: str | None = None, status: str | None = None, limit: int = 20
     ) -> list[dict[str, Any]]:
@@ -57,6 +88,7 @@ def build_server(root: Path) -> MCPServer:
             ]
 
     @server.tool()
+    @_surfaced
     def show_run(run_id: str) -> dict[str, Any]:
         """Everything about one run (id or unique prefix): state, intent,
         check results with the observed/expected values they compared, traced
@@ -71,6 +103,7 @@ def build_server(root: Path) -> MCPServer:
             return _ops.run_details(ws, run_id)
 
     @server.tool()
+    @_surfaced
     def promote_run(run_id: str, reason: str | None = None, force: bool = False) -> dict[str, Any]:
         """Make a run permanent (verified -> promoted). Give a reason — it is
         recorded as provenance. force=True promotes an unverified run and is
@@ -82,6 +115,7 @@ def build_server(root: Path) -> MCPServer:
             return _ops.run_summary(run)
 
     @server.tool()
+    @_surfaced
     def expire_runs(older_than: str | None = None, include_running: bool = False) -> dict[str, Any]:
         """Expire unpromoted runs past their TTL (state change only; gc drops
         bytes). older_than like '30d'/'12h' overrides the policy; '0d' expires
@@ -97,6 +131,7 @@ def build_server(root: Path) -> MCPServer:
             return {"expired": [_ops.run_summary(r) for r in expired], "count": len(expired)}
 
     @server.tool()
+    @_surfaced
     def gc(dry_run: bool = False) -> dict[str, Any]:
         """Drop artifact bytes no retention rule demands. References, hashes,
         and recipes always survive. dry_run=True only reports."""
@@ -105,6 +140,7 @@ def build_server(root: Path) -> MCPServer:
             return ws.gc(policy, dry_run=dry_run).model_dump()
 
     @server.tool()
+    @_surfaced
     def launch_workflow(
         script_path: str, name: str | None = None, intent: str | None = None
     ) -> dict[str, Any]:
@@ -119,6 +155,7 @@ def build_server(root: Path) -> MCPServer:
         return _ops.launch_script(root, script_path, name=name, intent=intent, capture_output=True)
 
     @server.tool()
+    @_surfaced
     def list_engines() -> dict[str, Any]:
         """What can be computed here: slab's built-in engines
         (emt/lammps/lj/mace/qe/rootstock — qe drives pw.x and needs only the

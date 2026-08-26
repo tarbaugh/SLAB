@@ -1246,6 +1246,25 @@ def _which_payload(token: str, command: str) -> str | None:
     return shutil.which(token, path=override)
 
 
+def _launcher_payload(argv: list[str]) -> list[str] | None:
+    """The payload behind an MPI launcher, when it can be read without a guess.
+
+    Only rank-count flags with a separate integer value (``-n 1``,
+    ``-np 4``) are stepped over: they mean the same thing to every launcher,
+    so skipping them cannot mistake a flag's value for the payload — and
+    ``mpirun -np 1 pw.x`` is the common login-node form on real clusters.
+    Any other flag would need launcher-specific knowledge of whether it
+    consumes a value, so the payload is unknowable: None, and the caller
+    degrades rather than guesses.
+    """
+    i = 1
+    while i + 1 < len(argv) and argv[i] in ("-n", "-np") and argv[i + 1].isdigit():
+        i += 2
+    if i >= len(argv) or argv[i].startswith("-"):
+        return None
+    return argv[i:]
+
+
 def _probe_argv(command: str) -> list[str] | None:
     """The argv a version probe may run for *command*, or None to skip probing.
 
@@ -1253,7 +1272,8 @@ def _probe_argv(command: str) -> list[str] | None:
     queues silently, inside one it consumes a job step, and ``mpirun -np 64
     pw.x`` would fan sixty-four ranks out on a login node — all for a banner
     the bare binary prints identically. The launcher is stripped when the
-    payload is unambiguous (the two-token form); a flagged launcher line
+    payload is unambiguous (:func:`_launcher_payload`: a bare two-token form,
+    or rank-count flags like ``-np 1``); any other flagged launcher line
     degrades to no probe rather than a guess. An ``env`` wrapper is kept —
     its assignments may be what makes the binary runnable.
     """
@@ -1264,9 +1284,10 @@ def _probe_argv(command: str) -> list[str] | None:
     if not argv:
         return None
     if Path(argv[0]).name in _MPI_LAUNCHERS:
-        if len(argv) == 2 and not argv[1].startswith("-"):
-            return [*prefix, argv[1]]
-        return None
+        payload = _launcher_payload(argv)
+        if payload is None:
+            return None
+        return [*prefix, *payload]
     return [*prefix, *argv]
 
 
@@ -1419,18 +1440,18 @@ def _remember_setup_failure(key: tuple[tuple[str, ...], str], detail: str) -> tu
 def _setup_probe_token(command: str) -> str | None:
     """The binary a setup-shell existence check should ask about, or None.
 
-    The payload for plain commands; the launched binary for the two-token
-    launcher form (the launcher itself resolves without modules); nothing
-    checkable for flagged launcher lines — the wrapper's ``set -e`` and the
-    engine's own failure evidence take over at run time.
+    The payload for plain commands; the launched binary when the launcher
+    form is unambiguous (:func:`_launcher_payload`: bare, or rank-count
+    flags — the launcher itself resolves without modules); nothing checkable
+    otherwise — the wrapper's ``set -e`` and the engine's own failure
+    evidence take over at run time.
     """
     payload = _command_payload(command)
     if not payload:
         return None
     if Path(payload[0]).name in _MPI_LAUNCHERS:
-        if len(payload) == 2 and not payload[1].startswith("-"):
-            return payload[1]
-        return None
+        launched = _launcher_payload(payload)
+        return None if launched is None else launched[0]
     return payload[0]
 
 

@@ -78,7 +78,7 @@ files = ["src"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["ase.*", "mace.*", "rootstock.*", "mcp.server.fastmcp"]
+module = ["ase.*", "mace.*", "rootstock.*", "mcp.server.fastmcp.*"]
 ignore_missing_imports = true
 
 # These two modules call into ASE, which is only partially typed; everything

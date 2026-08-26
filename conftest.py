@@ -26,6 +26,21 @@ def _isolated_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("SLAB_SITE_CONFIG", raising=False)
     monkeypatch.delenv("SLAB_WORKSPACE", raising=False)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config-isolated"))
+    # Rootstock discovers installs on its own: $ROOTSTOCK_ROOT, then a user
+    # config at a literal ~/.config/rootstock/config.toml that ignores
+    # $XDG_CONFIG_HOME. On a machine with a real install configured (an HPC
+    # login node), tests asserting the *unconfigured* behavior would see it.
+    monkeypatch.delenv("ROOTSTOCK_ROOT", raising=False)
+    try:
+        import rootstock.config as _rootstock_config
+    except ImportError:
+        pass
+    else:
+        monkeypatch.setattr(
+            _rootstock_config,
+            "DEFAULT_CONFIG_FILE",
+            tmp_path / "rootstock-config-isolated" / "config.toml",
+        )
     # The project layer is discovered from the working directory, so the
     # default cwd must be a directory with no slab.toml in it.
     neutral = tmp_path / "cwd-isolated"

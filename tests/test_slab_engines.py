@@ -352,6 +352,25 @@ def test_unknown_name_hints_when_root_unconfigured() -> None:
         get_calculator("nope-checkpoint")
 
 
+def test_suite_is_blind_to_an_ambient_rootstock_user_config(rootstock_root: Path) -> None:
+    """A real ``~/.config/rootstock/config.toml`` must not reach the tests.
+
+    Rootstock resolves that path at import time from the literal home, so
+    neither ``$XDG_CONFIG_HOME`` nor a late ``$HOME`` redirect blinds it —
+    only the root conftest's patch of ``DEFAULT_CONFIG_FILE`` does. This
+    proves the patch points at a throwaway location AND that the location is
+    the one discovery actually reads: a config written there is honored.
+    """
+    pytest.importorskip("rootstock", reason="rootstock extra not installed")
+    from rootstock.config import DEFAULT_CONFIG_FILE
+
+    assert Path.home() not in Path(DEFAULT_CONFIG_FILE).parents
+    DEFAULT_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    DEFAULT_CONFIG_FILE.write_text(f'root = "{rootstock_root}"\n')
+    with pytest.raises(EngineNotAvailableError, match="not declared as a checkpoint"):
+        get_calculator("nope-checkpoint")
+
+
 def test_unknown_cluster_surfaces_rootstock_error(rootstock_root: Path) -> None:
     with pytest.raises(EngineNotAvailableError, match=r"[Uu]nknown cluster"):
         get_calculator("fake-mace-checkpoint", cluster="not-a-real-cluster")

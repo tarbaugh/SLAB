@@ -782,7 +782,9 @@ def test_version_probe_never_runs_through_a_launcher(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """'mpirun -np 64 pw.x' at identity time would fan ranks out on a login
-    node; the probe must run the bare payload (two-token form) or nothing."""
+    node; the probe runs the bare payload when the launcher form is readable
+    (bare, or rank-count flags like '-np 1' — the common cluster smoke form)
+    and nothing otherwise. The launcher itself must never execute."""
     from slab.backends import _banner_version
 
     bins = tmp_path / "bin"
@@ -792,9 +794,26 @@ def test_version_probe_never_runs_through_a_launcher(
     _script(bins / "pw.x", 'echo "Program PWSCF v.7.5 starts"\nexit 0\n')
     monkeypatch.setenv("PATH", f"{bins}:{os.environ.get('PATH', '')}")
     assert _banner_version("mpirun pw.x") == "7.5"  # probed via bare pw.x
+    assert _banner_version("mpirun -np 64 pw.x") == "7.5"  # rank flag: bare payload
+    assert _banner_version("mpirun -n 4 -np 2 pw.x") == "7.5"
     assert not marker.exists()  # the launcher itself never executed
-    assert _banner_version("mpirun -np 64 pw.x") is None  # flagged form: no probe
+    # Launcher-specific flags: whether they consume a value is unknowable,
+    # so the payload is too — no probe rather than a guess.
+    assert _banner_version("mpirun -x FOO=bar pw.x") is None
+    assert _banner_version("mpirun -np notanumber pw.x") is None
+    assert _banner_version("mpirun -np 1") is None  # no payload at all
     assert not marker.exists()
+
+
+def test_setup_probe_token_reads_rank_count_launcher_forms() -> None:
+    """The setup-shell guards ask about the launched binary for 'mpirun -np 1
+    pw.x' too — the form a cluster config actually uses — and still refuse
+    launcher lines whose flags they cannot read."""
+    from slab.backends import _setup_probe_token
+
+    assert _setup_probe_token("mpirun -np 1 /opt/qe/bin/pw.x") == "/opt/qe/bin/pw.x"
+    assert _setup_probe_token("srun -n 1 pw.x") == "pw.x"
+    assert _setup_probe_token("mpirun --bind-to core pw.x") is None
 
 
 def test_versionless_identity_carries_a_binary_fingerprint(tmp_path: Path) -> None:
