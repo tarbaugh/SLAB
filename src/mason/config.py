@@ -136,6 +136,12 @@ class AgentConfig(BaseModel):
     tool_protocol: Literal["native", "fenced"] = "native"
     approval: Literal["ask", "auto"] = "ask"
     shell_allowlist: tuple[str, ...] = ()
+    # The file fence and the session lock are workflow controls, not security
+    # boundaries: the shell tool can still reach anything the Unix user can,
+    # behind its own allowlist and the approval gate. See docs/tutorials/
+    # mason.md for the container recipe when a real boundary is wanted.
+    file_scope: Literal["project", "anywhere"] = "project"
+    session_lock: bool = True
     serve: ServeConfig = ServeConfig()
     # The roster: whether the entry agent may delegate at all, and per-agent
     # overrides keyed by card name. The cards themselves are markdown files

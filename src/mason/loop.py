@@ -179,6 +179,8 @@ class Mason:
         self.depth = depth
         if depth == 0:
             check_overrides(session.agent, self.roster)
+            # One running loop per workspace; children run inside this lock.
+            session.acquire_session_lock()
         session.agent_name = spec.name
         self._apply_roster_override()
         self.client: ChatBackend = (

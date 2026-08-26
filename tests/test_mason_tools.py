@@ -385,3 +385,89 @@ def test_the_vocabulary_matches_an_all_features_toolbox(tmp_path: Path) -> None:
     roster = discover_roster(tmp_path)
     box = build_toolbox(session, roster["pi"], roster=roster)
     assert set(box.tools) == TOOL_VOCABULARY
+
+
+# -- the file fence ----------------------------------------------------------
+
+
+def test_file_tools_refuse_paths_outside_the_fence(
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """The sandbox principle at the tool layer: work happens in the project."""
+    elsewhere = tmp_path_factory.mktemp("elsewhere")
+    secret = elsewhere / "secret.txt"
+    secret.write_text("credentials\n")
+    box = build_toolbox(_session(tmp_path))
+
+    for call in (
+        _call("read_file", path=str(secret)),
+        _call("write_file", path=str(elsewhere / "new.txt"), content="x"),
+        _call("edit_file", path=str(secret), old_string="a", new_string="b"),
+        _call("list_dir", path=str(elsewhere)),
+        _call("search", pattern="credentials", path=str(elsewhere)),
+        _call("launch_workflow", script=str(elsewhere / "wf.py"), intent="x"),
+    ):
+        answer = box.dispatch(call)
+        assert "outside this session's file scope" in answer, call.name
+        assert "file_scope" in answer, call.name
+    assert not (elsewhere / "new.txt").exists()
+    assert secret.read_text() == "credentials\n"
+
+
+def test_relative_escapes_and_symlinks_stay_inside(
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    import os
+
+    elsewhere = tmp_path_factory.mktemp("elsewhere-links")
+    (elsewhere / "secret.txt").write_text("hidden\n")
+    box = build_toolbox(_session(tmp_path))
+
+    dotted = os.path.relpath(elsewhere / "secret.txt", tmp_path)
+    assert dotted.startswith("..")
+    assert "outside this session's file scope" in box.dispatch(_call("read_file", path=dotted))
+
+    link = tmp_path / "innocent.txt"
+    link.symlink_to(elsewhere / "secret.txt")
+    assert "outside this session's file scope" in box.dispatch(
+        _call("read_file", path="innocent.txt")
+    )
+
+
+def test_the_fence_admits_project_workspace_and_skill_roots(
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reads reach the project, the workspace, and discovered skill roots;
+    writes reach only the first two."""
+    xdg = tmp_path_factory.mktemp("xdg-fence")
+    skill_dir = xdg / "slab" / "skills" / "demo-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo-skill\ndescription: a fence test skill\n---\n\nBody.\n"
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+
+    session = _session(tmp_path)
+    box = build_toolbox(session)
+    (tmp_path / "notes.txt").write_text("in project\n")
+    workspace_file = session.workspace_root / "mason" / "sessions" / "old.jsonl"
+    workspace_file.parent.mkdir(parents=True, exist_ok=True)
+    workspace_file.write_text("{}\n")
+
+    assert "in project" in box.dispatch(_call("read_file", path="notes.txt"))
+    assert "{}" in box.dispatch(_call("read_file", path=str(workspace_file)))
+    assert "fence test skill" in box.dispatch(_call("read_file", path=str(skill_dir / "SKILL.md")))
+    answer = box.dispatch(
+        _call("write_file", path=str(skill_dir / "SKILL.md"), content="clobbered")
+    )
+    assert "outside this session's file scope" in answer
+    assert "fence test skill" in (skill_dir / "SKILL.md").read_text()
+
+
+def test_file_scope_anywhere_lifts_the_fence(
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    elsewhere = tmp_path_factory.mktemp("elsewhere-open")
+    (elsewhere / "data.txt").write_text("visible\n")
+    box = build_toolbox(_session(tmp_path, file_scope="anywhere"))
+    assert "visible" in box.dispatch(_call("read_file", path=str(elsewhere / "data.txt")))

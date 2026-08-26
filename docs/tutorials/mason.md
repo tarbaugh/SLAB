@@ -280,6 +280,24 @@ the turn. Either answer `y` deliberately, run with `--auto`, or set
 mutations ask. `mason run` without `--auto` refuses every mutating
 tool, so batch use needs `--auto`.
 
+The file fence bounds where the file tools work. With the default
+`[agent] file_scope = "project"`, the reading tools (`read_file`,
+`list_dir`, `search`, and `launch_workflow`) reach the project directory,
+the workspace, and the skill directories the session advertises. The
+writing tools (`write_file`, `edit_file`) reach only the project and the
+workspace. Paths are compared after symlinks resolve, so a link that
+points out of the fence counts as outside it. A refused path comes back
+as a tool result that names the fence and the setting, and
+`file_scope = "anywhere"` lifts it.
+
+The session lock keeps one running loop per workspace. With the default
+`[agent] session_lock = true`, a second Mason loop in the same workspace
+is refused with a message that names the holding process, because two
+loops interleave `NOTEBOOK.md` and race the plan. Delegated specialists
+run inside the parent's lock. On a filesystem that cannot hold an
+advisory lock, the lock degrades to a warning, and
+`session_lock = false` turns it off.
+
 ## Memory that outlives the context window
 
 Long projects die of context, not of model quality. Models degrade well
@@ -480,6 +498,15 @@ model's, so SLAB guarantees that what Mason reports is traceable and
 verified, not that its research taste is good. And the approval gate is a
 workflow control for your own account on your own machine, not a security
 sandbox, so `--auto` means what it says — for every agent on the roster.
+The file fence and the session lock share that caveat: they shrink the
+blast radius of a confused agent, and the `shell` tool remains the honest
+escape, behind its own gate. When you want a real boundary, run Mason
+inside a container. Launch it under your site's container runtime
+(Apptainer, Enroot) with only the project directory bound and no home
+mount. Inside such a fence, leave `[hpc]` unconfigured and the scheduler
+tools do not exist. Point `endpoint` at the served model, or at an
+OpenAI-compatible gateway your site operates, with `api_key_env` naming
+the gateway's key variable — Mason needs nothing else to work behind one.
 
 What has and has not been exercised against reality, precisely:
 

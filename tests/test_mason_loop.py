@@ -8,6 +8,7 @@ import pytest
 
 from mason.client import ChatReply, ContextOverflowError, ToolCall
 from mason.config import MasonConfig
+from mason.errors import MasonError
 from mason.loop import Mason
 from mason.session import MasonSession
 from slab.config import HpcConfig
@@ -167,6 +168,7 @@ def test_resume_replays_messages_after_fresh_system(tmp_path: Path) -> None:
     transcript = session.latest_transcript()
     assert transcript is not None
     replayed = session.load_messages(transcript)
+    session.release_session_lock()  # the first process has exited
     session2 = _session(tmp_path)
     client2 = FakeClient([_text_reply("second answer")])
     mason2 = Mason(session2, client=client2, resume_from=replayed)
@@ -370,11 +372,13 @@ def test_resume_transcripts_stay_self_contained(tmp_path: Path) -> None:
     session1 = _session(tmp_path)
     Mason(session1, client=FakeClient([_text_reply("first answer")])).run_turn("first question")
     replay1 = session1.load_messages(session1.transcript_path)
+    session1.release_session_lock()  # the first process has exited
 
     session2 = _session(tmp_path)
     Mason(
         session2, client=FakeClient([_text_reply("second answer")]), resume_from=replay1
     ).run_turn("second question")
+    session2.release_session_lock()
 
     session3 = _session(tmp_path)
     latest = session3.latest_transcript()
@@ -507,3 +511,56 @@ def test_finish_without_a_report_is_not_honored(tmp_path: Path) -> None:
     followup = client.requests[1][0]
     slots = [m["content"] for m in followup if m.get("role") == "tool"]
     assert any("'report' argument is missing or empty" in s for s in slots)
+
+
+# -- the session lock --------------------------------------------------------
+
+
+def test_a_second_session_in_the_workspace_is_refused(tmp_path: Path) -> None:
+    import os
+
+    session1 = _session(tmp_path)
+    Mason(session1, client=FakeClient([]))
+    session2 = _session(tmp_path)
+    with pytest.raises(MasonError, match="another mason session"):
+        Mason(session2, client=FakeClient([]))
+    try:
+        Mason(session2, client=FakeClient([]))
+    except MasonError as e:
+        assert f"pid {os.getpid()}" in str(e)  # the holder is named
+        assert "session_lock = false" in str(e)  # and so is the way out
+
+
+def test_session_lock_false_allows_concurrent_sessions(tmp_path: Path) -> None:
+    session1 = _session(tmp_path, session_lock=False)
+    Mason(session1, client=FakeClient([]))
+    session2 = _session(tmp_path, session_lock=False)
+    Mason(session2, client=FakeClient([]))  # no raise
+
+
+def test_children_run_inside_the_parents_lock(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    Mason(session, client=FakeClient([]))
+    child = session.spawn("dft-expert", session.base_agent)
+    Mason(child, client=FakeClient([]), depth=1)  # no raise: depth > 0 never locks
+    assert child._lock_handle is None
+
+
+def test_lock_degrades_with_a_warning_where_flock_is_unsupported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Parallel filesystems without flock get a warning, not a dead mason."""
+    import errno
+    import fcntl
+
+    def no_flock(fd: int, operation: int) -> None:
+        raise OSError(errno.ENOSYS, "Function not implemented")
+
+    monkeypatch.setattr(fcntl, "flock", no_flock)
+    session = _session(tmp_path)
+    with pytest.warns(UserWarning, match="cannot hold the session lock"):
+        Mason(session, client=FakeClient([]))
+    assert session._lock_handle is None
+    session2 = _session(tmp_path)
+    with pytest.warns(UserWarning, match="cannot hold the session lock"):
+        Mason(session2, client=FakeClient([]))  # undetected, by design

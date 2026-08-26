@@ -247,9 +247,17 @@ def build_toolbox(
         visible_catalog(skills, spec.name, spec.skills_scope) if spec is not None else skills
     )
     box = Toolbox(session)
-    _add_file_tools(box, session)
+    # The file fence (_out_of_scope): writes stay in the project and the
+    # workspace; reads and launches also reach the skill directories the
+    # harness itself advertises.
+    write_roots = (
+        _scope_root(session, session.cwd),
+        _scope_root(session, session.workspace_root),
+    )
+    read_roots = write_roots + tuple(_scope_root(session, s.root) for s in skills.values())
+    _add_file_tools(box, session, read_roots, write_roots)
     _add_shell_tool(box, session)
-    _add_workflow_tools(box, session)
+    _add_workflow_tools(box, session, read_roots)
     _add_engine_tools(box, session)
     if session.hpc.partitions:
         _add_hpc_tools(box, session)
@@ -294,6 +302,37 @@ def _resolve(session: MasonSession, path: str) -> Path:
     return candidate if candidate.is_absolute() else session.cwd / candidate
 
 
+def _scope_root(session: MasonSession, root: Path) -> Path:
+    """A scope root in comparable form: absolute (against the session's cwd,
+    not the process's) and symlink-resolved."""
+    absolute = root if root.is_absolute() else session.cwd / root
+    return absolute.resolve()
+
+
+def _out_of_scope(session: MasonSession, path: Path, roots: tuple[Path, ...]) -> str | None:
+    """The refusal observation when *path* leaves the file fence, else None.
+
+    The fence is the sandbox principle at the tool layer: the agent reads and
+    runs within its project, its workspace, and the skills it was shown, and
+    writes only within the project and workspace. Comparison happens on
+    fully resolved paths, so a symlink pointing out of the fence counts as
+    outside it. This is a workflow control, not a security boundary — the
+    shell tool remains the honest escape, behind its own gate.
+    """
+    if session.agent.file_scope == "anywhere":
+        return None
+    resolved = path.expanduser().resolve()
+    for root in roots:
+        if resolved.is_relative_to(root):
+            return None
+    return (
+        f"refused: {path} is outside this session's file scope. File tools read "
+        f"within the project directory, the workspace, and skill directories, "
+        f"and write within the project and workspace. Work there, use the shell "
+        f"tool (approval-gated), or set [agent] file_scope = \"anywhere\"."
+    )
+
+
 def _python_syntax_note(path: Path, content: str) -> str:
     """Post-write verification for Python files: a syntax check, immediately.
 
@@ -313,9 +352,16 @@ def _python_syntax_note(path: Path, content: str) -> str:
     return ""
 
 
-def _add_file_tools(box: Toolbox, session: MasonSession) -> None:
+def _add_file_tools(
+    box: Toolbox,
+    session: MasonSession,
+    read_roots: tuple[Path, ...],
+    write_roots: tuple[Path, ...],
+) -> None:
     def read_file(arguments: dict[str, Any]) -> str:
         path = _resolve(session, str(arguments["path"]))
+        if denied := _out_of_scope(session, path, read_roots):
+            return denied
         offset = int(arguments.get("offset", 1))
         limit = int(arguments.get("limit", _MAX_READ_LINES))
         if not path.is_file():
@@ -360,6 +406,8 @@ def _add_file_tools(box: Toolbox, session: MasonSession) -> None:
 
     def write_file(arguments: dict[str, Any]) -> str:
         path = _resolve(session, str(arguments["path"]))
+        if denied := _out_of_scope(session, path, write_roots):
+            return denied
         content = str(arguments["content"])
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
@@ -381,6 +429,8 @@ def _add_file_tools(box: Toolbox, session: MasonSession) -> None:
 
     def edit_file(arguments: dict[str, Any]) -> str:
         path = _resolve(session, str(arguments["path"]))
+        if denied := _out_of_scope(session, path, write_roots):
+            return denied
         old = str(arguments["old_string"])
         new = str(arguments["new_string"])
         replace_all = bool(arguments.get("replace_all", False))
@@ -431,6 +481,8 @@ def _add_file_tools(box: Toolbox, session: MasonSession) -> None:
 
     def list_dir(arguments: dict[str, Any]) -> str:
         path = _resolve(session, str(arguments.get("path", ".")))
+        if denied := _out_of_scope(session, path, read_roots):
+            return denied
         if not path.is_dir():
             return f"no such directory: {path}"
         entries = sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name))
@@ -459,6 +511,8 @@ def _add_file_tools(box: Toolbox, session: MasonSession) -> None:
     def search(arguments: dict[str, Any]) -> str:
         pattern = str(arguments["pattern"])
         root = _resolve(session, str(arguments.get("path", ".")))
+        if denied := _out_of_scope(session, root, read_roots):
+            return denied
         glob = str(arguments.get("glob", "*"))
         try:
             expression = re.compile(pattern)
@@ -601,7 +655,9 @@ def _add_shell_tool(box: Toolbox, session: MasonSession) -> None:
 # -- workflows (foundation) ---------------------------------------------------
 
 
-def _add_workflow_tools(box: Toolbox, session: MasonSession) -> None:
+def _add_workflow_tools(
+    box: Toolbox, session: MasonSession, read_roots: tuple[Path, ...]
+) -> None:
     def list_runs(arguments: dict[str, Any]) -> str:
         from foundation.runtime import Workspace
 
@@ -661,6 +717,8 @@ def _add_workflow_tools(box: Toolbox, session: MasonSession) -> None:
         from foundation._ops import launch_script
 
         script = _resolve(session, str(arguments["script"]))
+        if denied := _out_of_scope(session, script, read_roots):
+            return denied
         result = launch_script(
             session.workspace_root,
             script,

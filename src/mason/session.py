@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import warnings
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -126,6 +127,69 @@ class MasonSession:
         self.sessions_dir = self.workspace_root / "mason" / "sessions"
         stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         self.transcript_path = self.sessions_dir / f"{stamp}-{os.getpid()}.jsonl"
+        self._lock_handle: Any | None = None
+
+    # -- one running session per workspace ------------------------------------
+
+    def acquire_session_lock(self) -> None:
+        """Refuse to run alongside another mason in the same workspace.
+
+        Two concurrent sessions interleave ``NOTEBOOK.md`` entries and race
+        each other's view of the plan, so the loop takes an advisory lock
+        before its first turn. Contention is refused loudly, naming the
+        holder. Delegated children never call this — they run inside the
+        parent's lock. A filesystem that cannot lock (some parallel
+        filesystems) degrades to a warning: an undetected concurrent session
+        beats a workspace nobody can use. ``[agent] session_lock = false``
+        turns the lock off.
+        """
+        if not self.agent.session_lock or self._lock_handle is not None:
+            return
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover - non-POSIX platform
+            return
+        lock_path = self.sessions_dir.parent / "session.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(lock_path, "a+", encoding="utf-8")  # noqa: SIM115 - held for the process's life
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            handle.seek(0)
+            holder = handle.read().strip() or "holder unknown"
+            handle.close()
+            raise MasonError(
+                f"another mason session is already working in this workspace "
+                f"({holder}). Finish or stop it first, or set [agent] "
+                f"session_lock = false to run concurrent sessions anyway."
+            ) from None
+        except OSError as e:
+            handle.close()
+            warnings.warn(
+                f"the workspace filesystem cannot hold the session lock ({e}); "
+                f"concurrent mason sessions here will not be detected",
+                stacklevel=2,
+            )
+            return
+        handle.seek(0)
+        handle.truncate()
+        handle.write(
+            f"pid {os.getpid()}, cwd {self.cwd}, "
+            f"started {datetime.now(UTC).isoformat(timespec='seconds')}\n"
+        )
+        handle.flush()
+        self._lock_handle = handle
+
+    def release_session_lock(self) -> None:
+        """Let the workspace go (normally implicit in process exit).
+
+        The lock rides the open file handle, so a finished process releases
+        it without help. This exists for the caller that ends one session
+        and starts another in the same process — a resume, a test.
+        """
+        if self._lock_handle is not None:
+            self._lock_handle.close()
+            self._lock_handle = None
 
     # -- where the model lives ------------------------------------------------
 

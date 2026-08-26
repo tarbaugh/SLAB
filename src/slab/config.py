@@ -696,6 +696,13 @@ schema_version = 1
 # max_turns = 60                            # model calls per goal; the agent stops loudly
 # approval = "ask"                          # "ask" gates mutating tools; "auto" trusts them
 # shell_allowlist = ["git status", "ls"]    # command prefixes that never need approval
+# file_scope = "project"                    # file tools stay inside the project dir +
+#                                           # workspace (skill dirs readable); "anywhere"
+#                                           # lifts the fence. A workflow control, not a
+#                                           # security boundary (the shell tool is gated
+#                                           # separately by the allowlist + approval)
+# session_lock = true                       # refuse a second concurrent mason in this
+#                                           # workspace (false allows them)
 # tool_protocol = "native"                  # "fenced" for servers without a tool-call parser
 # compute_profile = "cluster"               # laptop | workstation | cluster — how big a
 #                                           # calculation the agent should reach for
