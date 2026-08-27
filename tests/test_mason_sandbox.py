@@ -499,3 +499,22 @@ def test_the_container_path_carries_the_venv(tmp_path: Path) -> None:
 
     script, _ = _render(tmp_path, _agent(), _slab_cfg())
     assert f"--env PATH={Path(sys.executable).parent}:" in script
+
+
+def test_the_container_env_tames_openmpi_and_can_pin_ranks(tmp_path: Path) -> None:
+    script, _ = _render(tmp_path, _agent(), _slab_cfg())
+    assert "--env OMPI_MCA_plm=isolated" in script  # no ssh, no scheduler inside
+    assert "--env OMPI_MCA_btl_vader_single_copy_mechanism=none" in script
+    assert '--env SLURM_NTASKS="${SLURM_NTASKS:-1}"' in script
+    pinned, _ = render_sandbox_script(
+        _agent(),
+        _HPC,
+        _slab_cfg(),
+        tmp_path / "ws",
+        tmp_path / "project",
+        "goal",
+        toml_path=tmp_path / "sandbox" / "slab.toml",
+        engine_tasks=16,
+    )
+    assert "--env SLURM_NTASKS=16" in pinned
+    assert "${SLURM_NTASKS:-1}" not in pinned

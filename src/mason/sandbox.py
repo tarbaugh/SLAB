@@ -734,6 +734,7 @@ def render_sandbox_script(
     partition: str | None = None,
     time_limit: str | None = None,
     snapshots: dict[str, SetupSnapshot] | None = None,
+    engine_tasks: int | None = None,
 ) -> tuple[str, list[str]]:
     """The batch script for one autonomous, network-dark session.
 
@@ -794,8 +795,21 @@ def render_sandbox_script(
             f"--env SLAB_WORKSPACE={shlex.quote(str(workspace_root))}",
             f"--env SLAB_CONFIG={shlex.quote(str(toml_path))}",
             # --cleanenv would strip it, and the bin-form qe command sizes
-            # its mpirun from it — 1 if the scheduler did not set it.
-            '--env SLURM_NTASKS="${SLURM_NTASKS:-1}"',
+            # its mpirun from it — 1 if the scheduler did not set it. An
+            # explicit --engine-tasks pins it instead: a whole node's rank
+            # count overwhelms a small cell's plane-wave distribution.
+            (
+                f"--env SLURM_NTASKS={engine_tasks}"
+                if engine_tasks is not None
+                else '--env SLURM_NTASKS="${SLURM_NTASKS:-1}"'
+            ),
+            # OpenMPI inside the namespace: there is no ssh and no
+            # scheduler, so component selection must not go looking for
+            # either — 'isolated' launches local ranks with no agent, and
+            # CMA single-copy is unavailable in user namespaces. Other MPI
+            # implementations ignore both variables.
+            "--env OMPI_MCA_plm=isolated",
+            "--env OMPI_MCA_btl_vader_single_copy_mechanism=none",
             # The venv on PATH, so the agent's shell probes find python and
             # the console scripts without knowing the install layout.
             f"--env PATH={shlex.quote(str(Path(_python()).parent))}"

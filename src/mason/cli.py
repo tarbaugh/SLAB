@@ -157,6 +157,12 @@ def _mason_session(
         updates["provider"] = provider
     if max_turns is not None:
         updates["max_turns"] = max_turns
+    if endpoint is not None:
+        # Into flag_updates like the others, so delegated children inherit
+        # it: a child re-resolves its own endpoint, and without this it
+        # would rediscover the serve record's URL — which, in the sandbox,
+        # is exactly the address the namespace cannot reach.
+        updates["endpoint"] = endpoint
     if updates:
         session.agent = _override_agent(session.agent, updates)
         # Remembered so the loop can re-assert them over any
@@ -164,7 +170,7 @@ def _mason_session(
         session.flag_updates = updates
     # After a provider change, which endpoint is right changes too; a
     # --endpoint flag outranks both the config and any discovered server.
-    if updates or endpoint is not None:
+    if updates:
         session.resolve_endpoint(endpoint)
     return session
 
@@ -529,6 +535,15 @@ def mason_sandbox_render(
         Path | None,
         typer.Option("--out", help="Directory for the two files (default: ./sandbox)."),
     ] = None,
+    engine_tasks: Annotated[
+        int | None,
+        typer.Option(
+            "--engine-tasks",
+            min=1,
+            help="Pin the MPI rank count for in-job engines (default: the "
+            "allocation's SLURM_NTASKS — often too many for small cells).",
+        ),
+    ] = None,
 ) -> None:
     """Write the sandbox batch script and its slab.toml — read both, then sbatch."""
     from mason.sandbox import render_sandbox_script, sandbox_toml, snapshot_engines
@@ -556,6 +571,7 @@ def mason_sandbox_render(
             partition=partition,
             time_limit=time_limit,
             snapshots=snapshots,
+            engine_tasks=engine_tasks,
         )
     except (MasonError, FoundationError, SlabError) as e:
         _fail(str(e))

@@ -365,3 +365,28 @@ def test_echo_step_clips_long_traces(capsys: pytest.CaptureFixture[str]) -> None
     _echo_step("reasoning", "", "x" * (_STEP_PREVIEW_CHARS + 500))
     out = capsys.readouterr().out
     assert "[... 500 more characters in the transcript]" in out
+
+
+def test_an_endpoint_flag_reaches_delegated_children(tmp_path: Path) -> None:
+    """--endpoint joins flag_updates: a child re-resolves its endpoint, and
+    without the flag it would rediscover the serve record's URL — in the
+    sandbox, exactly the address the namespace cannot reach."""
+    from mason.cli import _mason_session
+    from mason.config import roster_agent_config
+
+    session = _mason_session(
+        tmp_path / "ws",
+        auto=True,
+        model=None,
+        endpoint="http://127.0.0.1:8000/v1",
+        interactive=False,
+    )
+    assert session.flag_updates["endpoint"] == "http://127.0.0.1:8000/v1"
+    # The delegation path: roster config + re-asserted flags.
+    from mason.config import override_agent
+
+    effective = override_agent(
+        roster_agent_config(session.base_agent, "dft-expert"), dict(session.flag_updates)
+    )
+    child = session.spawn("dft-expert", effective)
+    assert child.endpoint == "http://127.0.0.1:8000/v1"
