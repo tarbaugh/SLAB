@@ -243,6 +243,8 @@ def environment_block(
     team: str | None = None,
 ) -> str:
     """The per-session context: where we are, what exists here, what memory says."""
+    from slab.hpc import allocated_tasks, cpu_budget
+
     lines = [
         "# Environment",
         f"project directory: {session.cwd}",
@@ -250,6 +252,13 @@ def environment_block(
         f"platform: {platform.system()} {platform.machine()}",
         f"date: {datetime.now(UTC).strftime('%Y-%m-%d')}",
         f"compute profile: {session.compute_profile}",
+        # The two parallelism facts the agent must size work within: what
+        # runs here may not exceed the CPU budget, and MPI engines already
+        # launch at the stated width — do not add -np on top of it.
+        f"cpus: {cpu_budget()} usable in this session; MPI engines launch "
+        f"with {allocated_tasks()} rank(s) automatically. Size scripts and "
+        f"delegated tasks within these; a launch requesting more ranks than "
+        f"the budget is refused.",
     ]
     if session.hpc.partitions:
         cluster = session.hpc.cluster or "unnamed cluster"

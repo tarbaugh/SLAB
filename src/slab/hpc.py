@@ -428,6 +428,48 @@ def _collapse(raw: str) -> JobState:
     return JobState(mapped) if mapped else JobState.UNDETERMINED
 
 
+def allocated_tasks() -> int:
+    """The current allocation's task count, or 1 outside one.
+
+    ``$SLURM_NTASKS`` inside a batch job; 1 on a login node or laptop, so
+    an interactive smoke test stays serial. The bin-form qe command sizes
+    its ``mpirun`` from this, and Mason's prompt states it so the agent
+    sizes its scripts to the same number.
+
+    Examples:
+        >>> import os
+        >>> os.environ["SLURM_NTASKS"] = "16"
+        >>> allocated_tasks()
+        16
+        >>> os.environ["SLURM_NTASKS"] = "not-a-number"
+        >>> allocated_tasks()
+        1
+        >>> del os.environ["SLURM_NTASKS"]
+    """
+    try:
+        count = int(os.environ.get("SLURM_NTASKS", ""))
+    except ValueError:
+        return 1
+    return count if count > 0 else 1
+
+
+def cpu_budget() -> int:
+    """How many CPUs this process may actually use.
+
+    CPU affinity where the platform reports it (a SLURM cgroup shrinks
+    this to the allocation), the machine's count otherwise. The ceiling
+    for any parallel launch that runs in-process rather than through the
+    scheduler.
+    """
+    getter = getattr(os, "sched_getaffinity", None)
+    if getter is not None:
+        try:
+            return len(getter(0)) or 1
+        except OSError:  # pragma: no cover - platform quirk
+            pass
+    return os.cpu_count() or 1
+
+
 def active_job_ids() -> frozenset[str]:
     """The user's job ids the scheduler still holds (pending or running).
 

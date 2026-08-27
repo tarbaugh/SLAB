@@ -238,6 +238,15 @@ own. Every choice it leads to still lands in explicit, traced
 `calculator_options` that the run records, so an audit sees the actual
 cutoffs and k-mesh rather than a profile name.
 
+The parallelism budget is stated and enforced separately. The environment
+block tells the agent how many CPUs the session may use and at how many
+MPI ranks the configured engines launch, so scripts and delegated tasks
+get sized to real numbers instead of guesses. The enforcement matches the
+statement: a `shell` command or `launch_workflow` script that spells out
+an `mpirun`, `mpiexec`, or `srun` with more ranks than the CPU budget is
+refused as a tool result that names the limit. `submit_job` is exempt,
+because its payload runs in its own allocation with its own budget.
+
 ## Software notes: curated context for the engines
 
 Without context, a model spends its first steps searching the filesystem for

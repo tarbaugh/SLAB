@@ -509,3 +509,35 @@ def test_submit_job_files_land_in_the_workspace_jobs_dir(
     assert "submitted job 42" in answer
     assert captured["directory"] == session.workspace_root / "jobs"
     assert f"cd {tmp_path}" in str(captured["script"])
+
+
+def test_oversubscribed_launches_are_refused_where_they_run_here(
+    box: Toolbox, tmp_path: Path
+) -> None:
+    """The shell and launch_workflow execute in this session's allocation, so
+    a hand-written mpirun asking for more ranks than the CPU budget is
+    refused as a tool result the model can read and adapt to."""
+    result = box.dispatch(_call("shell", command="mpirun -np 99999 hostname"))
+    assert "refused" in result and "99999 MPI rank(s)" in result
+    assert "cpu(s) are usable" in result
+
+    script = tmp_path / "over.py"
+    script.write_text('import subprocess\nsubprocess.run("srun --ntasks=99999 pw.x")\n')
+    result = box.dispatch(_call("launch_workflow", script=str(script)))
+    assert "refused" in result and "99999" in result
+
+    # Within budget passes through to real execution.
+    result = box.dispatch(_call("shell", command="echo mpirun -np 1 ok"))
+    assert "exit 0" in result
+
+
+def test_the_environment_states_the_cpu_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mason.prompts import environment_block
+
+    monkeypatch.setenv("SLURM_NTASKS", "16")
+    block = environment_block(_session(tmp_path))
+    assert "cpus:" in block
+    assert "16 rank(s)" in block
+    assert "refused" in block  # the promise the tools actually keep

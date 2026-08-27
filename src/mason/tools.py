@@ -561,12 +561,45 @@ def _add_file_tools(
     )
 
 
+# A parallel launch spelled out in a command or script: mpirun/mpiexec/srun
+# with an explicit rank count. The configured engines size their own
+# launches; this catches the hand-written ones.
+_RANK_FLAG = re.compile(r"\b(?:mpirun|mpiexec|srun)\b[^\n;|&]*?(?:-np|--ntasks|-n)[=\s]+(\d+)")
+
+
+def _rank_overcommit(text: str) -> str | None:
+    """A refusal when *text* asks for more MPI ranks than this session has.
+
+    Guards the two surfaces that execute HERE (the shell and
+    launch_workflow); submit_job is deliberately exempt, because its
+    payload runs in its own allocation with its own budget. The refusal is
+    a tool result the model reads and adapts to, never an exception.
+    """
+    from slab.hpc import cpu_budget
+
+    requested = max(
+        (int(m.group(1)) for m in _RANK_FLAG.finditer(text)), default=0
+    )
+    budget = cpu_budget()
+    if requested > budget:
+        return (
+            f"refused: this launches {requested} MPI rank(s) but only {budget} "
+            f"cpu(s) are usable in this session. Size the launch within that "
+            f"budget — and prefer the configured engine (engine='qe' with "
+            f"calculator_options) over a hand-written mpirun: it already "
+            f"launches at the right width."
+        )
+    return None
+
+
 # -- shell -------------------------------------------------------------------
 
 
 def _add_shell_tool(box: Toolbox, session: MasonSession) -> None:
     def shell(arguments: dict[str, Any]) -> str:
         command = str(arguments["command"])
+        if refused := _rank_overcommit(command):
+            return refused
         timeout = min(
             float(arguments.get("timeout_s", session.agent.shell_timeout_s)),
             _MAX_SHELL_TIMEOUT_S,
@@ -720,6 +753,12 @@ def _add_workflow_tools(
         script = _resolve(session, str(arguments["script"]))
         if denied := _out_of_scope(session, script, read_roots):
             return denied
+        try:
+            script_text = Path(script).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            script_text = ""  # launch_script reports the unreadable file itself
+        if refused := _rank_overcommit(script_text):
+            return refused
         result = launch_script(
             session.workspace_root,
             script,

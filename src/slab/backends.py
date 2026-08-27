@@ -1978,21 +1978,12 @@ def _qe_setting(key: str) -> str | None:
     return _qe_configured(key)
 
 
-def _slurm_ntasks() -> int:
-    """The current allocation's task count, or 1 outside one."""
-    try:
-        count = int(os.environ.get("SLURM_NTASKS", ""))
-    except ValueError:
-        return 1
-    return count if count > 0 else 1
-
-
 def _qe_config_command() -> str | None:
     """The configured qe command, constructed when ``bin`` names the install.
 
     ``[engines.qe] command`` wins verbatim. ``[engines.qe] bin`` names the
     install's bin directory instead, and the command is constructed here:
-    ``mpirun -np N <bin>/pw.x`` with N from :func:`_slurm_ntasks`, so a job
+    ``mpirun -np N <bin>/pw.x`` with N from :func:`slab.hpc.allocated_tasks`, so a job
     uses its whole allocation and a login-node smoke test stays serial. An
     ``mpirun`` bundled in the same bin directory wins over the PATH's — a
     custom QE install usually links against its own MPI. The constructed
@@ -2009,7 +2000,9 @@ def _qe_config_command() -> str | None:
         root = Path(str(bin_dir)).expanduser()
         bundled = root / "mpirun"
         launcher = shlex.quote(str(bundled)) if bundled.is_file() else "mpirun"
-        return f"{launcher} -np {_slurm_ntasks()} {shlex.quote(str(root / 'pw.x'))}"
+        from slab.hpc import allocated_tasks
+
+        return f"{launcher} -np {allocated_tasks()} {shlex.quote(str(root / 'pw.x'))}"
     return _qe_configured("command")
 
 
