@@ -405,3 +405,36 @@ def test_bridge_refuses_a_malformed_upstream() -> None:
 
     with pytest.raises(SandboxError, match="host:port"):
         bridge("/tmp/nope.sock", "not-an-endpoint")
+
+
+def test_snapshot_resolves_the_bin_form_payload_by_absolute_path(tmp_path: Path) -> None:
+    """With [engines.qe] bin, pw.x is off PATH by design; the setup lines
+    exist for runtime libraries, and the snapshot must not demand that they
+    export the binary."""
+    from mason.sandbox import snapshot_engines
+
+    bin_dir = tmp_path / "qe" / "bin"
+    bin_dir.mkdir(parents=True)
+    pw = bin_dir / "pw.x"
+    pw.write_text("#!/bin/sh\n")
+    pw.chmod(0o755)
+    cfg = _slab_cfg(
+        engines={"qe": {"bin": str(bin_dir), "setup": ["export SLAB_SNAPSHOT_QE=1"]}}
+    )
+    snapshot = snapshot_engines(cfg)["qe"]
+    assert snapshot.error is None
+    assert snapshot.payload == str(pw)
+    assert snapshot.env["SLAB_SNAPSHOT_QE"] == "1"
+
+
+def test_snapshot_failure_names_the_cause_not_the_stderr_noise(tmp_path: Path) -> None:
+    from mason.sandbox import snapshot_setup
+
+    # Noise on stderr plus a nonzero exit: the exit is the story.
+    failing = snapshot_setup("qe", ("echo 'Loading requirement: x' >&2", "false"), "pw.x")
+    assert failing.error is not None
+    assert failing.error.startswith("setup exited 1")
+    # Setup succeeds but the binary never appears: say that, not the noise.
+    missing = snapshot_setup("qe", ("echo 'Loading requirement: x' >&2",), "slab-no-such-binary")
+    assert missing.error is not None
+    assert missing.error.startswith("'slab-no-such-binary' did not resolve after setup")

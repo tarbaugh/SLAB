@@ -389,7 +389,9 @@ def snapshot_setup(
                 f"env -0 > {shlex.quote(str(files['before']))}",
                 "set -e",
                 *setup,
-                f"command -v {shlex.quote(payload)} > {shlex.quote(str(files['which']))}",
+                # The probe must not trip set -e: a payload that fails to
+                # resolve is its own diagnosis, distinct from a failing setup.
+                f"command -v {shlex.quote(payload)} > {shlex.quote(str(files['which']))} || true",
                 f"env -0 > {shlex.quote(str(files['after']))}",
                 f'ldd "$(command -v {shlex.quote(payload)})" '
                 f"> {shlex.quote(str(files['ldd']))} 2>/dev/null || true",
@@ -405,14 +407,15 @@ def snapshot_setup(
             )
         resolved = files["which"].read_text().strip() if files["which"].exists() else ""
         if result.returncode != 0 or not resolved:
-            detail = result.stderr.strip().splitlines()
-            return SetupSnapshot(
-                engine,
-                "",
-                {},
-                (),
-                error=(detail[-1] if detail else f"{payload!r} not found after setup"),
-            )
+            # Module systems chatter on stderr while succeeding, so name the
+            # actual failure first and quote stderr only as supporting detail.
+            tail = " | ".join(result.stderr.strip().splitlines()[-3:])
+            detail = f" (stderr: {tail})" if tail else ""
+            if result.returncode != 0:
+                cause = f"setup exited {result.returncode}{detail}"
+            else:
+                cause = f"{payload!r} did not resolve after setup{detail}"
+            return SetupSnapshot(engine, "", {}, (), error=cause)
         before = _env_entries(files["before"].read_bytes())
         after = _env_entries(files["after"].read_bytes())
         plain: dict[str, str] = {}
@@ -439,10 +442,16 @@ def snapshot_engines(slab_cfg: SlabConfig) -> dict[str, SetupSnapshot]:
     snapshots: dict[str, SetupSnapshot] = {}
     for engine in ("qe", "lammps"):
         table = getattr(slab_cfg.engines, engine)
-        if table.setup:
-            snapshots[engine] = snapshot_setup(
-                engine, table.setup, payload_name(engine, table.command)
-            )
+        if not table.setup:
+            continue
+        if engine == "qe" and getattr(table, "bin", None):
+            # The bin form keeps pw.x off PATH on purpose; the setup lines
+            # exist for its runtime libraries, so resolve the binary by its
+            # absolute path rather than expecting the setup to export it.
+            payload = str(Path(table.bin) / "pw.x")
+        else:
+            payload = payload_name(engine, table.command)
+        snapshots[engine] = snapshot_setup(engine, table.setup, payload)
     return snapshots
 
 
