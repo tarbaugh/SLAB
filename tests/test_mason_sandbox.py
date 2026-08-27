@@ -63,7 +63,8 @@ def test_render_isolates_and_fails_closed(tmp_path: Path) -> None:
     assert "mason sandbox verify" in script  # either proof failing aborts the job
     assert "mason run --auto" in script
     assert "'relax Cu and report'" in script
-    assert "UNIX-LISTEN:$BRIDGE,fork" in script
+    assert 'sandbox bridge "$BRIDGE" "$UPSTREAM"' in script
+    assert "socat" not in script  # both bridge halves are mason's own plumbing
     # The scheduler header comes from [hpc]; the payload never uses srun.
     assert "#SBATCH --partition=cpu" in script
 
@@ -365,3 +366,40 @@ def test_qe_pseudo_dir_is_bound_and_satisfies_the_pseudos_warning(tmp_path: Path
     binds, warnings = default_binds(tmp_path / "p", tmp_path / "ws", cfg)
     assert "/shared/upf:/shared/upf:ro" in binds
     assert not any("pseudopotentials" in w for w in warnings)
+
+
+def test_bridge_and_forward_chain_end_to_end() -> None:
+    """Client -> forward (loopback) -> unix socket -> bridge -> TCP stub.
+
+    The full relay chain the rendered job assembles, both halves the real
+    functions, no socat anywhere.
+    """
+    import tempfile
+    import urllib.request
+    from http.server import HTTPServer
+
+    from mason.sandbox import bridge
+
+    stub = HTTPServer(("127.0.0.1", 0), _Stub)
+    threading.Thread(target=stub.serve_forever, daemon=True).start()
+    sock = str(Path(tempfile.mkdtemp()) / "llm.sock")
+    threading.Thread(
+        target=bridge, args=(sock, f"127.0.0.1:{stub.server_address[1]}"), daemon=True
+    ).start()
+    for _ in range(50):
+        if Path(sock).exists():
+            break
+        threading.Event().wait(0.1)
+    port = next(_PORTS)
+    threading.Thread(target=forward, args=(sock, port), daemon=True).start()
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=5) as response:
+        payload = json.loads(response.read())
+    assert payload["data"][0]["id"] == "test-model"
+    stub.shutdown()
+
+
+def test_bridge_refuses_a_malformed_upstream() -> None:
+    from mason.sandbox import bridge
+
+    with pytest.raises(SandboxError, match="host:port"):
+        bridge("/tmp/nope.sock", "not-an-endpoint")

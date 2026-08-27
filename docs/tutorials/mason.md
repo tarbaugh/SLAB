@@ -354,10 +354,12 @@ clean environment, and file access limited to explicit bind mounts. The
 shell tool then reaches only what the fence was always meant to bound.
 
 The model stays reachable through exactly one path. On the host side of the
-job, `socat` bridges the recorded serve endpoint onto a unix socket. Inside
-the container, `mason sandbox forward` relays that socket to
-`127.0.0.1:8000`, and the agent talks to it as a normal endpoint. The
-destination is fixed in the script, so the agent cannot redirect it.
+job, `mason sandbox bridge` relays a unix socket to the recorded serve
+endpoint. Inside the container, `mason sandbox forward` relays that socket
+to `127.0.0.1:8000`, and the agent talks to it as a normal endpoint. The
+destination is fixed at job start, so the agent cannot redirect it. Both
+halves are plain Python from the installed package, so the host needs no
+relay tool.
 
 The job fails closed. Before the agent starts, `mason sandbox verify` runs
 inside the container and proves two things: a public URL is unreachable,
@@ -374,10 +376,9 @@ binary to find them). Because everything specific to a machine comes from
 that machine's own config, nothing site-specific ever needs to enter a
 repository.
 
-Run `mason sandbox check` first. It reports whether the container runtime,
-`socat`, and unprivileged network namespaces exist here, and whether the
-image and the serve record are in place. Then render, read both files, and
-submit:
+Run `mason sandbox check` first. It reports whether the container runtime
+and unprivileged network namespaces exist here, and whether the image and
+the serve record are in place. Then render, read both files, and submit:
 
 ```
 mason sandbox render "the goal" --partition cpu

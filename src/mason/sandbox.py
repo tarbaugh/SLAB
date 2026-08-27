@@ -6,9 +6,10 @@ module renders: one batch job that runs ``mason run --auto`` inside an
 Apptainer container with an empty network namespace (``--net --network
 none``), no home directory, a clean environment, and file access limited to
 explicit bind mounts. The model stays reachable through exactly one path — a
-unix socket, bridged on the host side to the recorded serve endpoint by a
-``socat`` with a fixed destination — so the agent's shell can reach the
-model and nothing else.
+unix socket, bridged on the host side to the recorded serve endpoint by
+:func:`bridge` with a fixed destination — so the agent's shell can reach
+the model and nothing else. Both halves of the bridge are stdlib Python
+run by the ``mason`` script itself, so the host needs no relay tool.
 
 Everything machine-specific derives from the loaded configuration: the
 workspace from ``[workspace]``, the pseudopotential and scratch roots from
@@ -47,6 +48,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -75,42 +77,76 @@ class SandboxError(MasonError):
 # -- the bridge (runs inside the container) -----------------------------------
 
 
+def _pump(source: socket.socket, sink: socket.socket) -> None:
+    try:
+        while True:
+            data = source.recv(65536)
+            if not data:
+                break
+            sink.sendall(data)
+    except OSError:
+        pass
+    finally:
+        for side in (source, sink):
+            with contextlib.suppress(OSError):
+                side.shutdown(socket.SHUT_RDWR)
+
+
+def _relay(server: socket.socket, connect: Callable[[], socket.socket]) -> None:
+    """Accept forever; pair every client with a fresh upstream connection."""
+    server.listen()
+    while True:
+        client, _addr = server.accept()
+        try:
+            upstream = connect()
+        except OSError:
+            client.close()
+            continue
+        threading.Thread(target=_pump, args=(client, upstream), daemon=True).start()
+        threading.Thread(target=_pump, args=(upstream, client), daemon=True).start()
+
+
 def forward(socket_path: str, port: int = BRIDGE_PORT) -> None:
     """Serve ``127.0.0.1:port`` by relaying every connection to a unix socket.
 
     This is the container half of the bridge. The namespace has no network,
-    so the only route out is the bound socket file, whose other end is a
-    host-side ``socat`` pointed at one fixed destination. Runs until killed.
+    so the only route out is the bound socket file, whose other end is the
+    host-side :func:`bridge` pointed at one fixed destination. Runs until
+    killed.
     """
 
-    def pump(source: socket.socket, sink: socket.socket) -> None:
-        try:
-            while True:
-                data = source.recv(65536)
-                if not data:
-                    break
-                sink.sendall(data)
-        except OSError:
-            pass
-        finally:
-            for side in (source, sink):
-                with contextlib.suppress(OSError):
-                    side.shutdown(socket.SHUT_RDWR)
+    def connect() -> socket.socket:
+        upstream = socket.socket(socket.AF_UNIX)
+        upstream.connect(socket_path)
+        return upstream
 
     server = socket.socket()
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("127.0.0.1", port))
-    server.listen()
-    while True:
-        client, _addr = server.accept()
-        upstream = socket.socket(socket.AF_UNIX)
-        try:
-            upstream.connect(socket_path)
-        except OSError:
-            client.close()
-            continue
-        threading.Thread(target=pump, args=(client, upstream), daemon=True).start()
-        threading.Thread(target=pump, args=(upstream, client), daemon=True).start()
+    _relay(server, connect)
+
+
+def bridge(socket_path: str, upstream: str) -> None:
+    """Serve a unix socket by relaying every connection to ``host:port``.
+
+    The host half of the bridge, run outside the container by the rendered
+    job. *upstream* is fixed at start — the agent inside can neither see nor
+    change the destination. Pure stdlib on purpose: the host already has
+    this environment, so the sandbox needs no socat or other relay tool.
+    Runs until killed.
+    """
+    host, _sep, port_text = upstream.rpartition(":")
+    if not host or not port_text.isdigit():
+        raise SandboxError(f"bridge upstream must be host:port, got {upstream!r}")
+
+    def connect() -> socket.socket:
+        return socket.create_connection((host, int(port_text)), timeout=30.0)
+
+    with contextlib.suppress(OSError):
+        os.unlink(socket_path)
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(socket_path)
+    _relay(server, connect)
 
 
 def verify(
@@ -177,7 +213,6 @@ def preflight(agent: AgentConfig, workspace_root: str | os.PathLike[str]) -> lis
             rows.append(("-", f"{name} not found on PATH ({why})"))
 
     tool("apptainer", "the container runtime")
-    tool("socat", "the host side of the endpoint bridge")
 
     if shutil.which("unshare"):
         probe = subprocess.run(
@@ -657,13 +692,12 @@ def render_sandbox_script(
 
     record = record_path(workspace_root).resolve()
     prologue = [
-        'command -v socat >/dev/null || { echo "socat not found on the host" >&2; exit 1; }',
         f"RECORD={shlex.quote(str(record))}",
         '[ -f "$RECORD" ] || { echo "no serve record at $RECORD;'
         " start the model server first ('mason serve start')\" >&2; exit 1; }",
         f'UPSTREAM=$({shlex.quote(_python())} -c {shlex.quote(_UPSTREAM_SNIPPET)} "$RECORD")',
         'BRIDGE="$(mktemp -d)/llm.sock"',
-        'socat "UNIX-LISTEN:$BRIDGE,fork" "TCP:$UPSTREAM" &',
+        f'{mason} sandbox bridge "$BRIDGE" "$UPSTREAM" &',
         "BRIDGE_PID=$!",
         "trap 'kill \"$BRIDGE_PID\" 2>/dev/null || true' EXIT",
         'for _ in $(seq 50); do [ -S "$BRIDGE" ] && break; sleep 0.1; done',

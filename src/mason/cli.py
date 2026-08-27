@@ -588,6 +588,20 @@ def mason_sandbox_forward(
     forward(socket_path, port)
 
 
+@sandbox_app.command("bridge")
+def mason_sandbox_bridge(
+    socket_path: Annotated[str, typer.Argument(help="The unix socket to serve.")],
+    upstream: Annotated[str, typer.Argument(help="Fixed destination, host:port.")],
+) -> None:
+    """In-job plumbing: relay the bridge socket to the serve endpoint (host side)."""
+    from mason.sandbox import bridge
+
+    try:
+        bridge(socket_path, upstream)
+    except (MasonError, FoundationError, SlabError) as e:
+        _fail(str(e))
+
+
 @sandbox_app.command("verify")
 def mason_sandbox_verify(
     port: Annotated[int, typer.Option("--port", help="The bridged loopback port.")] = 8000,
