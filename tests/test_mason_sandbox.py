@@ -418,12 +418,14 @@ def test_snapshot_resolves_the_bin_form_payload_by_absolute_path(tmp_path: Path)
     pw = bin_dir / "pw.x"
     pw.write_text("#!/bin/sh\n")
     pw.chmod(0o755)
+    (bin_dir / "mpirun").write_text("#!/bin/sh\n")  # bundled: no extra probe
     cfg = _slab_cfg(
         engines={"qe": {"bin": str(bin_dir), "setup": ["export SLAB_SNAPSHOT_QE=1"]}}
     )
     snapshot = snapshot_engines(cfg)["qe"]
     assert snapshot.error is None
     assert snapshot.payload == str(pw)
+    assert snapshot.extra_binaries == ()
     assert snapshot.env["SLAB_SNAPSHOT_QE"] == "1"
 
 
@@ -438,3 +440,62 @@ def test_snapshot_failure_names_the_cause_not_the_stderr_noise(tmp_path: Path) -
     missing = snapshot_setup("qe", ("echo 'Loading requirement: x' >&2",), "slab-no-such-binary")
     assert missing.error is not None
     assert missing.error.startswith("'slab-no-such-binary' did not resolve after setup")
+
+
+def test_snapshot_probes_and_binds_the_launcher_too(tmp_path: Path) -> None:
+    """ldd of pw.x names the launcher's lib but never its bin — the mpirun
+    the constructed command needs must be probed and bound itself, or the
+    job dies with 'mpirun: not found' at its first QE call."""
+    from mason.sandbox import _snapshot_binds, snapshot_engines
+
+    qe_bin = tmp_path / "qe" / "bin"
+    qe_bin.mkdir(parents=True)
+    pw = qe_bin / "pw.x"
+    pw.write_text("#!/bin/sh\n")
+    pw.chmod(0o755)
+    mpi_bin = tmp_path / "openmpi" / "bin"
+    mpi_bin.mkdir(parents=True)
+    mpirun = mpi_bin / "mpirun"
+    mpirun.write_text("#!/bin/sh\n")
+    mpirun.chmod(0o755)
+    cfg = _slab_cfg(
+        engines={
+            "qe": {"bin": str(qe_bin), "setup": [f'export PATH="{mpi_bin}:$PATH"']}
+        }
+    )
+    snapshot = snapshot_engines(cfg)["qe"]
+    assert snapshot.error is None
+    assert snapshot.extra_binaries == (str(mpirun),)
+    prefix = mpi_bin.parent
+    assert f"{prefix}:{prefix}:ro" in _snapshot_binds(snapshot)
+
+
+def test_snapshot_fails_when_the_launcher_cannot_resolve(tmp_path: Path) -> None:
+    """Direct exercise of the mechanism: the dev machine may well have a
+    real mpirun on PATH, so the unresolvable launcher gets an alias no
+    machine has."""
+    from mason.sandbox import snapshot_setup
+
+    pw = tmp_path / "pw.x"
+    pw.write_text("#!/bin/sh\n")
+    pw.chmod(0o755)
+    snapshot = snapshot_setup(
+        "qe", ("true",), str(pw), extras=("slab-no-such-launcher",)
+    )
+    assert snapshot.error is not None
+    assert "'slab-no-such-launcher' did not resolve" in snapshot.error
+
+
+def test_sandbox_toml_sets_a_workstation_profile_by_default(tmp_path: Path) -> None:
+    text, _ = sandbox_toml(_slab_cfg(), _agent(), tmp_path / "ws")
+    assert 'compute_profile = "workstation"' in text
+    explicit = _agent(compute_profile="cluster")
+    text, _ = sandbox_toml(_slab_cfg(), explicit, tmp_path / "ws")
+    assert 'compute_profile = "cluster"' in text
+
+
+def test_the_container_path_carries_the_venv(tmp_path: Path) -> None:
+    import sys
+
+    script, _ = _render(tmp_path, _agent(), _slab_cfg())
+    assert f"--env PATH={Path(sys.executable).parent}:" in script

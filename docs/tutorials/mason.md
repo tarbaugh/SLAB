@@ -387,8 +387,10 @@ sbatch sandbox/mason-sandbox.sbatch
 
 Engine `setup` lines get snapshotted. A `module load` works on the host
 and means nothing inside the container, so the render runs each engine's
-setup once, on the host, and records what it did: the resolved binary, the
-environment it changed, and the binary's library closure from `ldd`. The
+setup once, on the host, and records what it did: the resolved binaries —
+the payload and the launcher its command references, since `mpirun` must
+be bound as surely as `pw.x` — the environment it changed, and each
+binary's library closure from `ldd`. The
 snapshot becomes bind mounts in the script and explicit `export` lines in
 the rendered `slab.toml`. List variables such as `PATH` keep only the
 components the setup added, so the container's own base value survives
@@ -403,7 +405,9 @@ scheduler tools do not exist, and calculations run inside the job's own
 allocation. Size the job for its engine legs, and name QE by its install
 (`[engines.qe] bin`), which sizes `mpirun` to the allocation and binds the
 install automatically; the render warns when a hand-written command uses
-`srun`.
+`srun`. And because no `[hpc]` would otherwise derive a `laptop` compute
+profile, the rendered config pins `compute_profile = "workstation"` — the
+honest size for one owned node — unless your own config sets a profile.
 
 ## Memory that outlives the context window
 

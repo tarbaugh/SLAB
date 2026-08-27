@@ -298,6 +298,7 @@ class SetupSnapshot:
         lib_dirs: tuple[str, ...],
         error: str | None = None,
         path_prepends: dict[str, tuple[str, ...]] | None = None,
+        extra_binaries: tuple[str, ...] = (),
     ) -> None:
         self.engine = engine
         self.payload = payload
@@ -305,6 +306,11 @@ class SetupSnapshot:
         self.lib_dirs = lib_dirs
         self.error = error
         self.path_prepends = path_prepends or {}
+        # Launchers and helpers the engine command needs besides the payload
+        # (mpirun, notably). Each contributes its install prefix to the
+        # binds: a launcher reachable on PATH but with an unbound bin/ is
+        # exactly the 'mpirun: not found' the first real run produced.
+        self.extra_binaries = extra_binaries
 
     def setup_lines(self) -> list[str]:
         """The frozen replacement for the module loads: explicit exports."""
@@ -371,30 +377,48 @@ def _lib_dirs(ldd_output: str) -> tuple[str, ...]:
 
 
 def snapshot_setup(
-    engine: str, setup: tuple[str, ...], payload: str, *, timeout_s: float = 120.0
+    engine: str,
+    setup: tuple[str, ...],
+    payload: str,
+    *,
+    extras: tuple[str, ...] = (),
+    timeout_s: float = 120.0,
 ) -> SetupSnapshot:
     """Run one engine's setup on the host and record what it did.
 
     A login shell dumps its environment, runs the setup under ``set -e``,
-    resolves *payload*, dumps the environment again, and asks ``ldd`` for
-    the binary's closure (best-effort: a missing ldd or a static binary
-    yields no library dirs, and the payload's own prefix still gets bound).
+    resolves *payload* and every *extras* executable (the launcher the
+    engine command needs, typically ``mpirun``), dumps the environment
+    again, and asks ``ldd`` for each binary's closure (best-effort: a
+    missing ldd or a static binary yields no library dirs, and each
+    binary's own prefix still gets bound). Any target failing to resolve
+    fails the snapshot — a command that cannot resolve on the host cannot
+    work inside the container either.
     """
     import tempfile
 
+    targets = (payload, *extras)
     with tempfile.TemporaryDirectory() as scratch:
-        files = {name: Path(scratch) / name for name in ("before", "after", "which", "ldd")}
+        files = {name: Path(scratch) / name for name in ("before", "after", "ldd")}
+        probes = [Path(scratch) / f"which{i}" for i in range(len(targets))]
+        probe_lines = []
+        for target, probe in zip(targets, probes, strict=True):
+            # Probes must not trip set -e: a target that fails to resolve is
+            # its own diagnosis, distinct from a failing setup.
+            probe_lines.append(
+                f"command -v {shlex.quote(target)} > {shlex.quote(str(probe))} || true"
+            )
+            probe_lines.append(
+                f'ldd "$(command -v {shlex.quote(target)})" '
+                f">> {shlex.quote(str(files['ldd']))} 2>/dev/null || true"
+            )
         script = "\n".join(
             [
                 f"env -0 > {shlex.quote(str(files['before']))}",
                 "set -e",
                 *setup,
-                # The probe must not trip set -e: a payload that fails to
-                # resolve is its own diagnosis, distinct from a failing setup.
-                f"command -v {shlex.quote(payload)} > {shlex.quote(str(files['which']))} || true",
+                *probe_lines,
                 f"env -0 > {shlex.quote(str(files['after']))}",
-                f'ldd "$(command -v {shlex.quote(payload)})" '
-                f"> {shlex.quote(str(files['ldd']))} 2>/dev/null || true",
             ]
         )
         try:
@@ -405,8 +429,9 @@ def snapshot_setup(
             return SetupSnapshot(
                 engine, "", {}, (), error=f"setup did not finish within {timeout_s:.0f}s"
             )
-        resolved = files["which"].read_text().strip() if files["which"].exists() else ""
-        if result.returncode != 0 or not resolved:
+        resolved = [p.read_text().strip() if p.exists() else "" for p in probes]
+        missing = [t for t, r in zip(targets, resolved, strict=True) if not r]
+        if result.returncode != 0 or missing:
             # Module systems chatter on stderr while succeeding, so name the
             # actual failure first and quote stderr only as supporting detail.
             tail = " | ".join(result.stderr.strip().splitlines()[-3:])
@@ -414,7 +439,7 @@ def snapshot_setup(
             if result.returncode != 0:
                 cause = f"setup exited {result.returncode}{detail}"
             else:
-                cause = f"{payload!r} did not resolve after setup{detail}"
+                cause = f"{missing[0]!r} did not resolve after setup{detail}"
             return SetupSnapshot(engine, "", {}, (), error=cause)
         before = _env_entries(files["before"].read_bytes())
         after = _env_entries(files["after"].read_bytes())
@@ -434,34 +459,61 @@ def snapshot_setup(
             else:
                 plain[key] = value
         libs = _lib_dirs(files["ldd"].read_text()) if files["ldd"].exists() else ()
-        return SetupSnapshot(engine, resolved, plain, libs, path_prepends=prepends)
+        return SetupSnapshot(
+            engine,
+            resolved[0],
+            plain,
+            libs,
+            path_prepends=prepends,
+            extra_binaries=tuple(resolved[1:]),
+        )
 
 
 def snapshot_engines(slab_cfg: SlabConfig) -> dict[str, SetupSnapshot]:
-    """A snapshot per engine whose config declares setup lines."""
+    """A snapshot per engine whose config declares setup lines.
+
+    Each snapshot probes the payload binary and every launcher the engine
+    command references, because a launcher resolves through the setup's
+    PATH exactly like the payload does — and its install must be bound or
+    the command dies inside the container at its first token.
+    """
     snapshots: dict[str, SetupSnapshot] = {}
     for engine in ("qe", "lammps"):
         table = getattr(slab_cfg.engines, engine)
         if not table.setup:
             continue
+        tokens = shlex.split(table.command) if table.command else []
+        extras = tuple(t for t in tokens if t in ("mpirun", "mpiexec"))
         if engine == "qe" and getattr(table, "bin", None):
             # The bin form keeps pw.x off PATH on purpose; the setup lines
             # exist for its runtime libraries, so resolve the binary by its
             # absolute path rather than expecting the setup to export it.
+            # The constructed command launches through mpirun, which must
+            # resolve too unless the install bundles its own.
             payload = str(Path(table.bin) / "pw.x")
+            if not (Path(table.bin) / "mpirun").is_file():
+                extras = ("mpirun",)
         else:
             payload = payload_name(engine, table.command)
-        snapshots[engine] = snapshot_setup(engine, table.setup, payload)
+        snapshots[engine] = snapshot_setup(engine, table.setup, payload, extras=extras)
     return snapshots
 
 
 def _snapshot_binds(snapshot: SetupSnapshot) -> list[str]:
-    """Read-only binds for a snapshotted engine: its install, its libraries."""
+    """Read-only binds for a snapshotted engine: installs and libraries.
+
+    Every resolved binary contributes its install prefix — the launcher's
+    included, because ``ldd`` of the payload names the launcher's ``lib``
+    but never its ``bin``, and a bound ``lib`` next to an absent ``bin``
+    is precisely how 'mpirun: not found' happens inside the container.
+    """
     if snapshot.error:
         return []
-    bin_dir = Path(snapshot.payload).parent
-    prefix = bin_dir.parent if bin_dir.name == "bin" else bin_dir
-    return [f"{d}:{d}:ro" for d in dict.fromkeys([str(prefix), *snapshot.lib_dirs])]
+    prefixes = []
+    for binary in (snapshot.payload, *snapshot.extra_binaries):
+        bin_dir = Path(binary).parent
+        prefixes.append(str(bin_dir.parent if bin_dir.name == "bin" else bin_dir))
+    return [f"{d}:{d}:ro" for d in dict.fromkeys([*prefixes, *snapshot.lib_dirs])]
 
 
 def _collapse_binds(binds: list[str]) -> list[str]:
@@ -649,6 +701,11 @@ def sandbox_toml(
         for k, v in agent.model_dump(exclude_defaults=True).items()
         if k not in _AGENT_KEYS_DROPPED
     }
+    # With no [hpc] table, an unset profile would derive to "laptop" — and
+    # the prompt would tell a whole compute allocation to think small (the
+    # first real run's agent spent turns reasoning from "this is a laptop").
+    # The sandbox owns one real node: workstation is the honest size.
+    agent_table.setdefault("compute_profile", "workstation")
     out = [
         "# Rendered by 'mason sandbox render'. The scheduler table is deliberately",
         "# absent: the sandbox has no route to the controller, so the scheduler",
@@ -739,6 +796,10 @@ def render_sandbox_script(
             # --cleanenv would strip it, and the bin-form qe command sizes
             # its mpirun from it — 1 if the scheduler did not set it.
             '--env SLURM_NTASKS="${SLURM_NTASKS:-1}"',
+            # The venv on PATH, so the agent's shell probes find python and
+            # the console scripts without knowing the install layout.
+            f"--env PATH={shlex.quote(str(Path(_python()).parent))}"
+            ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             '"$IMAGE"',
             f"bash -c {shlex.quote(inner)}",
         ]
