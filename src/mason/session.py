@@ -36,6 +36,16 @@ from slab.config import load_config as load_slab_config
 Approver = Callable[[str, str], bool]
 """``(tool_name, preview) -> allow?`` — the permission gate for mutating tools."""
 
+Observer = Callable[[str, str, str], None]
+"""``(kind, attribution, text)`` — live step output for interactive display.
+
+``kind`` is ``"reasoning"`` (the model's thinking, when the server's
+reasoning parser separates it) or ``"text"`` (assistant prose emitted
+alongside tool calls, which otherwise never reaches the terminal).
+``attribution`` is the delegated agent's marker, empty for the session
+owner. Display only: the transcript records reasoning regardless.
+"""
+
 # Shell control operators disqualify a command from allowlist auto-approval.
 _SHELL_CONTROL = re.compile(r"[;&|`<>\n]|\$\(")
 
@@ -70,6 +80,9 @@ class MasonSession:
             runs — pass an interactive prompt or use approval ``"auto"``).
         auto_approve: True overrides the config's approval mode to allow
             every tool call this session (the ``--auto`` flag).
+        observer: Callback receiving live step output (reasoning, interim
+            assistant text) for display; ``None`` (the default) shows
+            nothing. Delegated children inherit it.
     """
 
     def __init__(
@@ -81,6 +94,7 @@ class MasonSession:
         hpc: HpcConfig | None = None,
         approver: Approver | None = None,
         auto_approve: bool = False,
+        observer: Observer | None = None,
     ) -> None:
         self.cwd = Path(cwd if cwd is not None else Path.cwd()).resolve()
         # Each table comes from the package that owns it. Passing one in skips
@@ -100,6 +114,7 @@ class MasonSession:
         )
         self.approver: Approver = approver if approver is not None else _approve_nothing
         self.auto_approve = auto_approve
+        self.observer: Observer | None = observer
         # Which agent card this session runs as; the loop sets it from the
         # spec it resolves. Delegated child sessions carry the specialist's
         # name for attribution in approvals and notebook entries.
@@ -219,9 +234,10 @@ class MasonSession:
         """A delegated child session: shared gate and memory, its own transcript.
 
         The child shares the project directory, the workspace, the ``[hpc]``
-        view, the approver, and the auto-approve policy — one permission
-        regime per session, whoever asks. Its token usage chains upward so
-        the parent's totals stay whole-session truths. Fresh per child: the
+        view, the approver, the auto-approve policy, and the observer — one
+        permission regime and one terminal per session, whoever asks. Its
+        token usage chains upward so the parent's totals stay whole-session
+        truths. Fresh per child: the
         read-files staleness guard (a specialist must read a file before
         editing it even when the parent read it), and the transcript, named
         after the parent's with the agent and an ordinal so ``--resume``
@@ -234,6 +250,7 @@ class MasonSession:
             hpc=self.hpc,
             approver=self.approver,
             auto_approve=self.auto_approve,
+            observer=self.observer,
         )
         child.agent_name = agent_name
         child._parent = self

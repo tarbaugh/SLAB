@@ -564,3 +564,84 @@ def test_lock_degrades_with_a_warning_where_flock_is_unsupported(
     session2 = _session(tmp_path)
     with pytest.warns(UserWarning, match="cannot hold the session lock"):
         Mason(session2, client=FakeClient([]))  # undetected, by design
+
+
+# -- reasoning: recorded, shown, never replayed --------------------------------
+
+
+def test_reasoning_is_recorded_and_shown_never_replayed(tmp_path: Path) -> None:
+    (tmp_path / "hello.txt").write_text("materials\n")
+    events: list[tuple[str, str, str]] = []
+    client = FakeClient(
+        [
+            ChatReply(
+                content="I will read the file first.",
+                reasoning="the goal needs hello.txt",
+                tool_calls=(
+                    ToolCall(
+                        id="c1",
+                        name="read_file",
+                        arguments={"path": "hello.txt"},
+                        arguments_raw='{"path": "hello.txt"}',
+                    ),
+                ),
+                prompt_tokens=100,
+                completion_tokens=10,
+            ),
+            ChatReply(
+                content="it says materials",
+                reasoning="the read gave the answer",
+                prompt_tokens=100,
+                completion_tokens=10,
+            ),
+        ]
+    )
+    session = _session(tmp_path)
+    session.observer = lambda kind, attribution, text: events.append((kind, attribution, text))
+    result = Mason(session, client=client).run_turn("what does hello.txt say?")
+    assert result.stop_reason == "answer"
+    # The observer saw both traces and the interim text, but never the final
+    # answer (the CLI prints that from TurnResult):
+    assert ("reasoning", "", "the goal needs hello.txt") in events
+    assert ("text", "", "I will read the file first.") in events
+    assert ("reasoning", "", "the read gave the answer") in events
+    assert not any(text == "it says materials" for _, _, text in events)
+    # The transcript keeps each trace as its own event, in order...
+    recorded = [
+        json.loads(line) for line in session.transcript_path.read_text().splitlines()
+    ]
+    traces = [event["text"] for event in recorded if event["type"] == "reasoning"]
+    assert traces == ["the goal needs hello.txt", "the read gave the answer"]
+    # ...and neither --resume nor the live history replays it to the model:
+    for message in session.load_messages(session.transcript_path):
+        assert "reasoning" not in message
+    assert all("reasoning" not in m for m in client.requests[1][0])
+
+
+def test_text_protocol_calls_do_not_echo_their_markup(tmp_path: Path) -> None:
+    events: list[tuple[str, str, str]] = []
+    markup = '{"name": "list_dir", "parameters": {"path": "."}}'
+    client = FakeClient(
+        [
+            ChatReply(
+                content=markup,
+                reasoning="listing first",
+                prompt_tokens=100,
+                completion_tokens=10,
+            ),
+            _text_reply("done"),
+        ]
+    )
+    session = _session(tmp_path)
+    session.observer = lambda kind, attribution, text: events.append((kind, attribution, text))
+    Mason(session, client=client).run_turn("look around")
+    kinds = [kind for kind, _, _ in events]
+    assert "reasoning" in kinds  # the trace still shows
+    assert "text" not in kinds  # the call markup does not: the approval preview has it
+
+
+def test_spawned_child_shares_the_observer(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    session.observer = lambda kind, attribution, text: None
+    child = session.spawn("materials", session.agent)
+    assert child.observer is session.observer

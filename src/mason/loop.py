@@ -258,6 +258,7 @@ class Mason:
                     calls = list(parse_loose_calls(reply.content, frozenset(self.toolbox.tools)))
                 from_text = bool(calls)
             self._append_assistant(reply, has_calls=bool(calls))
+            self._observe_step(reply, interim=bool(calls) and not from_text)
             if not calls:
                 text = reply.content or ""
                 if reply.finish_reason == "max_tokens":
@@ -388,7 +389,28 @@ class Mason:
         self.messages.append(message)
         self.session.record({"type": "message", "message": message})
 
+    def _observe_step(self, reply: ChatReply, *, interim: bool) -> None:
+        """Live step output to whoever is watching (chat wires a printer).
+
+        Interim assistant text is shown only for native tool calls: under
+        the text protocols the content *is* the call markup, and the
+        approval preview already shows the call.
+        """
+        observer = self.session.observer
+        if observer is None:
+            return
+        attribution = self.session.attribution()
+        if reply.reasoning:
+            observer("reasoning", attribution, reply.reasoning)
+        if interim and reply.content and reply.content.strip():
+            observer("text", attribution, reply.content)
+
     def _append_assistant(self, reply: ChatReply, *, has_calls: bool) -> None:
+        if reply.reasoning:
+            # Its own event, not a message field: --resume replays message
+            # events verbatim, and reasoning must never re-enter the
+            # model's context (the client contract, mason.client).
+            self.session.record({"type": "reasoning", "text": reply.reasoning})
         message: dict[str, Any] = {"role": "assistant", "content": reply.content}
         if has_calls and not self.fenced and reply.tool_calls:
             message["tool_calls"] = [

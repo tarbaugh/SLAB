@@ -292,3 +292,76 @@ def test_mason_doctor_flags_a_roster_table_without_a_card(
     assert result.exit_code == 1
     assert "[x] roster: " in result.output
     assert "[agent.roster.nobody]" in result.output
+
+
+# -- reasoning display ---------------------------------------------------------
+
+
+def test_mason_chat_prints_reasoning_by_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _patch_client(
+        monkeypatch,
+        [
+            ChatReply(
+                content="hello!",
+                reasoning="a warm greeting back",
+                prompt_tokens=10,
+                completion_tokens=2,
+            )
+        ],
+    )
+    result = runner.invoke(
+        app,
+        ["chat", "-w", str(tmp_path / ".slab"), "--model", "fake"],
+        input="hi\n/quit\n",
+    )
+    assert result.exit_code == 0
+    assert "[reasoning] a warm greeting back" in result.output
+    assert "hello!" in result.output
+
+
+def test_show_reasoning_false_silences_the_chat_display(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "slab.toml").write_text(
+        '[agent]\nmodel = "fake"\nshow_reasoning = false\n'
+    )
+    _patch_client(
+        monkeypatch,
+        [
+            ChatReply(
+                content="hello!", reasoning="hidden", prompt_tokens=10, completion_tokens=2
+            )
+        ],
+    )
+    result = runner.invoke(
+        app, ["chat", "-w", str(tmp_path / ".slab")], input="hi\n/quit\n"
+    )
+    assert result.exit_code == 0
+    assert "[reasoning]" not in result.output
+    assert "hello!" in result.output
+
+
+def test_mason_run_never_prints_reasoning(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    reply = _finish("a0 = 3.615 A (run ab12cd)").model_copy(
+        update={"reasoning": "checked the run record"}
+    )
+    _patch_client(monkeypatch, [reply])
+    result = runner.invoke(app, ["run", "measure a0", "-w", str(tmp_path / ".slab")])
+    assert result.exit_code == 0
+    assert "[reasoning]" not in result.output
+    assert "checked the run record" not in result.output
+
+
+def test_echo_step_clips_long_traces(capsys: pytest.CaptureFixture[str]) -> None:
+    from mason.cli import _STEP_PREVIEW_CHARS, _echo_step
+
+    _echo_step("reasoning", "", "x" * (_STEP_PREVIEW_CHARS + 500))
+    out = capsys.readouterr().out
+    assert "[... 500 more characters in the transcript]" in out

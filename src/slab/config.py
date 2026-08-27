@@ -696,6 +696,10 @@ schema_version = 1
 # max_turns = 60                            # model calls per goal; the agent stops loudly
 # approval = "ask"                          # "ask" gates mutating tools; "auto" trusts them
 # shell_allowlist = ["git status", "ls"]    # command prefixes that never need approval
+# show_reasoning = true                     # 'mason chat' prints the model's reasoning
+#                                           # between tool calls (needs the server's
+#                                           # reasoning parser); false hides it. The
+#                                           # transcript records reasoning either way
 # file_scope = "project"                    # file tools stay inside the project dir +
 #                                           # workspace (skill dirs readable); "anywhere"
 #                                           # lifts the fence. A workflow control, not a

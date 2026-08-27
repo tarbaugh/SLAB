@@ -280,6 +280,16 @@ the turn. Either answer `y` deliberately, run with `--auto`, or set
 mutations ask. `mason run` without `--auto` refuses every mutating
 tool, so batch use needs `--auto`.
 
+In chat, Mason prints the model's reasoning between tool calls, dimmed
+and prefixed `[reasoning]`, so each approval prompt arrives with its
+rationale above it. Interim assistant text prints the same way, and a
+delegated specialist's output carries its name. The reasoning stream
+needs a reasoning parser on the server, which the `mason serve` template
+names next to the tool-call parser. Set `[agent] show_reasoning = false`
+to hide the display. The transcript records every reasoning trace as its
+own event either way, and `--resume` never replays reasoning into the
+model's context. `mason run` prints only the final report.
+
 The file fence bounds where the file tools work. With the default
 `[agent] file_scope = "project"`, the reading tools (`read_file`,
 `list_dir`, `search`, and `launch_workflow`) reach the project directory,

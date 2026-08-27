@@ -95,3 +95,13 @@ def test_agent_models_forbid_unknown_keys() -> None:
         AgentConfig.model_validate({"modle": "typo"})
     with pytest.raises(Exception, match="prot"):
         ServeConfig.model_validate({"prot": 8000})
+
+
+def test_show_reasoning_defaults_on_and_stays_session_wide() -> None:
+    from pydantic import ValidationError
+
+    from mason.config import RosterOverride
+
+    assert AgentConfig().show_reasoning is True
+    with pytest.raises(ValidationError):
+        RosterOverride.model_validate({"show_reasoning": False})

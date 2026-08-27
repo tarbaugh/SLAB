@@ -73,6 +73,28 @@ def _main(
     """Mason — the resident research agent."""
 
 
+_STEP_PREVIEW_CHARS = 2_000
+
+
+def _echo_step(kind: str, attribution: str, text: str) -> None:
+    """Live step output for chat: reasoning dimmed, interim text plain.
+
+    Long traces are clipped for the terminal only; the transcript holds
+    the full text.
+    """
+    shown = text.strip()
+    if len(shown) > _STEP_PREVIEW_CHARS:
+        clipped = len(shown) - _STEP_PREVIEW_CHARS
+        shown = (
+            shown[:_STEP_PREVIEW_CHARS]
+            + f" [... {clipped} more characters in the transcript]"
+        )
+    if kind == "reasoning":
+        typer.secho(f"\n[reasoning] {attribution}{shown}", dim=True)
+    else:
+        typer.echo(f"\n{attribution}{shown}")
+
+
 def _ask_approval(tool_name: str, preview: str) -> bool:
     from click.exceptions import Abort
 
@@ -196,6 +218,10 @@ def mason_chat(
         session = _mason_session(
             workspace, auto=auto, model=model, endpoint=endpoint, provider=provider
         )
+        # Chat is where a person watches the loop; 'mason run' never
+        # wires an observer, so batch output stays the final report alone.
+        if session.agent.show_reasoning:
+            session.observer = _echo_step
         spec, roster = _resolve_spec(agent)
         resume_from = None
         if resume:
