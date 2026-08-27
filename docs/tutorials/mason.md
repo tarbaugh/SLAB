@@ -238,6 +238,28 @@ own. Every choice it leads to still lands in explicit, traced
 `calculator_options` that the run records, so an audit sees the actual
 cutoffs and k-mesh rather than a profile name.
 
+## Software notes: curated context for the engines
+
+Without context, a model spends its first steps searching the filesystem for
+what `slab` already knows. The system prompt therefore carries a curated
+note for each engine this machine enables. A note says what the engine is
+for, how to invoke it correctly, and which mistakes it invites. The `mace`
+note names the two routes to a served checkpoint, the `qe` note points at
+the named protocols instead of hand-picked cutoffs, and the `lammps` note
+says where the real error message hides.
+
+Selection follows the configuration. The always-available engines (`emt`,
+`lj`, `mace`) load their notes unconditionally. The engines that need a
+table (`qe`, `lammps`, `rootstock`) load their notes when `slab.toml`
+configures `[engines.<name>]`. Set `[agent] software_notes = false` to turn
+the block off. The notes are starting context only: they grant no
+capability, and `list_engines` stays the live inventory.
+
+If your software has machine-local quirks, you can replace a note: a file at
+`~/.config/slab/notes/<engine>.md` wins over the packaged note, whole-file.
+This is an escape hatch for local tweaks, not a content system. Keep a
+replacement short, because the note rides in every request's context.
+
 ## The tool surface
 
 Mason has few, orthogonal tools with crisp machine-checkable failure modes.
@@ -299,6 +321,13 @@ workspace. Paths are compared after symlinks resolve, so a link that
 points out of the fence counts as outside it. A refused path comes back
 as a tool result that names the fence and the setting, and
 `file_scope = "anywhere"` lifts it.
+
+While the fence is on, the prompt also tells the model to treat it as the
+working area: stay inside the project directory and the workspace, do not
+probe other locations with the shell, and ask before touching a path
+outside. The fence blocks the file tools mechanically. The prompt guidance
+covers the shell, which the fence never bounded, so an approval prompt for
+an out-of-bounds `ls` should now arrive with a reason or not at all.
 
 Job scripts and SLURM output files from `submit_job` land in
 `<workspace>/jobs/`, not in the project directory. The job itself still

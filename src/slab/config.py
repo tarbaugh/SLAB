@@ -700,6 +700,10 @@ schema_version = 1
 #                                           # between tool calls (needs the server's
 #                                           # reasoning parser); false hides it. The
 #                                           # transcript records reasoning either way
+# software_notes = true                     # the system prompt carries curated notes on
+#                                           # the engines this file enables; a file
+#                                           # ~/.config/slab/notes/<engine>.md replaces
+#                                           # a note for machine-local tweaks
 # file_scope = "project"                    # file tools stay inside the project dir +
 #                                           # workspace (skill dirs readable); "anywhere"
 #                                           # lifts the fence. A workflow control, not a

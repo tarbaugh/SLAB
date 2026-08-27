@@ -12,9 +12,11 @@ import platform
 from datetime import UTC, datetime
 from typing import Any
 
+from mason.notes import notes_block
 from mason.roster import AgentSpec
 from mason.session import MasonSession
 from mason.skills import Skill, catalog_block
+from slab.config import load_config as load_slab_config
 
 #: The harness discipline shared by every agent card. A card's body supplies
 #: identity and domain doctrine; this supplies how work is done here. The
@@ -165,6 +167,20 @@ def compute_profile_block(profile: str) -> str:
     return COMPUTE_PROFILES.get(profile, "")
 
 
+#: Default guidance whenever the file fence is on: the fence bounds the file
+#: tools mechanically, and this tells the model to treat the bound as the
+#: working area rather than probing past it with the shell. Rendered in the
+#: environment block because it names the session's directories, and skipped
+#: under ``file_scope = "anywhere"``, where it would be false.
+WORKING_BOUNDS = """\
+# Working bounds
+
+Stay inside the project directory and the workspace. The file tools are \
+fenced to them. Do not explore, list, or search other locations with the \
+shell, and do not read files the task does not need. When work seems to \
+need data or software outside these directories, name the path, say why, \
+and ask the user before you touch it."""
+
 FENCED_PROTOCOL = """\
 
 # Tool protocol (fenced)
@@ -243,6 +259,8 @@ def environment_block(
         lines.append(f"cluster: {cluster}; partitions: {partitions}{suffix}")
     else:
         lines.append("cluster: none configured (no SLURM tools this session)")
+    if session.agent.file_scope == "project":
+        lines.append("\n" + WORKING_BOUNDS)
     if skills:
         lines.append("\n" + catalog_block(skills))
     if team:
@@ -278,7 +296,7 @@ def system_messages(
     skills: dict[str, Skill] | None = None,
     team: str | None = None,
 ) -> list[dict[str, Any]]:
-    """The system prompt: role, static core, compute budget, protocol, environment.
+    """The system prompt: role, core, budget, software notes, protocol, environment.
 
     *spec* supplies the role block (the agent card's body); ``None`` yields
     the bare harness voice. Layers are ordered by change frequency so a
@@ -290,6 +308,10 @@ def system_messages(
     budget = compute_profile_block(session.compute_profile)
     if budget:
         prompt += "\n" + budget + "\n"
+    if session.agent.software_notes:
+        # Machine-stable, so it sits with the static layers: the block only
+        # changes when slab.toml (or a user note override) changes.
+        prompt += "\n" + notes_block(load_slab_config(session.cwd).engines) + "\n"
     if catalog is not None:
         prompt += FENCED_PROTOCOL.replace("{catalog}", catalog)
     environment = environment_block(session, skills, team)
