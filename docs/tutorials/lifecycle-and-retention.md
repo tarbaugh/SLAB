@@ -204,4 +204,21 @@ Two safety valves follow the same logic:
 - Blobs that no run references are reported as `orphans` but never deleted, because they may belong to an in-flight run that has not recorded its references yet.
 - Runs at status `running` are never swept by default. A hard-killed process leaves its run at `running` forever, so `expire --include-running` (or `include_running=True`) exists for when you know those processes are dead. Such runs are marked failed first, then expired.
 
+## Fast-forward, then purge
+
+The two phases above respect the retention policy. The `slab-stack` command holds the two verbs that override it. Use them when a line of work is finished and you have promoted everything you intend to keep.
+
+`slab-stack fast-forward` moves every unpromoted run to `expired`, now. It is a state change only, like `expire`. Promoted and archived runs are not touched. Runs stuck at status `running` are skipped unless you pass `--include-running`.
+
+**Warning: `slab-stack purge` deletes data permanently. Run it with `--dry-run` first, and promote every run you want to keep before you run it.**
+
+`slab-stack purge` removes all expired data, metadata included:
+
+- The database rows of every expired run: the run, its transitions, its artifact references, its tasks, and its checks. `foundation show` can no longer answer for a purged run.
+- The artifact bytes those runs referenced, unless a surviving run references the same hash. Blobs that no run references at all stay, exactly as in `gc`.
+- Mason session transcripts, together with their delegation transcripts. The newest conversation stays, so `mason chat --resume` keeps working. Pass `--all-sessions` to remove it too.
+- The `.sbatch` scripts and SLURM `.out` files of finished jobs, from `<workspace>/jobs/` and from the serve directory. Jobs still in the queue keep their files, and the serve endpoint record is never touched.
+
+Only runs in the `expired` state can be deleted. The store refuses any other state, so promoted and archived runs cannot be purged. Promote a run to keep it; the two commands together remove everything you did not.
+
 For where these states come from in the first place, see the [Quickstart](quickstart.md). For the argument behind the design, see [Architecture](../architecture.md).

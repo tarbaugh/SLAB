@@ -26,6 +26,7 @@ is the normal case, not an error, until something actually tries to submit.
 
 from __future__ import annotations
 
+import getpass
 import os
 import re
 import shutil
@@ -425,6 +426,32 @@ def _collapse(raw: str) -> JobState:
     keyword = raw.split()[0].split("+")[0] if raw.split() else ""
     mapped = _STATE_MAP.get(keyword)
     return JobState(mapped) if mapped else JobState.UNDETERMINED
+
+
+def active_job_ids() -> frozenset[str]:
+    """The user's job ids the scheduler still holds (pending or running).
+
+    One ``squeue`` call for the whole answer, so a sweep over many job
+    files pays for a single scheduler round trip. Raises
+    :class:`SchedulerNotAvailableError` where there is no ``squeue`` — the
+    caller decides what absence means (a purge on a laptop treats it as
+    "nothing can be running") — and :class:`SchedulerError` when ``squeue``
+    answers with a failure, because "the scheduler would not say" must
+    never be read as "nothing is active".
+    """
+    _require("squeue")
+    result = _run_scheduler_command(
+        ["squeue", "-h", "-u", getpass.getuser(), "-o", "%A"],
+        timeout=_SQUEUE_TIMEOUT_S,
+    )
+    if result.returncode != 0:
+        raise SchedulerError(
+            f"squeue could not list this user's jobs (exit {result.returncode}): "
+            f"{result.stderr.strip() or result.stdout.strip() or 'no output'}"
+        )
+    return frozenset(
+        line.strip() for line in result.stdout.splitlines() if line.strip()
+    )
 
 
 def cancel(job_id: str) -> None:

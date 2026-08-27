@@ -471,3 +471,41 @@ def test_file_scope_anywhere_lifts_the_fence(
     (elsewhere / "data.txt").write_text("visible\n")
     box = build_toolbox(_session(tmp_path, file_scope="anywhere"))
     assert "visible" in box.dispatch(_call("read_file", path=str(elsewhere / "data.txt")))
+
+
+def test_submit_job_files_land_in_the_workspace_jobs_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Job scripts and SLURM output stay out of the project directory (so
+    'slab-stack purge' can sweep them), while a prologue cd keeps the
+    payload running in the project."""
+    import slab.hpc as hpc_module
+    from slab.hpc import SubmittedJob
+
+    captured: dict[str, object] = {}
+
+    def fake_submit(script: str, *, job_name: str, partition: str, directory=None):
+        captured["script"] = script
+        captured["directory"] = Path(directory)
+        return SubmittedJob(
+            job_id="42", job_name=job_name, partition=partition, script_path="x"
+        )
+
+    monkeypatch.setattr(hpc_module, "submit", fake_submit)
+    hpc = HpcConfig.model_validate({"default_partition": "cpu", "partitions": {"cpu": {}}})
+    session = MasonSession(
+        tmp_path, workspace_root=tmp_path / ".slab", hpc=hpc, auto_approve=True
+    )
+    box = build_toolbox(session)
+    import json
+
+    call = ToolCall(
+        id="t1",
+        name="submit_job",
+        arguments={"command": "foundation run wf.py", "name": "cu"},
+        arguments_raw=json.dumps({"command": "foundation run wf.py", "name": "cu"}),
+    )
+    answer = box.dispatch(call)
+    assert "submitted job 42" in answer
+    assert captured["directory"] == session.workspace_root / "jobs"
+    assert f"cd {tmp_path}" in str(captured["script"])

@@ -195,6 +195,10 @@ class RunStore(Protocol):
         """Return the run's lifecycle transitions, oldest first."""
         ...
 
+    def delete_run(self, run_id: str) -> Run:
+        """Delete one expired run and every row that references it."""
+        ...
+
     def add_task(self, record: TaskRecord) -> TaskRecord:
         """Record a traced task call on its run."""
         ...
@@ -975,6 +979,39 @@ class SQLiteRunStore:
             )
             for row in rows
         ]
+
+    def delete_run(self, run_id: str) -> Run:
+        """Delete one expired run and every row that references it.
+
+        Only ``expired`` runs can be deleted: expiry is the lifecycle's
+        release of the evidence, and deletion is the purge phase acting on
+        that release. Any other state is refused — expire it first, or
+        promote it to keep it. Child rows (transitions, artifact references,
+        tasks, checks) go with the run via the schema's ``ON DELETE
+        CASCADE``. Returns the run as it was, for reporting.
+
+        Examples:
+            >>> store = SQLiteRunStore(":memory:")
+            >>> r = store.create(Run(name="scratch"))
+            >>> try:
+            ...     store.delete_run(r.id)
+            ... except RunStateError as e:
+            ...     print(e.operation, e.state.value)
+            delete quarantined
+            >>> _ = store.transition(r.id, "expired", actor="ttl")
+            >>> store.delete_run(r.id).name
+            'scratch'
+            >>> store.list_runs()
+            []
+            >>> store.close()
+        """
+        with self._txn() as conn:
+            rid = self._resolve(run_id)
+            run = self._get_exact(conn, rid)
+            if run.state is not LifecycleState.EXPIRED:
+                raise RunStateError(rid, run.state, "delete")
+            conn.execute("DELETE FROM runs WHERE id = ?", (rid,))
+            return run
 
     # -- internals --------------------------------------------------------------------
 

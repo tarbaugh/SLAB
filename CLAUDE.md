@@ -34,14 +34,16 @@ real executions. Do not edit them for style.
 
 ## Package layering
 
-The repository ships one distribution, `slab-stack`, containing three
-import packages. Each has a console script of the same name.
+The repository ships one distribution, `slab-stack`, containing four
+import packages. Each has a console script of the same name (the
+umbrella's is `slab-stack`).
 
 | Package | Owns | May import |
 |---|---|---|
 | `slab` | Access to computational software: engines and calculators, the engine registry, QE protocols, pseudopotential families, the SLURM layer, the config loader | nothing else here |
 | `foundation` | Workflows and state: runs, lifecycle, the artifact store, retention, tracing and caching, verification, the ready-made tasks, the MCP server | `slab` |
 | `mason` | The resident research agent: LLM clients, the ReAct loop, tools, session, prompts, model serving, the roster of agent cards, skills, delegation | `foundation`, `slab` |
+| `slab_stack` | Distribution-level housekeeping that must cross the layers: `fast-forward` (expire everything unpromoted) and `purge` (delete expired rows, bytes, transcripts, job files) | `mason`, `foundation`, `slab` |
 
 The dependency direction is a hard rule, and `tests/test_layering.py`
 enforces it by reading the AST. That catches imports which only execute on

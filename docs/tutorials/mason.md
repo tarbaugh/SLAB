@@ -300,6 +300,13 @@ points out of the fence counts as outside it. A refused path comes back
 as a tool result that names the fence and the setting, and
 `file_scope = "anywhere"` lifts it.
 
+Job scripts and SLURM output files from `submit_job` land in
+`<workspace>/jobs/`, not in the project directory. The job itself still
+runs in the project directory. The workspace sits inside the file fence,
+so the agent reads its own `.out` files with `read_file`. When a job is
+finished, `slab-stack purge` sweeps its files from there (see
+[Lifecycle & retention](lifecycle-and-retention.md)).
+
 The session lock keeps one running loop per workspace. With the default
 `[agent] session_lock = true`, a second Mason loop in the same workspace
 is refused with a message that names the holding process, because two

@@ -788,3 +788,25 @@ def test_wal_refusal_falls_back_to_rollback_journal(
         assert store.get(run.id).name == "wal-fallback"
     finally:
         store.close()
+
+
+def test_delete_run_cascades_and_refuses_the_unexpired(store: SQLiteRunStore) -> None:
+    from foundation.errors import RunNotFoundError, RunStateError
+
+    run = store.create(Run(name="scratch"))
+    store.add_task(
+        TaskRecord(
+            run_id=run.id, name="t", status="completed", cache_key="ef" * 32,
+            started_at=utcnow(),
+        )
+    )
+    with pytest.raises(RunStateError, match="quarantined"):
+        store.delete_run(run.id)
+    store.transition(run.id, "expired", actor="ttl")
+    deleted = store.delete_run(run.id)
+    assert deleted.name == "scratch"
+    with pytest.raises(RunNotFoundError):
+        store.get(run.id)
+    # The cascade took the traced task with it, so the cache cannot serve
+    # a deleted run's result:
+    assert store.find_cached_task("ef" * 32) is None

@@ -49,9 +49,10 @@ Source = "https://github.com/tarbaugh/SLAB"
 slab = "slab.cli:app"
 foundation = "foundation.cli:app"
 mason = "mason.cli:app"
+slab-stack = "slab_stack.cli:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/slab", "src/foundation", "src/mason"]
+packages = ["src/slab", "src/foundation", "src/mason", "src/slab_stack"]
 
 [tool.hatch.build.targets.sdist]
 # Plan files are working documents for the repository, not for the package.
@@ -99,7 +100,7 @@ disallow_untyped_calls = false
 # (whose script imports the pre-split module paths on purpose) is skipped, and
 # so are the built-in skills: their scripts are argparse programs with
 # repeating shapes across skill directories, exercised through runpy instead.
-addopts = "-q --doctest-modules --ignore=tests/data --ignore=src/mason/skills --cov=slab --cov=foundation --cov=mason --cov-report=term-missing"
+addopts = "-q --doctest-modules --ignore=tests/data --ignore=src/mason/skills --cov=slab --cov=foundation --cov=mason --cov=slab_stack --cov-report=term-missing"
 testpaths = ["tests", "src"]
 filterwarnings = [
     # ASE-internal numpy 2.5 deprecations; not ours to fix

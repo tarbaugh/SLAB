@@ -73,10 +73,12 @@ from foundation.models import (
 from foundation.retention import (
     DEFAULT_POLICY,
     GcReport,
+    PurgeReport,
     RetentionPolicy,
     StateRule,
     expire_due,
     gc,
+    purge_expired,
 )
 from foundation.runtime import ActiveRun, Workspace, check, current_run
 from foundation.serialize import dumps, fingerprint, loads
@@ -108,6 +110,7 @@ __all__ = [
     "LifecycleState",
     "NestedRunError",
     "NoActiveRunError",
+    "PurgeReport",
     "RetentionPolicy",
     "Run",
     "RunExistsError",
@@ -135,6 +138,7 @@ __all__ = [
     "gc",
     "is_terminal",
     "loads",
+    "purge_expired",
     "requires_force",
     "task",
     "units",

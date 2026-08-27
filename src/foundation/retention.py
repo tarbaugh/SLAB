@@ -12,8 +12,17 @@ types — that is the design's central move. Two operations consume it:
   reference anywhere are dropped from the artifact store; every reference,
   hash, and recipe survives.
 
-Expiry and gc are deliberately two phases (``x expire`` then ``x gc``): state
-changes are cheap and reversible in review, byte deletion is not.
+A third operation sits outside the policy because the state machine has
+already decided for it:
+
+* :func:`purge_expired` — true deletion. Where gc keeps every reference,
+  hash, and recipe, purge removes ``expired`` runs outright — rows and any
+  bytes no surviving run references. Nothing else is reachable: the store
+  refuses to delete a run in any other state.
+
+Expiry, gc, and purge are deliberately separate phases: state changes are
+cheap and reversible in review, byte deletion is not, and row deletion is
+the end of traceability for what it removes.
 
 The asymmetry is enforced structurally: a policy that puts a TTL on
 ``promoted`` or ``archived`` fails validation — promoted data cannot be aged
@@ -291,6 +300,105 @@ def gc(
         kept=sorted(demanded & present),
         orphans=sorted(present - referenced),
         missing=sorted(demanded - present),
+        freed_bytes=freed,
+        dry_run=dry_run,
+    )
+
+
+class PurgeReport(BaseModel):
+    """What :func:`purge_expired` did (or, with ``dry_run``, would do).
+
+    Fields:
+        deleted: Ids of the expired runs whose rows were removed.
+        dropped: Hashes whose bytes went with them (no surviving reference).
+        kept: Hashes the deleted runs referenced but a surviving run still does.
+        freed_bytes: Total size of dropped blobs.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    deleted: list[str]
+    dropped: list[str]
+    kept: list[str]
+    freed_bytes: int
+    dry_run: bool
+
+
+def _reachable_hashes(runs: RunStore, run: Run) -> set[str]:
+    """Every blob hash a run references: declared artifacts and task data."""
+    digests = {ref.hash for ref in runs.list_artifacts(run.id)}
+    for task in runs.list_tasks(run.id):
+        digests.update(task.inputs.values())
+        digests.update(task.outputs.values())
+    return digests
+
+
+def purge_expired(
+    runs: RunStore,
+    artifacts: ArtifactStore,
+    *,
+    dry_run: bool = False,
+) -> PurgeReport:
+    """Delete expired runs outright: rows and bytes, irreversibly.
+
+    The destructive third phase, after :func:`expire_due` (state) and
+    :func:`gc` (bytes). Each expired run loses its row and, through the
+    schema's cascade, its transitions, artifact references, tasks, and
+    checks; then its blobs are dropped unless a surviving run references
+    them. Only runs already ``expired`` are touched — the store refuses
+    any other state — so promoted and archived data is structurally out
+    of reach. Blobs referenced by no run at all are left alone, exactly
+    as in gc: they may belong to an in-flight run that has not recorded
+    its references yet.
+
+    Examples:
+        >>> import tempfile
+        >>> from foundation.store import SQLiteRunStore
+        >>> store = SQLiteRunStore(":memory:")
+        >>> cas = ArtifactStore(tempfile.mkdtemp())
+        >>> keep = store.create(Run(name="keep"))
+        >>> gone = store.create(Run(name="gone"))
+        >>> shared = cas.put_bytes(b"shared structure")
+        >>> scratch = cas.put_bytes(b"wavecar")
+        >>> _ = store.add_artifact(keep.id, name="s", role="terminal",
+        ...                        hash=shared, size_bytes=16)
+        >>> _ = store.add_artifact(gone.id, name="s", role="terminal",
+        ...                        hash=shared, size_bytes=16)
+        >>> _ = store.add_artifact(gone.id, name="w", role="intermediate",
+        ...                        hash=scratch, size_bytes=7)
+        >>> _ = store.transition(keep.id, "promoted", force=True)
+        >>> _ = store.transition(gone.id, "expired", actor="ttl")
+        >>> report = purge_expired(store, cas)
+        >>> report.deleted == [gone.id], report.freed_bytes
+        (True, 7)
+        >>> cas.has(shared), cas.has(scratch)
+        (True, False)
+        >>> [r.name for r in store.list_runs()]
+        ['keep']
+        >>> store.close()
+    """
+    every = runs.list_runs()
+    expired = [run for run in every if run.state is LifecycleState.EXPIRED]
+    candidates: set[str] = set()
+    for run in expired:
+        candidates |= _reachable_hashes(runs, run)
+    surviving: set[str] = set()
+    for run in every:
+        if run.state is not LifecycleState.EXPIRED:
+            surviving |= _reachable_hashes(runs, run)
+    to_drop = sorted(
+        digest for digest in candidates - surviving if artifacts.has(digest)
+    )
+    freed = sum(artifacts.size(digest) for digest in to_drop)
+    if not dry_run:
+        for run in expired:
+            runs.delete_run(run.id)
+        for digest in to_drop:
+            artifacts.discard(digest)
+    return PurgeReport(
+        deleted=[run.id for run in expired],
+        dropped=to_drop,
+        kept=sorted(candidates & surviving),
         freed_bytes=freed,
         dry_run=dry_run,
     )

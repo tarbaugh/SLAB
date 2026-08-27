@@ -427,3 +427,61 @@ def test_expire_include_running_recovers_hard_killed_runs(store: SQLiteRunStore)
     assert expired_run.state is E
     assert expired_run.status is ExecutionStatus.FAILED
     assert expired_run.error is not None and "presumed dead" in expired_run.error
+
+
+# -- purge: the destructive third phase ---------------------------------------
+
+
+def test_purge_drops_task_traced_bytes_of_expired_runs(
+    cas: ArtifactStore,
+) -> None:
+    from foundation.models import TaskRecord
+    from foundation.retention import purge_expired
+
+    store = SQLiteRunStore(":memory:")
+    run = store.create(Run(name="traced"))
+    blob = cas.put_bytes(b"task output")
+    store.add_task(
+        TaskRecord(
+            run_id=run.id,
+            name="relax",
+            status="completed",
+            cache_key="ab" * 32,
+            outputs={"atoms": blob},
+            started_at=utcnow(),
+        )
+    )
+    store.transition(run.id, E, actor="ttl")
+    report = purge_expired(store, cas)
+    assert report.deleted == [run.id]
+    assert report.dropped == [blob]
+    assert not cas.has(blob)
+    store.close()
+
+
+def test_purge_dry_run_reports_without_deleting(cas: ArtifactStore) -> None:
+    from foundation.retention import purge_expired
+
+    store = SQLiteRunStore(":memory:")
+    run = store.create(Run(name="doomed"))
+    blob = cas.put_bytes(b"bytes")
+    store.add_artifact(run.id, name="b", role="terminal", hash=blob, size_bytes=5)
+    store.transition(run.id, E, actor="ttl")
+    report = purge_expired(store, cas, dry_run=True)
+    assert report.dry_run and report.deleted == [run.id] and report.dropped == [blob]
+    assert cas.has(blob)
+    assert len(store.list_runs()) == 1
+    store.close()
+
+
+def test_purge_leaves_orphan_blobs_alone(cas: ArtifactStore) -> None:
+    """An unreferenced blob may belong to an in-flight run: purge, like gc,
+    never touches it."""
+    from foundation.retention import purge_expired
+
+    store = SQLiteRunStore(":memory:")
+    orphan = cas.put_bytes(b"in-flight, not yet recorded")
+    report = purge_expired(store, cas)
+    assert report.deleted == [] and report.dropped == []
+    assert cas.has(orphan)
+    store.close()

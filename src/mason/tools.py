@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -795,14 +796,20 @@ def _add_hpc_tools(box: Toolbox, session: MasonSession) -> None:
         name = str(arguments["name"])
         command = str(arguments["command"])
         partition, _spec = session.hpc.resolve_partition(arguments.get("partition"))
+        # Scripts and SLURM .out files live under the workspace so
+        # 'slab-stack purge' can sweep them; the prologue cd keeps the
+        # payload running in the project directory as before (the .out is
+        # opened before the cd, so it stays in jobs/).
         script = render_sbatch(
             command,
             job_name=name,
             partition=partition,
             config=session.hpc,
             time_limit=arguments.get("time_limit"),
+            prologue=(f"cd {shlex.quote(str(session.cwd))}",),
         )
-        job = submit(script, job_name=name, partition=partition, directory=session.cwd)
+        jobs_dir = session.workspace_root / "jobs"
+        job = submit(script, job_name=name, partition=partition, directory=jobs_dir)
         return (
             f"submitted job {job.job_id} ({job.job_name}) to partition {job.partition}; "
             f"script kept at {job.script_path}; poll with job_status"

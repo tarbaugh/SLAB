@@ -1,5 +1,6 @@
-"""The dependency direction between the three packages, enforced.
+"""The dependency direction between the packages, enforced.
 
+``slab_stack`` may import everything (it is the distribution's umbrella).
 ``mason`` may import ``foundation`` and ``slab``. ``foundation`` may import
 ``slab``. ``slab`` imports neither. Nothing in the language stops a stray
 ``from foundation import ...`` inside ``slab``; this test does.
@@ -27,6 +28,7 @@ ALLOWED: dict[str, frozenset[str]] = {
     "slab": frozenset({"slab"}),
     "foundation": frozenset({"foundation", "slab"}),
     "mason": frozenset({"mason", "foundation", "slab"}),
+    "slab_stack": frozenset({"slab_stack", "mason", "foundation", "slab"}),
 }
 PACKAGES = tuple(ALLOWED)
 
@@ -136,12 +138,13 @@ def test_package_resolves_inside_this_checkout(package: str) -> None:
     )
 
 
-def test_pyproject_declares_exactly_the_three_console_scripts() -> None:
+def test_pyproject_declares_a_console_script_per_package() -> None:
+    """Script names are the package names, with underscores dashed
+    (``slab_stack`` ships as ``slab-stack``, the distribution's own name)."""
     pyproject = tomllib.loads((SRC.parent / "pyproject.toml").read_text())
     scripts = pyproject["project"]["scripts"]
-    assert set(scripts) == set(PACKAGES)
-    for name in PACKAGES:
-        assert scripts[name] == f"{name}.cli:app"
+    expected = {name.replace("_", "-"): f"{name}.cli:app" for name in PACKAGES}
+    assert scripts == expected
 
 
 def test_wheel_ships_every_package() -> None:

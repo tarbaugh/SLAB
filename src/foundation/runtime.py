@@ -41,7 +41,15 @@ from foundation.errors import (
 )
 from foundation.lifecycle import ExecutionStatus, LifecycleState
 from foundation.models import ArtifactRef, ArtifactRole, CheckResult, Run
-from foundation.retention import DEFAULT_POLICY, GcReport, RetentionPolicy, expire_due, gc
+from foundation.retention import (
+    DEFAULT_POLICY,
+    GcReport,
+    PurgeReport,
+    RetentionPolicy,
+    expire_due,
+    gc,
+    purge_expired,
+)
 from foundation.serialize import dumps
 from foundation.store import SQLiteRunStore
 
@@ -420,3 +428,15 @@ class Workspace:
             >>> ws.close()
         """
         return gc(self.runs, self.artifacts, policy, dry_run=dry_run)
+
+    def purge_expired(self, *, dry_run: bool = False) -> PurgeReport:
+        """Delete expired runs outright (see :func:`foundation.retention.purge_expired`).
+
+        Examples:
+            >>> import tempfile
+            >>> ws = Workspace(tempfile.mkdtemp())
+            >>> ws.purge_expired().deleted
+            []
+            >>> ws.close()
+        """
+        return purge_expired(self.runs, self.artifacts, dry_run=dry_run)

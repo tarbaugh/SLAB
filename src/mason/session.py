@@ -63,6 +63,39 @@ def _approve_nothing(tool: str, preview: str) -> bool:
     return False
 
 
+def transcript_groups(
+    workspace_root: str | os.PathLike[str],
+) -> list[tuple[Path, list[Path]]]:
+    """Conversation transcripts with their delegation siblings, oldest first.
+
+    A conversation transcript is ``<stamp>-<pid>.jsonl``; the delegation
+    transcripts its turns produced share its stem with an agent name and
+    an ordinal appended. Grouping them keeps a sweep from deleting a
+    conversation while stranding its specialists' archives, or the
+    reverse. This is the one layout fact ``slab-stack purge`` needs, so
+    it lives here with the layout's owner.
+    """
+    sessions = Path(workspace_root) / "mason" / "sessions"
+    if not sessions.is_dir():
+        return []
+    conversations = sorted(
+        p
+        for p in sessions.glob("*.jsonl")
+        if p.is_file() and _CONVERSATION_TRANSCRIPT.match(p.name)
+    )
+    return [
+        (
+            conversation,
+            sorted(
+                p
+                for p in sessions.glob(f"{conversation.stem}-*.jsonl")
+                if p.is_file()
+            ),
+        )
+        for conversation in conversations
+    ]
+
+
 class MasonSession:
     """One agent session in one project directory.
 
