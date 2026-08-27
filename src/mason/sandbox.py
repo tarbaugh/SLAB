@@ -18,6 +18,15 @@ record at job runtime. The rendered artifacts therefore live on the machine
 they describe, and nothing site-specific belongs in a repository — the
 template here stays generic.
 
+Engine ``setup`` lines get the same treatment. ``module load`` works on the
+host and means nothing inside the container, so the render runs each
+engine's setup once, on the host, and snapshots what it did: the resolved
+binary, the environment delta, and the binary's library closure. The
+snapshot becomes bind mounts and explicit ``export`` lines in the rendered
+``slab.toml`` — the real config keeps its modules as the single source of
+truth, and the frozen copy is reviewable output like everything else. A
+module upgrade means re-rendering.
+
 The rendered job fails closed: before starting the agent, it proves inside
 the container that the internet is unreachable and that the bridged
 endpoint answers. Either proof failing aborts the job. Like the serve
@@ -211,6 +220,228 @@ def preflight(agent: AgentConfig, workspace_root: str | os.PathLike[str]) -> lis
     return rows
 
 
+# -- the setup snapshot (runs on the host, at render time) --------------------
+
+#: Environment keys a login shell churns on its own; never part of what a
+#: setup line meant to communicate. BASH_FUNC_* entries (exported shell
+#: functions, the module command itself among them) are dropped too — they
+#: cannot ride an export line, and the container has no module system for
+#: them to drive anyway.
+_ENV_NOISE = frozenset(
+    {"PWD", "OLDPWD", "SHLVL", "_", "PS1", "PS2", "PROMPT_COMMAND", "LS_COLORS"}
+)
+
+#: Library directories the container's base image provides itself; binding
+#: the host's copy over them would shadow the image's own loader setup.
+_BASE_IMAGE_LIBS = ("/lib", "/lib64", "/usr/lib", "/usr/lib64")
+
+#: What binary to resolve per engine when the command does not name one.
+_DEFAULT_PAYLOAD = {"qe": "pw.x", "lammps": "lmp"}
+
+_LAUNCHERS = frozenset({"env", "srun", "mpirun", "mpiexec", "nice", "time"})
+
+
+class SetupSnapshot:
+    """What one engine's ``setup`` lines did when run on the host.
+
+    ``payload`` is the resolved binary, ``env`` the plain environment
+    variables the setup introduced or changed, ``path_prepends`` the
+    components it added to colon-separated list variables (``PATH``,
+    ``LD_LIBRARY_PATH``, ...) — only the additions, so the container's own
+    base value survives underneath. ``lib_dirs`` are the binary's
+    shared-library directories outside the container base image. A snapshot
+    with ``error`` set means the setup failed or the binary never appeared —
+    the render then keeps the hand-configuration warning instead of
+    pretending.
+    """
+
+    def __init__(
+        self,
+        engine: str,
+        payload: str,
+        env: dict[str, str],
+        lib_dirs: tuple[str, ...],
+        error: str | None = None,
+        path_prepends: dict[str, tuple[str, ...]] | None = None,
+    ) -> None:
+        self.engine = engine
+        self.payload = payload
+        self.env = env
+        self.lib_dirs = lib_dirs
+        self.error = error
+        self.path_prepends = path_prepends or {}
+
+    def setup_lines(self) -> list[str]:
+        """The frozen replacement for the module loads: explicit exports."""
+        lines = [
+            f"export {key}={shlex.quote(value)}" for key, value in sorted(self.env.items())
+        ]
+        for key, added in sorted(self.path_prepends.items()):
+            joined = ":".join(added)
+            for hostile in ("\\", '"', "$", "`"):
+                joined = joined.replace(hostile, "\\" + hostile)
+            lines.append(f'export {key}="{joined}${{{key}:+:${key}}}"')
+        return lines
+
+    def export_count(self) -> int:
+        return len(self.env) + len(self.path_prepends)
+
+
+def payload_name(engine: str, command: str | None) -> str:
+    """The binary a setup must make resolvable, read off the command line.
+
+    Skips launchers, options, assignments, and bare numbers, so
+    ``mpirun -np 4 pw.x`` and ``env OMP_NUM_THREADS=4 pw.x`` both name
+    ``pw.x``. With no command configured, the engine's canonical binary.
+
+    Examples:
+        >>> payload_name("qe", "mpirun -np 4 pw.x")
+        'pw.x'
+        >>> payload_name("lammps", None)
+        'lmp'
+    """
+    for token in shlex.split(command) if command else ():
+        if token in _LAUNCHERS or token.startswith("-") or "=" in token or token.isdigit():
+            continue
+        return token
+    return _DEFAULT_PAYLOAD[engine]
+
+
+def _env_entries(raw: bytes) -> dict[str, str]:
+    entries: dict[str, str] = {}
+    for chunk in raw.split(b"\0"):
+        if not chunk:
+            continue
+        key, _sep, value = chunk.decode("utf-8", errors="replace").partition("=")
+        if key in _ENV_NOISE or key.startswith("BASH_FUNC_"):
+            continue
+        entries[key] = value
+    return entries
+
+
+def _lib_dirs(ldd_output: str) -> tuple[str, ...]:
+    dirs: set[str] = set()
+    for line in ldd_output.splitlines():
+        _name, arrow, rest = line.partition("=>")
+        target = rest.split()[0] if arrow and rest.split() else ""
+        if not target.startswith("/"):
+            continue
+        parent = str(Path(target).parent)
+        if any(
+            parent == base or parent.startswith(base + "/") for base in _BASE_IMAGE_LIBS
+        ):
+            continue
+        dirs.add(parent)
+    return tuple(sorted(dirs))
+
+
+def snapshot_setup(
+    engine: str, setup: tuple[str, ...], payload: str, *, timeout_s: float = 120.0
+) -> SetupSnapshot:
+    """Run one engine's setup on the host and record what it did.
+
+    A login shell dumps its environment, runs the setup under ``set -e``,
+    resolves *payload*, dumps the environment again, and asks ``ldd`` for
+    the binary's closure (best-effort: a missing ldd or a static binary
+    yields no library dirs, and the payload's own prefix still gets bound).
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as scratch:
+        files = {name: Path(scratch) / name for name in ("before", "after", "which", "ldd")}
+        script = "\n".join(
+            [
+                f"env -0 > {shlex.quote(str(files['before']))}",
+                "set -e",
+                *setup,
+                f"command -v {shlex.quote(payload)} > {shlex.quote(str(files['which']))}",
+                f"env -0 > {shlex.quote(str(files['after']))}",
+                f'ldd "$(command -v {shlex.quote(payload)})" '
+                f"> {shlex.quote(str(files['ldd']))} 2>/dev/null || true",
+            ]
+        )
+        try:
+            result = subprocess.run(
+                ["bash", "-lc", script], capture_output=True, text=True, timeout=timeout_s
+            )
+        except subprocess.TimeoutExpired:
+            return SetupSnapshot(
+                engine, "", {}, (), error=f"setup did not finish within {timeout_s:.0f}s"
+            )
+        resolved = files["which"].read_text().strip() if files["which"].exists() else ""
+        if result.returncode != 0 or not resolved:
+            detail = result.stderr.strip().splitlines()
+            return SetupSnapshot(
+                engine,
+                "",
+                {},
+                (),
+                error=(detail[-1] if detail else f"{payload!r} not found after setup"),
+            )
+        before = _env_entries(files["before"].read_bytes())
+        after = _env_entries(files["after"].read_bytes())
+        plain: dict[str, str] = {}
+        prepends: dict[str, tuple[str, ...]] = {}
+        for key, value in after.items():
+            if before.get(key) == value:
+                continue
+            if key.endswith("PATH"):
+                # A list variable: keep only what the setup added, so the
+                # container's own base value survives underneath instead of
+                # being shadowed by the host's entire list.
+                have = set(filter(None, before.get(key, "").split(":")))
+                added = tuple(c for c in value.split(":") if c and c not in have)
+                if added:
+                    prepends[key] = added
+            else:
+                plain[key] = value
+        libs = _lib_dirs(files["ldd"].read_text()) if files["ldd"].exists() else ()
+        return SetupSnapshot(engine, resolved, plain, libs, path_prepends=prepends)
+
+
+def snapshot_engines(slab_cfg: SlabConfig) -> dict[str, SetupSnapshot]:
+    """A snapshot per engine whose config declares setup lines."""
+    snapshots: dict[str, SetupSnapshot] = {}
+    for engine in ("qe", "lammps"):
+        table = getattr(slab_cfg.engines, engine)
+        if table.setup:
+            snapshots[engine] = snapshot_setup(
+                engine, table.setup, payload_name(engine, table.command)
+            )
+    return snapshots
+
+
+def _snapshot_binds(snapshot: SetupSnapshot) -> list[str]:
+    """Read-only binds for a snapshotted engine: its install, its libraries."""
+    if snapshot.error:
+        return []
+    bin_dir = Path(snapshot.payload).parent
+    prefix = bin_dir.parent if bin_dir.name == "bin" else bin_dir
+    return [f"{d}:{d}:ro" for d in dict.fromkeys([str(prefix), *snapshot.lib_dirs])]
+
+
+def _collapse_binds(binds: list[str]) -> list[str]:
+    """Drop exact duplicates and read-only binds nested inside another bind."""
+
+    def src(spec: str) -> str:
+        return spec.split(":", 1)[0]
+
+    kept: list[str] = []
+    for spec in binds:
+        redundant = False
+        for other in binds:
+            if other == spec:
+                continue
+            inside = src(spec) == src(other) or src(spec).startswith(src(other) + "/")
+            wider = spec.endswith(":ro") or other.endswith(":rw")
+            if inside and wider and (other in kept or binds.index(other) < binds.index(spec)):
+                redundant = True
+                break
+        if not redundant and spec not in kept:
+            kept.append(spec)
+    return kept
+
+
 # -- rendering ----------------------------------------------------------------
 
 
@@ -230,14 +461,19 @@ def _mason_bin() -> Path:
 
 
 def default_binds(
-    project: Path, workspace_root: Path, slab_cfg: SlabConfig
+    project: Path,
+    workspace_root: Path,
+    slab_cfg: SlabConfig,
+    snapshots: dict[str, SetupSnapshot] | None = None,
 ) -> tuple[list[str], list[str]]:
     """The bind mounts the configuration implies, plus warnings for the gaps.
 
     Read-write: the project, the workspace, and the scratch root. Read-only:
-    the pseudopotential root, the rootstock install, and the Python
-    environment (with the repository checkout when the install is editable).
-    Everything else does not exist inside the container.
+    the pseudopotential roots, the rootstock install, the Python environment
+    (with the repository checkout when the install is editable), and — for
+    each engine in *snapshots* — the install and library directories its
+    setup resolved to on the host. Everything else does not exist inside
+    the container.
     """
     warnings: list[str] = []
     binds = [f"{project}:{project}:rw", f"{workspace_root}:{workspace_root}:rw"]
@@ -245,10 +481,17 @@ def default_binds(
         binds.append(f"{slab_cfg.paths.scratch}:{slab_cfg.paths.scratch}:rw")
     if slab_cfg.paths.pseudos:
         binds.append(f"{slab_cfg.paths.pseudos}:{slab_cfg.paths.pseudos}:ro")
-    else:
-        warnings.append("[paths] pseudos is unset: no pseudopotentials will be visible")
+    if slab_cfg.engines.qe.pseudo_dir:
+        binds.append(f"{slab_cfg.engines.qe.pseudo_dir}:{slab_cfg.engines.qe.pseudo_dir}:ro")
+    if not slab_cfg.paths.pseudos and not slab_cfg.engines.qe.pseudo_dir:
+        warnings.append(
+            "neither [paths] pseudos nor [engines.qe] pseudo_dir is set: "
+            "no pseudopotentials will be visible"
+        )
     if slab_cfg.paths.engines:
         binds.append(f"{slab_cfg.paths.engines}:{slab_cfg.paths.engines}:ro")
+    for snapshot in (snapshots or {}).values():
+        binds.extend(_snapshot_binds(snapshot))
     if slab_cfg.engines.qe.bin:
         # The whole install, not just bin/: pw.x usually links ../lib.
         prefix = Path(slab_cfg.engines.qe.bin).parent
@@ -311,7 +554,10 @@ _AGENT_KEYS_DROPPED = frozenset(
 
 
 def sandbox_toml(
-    slab_cfg: SlabConfig, agent: AgentConfig, workspace_root: Path
+    slab_cfg: SlabConfig,
+    agent: AgentConfig,
+    workspace_root: Path,
+    snapshots: dict[str, SetupSnapshot] | None = None,
 ) -> tuple[str, list[str]]:
     """The configuration the sandboxed session loads, plus render warnings.
 
@@ -319,6 +565,10 @@ def sandbox_toml(
     do not exist in the tool vocabulary, which is what an empty network
     namespace requires (the SLURM controller is unreachable). Calculations
     run in-process inside the job's own allocation.
+
+    An engine present in *snapshots* has its ``setup`` lines replaced by the
+    snapshot's explicit exports — the frozen equivalent of what the module
+    loads did on the host, which the container cannot run itself.
     """
     warnings: list[str] = []
     engines = slab_cfg.engines.model_dump(exclude_defaults=True)
@@ -330,13 +580,25 @@ def sandbox_toml(
             "to an mpirun-style command sized to the job's allocation"
         )
     for name, table in engines.items():
-        if table.get("setup"):
+        if not table.get("setup"):
+            continue
+        snapshot = (snapshots or {}).get(name)
+        if snapshot is not None and snapshot.error is None:
+            table["setup"] = snapshot.setup_lines()
             warnings.append(
-                f"[engines.{name}] has setup lines: module loads resolve against "
-                f"the host, not the container — bind the software read-only via "
-                f"[agent.sandbox] binds and set PATH/LD_LIBRARY_PATH in setup "
-                f"instead of 'module load'"
+                f"[engines.{name}] setup snapshotted from the host: "
+                f"{snapshot.payload}, {snapshot.export_count()} export(s), "
+                f"{len(_snapshot_binds(snapshot))} bind(s)"
             )
+            continue
+        because = f" (snapshot failed: {snapshot.error})" if snapshot is not None else ""
+        warnings.append(
+            f"[engines.{name}] has setup lines the render could not snapshot"
+            f"{because}: module loads resolve against the host, not the "
+            f"container — bind the software read-only via [agent.sandbox] "
+            f"binds and set PATH/LD_LIBRARY_PATH in setup instead of "
+            f"'module load'"
+        )
 
     agent_table = {
         k: v
@@ -370,6 +632,7 @@ def render_sandbox_script(
     toml_path: Path,
     partition: str | None = None,
     time_limit: str | None = None,
+    snapshots: dict[str, SetupSnapshot] | None = None,
 ) -> tuple[str, list[str]]:
     """The batch script for one autonomous, network-dark session.
 
@@ -387,8 +650,9 @@ def render_sandbox_script(
             "sandbox job should run in (build one with e.g. "
             "'apptainer build slab-sandbox.sif docker://rockylinux:9')"
         )
-    binds, warnings = default_binds(project, workspace_root, slab_cfg)
+    binds, warnings = default_binds(project, workspace_root, slab_cfg, snapshots)
     binds.extend(agent.sandbox.binds)
+    binds = _collapse_binds(binds)
     mason = _mason_bin()
 
     record = record_path(workspace_root).resolve()

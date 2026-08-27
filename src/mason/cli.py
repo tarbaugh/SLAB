@@ -531,7 +531,7 @@ def mason_sandbox_render(
     ] = None,
 ) -> None:
     """Write the sandbox batch script and its slab.toml — read both, then sbatch."""
-    from mason.sandbox import render_sandbox_script, sandbox_toml
+    from mason.sandbox import render_sandbox_script, sandbox_toml, snapshot_engines
     from slab.config import load_config as load_slab_config
 
     project = Path.cwd()
@@ -540,7 +540,11 @@ def mason_sandbox_render(
     try:
         agent, hpc, root = _serve_inputs(workspace)
         slab_cfg = load_slab_config(project)
-        toml_text, toml_warnings = sandbox_toml(slab_cfg, agent, root.resolve())
+        # Runs each engine's setup lines once, here on the host, so their
+        # module loads can be frozen into exports and binds the container
+        # can actually use.
+        snapshots = snapshot_engines(slab_cfg)
+        toml_text, toml_warnings = sandbox_toml(slab_cfg, agent, root.resolve(), snapshots)
         script, bind_warnings = render_sandbox_script(
             agent,
             hpc,
@@ -551,6 +555,7 @@ def mason_sandbox_render(
             toml_path=toml_path,
             partition=partition,
             time_limit=time_limit,
+            snapshots=snapshots,
         )
     except (MasonError, FoundationError, SlabError) as e:
         _fail(str(e))
@@ -558,8 +563,11 @@ def mason_sandbox_render(
     script_path = out_dir / "mason-sandbox.sbatch"
     script_path.write_text(script.rstrip("\n") + "\n", encoding="utf-8")
     toml_path.write_text(toml_text, encoding="utf-8")
-    for warning in (*toml_warnings, *bind_warnings):
-        typer.secho(f"[!] {warning}", err=True, fg=typer.colors.YELLOW)
+    for note in (*toml_warnings, *bind_warnings):
+        if "snapshotted from the host" in note:
+            typer.echo(f"[=] {note}")
+        else:
+            typer.secho(f"[!] {note}", err=True, fg=typer.colors.YELLOW)
     typer.echo(f"wrote {script_path}")
     typer.echo(f"wrote {toml_path}")
     typer.echo(

@@ -384,13 +384,25 @@ mason sandbox render "the goal" --partition cpu
 sbatch sandbox/mason-sandbox.sbatch
 ```
 
+Engine `setup` lines get snapshotted. A `module load` works on the host
+and means nothing inside the container, so the render runs each engine's
+setup once, on the host, and records what it did: the resolved binary, the
+environment it changed, and the binary's library closure from `ldd`. The
+snapshot becomes bind mounts in the script and explicit `export` lines in
+the rendered `slab.toml`. List variables such as `PATH` keep only the
+components the setup added, so the container's own base value survives
+underneath. Your real config keeps its module loads as the source of
+truth. The snapshot is frozen at render time, so re-render after a module
+changes, and check the `[=]` line the render prints for each snapshot.
+A setup that fails to snapshot keeps a warning naming the cause.
+
 Two consequences to plan for. The rendered `slab.toml` has no `[hpc]`
 table, because the namespace has no route to the scheduler — so the
 scheduler tools do not exist, and calculations run inside the job's own
 allocation. Size the job for its engine legs, and name QE by its install
 (`[engines.qe] bin`), which sizes `mpirun` to the allocation and binds the
 install automatically; the render warns when a hand-written command uses
-`srun` or when engine `setup` lines depend on host module loads.
+`srun`.
 
 ## Memory that outlives the context window
 

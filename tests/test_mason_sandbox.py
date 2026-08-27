@@ -99,7 +99,7 @@ def test_extra_binds_and_the_gaps_warned(tmp_path: Path) -> None:
     script, warnings = _render(tmp_path, agent, cfg)
     assert "--bind /opt/qe:/opt/qe:ro" in script
     assert any("cluster form" in w for w in warnings)
-    assert any("pseudos is unset" in w for w in warnings)
+    assert any("no pseudopotentials will be visible" in w for w in warnings)
 
 
 def test_render_requires_an_image(tmp_path: Path) -> None:
@@ -268,3 +268,100 @@ def test_qe_bin_is_bound_whole_install_and_ntasks_forwarded(tmp_path: Path) -> N
     script, warnings = _render(tmp_path, _agent(), cfg)
     assert '--env SLURM_NTASKS="${SLURM_NTASKS:-1}"' in script
     assert not any("srun" in w for w in warnings)  # nothing to hand-edit
+
+
+# -- the setup snapshot -------------------------------------------------------
+
+
+def test_snapshot_runs_the_setup_and_captures_the_delta(tmp_path: Path) -> None:
+    from mason.sandbox import snapshot_setup
+
+    bin_dir = tmp_path / "lammps-2025" / "bin"
+    bin_dir.mkdir(parents=True)
+    fake = bin_dir / "lmp"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    # A name nothing else exports: a var already in the inherited env (the
+    # engines tests leak OMP_NUM_THREADS) would vanish from the delta.
+    snapshot = snapshot_setup(
+        "lammps",
+        (f'export PATH="{bin_dir}:$PATH"', "export SLAB_SNAPSHOT_PROBE=4"),
+        "lmp",
+    )
+    assert snapshot.error is None
+    assert snapshot.payload == str(fake)
+    assert snapshot.env["SLAB_SNAPSHOT_PROBE"] == "4"
+    # Only the ADDED component is kept, not the host's whole PATH.
+    assert snapshot.path_prepends["PATH"] == (str(bin_dir),)
+    lines = snapshot.setup_lines()
+    assert "export SLAB_SNAPSHOT_PROBE=4" in lines
+    assert f'export PATH="{bin_dir}${{PATH:+:$PATH}}"' in lines
+    # The install prefix (parent of bin/) is what gets bound.
+    from mason.sandbox import _snapshot_binds
+
+    assert f"{bin_dir.parent}:{bin_dir.parent}:ro" in _snapshot_binds(snapshot)
+
+
+def test_snapshot_reports_a_failing_setup(tmp_path: Path) -> None:
+    from mason.sandbox import snapshot_setup
+
+    snapshot = snapshot_setup("qe", ("false",), "pw.x")
+    assert snapshot.error is not None
+    assert snapshot.payload == ""
+
+
+def test_snapshot_rewrites_the_rendered_toml(tmp_path: Path) -> None:
+    from mason.sandbox import SetupSnapshot
+
+    cfg = _slab_cfg(
+        engines={"qe": {"command": "pw.x", "setup": ["module load qe/7.4"]}},
+        paths={"pseudos": "/shared/pseudos"},
+    )
+    good = SetupSnapshot(
+        "qe",
+        "/apps/qe/bin/pw.x",
+        {},
+        ("/apps/mpi/lib",),
+        path_prepends={"PATH": ("/apps/qe/bin",)},
+    )
+    text, warnings = sandbox_toml(cfg, _agent(), tmp_path / "ws", {"qe": good})
+    assert "module load" not in text
+    # The container's own PATH survives underneath the prepend.
+    assert "/apps/qe/bin${PATH:+:$PATH}" in text
+    assert any("snapshotted from the host" in w for w in warnings)
+    assert not any("could not snapshot" in w for w in warnings)
+    # A failed snapshot keeps the hand-configuration warning, with the cause.
+    bad = SetupSnapshot("qe", "", {}, (), error="module: command not found")
+    text, warnings = sandbox_toml(cfg, _agent(), tmp_path / "ws", {"qe": bad})
+    assert "module load qe/7.4" in text
+    assert any("could not snapshot" in w and "module: command not found" in w for w in warnings)
+
+
+def test_snapshot_binds_reach_the_script_and_collapse(tmp_path: Path) -> None:
+    from mason.sandbox import SetupSnapshot
+
+    cfg = _slab_cfg(engines={"qe": {"command": "pw.x", "setup": ["module load qe"]}})
+    snapshot = SetupSnapshot(
+        "qe", "/apps/qe/bin/pw.x", {"PATH": "/apps/qe/bin"}, ("/apps/qe/lib", "/apps/mpi/lib")
+    )
+    script, _ = render_sandbox_script(
+        _agent(),
+        _HPC,
+        cfg,
+        tmp_path / "ws",
+        tmp_path / "project",
+        "goal",
+        toml_path=tmp_path / "sandbox" / "slab.toml",
+        snapshots={"qe": snapshot},
+    )
+    assert "--bind /apps/qe:/apps/qe:ro" in script
+    assert "--bind /apps/mpi/lib:/apps/mpi/lib:ro" in script
+    # /apps/qe/lib sits inside the /apps/qe bind and must not repeat.
+    assert "--bind /apps/qe/lib:" not in script
+
+
+def test_qe_pseudo_dir_is_bound_and_satisfies_the_pseudos_warning(tmp_path: Path) -> None:
+    cfg = _slab_cfg(engines={"qe": {"pseudo_dir": "/shared/upf"}})
+    binds, warnings = default_binds(tmp_path / "p", tmp_path / "ws", cfg)
+    assert "/shared/upf:/shared/upf:ro" in binds
+    assert not any("pseudopotentials" in w for w in warnings)
