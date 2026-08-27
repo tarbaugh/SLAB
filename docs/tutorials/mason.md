@@ -432,8 +432,11 @@ under version control, readable by humans:
   understanding changes. The tool echoes the full plan back into context,
   which is the "recitation" trick that holds long goals stable.
 * **`.slab/mason/sessions/*.jsonl`** are append-only transcripts of every
-  message, tool result, compaction, and token count, and
-  `mason chat --resume` replays the newest one.
+  message, tool result, reasoning trace, compaction, and token count, and
+  `mason chat --resume` replays the newest one. Read one with
+  `mason read <transcript>`: it renders the events in the chat display's
+  visual language (dimmed reasoning, cyan tool calls), clips long content
+  unless you pass `--full`, and ends with the token totals.
 * **`AGENTS.md`** is the cross-tool conventions standard, and if the project
   has one, it enters the system prompt every session.
 

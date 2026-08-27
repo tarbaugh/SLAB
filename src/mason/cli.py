@@ -495,6 +495,99 @@ def mason_serve_stop(
         _fail(str(e))
 
 
+_READ_PREVIEW_CHARS = 1_500
+
+
+def _clip(text: str, full: bool) -> str:
+    text = text.rstrip()
+    if full or len(text) <= _READ_PREVIEW_CHARS:
+        return text
+    omitted = len(text) - _READ_PREVIEW_CHARS
+    return f"{text[:_READ_PREVIEW_CHARS]}\n[... {omitted} more characters; --full shows them]"
+
+
+def _render_event(event: dict[str, Any], full: bool) -> None:
+    """One transcript event, in the same visual language as 'mason chat'."""
+    stamp = str(event.get("at", ""))[11:19]
+    kind = event.get("type")
+    if kind == "message":
+        message = event.get("message", {})
+        role = message.get("role")
+        if role == "user":
+            typer.secho(f"\n=== user @ {stamp} " + "=" * 46, bold=True)
+            typer.echo(_clip(str(message.get("content") or ""), full))
+        elif role == "assistant":
+            content = message.get("content")
+            if content:
+                typer.secho(f"\n--- assistant @ {stamp}", bold=True)
+                typer.echo(_clip(str(content), full))
+            for call in message.get("tool_calls") or []:
+                function = call.get("function", {})
+                arguments = str(function.get("arguments", ""))
+                if not full and len(arguments) > 200:
+                    arguments = arguments[:200] + " ..."
+                typer.secho(
+                    f"[{stamp}] -> {function.get('name', '?')} {arguments}",
+                    fg=typer.colors.CYAN,
+                )
+        elif role == "tool":
+            typer.echo(_clip(str(message.get("content") or ""), full))
+    elif kind == "reasoning":
+        typer.secho(f"\n[reasoning @ {stamp}]", dim=True)
+        typer.secho(_clip(str(event.get("text", "")), full), dim=True)
+    elif kind == "skill":
+        typer.secho(f"[{stamp}] skill loaded: {event.get('name')} ({event.get('source')})")
+    elif kind == "compaction":
+        typer.secho(f"\n=== compaction @ {stamp} " + "=" * 40, bold=True)
+        typer.echo(_clip(str(event.get("summary", "")), full))
+    elif kind == "finish":
+        typer.secho(f"\n=== final report @ {stamp} " + "=" * 39, bold=True)
+        typer.echo(_clip(str(event.get("report", "")), full))
+    elif kind == "resume":
+        typer.echo(f"[{stamp}] resumed with {event.get('messages')} prior message(s)")
+    # usage events are accumulated by the caller, not printed per step.
+
+
+@app.command("read")
+def mason_read(
+    transcript: Annotated[
+        Path, typer.Argument(help="A session transcript (.jsonl) to render.")
+    ],
+    full: Annotated[
+        bool, typer.Option("--full", help="Show everything; no truncation.")
+    ] = False,
+) -> None:
+    """Render a session transcript for human reading.
+
+    Same visual language as 'mason chat': dimmed reasoning, cyan tool
+    calls, plain results. A malformed line is marked and skipped — a
+    viewer must show the readable majority of a damaged file, unlike
+    --resume, which must refuse it.
+    """
+    import json as _json
+
+    if not transcript.is_file():
+        _fail(f"no transcript at {transcript}")
+    prompt_tokens = completion_tokens = steps = 0
+    for number, line in enumerate(transcript.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            event = _json.loads(line)
+        except _json.JSONDecodeError:
+            typer.secho(f"[line {number}: not valid JSON; skipped]", fg=typer.colors.YELLOW)
+            continue
+        if event.get("type") == "usage":
+            prompt_tokens += int(event.get("prompt_tokens") or 0)
+            completion_tokens += int(event.get("completion_tokens") or 0)
+            steps += 1
+            continue
+        _render_event(event, full)
+    typer.secho(
+        f"\n[{steps} model call(s); tokens {prompt_tokens}+{completion_tokens}]", dim=True
+    )
+
+
 sandbox_app = typer.Typer(
     help=(
         "The no-network container for autonomous runs: preflight the host, "

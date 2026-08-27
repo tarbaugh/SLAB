@@ -390,3 +390,44 @@ def test_an_endpoint_flag_reaches_delegated_children(tmp_path: Path) -> None:
     )
     child = session.spawn("dft-expert", effective)
     assert child.endpoint == "http://127.0.0.1:8000/v1"
+
+
+def test_mason_read_renders_a_transcript_for_humans(tmp_path: Path) -> None:
+    import json
+
+    transcript = tmp_path / "20260827-000000-1.jsonl"
+    events = [
+        {"at": "2026-08-27T10:00:00+00:00", "type": "message",
+         "message": {"role": "user", "content": "relax Cu"}},
+        {"at": "2026-08-27T10:00:05+00:00", "type": "usage",
+         "prompt_tokens": 100, "completion_tokens": 20},
+        {"at": "2026-08-27T10:00:05+00:00", "type": "reasoning", "text": "think " * 600},
+        {"at": "2026-08-27T10:00:05+00:00", "type": "message",
+         "message": {"role": "assistant", "content": None, "tool_calls": [
+             {"id": "t1", "type": "function",
+              "function": {"name": "shell", "arguments": '{"command": "ls"}'}}]}},
+        {"at": "2026-08-27T10:00:06+00:00", "type": "message",
+         "message": {"role": "tool", "tool_call_id": "t1", "content": "exit 0\nfiles"}},
+        {"at": "2026-08-27T10:00:09+00:00", "type": "finish", "report": "done, run r1"},
+    ]
+    lines = [json.dumps(e) for e in events]
+    lines.insert(3, "{broken")
+    transcript.write_text("\n".join(lines) + "\n")
+
+    result = runner.invoke(app, ["read", str(transcript)])
+    assert result.exit_code == 0, result.output
+    assert "=== user @ 10:00:00" in result.output
+    assert "relax Cu" in result.output
+    assert "[reasoning @ 10:00:05]" in result.output
+    assert "--full shows them" in result.output  # long reasoning clipped
+    assert '-> shell {"command": "ls"}' in result.output
+    assert "exit 0" in result.output
+    assert "=== final report @ 10:00:09" in result.output
+    assert "[line 4: not valid JSON; skipped]" in result.output
+    assert "[1 model call(s); tokens 100+20]" in result.output
+
+    unclipped = runner.invoke(app, ["read", str(transcript), "--full"])
+    assert "--full shows them" not in unclipped.output
+
+    missing = runner.invoke(app, ["read", str(tmp_path / "nope.jsonl")])
+    assert missing.exit_code != 0
