@@ -65,6 +65,8 @@ def test_render_isolates_and_fails_closed(tmp_path: Path) -> None:
     assert "'relax Cu and report'" in script
     assert 'sandbox bridge "$BRIDGE" "$UPSTREAM"' in script
     assert "socat" not in script  # both bridge halves are mason's own plumbing
+    # A missing image aborts with a plain message, not an apptainer FATAL.
+    assert 'no container image at $IMAGE' in script
     # The scheduler header comes from [hpc]; the payload never uses srun.
     assert "#SBATCH --partition=cpu" in script
 

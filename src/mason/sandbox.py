@@ -690,8 +690,13 @@ def render_sandbox_script(
     binds = _collapse_binds(binds)
     mason = _mason_bin()
 
+    image = str(Path(agent.sandbox.image).expanduser())
     record = record_path(workspace_root).resolve()
     prologue = [
+        f"IMAGE={shlex.quote(image)}",
+        '[ -f "$IMAGE" ] || { echo "no container image at $IMAGE; build it '
+        "(e.g. 'apptainer build $IMAGE docker://rockylinux:9') on a filesystem "
+        'the compute nodes mount" >&2; exit 1; }',
         f"RECORD={shlex.quote(str(record))}",
         '[ -f "$RECORD" ] || { echo "no serve record at $RECORD;'
         " start the model server first ('mason serve start')\" >&2; exit 1; }",
@@ -725,7 +730,7 @@ def render_sandbox_script(
             # --cleanenv would strip it, and the bin-form qe command sizes
             # its mpirun from it — 1 if the scheduler did not set it.
             '--env SLURM_NTASKS="${SLURM_NTASKS:-1}"',
-            shlex.quote(str(Path(agent.sandbox.image).expanduser())),
+            '"$IMAGE"',
             f"bash -c {shlex.quote(inner)}",
         ]
     )
