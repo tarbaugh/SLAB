@@ -1163,3 +1163,59 @@ def test_qe_setup_from_config_and_per_call_override(
             setup=["export PATH=/nowhere"],  # per-call wins; pw.x vanishes
             input_data={"system": {"ecutwfc": 30.0}},
         )
+
+
+def test_bin_constructs_the_command_sized_to_the_allocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """[engines.qe] bin -> 'mpirun -np N <bin>/pw.x', N from $SLURM_NTASKS."""
+    from slab.backends import _qe_config_command, _qe_locator
+
+    project = tmp_path / "project"
+    project.mkdir()
+    bin_dir = tmp_path / "qe-7.4" / "bin"
+    (project / "slab.toml").write_text(f'[engines.qe]\nbin = "{bin_dir}"\n')
+    monkeypatch.chdir(project)
+    monkeypatch.delenv("SLAB_CONFIG", raising=False)
+    monkeypatch.delenv("SLAB_SITE_CONFIG", raising=False)
+
+    monkeypatch.delenv("SLURM_NTASKS", raising=False)
+    assert _qe_config_command() == f"mpirun -np 1 {bin_dir}/pw.x"
+    monkeypatch.setenv("SLURM_NTASKS", "32")
+    assert _qe_config_command() == f"mpirun -np 32 {bin_dir}/pw.x"
+    monkeypatch.setenv("SLURM_NTASKS", "not-a-number")
+    assert _qe_config_command() == f"mpirun -np 1 {bin_dir}/pw.x"
+    # Cache identity resolves through the same chain as the calculator.
+    assert _qe_locator({})[0] == f"mpirun -np 1 {bin_dir}/pw.x"
+
+
+def test_bin_prefers_a_bundled_mpirun(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from slab.backends import _qe_config_command
+
+    project = tmp_path / "project"
+    project.mkdir()
+    bin_dir = tmp_path / "qe-7.4" / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "mpirun").write_text("#!/bin/sh\n")
+    (project / "slab.toml").write_text(f'[engines.qe]\nbin = "{bin_dir}"\n')
+    monkeypatch.chdir(project)
+    monkeypatch.delenv("SLAB_CONFIG", raising=False)
+    monkeypatch.delenv("SLAB_SITE_CONFIG", raising=False)
+    monkeypatch.delenv("SLURM_NTASKS", raising=False)
+    assert _qe_config_command() == f"{bin_dir}/mpirun -np 1 {bin_dir}/pw.x"
+
+
+def test_an_explicit_command_still_wins_over_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from slab.backends import _qe_config_command
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "slab.toml").write_text('[engines.qe]\ncommand = "mpirun -np 4 pw.x"\n')
+    monkeypatch.chdir(project)
+    monkeypatch.delenv("SLAB_CONFIG", raising=False)
+    monkeypatch.delenv("SLAB_SITE_CONFIG", raising=False)
+    assert _qe_config_command() == "mpirun -np 4 pw.x"

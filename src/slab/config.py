@@ -49,6 +49,7 @@ from pydantic import (
     ValidationError,
     ValidationInfo,
     field_validator,
+    model_validator,
 )
 
 from slab.errors import SlabError
@@ -126,6 +127,14 @@ ExpandedPath = Annotated[str, AfterValidator(_expand_path)]
 class QeEngineConfig(BaseModel):
     """Defaults for the built-in ``qe`` engine (``[engines.qe]``).
 
+    Two ways to name the code. ``command`` is the full invocation, written
+    by hand. ``bin`` names the install's ``bin`` directory instead, and the
+    command is constructed: ``mpirun -np N <bin>/pw.x``, with N taken from
+    ``$SLURM_NTASKS`` (the allocation a batch job runs in) and 1 outside
+    one, and a bundled ``<bin>/mpirun`` preferred over the PATH's. The two
+    are exclusive — a command that names a different binary than ``bin``
+    would silently win, so declaring both is refused.
+
     ``setup`` lines (module loads, exports) run in a private login-shell
     wrapper around THIS engine's subprocess only — the per-engine home for
     dependencies that must not apply job-wide the way ``[hpc] setup`` does.
@@ -135,8 +144,18 @@ class QeEngineConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     command: str | None = None
+    bin: ExpandedPath | None = None
     pseudo_dir: ExpandedPath | None = None
     setup: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _one_way_to_name_the_code(self) -> QeEngineConfig:
+        if self.command is not None and self.bin is not None:
+            raise ValueError(
+                "[engines.qe] sets both command and bin; pick one — command is "
+                "the full invocation, bin constructs it (mpirun -np N bin/pw.x)"
+            )
+        return self
 
 
 class LammpsEngineConfig(BaseModel):
@@ -625,6 +644,13 @@ schema_version = 1
 #                                      # variables to this engine's subprocess
 #                                      # alone (bare VAR=x needs a shell and
 #                                      # is refused; ASE execs argv directly)
+# bin = "/shared/sw/qe-7.4/bin"        # a custom install by its bin directory,
+#                                      # instead of command: the command becomes
+#                                      # 'mpirun -np N <bin>/pw.x' with N from
+#                                      # $SLURM_NTASKS (1 outside a job), and a
+#                                      # bundled <bin>/mpirun wins over PATH's.
+#                                      # 'mason sandbox render' binds the whole
+#                                      # install read-only automatically
 # setup = ["module purge", "module load qe/7.4", "export OMP_NUM_THREADS=4"]
 #                                      # THIS engine's dependencies: run in a
 #                                      # private login-shell wrapper around the

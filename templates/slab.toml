@@ -39,6 +39,13 @@ schema_version = 1
 #                                      # variables to this engine's subprocess
 #                                      # alone (bare VAR=x needs a shell and
 #                                      # is refused; ASE execs argv directly)
+# bin = "/shared/sw/qe-7.4/bin"        # a custom install by its bin directory,
+#                                      # instead of command: the command becomes
+#                                      # 'mpirun -np N <bin>/pw.x' with N from
+#                                      # $SLURM_NTASKS (1 outside a job), and a
+#                                      # bundled <bin>/mpirun wins over PATH's.
+#                                      # 'mason sandbox render' binds the whole
+#                                      # install read-only automatically
 # setup = ["module purge", "module load qe/7.4", "export OMP_NUM_THREADS=4"]
 #                                      # THIS engine's dependencies: run in a
 #                                      # private login-shell wrapper around the

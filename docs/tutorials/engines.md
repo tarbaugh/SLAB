@@ -261,6 +261,23 @@ ASE execs engine commands as a plain argv, with no shell, so `/usr/bin/env`
 applies the assignments to that engine's subprocess alone. Nothing leaks
 into the Python process, the cache, or any other engine.
 
+For a custom Quantum ESPRESSO install, you can name the install instead of
+writing the command:
+
+```toml
+[engines.qe]
+bin = "/shared/sw/qe-7.4/bin"
+```
+
+SLAB then constructs the command as `mpirun -np N <bin>/pw.x`. `N` comes
+from `$SLURM_NTASKS`, so a batch job uses its whole allocation and a
+login-node smoke test stays serial. An `mpirun` bundled in the same bin
+directory wins over the one on `PATH`, because a custom install usually
+links against its own MPI. `bin` and `command` are exclusive, and the
+constructed line enters cache identity exactly as a hand-written command
+would. `mason sandbox render` also binds the whole install read-only
+automatically, so the bin form needs no `[agent.sandbox]` entry.
+
 Sometimes an engine's install needs more than variables, such as a
 `module load`, an `LD_LIBRARY_PATH` change, or anything else that takes a
 shell. Declare that as the engine's own `setup`:

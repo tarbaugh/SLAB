@@ -1619,7 +1619,7 @@ def _qe_calculator(**options: Any) -> Any:
         # always the binary that actually ran. Guarded before ASE sees it:
         # ASE's own parse failure would be a BadConfiguration whose message
         # points everywhere except the actual problem.
-        command = command or _qe_setting("command") or "pw.x"
+        command = command or _qe_config_command() or "pw.x"
         _payload_guard(command, "qe")
         run_command = command
         if setup:
@@ -1731,7 +1731,7 @@ def _qe_locator(options: dict[str, Any]) -> tuple[str, str | None]:
         if options.get("command") is not None:
             command = str(options["command"])
         else:
-            command = _qe_setting("command") or "pw.x"
+            command = _qe_config_command() or "pw.x"
         pseudo_dir = options.get("pseudo_dir")
         if pseudo_dir is None:
             pseudo_dir = _qe_setting("pseudo_dir")
@@ -1976,6 +1976,41 @@ def _qe_setting(key: str) -> str | None:
     if value is not None:
         return str(value)
     return _qe_configured(key)
+
+
+def _slurm_ntasks() -> int:
+    """The current allocation's task count, or 1 outside one."""
+    try:
+        count = int(os.environ.get("SLURM_NTASKS", ""))
+    except ValueError:
+        return 1
+    return count if count > 0 else 1
+
+
+def _qe_config_command() -> str | None:
+    """The configured qe command, constructed when ``bin`` names the install.
+
+    ``[engines.qe] command`` wins verbatim. ``[engines.qe] bin`` names the
+    install's bin directory instead, and the command is constructed here:
+    ``mpirun -np N <bin>/pw.x`` with N from :func:`_slurm_ntasks`, so a job
+    uses its whole allocation and a login-node smoke test stays serial. An
+    ``mpirun`` bundled in the same bin directory wins over the PATH's — a
+    custom QE install usually links against its own MPI. The constructed
+    line enters cache identity exactly as a hand-written command would.
+    The chain ends at ASE's ``[espresso]`` section, as before.
+    """
+    from slab.config import config_value
+
+    explicit = config_value("engines.qe.command")
+    if explicit is not None:
+        return str(explicit)
+    bin_dir = config_value("engines.qe.bin")
+    if bin_dir is not None:
+        root = Path(str(bin_dir)).expanduser()
+        bundled = root / "mpirun"
+        launcher = shlex.quote(str(bundled)) if bundled.is_file() else "mpirun"
+        return f"{launcher} -np {_slurm_ntasks()} {shlex.quote(str(root / 'pw.x'))}"
+    return _qe_configured("command")
 
 
 def _mace_calculator(**options: Any) -> Any:

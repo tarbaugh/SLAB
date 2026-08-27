@@ -259,3 +259,12 @@ def test_cli_check_exits_nonzero_when_requirements_fail(
 def test_roster_tables_cannot_override_sandbox() -> None:
     with pytest.raises(Exception, match="sandbox"):
         AgentConfig.model_validate({"roster": {"pi": {"sandbox": {"image": "x"}}}})
+
+
+def test_qe_bin_is_bound_whole_install_and_ntasks_forwarded(tmp_path: Path) -> None:
+    cfg = _slab_cfg(engines={"qe": {"bin": "/shared/qe-7.4/bin"}})
+    binds, _ = default_binds(tmp_path / "p", tmp_path / "ws", cfg)
+    assert "/shared/qe-7.4:/shared/qe-7.4:ro" in binds  # the prefix, not just bin/
+    script, warnings = _render(tmp_path, _agent(), cfg)
+    assert '--env SLURM_NTASKS="${SLURM_NTASKS:-1}"' in script
+    assert not any("srun" in w for w in warnings)  # nothing to hand-edit

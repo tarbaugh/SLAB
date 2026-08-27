@@ -249,6 +249,10 @@ def default_binds(
         warnings.append("[paths] pseudos is unset: no pseudopotentials will be visible")
     if slab_cfg.paths.engines:
         binds.append(f"{slab_cfg.paths.engines}:{slab_cfg.paths.engines}:ro")
+    if slab_cfg.engines.qe.bin:
+        # The whole install, not just bin/: pw.x usually links ../lib.
+        prefix = Path(slab_cfg.engines.qe.bin).parent
+        binds.append(f"{prefix}:{prefix}:ro")
     rootstock = slab_cfg.engines.rootstock
     if rootstock.root:
         binds.append(f"{rootstock.root}:{rootstock.root}:ro")
@@ -420,6 +424,9 @@ def render_sandbox_script(
             f'--bind "$BRIDGE":{_SOCKET_IN_CONTAINER}',
             f"--env SLAB_WORKSPACE={shlex.quote(str(workspace_root))}",
             f"--env SLAB_CONFIG={shlex.quote(str(toml_path))}",
+            # --cleanenv would strip it, and the bin-form qe command sizes
+            # its mpirun from it — 1 if the scheduler did not set it.
+            '--env SLURM_NTASKS="${SLURM_NTASKS:-1}"',
             shlex.quote(str(Path(agent.sandbox.image).expanduser())),
             f"bash -c {shlex.quote(inner)}",
         ]

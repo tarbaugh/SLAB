@@ -387,9 +387,10 @@ sbatch sandbox/mason-sandbox.sbatch
 Two consequences to plan for. The rendered `slab.toml` has no `[hpc]`
 table, because the namespace has no route to the scheduler — so the
 scheduler tools do not exist, and calculations run inside the job's own
-allocation. Size the job for its engine legs, and give `[engines.qe]` an
-`mpirun`-style command; the render warns when the command uses `srun` or
-when engine `setup` lines depend on host module loads.
+allocation. Size the job for its engine legs, and name QE by its install
+(`[engines.qe] bin`), which sizes `mpirun` to the allocation and binds the
+install automatically; the render warns when a hand-written command uses
+`srun` or when engine `setup` lines depend on host module loads.
 
 ## Memory that outlives the context window
 

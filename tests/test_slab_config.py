@@ -559,3 +559,12 @@ def test_config_show_expands_slab_paths_but_not_foreign_tables(
     assert result.exit_code == 0
     assert "paths.scratch = '/scratch/tom/tmp'" in result.output
     assert "workspace.root = '${SLAB_TEST_SCRATCH}/ws'" in result.output
+
+
+def test_qe_bin_and_command_are_exclusive() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="both command and bin"):
+        QeEngineConfig(command="mpirun -np 1 /x/pw.x", bin="/x")
+    assert QeEngineConfig(bin="/shared/qe/bin").bin == "/shared/qe/bin"
+    assert QeEngineConfig(command="pw.x").bin is None
