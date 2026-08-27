@@ -160,13 +160,15 @@ def pseudos_install(
     force: Annotated[bool, typer.Option("--force", help="Replace an existing install.")] = False,
 ) -> None:
     """Download and verify a pseudopotential family from its official archive."""
-    from slab.pseudos import family_digest, install_sssp
+    from slab.pseudos import family_digest, install_sssp, pseudos_root_origin
 
     if kind.strip().lower() != "sssp":
         _fail(
             f"only 'sssp' families install today, not {kind!r} (PseudoDojo is served over "
             f"unverified HTTP upstream; point pseudo_dir= at your own files instead)"
         )
+    root, origin = pseudos_root_origin()
+    typer.echo(f"installing into {root} ({origin})")
     typer.echo(f"downloading SSSP {version} {functional} {precision} from Materials Cloud ...")
     try:
         family, directory = install_sssp(

@@ -149,6 +149,26 @@ def pseudos_root(root: str | os.PathLike[str] | None = None) -> Path:
     return base / _DEFAULT_SUBDIR
 
 
+def pseudos_root_origin() -> tuple[Path, str]:
+    """The install root together with why it was chosen.
+
+    The same resolution as :func:`pseudos_root`, made narratable so the
+    install command can say where files are about to land before a
+    multi-hundred-MB download — a family that quietly lands in the
+    home-directory default on a cluster is in the wrong place, and the
+    origin line is what makes that visible in time.
+    """
+    from_env = os.environ.get(PSEUDOS_ENV_VAR)
+    if from_env:
+        return Path(from_env).expanduser(), f"${PSEUDOS_ENV_VAR}"
+    from slab.config import config_value
+
+    configured = config_value("paths.pseudos")
+    if configured:
+        return Path(configured).expanduser(), "[paths] pseudos"
+    return pseudos_root(), "the built-in default; set [paths] pseudos to route elsewhere"
+
+
 def family_dir_name(name: str) -> str:
     """Directory name for a family: its name with path separators flattened.
 

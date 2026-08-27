@@ -299,3 +299,29 @@ def test_list_families_skips_staging_debris(root: Path) -> None:
     debris.mkdir()
     (debris / "family.json").write_text("{not even json")
     assert [f.name for f, _ in list_families()] == ["SSSP/1.3.0/PBEsol/efficiency"]
+
+
+def test_pseudos_root_origin_narrates_the_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from slab.pseudos import pseudos_root_origin
+
+    monkeypatch.delenv("SLAB_PSEUDOS", raising=False)
+    monkeypatch.delenv("SLAB_CONFIG", raising=False)
+    monkeypatch.delenv("SLAB_SITE_CONFIG", raising=False)
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+
+    _root, origin = pseudos_root_origin()
+    assert "default" in origin and "[paths] pseudos" in origin
+
+    (project / "slab.toml").write_text(f'[paths]\npseudos = "{tmp_path}/pseudos"\n')
+    root, origin = pseudos_root_origin()
+    assert root == tmp_path / "pseudos"
+    assert origin == "[paths] pseudos"
+
+    monkeypatch.setenv("SLAB_PSEUDOS", str(tmp_path / "env-root"))
+    root, origin = pseudos_root_origin()
+    assert root == tmp_path / "env-root"
+    assert origin == "$SLAB_PSEUDOS"
