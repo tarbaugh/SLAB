@@ -489,6 +489,118 @@ def mason_serve_stop(
         _fail(str(e))
 
 
+sandbox_app = typer.Typer(
+    help=(
+        "The no-network container for autonomous runs: preflight the host, "
+        "render the batch job, and the in-job plumbing it uses."
+    ),
+    no_args_is_help=True,
+)
+app.add_typer(sandbox_app, name="sandbox")
+
+
+@sandbox_app.command("check")
+def mason_sandbox_check(
+    workspace: _WorkspaceOpt = None,
+) -> None:
+    """What this machine still needs before 'sandbox render' output can run."""
+    from mason.sandbox import preflight
+
+    try:
+        agent, _hpc, root = _serve_inputs(workspace)
+        rows = preflight(agent, root)
+    except (MasonError, FoundationError, SlabError) as e:
+        _fail(str(e))
+    for mark, message in rows:
+        typer.echo(f"[{mark}] {message}")
+    if any(mark == "-" for mark, _ in rows):
+        raise typer.Exit(code=1)
+
+
+@sandbox_app.command("render")
+def mason_sandbox_render(
+    goal: Annotated[str, typer.Argument(help="The goal 'mason run --auto' receives.")],
+    workspace: _WorkspaceOpt = None,
+    partition: Annotated[
+        str | None, typer.Option("--partition", "-p", help="Partition for the engine legs.")
+    ] = None,
+    time_limit: _TimeOpt = None,
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", help="Directory for the two files (default: ./sandbox)."),
+    ] = None,
+) -> None:
+    """Write the sandbox batch script and its slab.toml — read both, then sbatch."""
+    from mason.sandbox import render_sandbox_script, sandbox_toml
+    from slab.config import load_config as load_slab_config
+
+    project = Path.cwd()
+    out_dir = (out if out is not None else project / "sandbox").resolve()
+    toml_path = out_dir / "slab.toml"
+    try:
+        agent, hpc, root = _serve_inputs(workspace)
+        slab_cfg = load_slab_config(project)
+        toml_text, toml_warnings = sandbox_toml(slab_cfg, agent, root.resolve())
+        script, bind_warnings = render_sandbox_script(
+            agent,
+            hpc,
+            slab_cfg,
+            root.resolve(),
+            project,
+            goal,
+            toml_path=toml_path,
+            partition=partition,
+            time_limit=time_limit,
+        )
+    except (MasonError, FoundationError, SlabError) as e:
+        _fail(str(e))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    script_path = out_dir / "mason-sandbox.sbatch"
+    script_path.write_text(script.rstrip("\n") + "\n", encoding="utf-8")
+    toml_path.write_text(toml_text, encoding="utf-8")
+    for warning in (*toml_warnings, *bind_warnings):
+        typer.secho(f"[!] {warning}", err=True, fg=typer.colors.YELLOW)
+    typer.echo(f"wrote {script_path}")
+    typer.echo(f"wrote {toml_path}")
+    typer.echo(
+        "read both files, then submit with: "
+        f"sbatch {script_path} — the job aborts unless the container "
+        "proves it is offline and the bridged endpoint answers"
+    )
+
+
+@sandbox_app.command("forward")
+def mason_sandbox_forward(
+    socket_path: Annotated[str, typer.Argument(help="The bridge's unix socket.")],
+    port: Annotated[int, typer.Option("--port", help="Loopback port to serve.")] = 8000,
+) -> None:
+    """In-job plumbing: relay 127.0.0.1:PORT to the bridge socket (runs until killed)."""
+    from mason.sandbox import forward
+
+    forward(socket_path, port)
+
+
+@sandbox_app.command("verify")
+def mason_sandbox_verify(
+    port: Annotated[int, typer.Option("--port", help="The bridged loopback port.")] = 8000,
+    probe_url: Annotated[
+        str, typer.Option("--probe-url", help="A URL that must NOT be reachable.")
+    ] = "http://example.com",
+    timeout: Annotated[
+        float, typer.Option("--timeout", help="Seconds to wait for the endpoint.")
+    ] = 30.0,
+) -> None:
+    """In-job plumbing: prove the sandbox is dark and the endpoint answers."""
+    from mason.sandbox import verify
+
+    try:
+        names = verify(port, probe_url=probe_url, ready_timeout_s=timeout)
+    except (MasonError, FoundationError, SlabError) as e:
+        _fail(str(e))
+    typer.echo(f"[+] {probe_url} is unreachable (the sandbox is dark)")
+    typer.echo(f"[+] 127.0.0.1:{port} answers; serving: {', '.join(names) or 'none'}")
+
+
 def _serve_hint(agent: AgentConfig, root: Path, origin: str, *, cluster: str = "") -> list[str]:
     """Why an unreachable endpoint might be unreachable, when we can tell."""
     from mason.serve import read_record

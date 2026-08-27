@@ -60,6 +60,29 @@ class ServeConfig(BaseModel):
     include_hpc_setup: bool = False
 
 
+class SandboxConfig(BaseModel):
+    """The no-network container for autonomous runs (``[agent.sandbox]``).
+
+    ``mason sandbox render`` derives almost everything from tables the
+    config already has (workspace, paths, engines); this table holds only
+    what cannot be derived. ``image`` is the Apptainer image the job runs
+    in. ``binds`` are extra bind specs (``src:dest:mode``, or a bare path
+    for a same-path read-only bind is spelled ``path:path:ro``) for what
+    derivation cannot see — a QE install prefix, an MPI library closure, a
+    site rootstock root the cluster form hides. Machine facts, so they live
+    here in the machine's own config, never in a repository.
+
+    Examples:
+        >>> SandboxConfig(image="/containers/slab.sif").binds
+        ()
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    image: str | None = None
+    binds: tuple[str, ...] = ()
+
+
 class RosterOverride(BaseModel):
     """Per-agent overrides of connection and budget fields (``[agent.roster.<name>]``).
 
@@ -67,7 +90,7 @@ class RosterOverride(BaseModel):
     budgets are machine facts and live here. Every field is optional; a set
     field replaces the ``[agent]`` value for that one agent. Session policy
     stays session-wide with one owner, so ``approval``, ``shell_allowlist``,
-    ``show_reasoning``, ``software_notes``, ``serve``, and
+    ``show_reasoning``, ``software_notes``, ``serve``, ``sandbox``, and
     ``compute_profile`` cannot be overridden per agent.
 
     Examples:
@@ -152,6 +175,7 @@ class AgentConfig(BaseModel):
     file_scope: Literal["project", "anywhere"] = "project"
     session_lock: bool = True
     serve: ServeConfig = ServeConfig()
+    sandbox: SandboxConfig = SandboxConfig()
     # The roster: whether the entry agent may delegate at all, and per-agent
     # overrides keyed by card name. The cards themselves are markdown files
     # (mason.roster); config holds only the machine facts about them.

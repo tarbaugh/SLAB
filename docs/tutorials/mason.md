@@ -344,6 +344,53 @@ run inside the parent's lock. On a filesystem that cannot hold an
 advisory lock, the lock degrades to a warning, and
 `session_lock = false` turns it off.
 
+## The sandbox: autonomous runs without a network
+
+`--auto` removes the approval gate, so the boundary for an unattended run
+must come from the operating system. `mason sandbox render` writes a batch
+job that provides that boundary. The job runs `mason run --auto` inside an
+Apptainer container with an empty network namespace, no home directory, a
+clean environment, and file access limited to explicit bind mounts. The
+shell tool then reaches only what the fence was always meant to bound.
+
+The model stays reachable through exactly one path. On the host side of the
+job, `socat` bridges the recorded serve endpoint onto a unix socket. Inside
+the container, `mason sandbox forward` relays that socket to
+`127.0.0.1:8000`, and the agent talks to it as a normal endpoint. The
+destination is fixed in the script, so the agent cannot redirect it.
+
+The job fails closed. Before the agent starts, `mason sandbox verify` runs
+inside the container and proves two things: a public URL is unreachable,
+and the bridged endpoint lists its models. Either proof failing aborts the
+job before the first turn.
+
+The render derives the bind mounts from the configuration it already has:
+the project directory and the workspace read-write, the scratch root
+read-write, the pseudopotential root, the engine registry, the rootstock
+install, and the Python environment read-only. `[agent.sandbox]` holds
+only what derivation cannot see: the container `image`, and extra `binds`
+for engine installs and their library closures (run `ldd` on the engine
+binary to find them). Because everything specific to a machine comes from
+that machine's own config, nothing site-specific ever needs to enter a
+repository.
+
+Run `mason sandbox check` first. It reports whether the container runtime,
+`socat`, and unprivileged network namespaces exist here, and whether the
+image and the serve record are in place. Then render, read both files, and
+submit:
+
+```
+mason sandbox render "the goal" --partition cpu
+sbatch sandbox/mason-sandbox.sbatch
+```
+
+Two consequences to plan for. The rendered `slab.toml` has no `[hpc]`
+table, because the namespace has no route to the scheduler — so the
+scheduler tools do not exist, and calculations run inside the job's own
+allocation. Size the job for its engine legs, and give `[engines.qe]` an
+`mpirun`-style command; the render warns when the command uses `srun` or
+when engine `setup` lines depend on host module loads.
+
 ## Memory that outlives the context window
 
 Long projects die of context, not of model quality. Models degrade well
@@ -546,13 +593,11 @@ workflow control for your own account on your own machine, not a security
 sandbox, so `--auto` means what it says — for every agent on the roster.
 The file fence and the session lock share that caveat: they shrink the
 blast radius of a confused agent, and the `shell` tool remains the honest
-escape, behind its own gate. When you want a real boundary, run Mason
-inside a container. Launch it under your site's container runtime
-(Apptainer, Enroot) with only the project directory bound and no home
-mount. Inside such a fence, leave `[hpc]` unconfigured and the scheduler
-tools do not exist. Point `endpoint` at the served model, or at an
-OpenAI-compatible gateway your site operates, with `api_key_env` naming
-the gateway's key variable — Mason needs nothing else to work behind one.
+escape, behind its own gate. When you want a real boundary, use the
+sandbox: `mason sandbox render` writes a batch job that runs the session
+in a container with no network, no home, and only the configured
+directories bound — see
+[The sandbox](#the-sandbox-autonomous-runs-without-a-network).
 
 What has and has not been exercised against reality, precisely:
 

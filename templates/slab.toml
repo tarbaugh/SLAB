@@ -169,3 +169,12 @@ schema_version = 1
 # include_hpc_setup = false                 # serve jobs skip [hpc]-level setup by default:
 #                                           # global engine module loads fight the server's
 #                                           # venv; the partition's own setup still applies
+
+# The no-network container for autonomous runs. 'mason sandbox render' derives
+# the bind mounts from the tables above; this holds only what it cannot derive.
+# [agent.sandbox]
+# image = "/containers/slab-sandbox.sif"    # Apptainer image the job runs in
+# binds = [                                 # extra binds (src:dest:mode) for what
+#   "/opt/qe-7.4:/opt/qe-7.4:ro",           # derivation cannot see: engine installs
+#   "/opt/openmpi:/opt/openmpi:ro",         # and their library closures ('ldd pw.x')
+# ]

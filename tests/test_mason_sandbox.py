@@ -1,0 +1,261 @@
+"""The sandbox: render is derivation, the bridge is real sockets, verify fails closed."""
+
+import http.server
+import json
+import shutil
+import socketserver
+import subprocess
+import threading
+from pathlib import Path
+
+import pytest
+from typer.testing import CliRunner
+
+from mason.cli import app
+from mason.config import AgentConfig
+from mason.sandbox import (
+    SandboxError,
+    default_binds,
+    forward,
+    preflight,
+    render_sandbox_script,
+    sandbox_toml,
+    verify,
+)
+from slab.config import HpcConfig, SlabConfig
+
+runner = CliRunner()
+
+_HPC = HpcConfig.model_validate(
+    {"default_partition": "cpu", "partitions": {"cpu": {"time_limit": "04:00:00"}}}
+)
+
+
+def _slab_cfg(**tables: object) -> SlabConfig:
+    return SlabConfig.model_validate(tables)
+
+
+def _agent(**extra: object) -> AgentConfig:
+    return AgentConfig.model_validate(
+        {"model": "test-model", "sandbox": {"image": "/containers/slab.sif"}, **extra}
+    )
+
+
+def _render(tmp_path: Path, agent: AgentConfig, slab_cfg: SlabConfig) -> tuple[str, list[str]]:
+    return render_sandbox_script(
+        agent,
+        _HPC,
+        slab_cfg,
+        tmp_path / "ws",
+        tmp_path / "project",
+        "relax Cu and report",
+        toml_path=tmp_path / "sandbox" / "slab.toml",
+    )
+
+
+# -- rendering ----------------------------------------------------------------
+
+
+def test_render_isolates_and_fails_closed(tmp_path: Path) -> None:
+    script, _ = _render(tmp_path, _agent(), _slab_cfg())
+    assert "--net --network none" in script
+    assert "--containall --no-home --cleanenv" in script
+    assert "mason sandbox verify" in script  # either proof failing aborts the job
+    assert "mason run --auto" in script
+    assert "'relax Cu and report'" in script
+    assert "UNIX-LISTEN:$BRIDGE,fork" in script
+    # The scheduler header comes from [hpc]; the payload never uses srun.
+    assert "#SBATCH --partition=cpu" in script
+
+
+def test_render_is_valid_bash(tmp_path: Path) -> None:
+    bash = shutil.which("bash")
+    assert bash is not None
+    script, _ = _render(tmp_path, _agent(), _slab_cfg())
+    check = subprocess.run(
+        [bash, "-n", "/dev/stdin"], input=script, capture_output=True, text=True
+    )
+    assert check.returncode == 0, check.stderr
+
+
+def test_binds_derive_from_the_config(tmp_path: Path) -> None:
+    cfg = _slab_cfg(
+        paths={"pseudos": "/shared/pseudos", "scratch": "/scratch/me"},
+        engines={"rootstock": {"root": "/shared/rootstock"}},
+    )
+    binds, warnings = default_binds(tmp_path / "p", tmp_path / "ws", cfg)
+    joined = "\n".join(binds)
+    assert f"{tmp_path / 'p'}:{tmp_path / 'p'}:rw" in binds
+    assert "/shared/pseudos:/shared/pseudos:ro" in binds
+    assert "/scratch/me:/scratch/me:rw" in binds
+    assert "/shared/rootstock:/shared/rootstock:ro" in binds
+    assert ":ro" in joined  # the python environment rides along read-only
+    assert warnings == []
+
+
+def test_extra_binds_and_the_gaps_warned(tmp_path: Path) -> None:
+    cfg = _slab_cfg(engines={"rootstock": {"cluster": "delta"}})
+    agent = _agent(sandbox={"image": "/i.sif", "binds": ["/opt/qe:/opt/qe:ro"]})
+    script, warnings = _render(tmp_path, agent, cfg)
+    assert "--bind /opt/qe:/opt/qe:ro" in script
+    assert any("cluster form" in w for w in warnings)
+    assert any("pseudos is unset" in w for w in warnings)
+
+
+def test_render_requires_an_image(tmp_path: Path) -> None:
+    agent = AgentConfig(model="test-model")
+    with pytest.raises(SandboxError, match=r"\[agent.sandbox\] image"):
+        _render(tmp_path, agent, _slab_cfg())
+
+
+def test_sandbox_toml_strips_hpc_and_warns_about_srun(tmp_path: Path) -> None:
+    cfg = _slab_cfg(
+        hpc={"partitions": {"cpu": {}}},
+        engines={"qe": {"command": "srun pw.x", "setup": ["module load qe"]}},
+        paths={"pseudos": "/shared/pseudos"},
+    )
+    text, warnings = sandbox_toml(cfg, _agent(), tmp_path / "ws")
+    assert "[hpc]" not in text
+    assert "[engines.qe]" in text
+    assert 'command = "srun pw.x"' in text
+    assert "[workspace]" in text
+    assert 'model = "test-model"' in text
+    # The sandbox table itself, connection details, and serve stay out.
+    assert "[agent.sandbox]" not in text
+    assert "image" not in text
+    assert any("srun" in w for w in warnings)
+    assert any("module loads" in w for w in warnings)
+    # What it emits, the loader accepts.
+    import tomllib
+
+    tomllib.loads(text)
+
+
+# -- the bridge and the proofs ------------------------------------------------
+
+
+class _Stub(http.server.BaseHTTPRequestHandler):
+    def do_GET(self) -> None:  # http.server's naming contract
+        body = json.dumps({"data": [{"id": "test-model"}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+class _UnixHTTPServer(socketserver.ThreadingUnixStreamServer):
+    def get_request(self):  # type: ignore[no-untyped-def]
+        request, _ = super().get_request()
+        return request, ("127.0.0.1", 0)
+
+
+_PORTS = iter(range(8907, 8957))
+
+
+@pytest.fixture()
+def bridged_stub() -> int:
+    """A stub model server on a unix socket, bridged to a loopback port.
+
+    Not under pytest's tmp_path: AF_UNIX paths cap at ~104 characters, and
+    tmp_path routinely exceeds that. mkdtemp() under $TMPDIR stays short.
+    Each test gets its own port, because forward() runs until its daemon
+    thread dies with the process — a stale forwarder still owns its port.
+    """
+    import tempfile
+
+    sock = str(Path(tempfile.mkdtemp()) / "llm.sock")
+    server = _UnixHTTPServer(sock, _Stub)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = next(_PORTS)
+    threading.Thread(target=forward, args=(sock, port), daemon=True).start()
+    yield port
+    server.shutdown()
+
+
+def test_forward_relays_http_over_the_unix_socket(bridged_stub: int) -> None:
+    import urllib.request
+
+    with urllib.request.urlopen(
+        f"http://127.0.0.1:{bridged_stub}/v1/models", timeout=5
+    ) as response:
+        payload = json.loads(response.read())
+    assert payload["data"][0]["id"] == "test-model"
+
+
+def test_verify_passes_when_dark_and_bridged(bridged_stub: int) -> None:
+    names = verify(
+        bridged_stub, probe_url="http://127.0.0.1:1", ready_timeout_s=10
+    )
+    assert names == ["test-model"]
+
+
+def test_verify_refuses_a_reachable_internet(bridged_stub: int) -> None:
+    reachable = f"http://127.0.0.1:{bridged_stub}/v1/models"
+    with pytest.raises(SandboxError, match=r"not\s+isolated"):
+        verify(bridged_stub, probe_url=reachable, ready_timeout_s=5)
+
+
+def test_verify_refuses_a_dead_endpoint(tmp_path: Path) -> None:
+    with pytest.raises(SandboxError, match="did not answer"):
+        verify(1, probe_url="http://127.0.0.1:1", ready_timeout_s=2)
+
+
+# -- preflight and the CLI ----------------------------------------------------
+
+
+def test_preflight_reports_the_missing_pieces(tmp_path: Path) -> None:
+    agent = AgentConfig(model="m")  # no image configured
+    rows = preflight(agent, tmp_path / "ws")
+    marks = {message: mark for mark, message in rows}
+    assert any("image is not set" in m and marks[m] == "-" for m in marks)
+    assert any("no serve record" in m and marks[m] == "?" for m in marks)
+
+
+def test_cli_render_writes_both_files_and_next_steps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "slab.toml").write_text(
+        '[agent]\nmodel = "m"\n[agent.sandbox]\nimage = "/i.sif"\n'
+        '[hpc]\ndefault_partition = "cpu"\n[hpc.partitions.cpu]\n'
+    )
+    result = runner.invoke(
+        app, ["sandbox", "render", "do the thing", "-w", str(tmp_path / "ws")]
+    )
+    assert result.exit_code == 0, result.output
+    script = (tmp_path / "sandbox" / "mason-sandbox.sbatch").read_text()
+    toml_text = (tmp_path / "sandbox" / "slab.toml").read_text()
+    assert "--network none" in script
+    assert str(tmp_path / "sandbox" / "slab.toml") in script  # SLAB_CONFIG points at it
+    assert "[hpc]" not in toml_text
+    assert "read both files" in result.output
+
+
+def test_cli_render_without_an_image_fails_loudly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "slab.toml").write_text('[agent]\nmodel = "m"\n')
+    result = runner.invoke(
+        app, ["sandbox", "render", "goal", "-w", str(tmp_path / "ws")]
+    )
+    assert result.exit_code != 0
+    assert "image" in result.output
+
+
+def test_cli_check_exits_nonzero_when_requirements_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "slab.toml").write_text('[agent]\nmodel = "m"\n')
+    result = runner.invoke(app, ["sandbox", "check", "-w", str(tmp_path / "ws")])
+    assert result.exit_code == 1
+    assert "[-]" in result.output
+
+
+def test_roster_tables_cannot_override_sandbox() -> None:
+    with pytest.raises(Exception, match="sandbox"):
+        AgentConfig.model_validate({"roster": {"pi": {"sandbox": {"image": "x"}}}})

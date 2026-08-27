@@ -257,7 +257,7 @@ def test_template_declares_no_table_twice_even_in_comments(tmp_path: Path) -> No
 def test_every_key_the_template_shows_is_a_key_the_schema_accepts() -> None:
     """The template is documentation; a stale key in it teaches a load error."""
     from foundation.config import WorkspaceConfig
-    from mason.config import AgentConfig, ServeConfig
+    from mason.config import AgentConfig, SandboxConfig, ServeConfig
 
     models = {
         "": SlabConfig,
@@ -271,6 +271,7 @@ def test_every_key_the_template_shows_is_a_key_the_schema_accepts() -> None:
         "[hpc.partitions.gpu]": Partition,
         "[agent]": AgentConfig,
         "[agent.serve]": ServeConfig,
+        "[agent.sandbox]": SandboxConfig,
     }
     table = ""
     unknown: list[str] = []
