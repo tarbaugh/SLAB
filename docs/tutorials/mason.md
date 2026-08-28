@@ -377,12 +377,73 @@ clean environment, and file access limited to explicit bind mounts. The
 shell tool then reaches only what the fence was always meant to bound.
 
 The model stays reachable through exactly one path. On the host side of the
-job, `mason sandbox bridge` relays a unix socket to the recorded serve
-endpoint. Inside the container, `mason sandbox forward` relays that socket
-to `127.0.0.1:8000`, and the agent talks to it as a normal endpoint. The
+job, `mason sandbox bridge` relays a unix socket to one fixed upstream.
+Inside the container, `mason sandbox forward` relays that socket to
+`127.0.0.1:8000`, and the agent talks to it as a normal endpoint. The
 destination is fixed at job start, so the agent cannot redirect it. Both
 halves are plain Python from the installed package, so the host needs no
 relay tool.
+
+### Which model the sandbox talks to
+
+The upstream follows the same precedence as everywhere else. A configured
+`[agent] endpoint` wins, and only without one does the job read the record
+a `mason serve` job wrote. The bridge takes both forms and picks by shape:
+
+| upstream | the bridge is | for |
+|---|---|---|
+| `gpu-node:8000` | a byte relay | a model this cluster serves |
+| `https://gateway.example/v1` | an HTTP forwarder | a model behind a gateway |
+
+The forwarder terminates the plain HTTP the container speaks, sends the
+request on over TLS, and authenticates with the key named by `[agent]
+api_key_env`. The key is read on the host at job start. It never enters the
+container, because the container is launched `--cleanenv` and the rendered
+`slab.toml` carries no `api_key_env` and no endpoint. The agent can
+therefore neither read the key nor change where its requests go.
+
+The rendered job names the variable and never its value:
+
+```bash
+mason sandbox render "measure a0 for bcc Nb" --partition cpu
+```
+
+```text
+UPSTREAM=https://gateway.example/v1
+[ -n "$GATEWAY_API_KEY" ] || { echo "\$GATEWAY_API_KEY is not set in this job's environment, and the gateway at $UPSTREAM needs it" >&2; exit 1; }
+BRIDGE="$(mktemp -d)/llm.sock"
+/home/you/SLAB/.venv/bin/mason sandbox bridge "$BRIDGE" "$UPSTREAM" --key-env GATEWAY_API_KEY &
+```
+
+`sbatch` exports the submitting environment by default, so a key exported
+in your login shell reaches the job. The guard above is there for a cluster
+configured `--export=NONE`, where it fails the job at start naming the
+variable, rather than at the first request hours later. `mason sandbox
+check` reports the same things before you submit:
+
+```text
+[+] upstream: https://gateway.example/v1 [[agent] endpoint]
+[+] $GATEWAY_API_KEY is set; the bridge reads it on the host
+[?] only a compute node can prove a compute node reaches that host (srun curl); this node's own reachability proves nothing
+```
+
+That last row is the one to act on. Login nodes are often the only routed
+hosts on a cluster, and the sandbox runs on a compute node. Prove the route
+before you rely on it:
+
+```bash
+srun -p cpu --pty curl -s -o /dev/null -w '%{http_code}\n' https://gateway.example/v1/models -H "Authorization: Bearer $GATEWAY_API_KEY"
+```
+
+A gateway upstream widens what the sandbox can reach, and it is worth being
+plain about what that does and does not change. The container still has no
+route out of its own: the namespace is empty, and `verify` still refuses to
+start a run if any public URL answers. The single permitted route is still
+the bound socket with its destination fixed before the agent exists. What
+changes is that the destination may now be off-cluster, and the gateway
+sees the sandboxed agent's traffic. Whether a compute node may reach it at
+all is your site's policy, which this arrangement neither assumes nor
+works around.
 
 The job fails closed. Before the agent starts, `mason sandbox verify` runs
 inside the container and proves two things: a public URL is unreachable,
