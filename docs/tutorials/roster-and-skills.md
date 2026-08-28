@@ -21,10 +21,10 @@ mason roster
 ```
 
 ```text
-pi                 built-in  llama3.1:8b                  5 skill(s)  [delegates]
-analysis-expert    built-in  llama3.1:8b                  3 skill(s)
-dft-expert         built-in  llama3.1:8b                  3 skill(s)
-md-expert          built-in  llama3.1:8b                  2 skill(s)
+pi                 built-in  llama3.1:8b                  13 skill(s)  [delegates]
+analysis-expert    built-in  llama3.1:8b                  9 skill(s)
+dft-expert         built-in  llama3.1:8b                  5 skill(s)
+md-expert          built-in  llama3.1:8b                  8 skill(s)
 ```
 
 Each agent runs the same harness with a different role prompt, its own
@@ -108,7 +108,7 @@ experience, and nothing requires you to delegate.
 
 A skill is a directory with a `SKILL.md` file, in the
 [Agent Skills format](https://agentskills.io/specification). Mason adds
-no dialect, so skills written for other tools load unmodified. Five
+no dialect, so skills written for other tools load unmodified. Thirteen
 skills ship built in:
 
 ```bash
@@ -117,11 +117,25 @@ mason skills
 
 ```text
 convergence-study          built-in  dft-expert                   1 script(s)
+elastic-constants          built-in  analysis-expert dft-expert   1 script(s)
 equation-of-state          built-in  analysis-expert dft-expert   1 script(s)
+interface-adhesion         built-in  analysis-expert dft-expert   1 script(s)
+kinetic-fits               built-in  analysis-expert md-expert    1 script(s)
+melt-quench                built-in  md-expert                    1 script(s)
 msd-diffusion              built-in  analysis-expert md-expert    1 script(s)
+nemd-transport             built-in  analysis-expert md-expert    1 script(s)
+nucleation-cnt             built-in  analysis-expert md-expert    1 script(s)
 radial-distribution        built-in  analysis-expert md-expert    1 script(s)
 surface-energy             built-in  dft-expert                   0 script(s)
+thermal-response           built-in  analysis-expert md-expert    1 script(s)
+two-phase-melting          built-in  md-expert                    0 script(s)
 ```
+
+The catalog covers the static side (equations of state, convergence,
+surfaces, elastic constants, interface adhesion) and the dynamic side
+(melt-quench glasses, thermal response, two-phase melting, NEMD
+transport, diffusion, nucleation), with the fits and unit conversions in
+tested scripts.
 
 The third column is the categorization: which agent cards see the skill.
 The PI sees every skill, because its card sets `skills: all`. A
@@ -132,8 +146,14 @@ mason skills --agent md-expert
 ```
 
 ```text
+kinetic-fits               built-in  analysis-expert md-expert    1 script(s)
+melt-quench                built-in  md-expert                    1 script(s)
 msd-diffusion              built-in  analysis-expert md-expert    1 script(s)
+nemd-transport             built-in  analysis-expert md-expert    1 script(s)
+nucleation-cnt             built-in  analysis-expert md-expert    1 script(s)
 radial-distribution        built-in  analysis-expert md-expert    1 script(s)
+thermal-response           built-in  analysis-expert md-expert    1 script(s)
+two-phase-melting          built-in  md-expert                    0 script(s)
 ```
 
 Skills load progressively. The system prompt carries one line per
@@ -145,12 +165,17 @@ script therefore runs under exactly the approval gate and the
 `shell_allowlist` that govern every other command. There is no separate
 execution surface.
 
-The bundled scripts are the point. `fit_eos.py`, `convergence_table.py`,
-`rdf.py`, and `msd.py` are argparse programs with `--json` output and
-actionable errors, and the test suite runs each one on real data. An
-agent that uses them does not re-derive a Birch-Murnaghan fit in every
-session, and the analysis itself has provenance: the skill names the
-script, and the script version ships with the package.
+The bundled scripts are the point. Every fit script (`fit_eos.py`,
+`fit_elastic.py`, `fit_rates.py`, `fit_nemd.py`, `msd.py`, and the rest)
+is an argparse program with `--json` output and actionable errors, and
+the test suite runs each one on real data. An agent that uses them does
+not re-derive a Birch-Murnaghan fit or a Voigt-Reuss-Hill average in
+every session, and the analysis itself has provenance: the skill names
+the script, and the script version ships with the package. Some skills
+also bundle an `assets/` workflow template (`eos_scan.py`,
+`strain_scan.py`, `melt_quench.py`, `thermal_ramp.py`); the agent copies
+the template into the project, edits the constants at the top, and
+launches it as a traced run.
 
 ## Discovery: three layers
 

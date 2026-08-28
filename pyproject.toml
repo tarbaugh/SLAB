@@ -92,7 +92,13 @@ disallow_untyped_calls = false
 # the package tree (no __init__.py on the path), so mypy sees them as
 # top-level modules named by file. List each; keep basenames unique.
 [[tool.mypy.overrides]]
-module = ["fit_eos", "eos_scan"]
+module = [
+    "fit_eos", "eos_scan",
+    "fit_elastic", "strain_scan",
+    "quench_report", "melt_quench",
+    "fit_thermal_ramp", "thermal_ramp",
+    "fit_rates", "fit_nemd", "adhesion", "cnt",
+]
 disallow_untyped_calls = false
 
 [tool.pytest.ini_options]

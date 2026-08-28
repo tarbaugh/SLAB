@@ -480,7 +480,9 @@ scoped task to with a `delegate` tool, one level deep, under the same
 approval gate and the same shared notebook. Skills in the open
 [Agent Skills format](https://agentskills.io/specification) give every
 agent reusable procedures with tested analysis scripts (equation-of-state
-fits, convergence tables, RDF, MSD), categorized per specialist. Project
+and elastic fits, convergence tables, RDF, MSD, melt-quench glasses,
+NEMD transport, kinetic laws, nucleation theory), categorized per
+specialist. Project
 directories can add or replace both: `agents/` and `skills/` shadow the
 user layer, which shadows the built-ins.
 

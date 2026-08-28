@@ -208,10 +208,18 @@ def test_builtin_cards_and_skills_ship_inside_the_package() -> None:
     )
     assert skills == [
         "convergence-study",
+        "elastic-constants",
         "equation-of-state",
+        "interface-adhesion",
+        "kinetic-fits",
+        "melt-quench",
         "msd-diffusion",
+        "nemd-transport",
+        "nucleation-cnt",
         "radial-distribution",
         "surface-energy",
+        "thermal-response",
+        "two-phase-melting",
     ]
     for name in skills:
         assert (SRC / "mason" / "skills" / name / "SKILL.md").is_file()
