@@ -294,7 +294,11 @@ cards with per-specialist skills, described in
 [The roster and skills](roster-and-skills.md).
 
 Every tool failure is returned as the tool result, as evidence the model
-reads, and never as an exception that kills the loop. Mutating tools pass
+reads, and never as an exception that kills the loop. A call that is
+identical to the previous one and returns a byte-identical result gets an
+escalating note appended, because the model cannot see sameness across
+steps and the harness can. Every call still executes, so polling a queue
+works, and a changed result resets the note silently. Mutating tools pass
 through an approval gate. Interactively, Mason asks, while `--auto` (or
 `[agent] approval = "auto"`) trusts them. `shell_allowlist` prefixes
 auto-approve at word boundaries, but a command that contains shell control
@@ -401,7 +405,10 @@ the payload and the launcher its command references, since `mpirun` must
 be bound as surely as `pw.x` — the environment it changed, and each
 binary's library closure from `ldd`. The
 snapshot becomes bind mounts in the script and explicit `export` lines in
-the rendered `slab.toml`. List variables such as `PATH` keep only the
+the rendered `slab.toml`. Site-prefix libraries bind by directory, and
+host system libraries the base image does not ship (an ordinary RPM such
+as `libpciaccess`) bind as individual files; the core runtime (libc, the
+loader) always comes from the image itself. List variables such as `PATH` keep only the
 components the setup added, so the container's own base value survives
 underneath. Your real config keeps its module loads as the source of
 truth. The snapshot is frozen at render time, so re-render after a module
