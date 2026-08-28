@@ -544,3 +544,45 @@ def test_system_libraries_are_bound_file_by_file(tmp_path: Path) -> None:
     binds = _snapshot_binds(snapshot)
     assert "/usr/lib64/libpciaccess.so.0:/usr/lib64/libpciaccess.so.0:ro" in binds
     assert not any(b.startswith("/lib64/libc") for b in binds)
+
+
+def test_the_bridge_survives_a_server_that_thinks_before_answering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The connect timeout must bound the CONNECT only. Left on the socket
+    it also bounds every read, and an inference server that generates for
+    longer than the timeout gets its relay torn down mid-request — the
+    client sees RemoteDisconnected while the server is healthy. Regression
+    for exactly that, with the timeout shrunk so the test proves the
+    property in seconds."""
+    import tempfile
+    import time
+    import urllib.request
+    from http.server import HTTPServer
+
+    from mason import sandbox as sandbox_module
+    from mason.sandbox import bridge
+
+    monkeypatch.setattr(sandbox_module, "_CONNECT_TIMEOUT_S", 0.5)
+
+    class _Slow(_Stub):
+        def do_GET(self) -> None:
+            time.sleep(1.5)  # 3x the connect timeout: silence, then answer
+            _Stub.do_GET(self)
+
+    stub = HTTPServer(("127.0.0.1", 0), _Slow)
+    threading.Thread(target=stub.serve_forever, daemon=True).start()
+    sock = str(Path(tempfile.mkdtemp()) / "llm.sock")
+    threading.Thread(
+        target=bridge, args=(sock, f"127.0.0.1:{stub.server_address[1]}"), daemon=True
+    ).start()
+    for _ in range(50):
+        if Path(sock).exists():
+            break
+        time.sleep(0.1)
+    port = next(_PORTS)
+    threading.Thread(target=forward, args=(sock, port), daemon=True).start()
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=10) as response:
+        payload = json.loads(response.read())
+    assert payload["data"][0]["id"] == "test-model"
+    stub.shutdown()

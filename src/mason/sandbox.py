@@ -61,6 +61,7 @@ from slab.config import HpcConfig, SlabConfig
 #: the sandbox's private namespace, so it can never collide with the host.
 BRIDGE_PORT = 8000
 _SOCKET_IN_CONTAINER = "/run/llm.sock"
+_CONNECT_TIMEOUT_S = 30.0
 
 #: Reads the serve record and prints ``host:port`` — run on the host at job
 #: start, so the bridge follows the server wherever the scheduler put it.
@@ -140,7 +141,17 @@ def bridge(socket_path: str, upstream: str) -> None:
         raise SandboxError(f"bridge upstream must be host:port, got {upstream!r}")
 
     def connect() -> socket.socket:
-        return socket.create_connection((host, int(port_text)), timeout=30.0)
+        connection = socket.create_connection(
+            (host, int(port_text)), timeout=_CONNECT_TIMEOUT_S
+        )
+        # The timeout above bounds the CONNECT only. Left in place it would
+        # also bound every read — and an inference server legitimately says
+        # nothing for minutes while it generates, so a timed-out idle read
+        # here tears the relay down mid-request and the client sees the
+        # server "close without response" while the server is fine. Blocking
+        # mode from here on; the client's own request timeout is the bound.
+        connection.settimeout(None)
+        return connection
 
     with contextlib.suppress(OSError):
         os.unlink(socket_path)
