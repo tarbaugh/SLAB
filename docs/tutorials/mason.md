@@ -398,6 +398,11 @@ mason sandbox render "the goal" --partition cpu
 sbatch sandbox/mason-sandbox.sbatch
 ```
 
+The partition also decides GPU visibility. When the target partition
+declares a `gres` that names gpus, the rendered `apptainer exec` adds
+`--nv`, so a torch-backed engine such as `mace` sees the device the job
+holds. A CPU partition renders without it.
+
 Engine `setup` lines get snapshotted. A `module load` works on the host
 and means nothing inside the container, so the render runs each engine's
 setup once, on the host, and records what it did: the resolved binaries —

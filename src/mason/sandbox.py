@@ -806,6 +806,15 @@ def render_sandbox_script(
     binds = _collapse_binds(binds)
     mason = _mason_bin()
 
+    # GPU passthrough derives from the target partition: a gres that names
+    # gpus means the job will hold one, and --nv mounts the host's driver
+    # stack so a torch-backed engine (mace) can see it. A CPU partition
+    # renders without it, and the container stays minimal.
+    _, partition_spec = hpc.resolve_partition(partition)
+    isolation_flags = "--containall --no-home --cleanenv --net --network none"
+    if partition_spec.gres and "gpu" in partition_spec.gres.lower():
+        isolation_flags += " --nv"
+
     image = str(Path(agent.sandbox.image).expanduser())
     record = record_path(workspace_root).resolve()
     prologue = [
@@ -838,7 +847,7 @@ def render_sandbox_script(
     command = " \\\n  ".join(
         [
             "apptainer exec",
-            "--containall --no-home --cleanenv --net --network none",
+            isolation_flags,
             *(f"--bind {shlex.quote(spec)}" for spec in binds),
             f'--bind "$BRIDGE":{_SOCKET_IN_CONTAINER}',
             f"--env SLAB_WORKSPACE={shlex.quote(str(workspace_root))}",

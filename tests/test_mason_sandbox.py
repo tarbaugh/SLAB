@@ -586,3 +586,27 @@ def test_the_bridge_survives_a_server_that_thinks_before_answering(
         payload = json.loads(response.read())
     assert payload["data"][0]["id"] == "test-model"
     stub.shutdown()
+
+
+def test_a_gpu_partition_mounts_the_driver_stack(tmp_path: Path) -> None:
+    hpc = HpcConfig.model_validate(
+        {
+            "default_partition": "cpu",
+            "partitions": {
+                "cpu": {"time_limit": "04:00:00"},
+                "a100": {"time_limit": "04:00:00", "gres": "gpu:a100:1"},
+            },
+        }
+    )
+    gpu_script, _ = render_sandbox_script(
+        _agent(), hpc, _slab_cfg(), tmp_path / "ws", tmp_path / "project",
+        "quench a glass", toml_path=tmp_path / "sandbox" / "slab.toml", partition="a100",
+    )
+    assert "--network none --nv" in gpu_script
+    assert "#SBATCH --gres=gpu:a100:1" in gpu_script
+
+    cpu_script, _ = render_sandbox_script(
+        _agent(), hpc, _slab_cfg(), tmp_path / "ws", tmp_path / "project",
+        "quench a glass", toml_path=tmp_path / "sandbox" / "slab.toml",
+    )
+    assert "--nv" not in cpu_script
