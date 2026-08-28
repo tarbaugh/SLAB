@@ -23,10 +23,12 @@ from typing import Any
 
 from foundation.errors import (
     FoundationError,
+    IllegalTransitionError,
     NestedRunError,
     ScriptExitError,
     StorageError,
 )
+from foundation.lifecycle import ExecutionStatus, LifecycleState
 from foundation.models import Run
 from foundation.retention import DEFAULT_POLICY, RetentionPolicy
 from foundation.runtime import Workspace
@@ -122,6 +124,7 @@ def run_summary(run: Run) -> dict[str, Any]:
         "state": run.state.value,
         "status": run.status.value,
         "intent": run.intent,
+        "session": run.session,
         "error": run.error,
         "created_at": run.created_at.isoformat(),
         "state_entered_at": run.state_entered_at.isoformat(),
@@ -206,12 +209,146 @@ def run_details(ws: Workspace, run_id: str) -> dict[str, Any]:
     }
 
 
+PERMANENT_STATES = (LifecycleState.PROMOTED, LifecycleState.ARCHIVED)
+
+
+def sessions_summary(ws: Workspace, *, limit: int | None = None) -> dict[str, Any]:
+    """The sessions that created runs, newest first, plus the unstamped count.
+
+    This is ``foundation sessions`` and the MCP ``list_sessions`` tool: it
+    answers "which conversation produced which runs" so a user can promote a
+    whole session without collecting run ids. Runs created before session
+    stamping, or by a client that sets none, carry no session; they are
+    counted once rather than listed.
+    """
+    summaries = ws.runs.list_sessions(limit=limit)
+    # Unlimited on purpose: a row limit must not make the unstamped tally,
+    # which is every run minus every stamped one, look larger than it is.
+    stamped = sum(s.runs for s in ws.runs.list_sessions())
+    return {
+        "sessions": [
+            {
+                "session": s.session,
+                "runs": s.runs,
+                "states": s.states,
+                "breakdown": s.breakdown(),
+                "newest_at": s.newest_at.isoformat(),
+            }
+            for s in summaries
+        ],
+        "unstamped": len(ws.runs.list_runs()) - stamped,
+    }
+
+
+def promote_session(
+    ws: Workspace,
+    session: str,
+    *,
+    reason: str | None = None,
+    force: bool = False,
+    actor: str = "user",
+) -> dict[str, Any]:
+    """Promote every run one client session created; report each outcome.
+
+    This is ``foundation promote --session`` and the MCP ``promote_session``
+    tool. *session* is a full session id or a unique prefix. Every stamped run
+    is considered and reported:
+
+    - ``verified`` runs are promoted;
+    - ``promoted``/``archived`` runs are reported as already permanent;
+    - unverified runs are skipped unless *force* is set;
+    - failed runs are skipped even under *force*, because a bulk command must
+      not sweep failures into permanence (promote such a run by its own id);
+    - expired runs are skipped; the transition is illegal.
+
+    Each run commits on its own, so a partial failure is safe to rerun: every
+    outcome is idempotent. ``complete`` is True when no run was skipped.
+
+    Raises:
+        SessionNotFoundError: No run carries the session.
+        AmbiguousSessionError: The prefix matches several sessions.
+    """
+    resolved = ws.runs.resolve_session(session)
+    why = reason if reason else f"promoted with session {resolved}"
+    # Oldest first, so the report reads in the order the session worked.
+    outcomes = [
+        _promote_one(ws, run, reason=why, force=force, actor=actor)
+        for run in reversed(ws.runs.list_runs(session=resolved))
+    ]
+    counted = {kind: sum(1 for o in outcomes if o["outcome"] == kind) for kind in _OUTCOMES}
+    return {
+        "session": resolved,
+        "reason": why,
+        "outcomes": outcomes,
+        "complete": counted["skipped"] == 0 and bool(outcomes),
+        **counted,
+    }
+
+
+_OUTCOMES = ("promoted", "already", "skipped")
+
+
+def _promote_one(
+    ws: Workspace, run: Run, *, reason: str, force: bool, actor: str
+) -> dict[str, Any]:
+    """Decide and apply one run's fate inside a session promote."""
+    outcome, detail = _verdict(run, force=force)
+    if outcome == "promoted":
+        try:
+            ws.runs.transition(
+                run.id,
+                LifecycleState.PROMOTED,
+                actor=actor,
+                reason=reason,
+                force=force,
+                expected=run.state,
+            )
+        except IllegalTransitionError as e:
+            # Someone else moved the run between the listing and the write.
+            outcome, detail = "skipped", str(e)
+    return {
+        "id": run.id,
+        "name": run.name,
+        "state": run.state.value,
+        "status": run.status.value,
+        "outcome": outcome,
+        "detail": detail,
+    }
+
+
+def _verdict(run: Run, *, force: bool) -> tuple[str, str]:
+    """What a session promote does with one run, and why (pure).
+
+    Examples:
+        >>> _verdict(Run(state="verified"), force=False)[0]
+        'promoted'
+        >>> _verdict(Run(state="quarantined"), force=False)
+        ('skipped', 'not verified: pass --force to promote it anyway')
+        >>> _verdict(Run(state="quarantined", status="failed"), force=True)[0]
+        'skipped'
+        >>> _verdict(Run(state="promoted"), force=False)
+        ('already', 'already permanent')
+    """
+    if run.state in PERMANENT_STATES:
+        return "already", "already permanent"
+    if run.state is LifecycleState.VERIFIED:
+        return "promoted", "checks passed"
+    if run.state is LifecycleState.QUARANTINED:
+        if run.status is ExecutionStatus.FAILED:
+            return "skipped", "failed run: promote it by its own id if you mean to"
+        if not force:
+            return "skipped", "not verified: pass --force to promote it anyway"
+        return "promoted", "forced: never verified"
+    return "skipped", f"{run.state.value}: nothing to promote"
+
+
 def launch_script(
     root: Path,
     script: str | os.PathLike[str],
     *,
     name: str | None = None,
     intent: str | None = None,
+    session: str | None = None,
     argv: tuple[str, ...] = (),
     capture_output: bool = False,
 ) -> dict[str, Any]:
@@ -222,6 +359,10 @@ def launch_script(
     supplies the workspace and the run context, so scripts carry zero
     ceremony. Scripts that manage their own ``Workspace.start_run`` should be
     executed with plain ``python`` instead (nesting is refused with a hint).
+
+    *session* stamps the run with the client session that launched it; when
+    omitted, ``$SLAB_SESSION`` applies (see
+    :func:`foundation.runtime.resolve_session_id`).
 
     The result dict carries ``run_id``, final ``state``/``status``, check
     counts, and — with ``capture_output=True`` — everything the script printed
@@ -254,7 +395,9 @@ def launch_script(
                 if capture_output:
                     stack.enter_context(redirect_stdout(buffer))
                     stack.enter_context(redirect_stderr(buffer))
-                with ws.start_run(name=name or script_path.stem, intent=intent) as active:
+                with ws.start_run(
+                    name=name or script_path.stem, intent=intent, session=session
+                ) as active:
                     run_id = active.id
                     _execute_script(script_path)
         except NestedRunError:

@@ -12,9 +12,11 @@ from foundation._ops import (
     launch_script,
     load_policy,
     parse_duration_days,
+    promote_session,
     resolve_root,
     run_details,
     run_summary,
+    sessions_summary,
     ttl_override_policy,
 )
 
@@ -323,3 +325,105 @@ def test_capture_includes_check_time_prints(root: Path, tmp_path: Path) -> None:
     result = launch_script(root, script, capture_output=True)
     assert "BODY-PRINT" in result["output"]
     assert "CHECK-PRINT" in result["output"]
+
+
+# -- sessions --------------------------------------------------------------------------
+
+
+def _run(ws: Workspace, name: str, *, verified: bool, session: str | None) -> str:
+    with ws.start_run(name=name, session=session) as run:
+        run.check(lambda: verified, name="gate")
+    return run.id
+
+
+def test_launch_script_stamps_the_session(root: Path, tmp_path: Path) -> None:
+    script = _write(tmp_path, "wf.py", "x = 1\n")
+    result = launch_script(root, script, session="chat-1")
+    assert result["session"] == "chat-1"
+    with Workspace(root) as ws:
+        assert ws.runs.get(result["run_id"]).session == "chat-1"
+
+
+def test_launch_script_falls_back_to_the_environment(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SLAB_SESSION", "from-env")
+    script = _write(tmp_path, "wf.py", "x = 1\n")
+    assert launch_script(root, script)["session"] == "from-env"
+
+
+def test_sessions_summary_shape(root: Path) -> None:
+    with Workspace(root) as ws:
+        _run(ws, "a", verified=True, session="chat-1")
+        _run(ws, "b", verified=False, session="chat-1")
+        _run(ws, "c", verified=True, session=None)
+        summary = sessions_summary(ws)
+    assert summary["unstamped"] == 1
+    (row,) = summary["sessions"]
+    assert (row["session"], row["runs"]) == ("chat-1", 2)
+    assert row["breakdown"] == "1 quarantined, 1 verified"
+    assert row["states"] == {"quarantined": 1, "verified": 1}
+
+
+def test_sessions_summary_limit_keeps_the_unstamped_count_whole(root: Path) -> None:
+    """A row limit must not make the unstamped tally look larger than it is."""
+    with Workspace(root) as ws:
+        _run(ws, "a", verified=True, session="chat-1")
+        _run(ws, "b", verified=True, session="chat-2")
+        _run(ws, "c", verified=True, session=None)
+        summary = sessions_summary(ws, limit=1)
+    assert len(summary["sessions"]) == 1
+    assert summary["unstamped"] == 1
+
+
+def test_promote_session_outcomes_are_reported_in_run_order(root: Path) -> None:
+    with Workspace(root) as ws:
+        first = _run(ws, "a", verified=True, session="chat-1")
+        second = _run(ws, "b", verified=False, session="chat-1")
+        result = promote_session(ws, "chat-1")
+        assert [o["id"] for o in result["outcomes"]] == [first, second]  # oldest first
+        assert [o["outcome"] for o in result["outcomes"]] == ["promoted", "skipped"]
+        assert result["complete"] is False
+        assert ws.runs.get(first).state.value == "promoted"
+
+
+def test_promote_session_actor_is_recorded(root: Path) -> None:
+    with Workspace(root) as ws:
+        run_id = _run(ws, "a", verified=True, session="chat-1")
+        promote_session(ws, "chat-1", actor="agent")
+        assert ws.runs.history(run_id)[-1].actor == "agent"
+
+
+def test_promote_session_of_only_permanent_runs_is_complete(root: Path) -> None:
+    with Workspace(root) as ws:
+        _run(ws, "a", verified=True, session="chat-1")
+        assert promote_session(ws, "chat-1")["complete"] is True
+        again = promote_session(ws, "chat-1")
+        assert (again["already"], again["complete"]) == (1, True)
+
+
+def test_promote_session_yields_to_a_concurrent_change(root: Path) -> None:
+    """A run promoted (or expired) between the listing and the write is
+    reported as skipped, never as a crash: the rest of the session still
+    promotes, and rerunning the command settles it."""
+    from foundation import IllegalTransitionError, LifecycleState
+
+    with Workspace(root) as ws:
+        run_id = _run(ws, "a", verified=True, session="chat-1")
+        real = ws.runs.transition
+
+        def racing(rid: str, to_state: object, **kwargs: object) -> object:
+            ws.runs.transition = real  # only the first write loses
+            raise IllegalTransitionError(
+                LifecycleState.VERIFIED,
+                LifecycleState.PROMOTED,
+                detail="someone else moved it",
+            )
+
+        ws.runs.transition = racing  # type: ignore[method-assign]
+        result = promote_session(ws, "chat-1")
+        (outcome,) = result["outcomes"]
+        assert outcome["outcome"] == "skipped"
+        assert "someone else moved it" in outcome["detail"]
+        assert result["complete"] is False
+        assert ws.runs.get(run_id).state.value == "verified"

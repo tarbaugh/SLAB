@@ -14,8 +14,10 @@ from foundation.mcp_server import build_server
 
 EXPECTED_TOOLS = {
     "list_runs",
+    "list_sessions",
     "show_run",
     "promote_run",
+    "promote_session",
     "expire_runs",
     "gc",
     "launch_workflow",
@@ -45,9 +47,9 @@ def _call(server: Any, tool: str, args: dict[str, Any] | None = None) -> Any:
     return json.loads(texts[0]) if texts else None
 
 
-def _seed(root: Path, *, verified: bool = True) -> str:
+def _seed(root: Path, *, verified: bool = True, session: str | None = None) -> str:
     with Workspace(root) as ws:
-        with ws.start_run(name="seeded", intent="mcp test") as run:
+        with ws.start_run(name="seeded", intent="mcp test", session=session) as run:
             # content differs per outcome so gc tests don't hit shared-hash dedup
             run.keep("out", {"e": -2.0, "verified": verified})
             run.check(lambda: verified, name="gate")
@@ -148,3 +150,63 @@ def test_failure_evidence_reaches_the_agent(root: Path, tmp_path: Path) -> None:
     details = _call(server, "show_run", {"run_id": result["run_id"]})
     (task_entry,) = details["tasks"]
     assert task_entry["failure"]["notes"] == ["last residual: 3.2e-2"]
+
+
+# -- sessions ----------------------------------------------------------------
+
+
+def test_list_runs_filters_by_session(root: Path) -> None:
+    mine = _seed(root, session="chat-1")
+    _seed(root, verified=False, session="chat-2")
+    server = build_server(root)
+    assert [r["id"] for r in _call(server, "list_runs", {"session": "chat-1"})] == [mine]
+    assert _call(server, "list_runs", {})[0]["session"] in ("chat-1", "chat-2")
+
+
+def test_list_sessions_reports_counts_and_unstamped(root: Path) -> None:
+    _seed(root, session="chat-1")
+    _seed(root, verified=False, session="chat-1")
+    _seed(root)  # no session
+    server = build_server(root)
+
+    summary = _call(server, "list_sessions", {})
+    assert summary["unstamped"] == 1
+    (row,) = summary["sessions"]
+    assert (row["session"], row["runs"]) == ("chat-1", 2)
+    assert row["breakdown"] == "1 quarantined, 1 verified"
+
+
+def test_promote_session_reports_every_outcome(root: Path) -> None:
+    verified = _seed(root, session="chat-1")
+    unverified = _seed(root, verified=False, session="chat-1")
+    server = build_server(root)
+
+    result = _call(server, "promote_session", {"session": "chat", "reason": "the good batch"})
+    assert (result["session"], result["promoted"], result["skipped"]) == ("chat-1", 1, 1)
+    assert result["complete"] is False
+    by_id = {o["id"]: o for o in result["outcomes"]}
+    assert by_id[verified]["outcome"] == "promoted"
+    assert by_id[unverified]["outcome"] == "skipped"
+
+    forced = _call(server, "promote_session", {"session": "chat-1", "force": True})
+    assert (forced["promoted"], forced["already"], forced["complete"]) == (1, 1, True)
+
+    with Workspace(root) as ws:
+        assert ws.runs.get(verified).state.value == "promoted"
+        assert ws.runs.history(verified)[-1].actor == "agent"
+        assert ws.runs.history(verified)[-1].reason == "the good batch"
+
+
+def test_promote_session_default_reason_names_the_session(root: Path) -> None:
+    run_id = _seed(root, session="chat-1")
+    server = build_server(root)
+    _call(server, "promote_session", {"session": "chat-1"})
+    with Workspace(root) as ws:
+        assert ws.runs.history(run_id)[-1].reason == "promoted with session chat-1"
+
+
+def test_promote_session_unknown_surfaces_helpfully(root: Path) -> None:
+    _seed(root, session="chat-1")
+    server = build_server(root)
+    with pytest.raises(Exception, match="foundation sessions"):
+        _call(server, "promote_session", {"session": "nope"})

@@ -32,13 +32,26 @@ def root(tmp_path: Path) -> Path:
     return tmp_path / "ws"
 
 
-def _seed_run(root: Path, *, name: str = "seeded", verified: bool = True) -> str:
+def _seed_run(
+    root: Path, *, name: str = "seeded", verified: bool = True, session: str | None = None
+) -> str:
     """Create a run with a check, task-free, directly through the library."""
     with Workspace(root) as ws:
-        with ws.start_run(name=name, intent=f"intent of {name}") as run:
+        with ws.start_run(name=name, intent=f"intent of {name}", session=session) as run:
             run.keep("result", {"e": -1.5})
             run.check(lambda: verified, name="gate")
         return run.id
+
+
+def _seed_failed_run(root: Path, *, name: str = "boom", session: str | None = None) -> str:
+    """Create a run that raised: quarantined, status failed."""
+    with (
+        Workspace(root) as ws,
+        pytest.raises(RuntimeError),
+        ws.start_run(name=name, session=session) as run,
+    ):
+        raise RuntimeError("nope")
+    return run.id
 
 def test_version() -> None:
     result = runner.invoke(app, ["--version"])
@@ -197,6 +210,183 @@ def test_promote_unverified_needs_force(root: Path) -> None:
     assert forced.exit_code == 0
     with Workspace(root) as ws:
         assert ws.runs.history(run_id)[-1].forced is True
+
+
+def test_promote_several_runs_at_once(root: Path) -> None:
+    first = _seed_run(root, name="a", verified=True)
+    second = _seed_run(root, name="b", verified=True)
+    result = runner.invoke(app, ["promote", first, second, "-w", str(root)])
+    assert result.exit_code == 0, result.output
+    with Workspace(root) as ws:
+        assert [ws.runs.get(r).state.value for r in (first, second)] == ["promoted"] * 2
+
+
+def test_promote_reports_each_bad_id_and_keeps_going(root: Path) -> None:
+    good = _seed_run(root, verified=True)
+    result = runner.invoke(app, ["promote", "01xxxxxxxx", good, "-w", str(root)])
+    assert result.exit_code == 1
+    assert "no run matches" in result.output
+    with Workspace(root) as ws:
+        assert ws.runs.get(good).state.value == "promoted"
+
+
+@pytest.mark.parametrize("argv", [[], ["01xxxxxxxx", "--session", "chat-1"]])
+def test_promote_needs_ids_or_a_session(root: Path, argv: list[str]) -> None:
+    result = runner.invoke(app, ["promote", *argv, "-w", str(root)])
+    assert result.exit_code == 1
+    assert "not both" in result.output
+
+
+# -- promote --session -----------------------------------------------------------------
+
+
+def _seed_session(root: Path) -> dict[str, str]:
+    """One session's runs, one per outcome the promote table covers."""
+    ids = {
+        "verified": _seed_run(root, name="good", verified=True, session="chat-1"),
+        "unverified": _seed_run(root, name="meh", verified=False, session="chat-1"),
+        "failed": _seed_failed_run(root, session="chat-1"),
+        "expired": _seed_run(root, name="old", verified=False, session="chat-1"),
+    }
+    with Workspace(root) as ws:
+        ws.runs.transition(ids["expired"], "expired", reason="ttl")
+    _seed_run(root, name="elsewhere", verified=True, session="chat-2")
+    _seed_run(root, name="unstamped", verified=True)
+    return ids
+
+
+def test_promote_session_promotes_only_the_verified(root: Path) -> None:
+    ids = _seed_session(root)
+    result = runner.invoke(app, ["promote", "--session", "chat-1", "-w", str(root)])
+    assert result.exit_code == 1  # skipped runs remain
+    assert "1 promoted, 0 already permanent, 3 skipped" in result.output
+    assert "pass --force" in result.output
+    with Workspace(root) as ws:
+        assert ws.runs.get(ids["verified"]).state.value == "promoted"
+        assert ws.runs.get(ids["unverified"]).state.value == "quarantined"
+        assert ws.runs.history(ids["verified"])[-1].reason == "promoted with session chat-1"
+        # neither the other session nor the unstamped run was touched
+        assert [r.name for r in ws.runs.list_runs(state="promoted")] == ["good"]
+
+
+def test_promote_session_force_takes_the_unverified_but_never_the_failed(root: Path) -> None:
+    ids = _seed_session(root)
+    result = runner.invoke(app, ["promote", "--session", "chat-1", "-w", str(root), "--force"])
+    assert result.exit_code == 1  # the failed and expired runs stay behind
+    assert "2 promoted, 0 already permanent, 2 skipped" in result.output
+    assert "failed run: promote it by its own id" in result.output
+    with Workspace(root) as ws:
+        assert ws.runs.get(ids["unverified"]).state.value == "promoted"
+        assert ws.runs.get(ids["failed"]).state.value == "quarantined"
+        assert ws.runs.get(ids["expired"]).state.value == "expired"
+
+
+def test_promote_session_is_idempotent(root: Path) -> None:
+    _seed_run(root, name="good", verified=True, session="chat-1")
+    first = runner.invoke(app, ["promote", "--session", "chat-1", "-w", str(root)])
+    assert first.exit_code == 0
+    assert "1 promoted, 0 already permanent, 0 skipped" in first.output
+    second = runner.invoke(app, ["promote", "--session", "chat-1", "-w", str(root)])
+    assert second.exit_code == 0
+    assert "0 promoted, 1 already permanent, 0 skipped" in second.output
+    assert "already permanent" in second.output
+
+
+def test_promote_session_accepts_a_prefix_and_a_reason(root: Path) -> None:
+    run_id = _seed_run(root, verified=True, session="20260828-013504-48123")
+    result = runner.invoke(
+        app, ["promote", "--session", "20260828", "-w", str(root), "--reason", "the Nb study"]
+    )
+    assert result.exit_code == 0
+    assert "session 20260828-013504-48123" in result.output
+    with Workspace(root) as ws:
+        assert ws.runs.history(run_id)[-1].reason == "the Nb study"
+
+
+def test_promote_session_unknown_or_ambiguous(root: Path) -> None:
+    _seed_run(root, verified=True, session="chat-1")
+    _seed_run(root, verified=True, session="chat-2")
+    unknown = runner.invoke(app, ["promote", "--session", "nope", "-w", str(root)])
+    assert unknown.exit_code == 1
+    assert "foundation sessions" in unknown.output
+
+    ambiguous = runner.invoke(app, ["promote", "--session", "chat", "-w", str(root)])
+    assert ambiguous.exit_code == 1
+    assert "ambiguous" in ambiguous.output
+
+
+# -- sessions --------------------------------------------------------------------------
+
+
+def test_sessions_lists_rows_and_counts_the_unstamped(root: Path) -> None:
+    _seed_run(root, name="a", verified=True, session="chat-1")
+    _seed_run(root, name="b", verified=False, session="chat-1")
+    _seed_run(root, name="c", verified=True)
+    result = runner.invoke(app, ["sessions", "-w", str(root)])
+    assert result.exit_code == 0, result.output
+    assert "chat-1" in result.output
+    assert "1 quarantined, 1 verified" in result.output
+    assert "(1 run(s) carry no session)" in result.output
+
+
+def test_sessions_refuses_a_negative_limit(root: Path) -> None:
+    _seed_run(root, verified=True, session="chat-1")
+    result = runner.invoke(app, ["sessions", "-w", str(root), "--limit", "-1"])
+    assert result.exit_code == 1
+    assert "limit must be >= 0" in result.output
+
+
+def test_sessions_empty_workspace(root: Path) -> None:
+    _seed_run(root, verified=True)
+    result = runner.invoke(app, ["sessions", "-w", str(root)])
+    assert result.exit_code == 0
+    assert "no sessions" in result.output
+
+
+# -- session stamps --------------------------------------------------------------------
+
+
+def test_run_stamps_the_session_flag(root: Path, tmp_path: Path) -> None:
+    script = tmp_path / "wf.py"
+    script.write_text(HAPPY_SCRIPT)
+    result = runner.invoke(
+        app, ["run", str(script), "-w", str(root), "--session", "chat-1"]
+    )
+    assert result.exit_code == 0, result.output
+    with Workspace(root) as ws:
+        assert ws.runs.list_runs()[0].session == "chat-1"
+
+
+def test_run_stamps_the_session_environment(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SLAB_SESSION", "from-env")
+    script = tmp_path / "wf.py"
+    script.write_text(HAPPY_SCRIPT)
+    assert runner.invoke(app, ["run", str(script), "-w", str(root)]).exit_code == 0
+    with Workspace(root) as ws:
+        assert ws.runs.list_runs()[0].session == "from-env"
+
+
+def test_list_filters_by_session(root: Path) -> None:
+    mine = _seed_run(root, name="mine", verified=True, session="chat-1")
+    _seed_run(root, name="theirs", verified=True, session="chat-2")
+    result = runner.invoke(app, ["list", "--session", "chat-1", "-w", str(root), "-q"])
+    assert result.exit_code == 0
+    assert result.output.split() == [mine]
+
+    unknown = runner.invoke(app, ["list", "--session", "nope", "-w", str(root)])
+    assert unknown.exit_code == 1
+    assert "error:" in unknown.output
+
+
+def test_show_prints_the_session(root: Path) -> None:
+    run_id = _seed_run(root, verified=True, session="chat-1")
+    result = runner.invoke(app, ["show", run_id, "-w", str(root)])
+    assert "session: chat-1" in result.output
+
+    bare = _seed_run(root, name="bare", verified=True)
+    assert "session:" not in runner.invoke(app, ["show", bare, "-w", str(root)]).output
 
 
 # -- expire / gc -----------------------------------------------------------------------
@@ -456,6 +646,7 @@ def _future_workspace(tmp_path: Path) -> Path:
         ["list"],
         ["show", "01xxxxxxxx"],
         ["promote", "01xxxxxxxx"],
+        ["sessions"],
         ["expire", "--older-than", "0d"],
         ["gc"],
     ],

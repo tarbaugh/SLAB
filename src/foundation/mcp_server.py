@@ -66,6 +66,8 @@ quarantined (ephemeral, expires) -> verified (checks passed) -> promoted (perman
 Launch workflows with launch_workflow; inspect with list_runs/show_run; promote
 what deserves keeping (promotion is the ONLY thing that makes data permanent);
 expire_runs + gc reclaim everything else. Prefixes of run ids are accepted.
+Runs carry the client session that created them: list_sessions shows which
+conversation produced which runs, and promote_session promotes a whole one.
 """
 
 
@@ -76,15 +78,21 @@ def build_server(root: Path) -> MCPServer:
     @server.tool()
     @_surfaced
     def list_runs(
-        state: str | None = None, status: str | None = None, limit: int = 20
+        state: str | None = None,
+        status: str | None = None,
+        session: str | None = None,
+        limit: int = 20,
     ) -> list[dict[str, Any]]:
         """List runs, newest first, optionally filtered by lifecycle state
-        (quarantined/verified/promoted/archived/expired) and/or execution
-        status (pending/running/completed/failed)."""
+        (quarantined/verified/promoted/archived/expired), execution status
+        (pending/running/completed/failed), and/or the session that created
+        them (full id or unique prefix; see list_sessions)."""
         with Workspace(root) as ws:
             return [
                 _ops.run_summary(r)
-                for r in ws.runs.list_runs(state=state, status=status, limit=limit)
+                for r in ws.runs.list_runs(
+                    state=state, status=status, session=session, limit=limit
+                )
             ]
 
     @server.tool()
@@ -113,6 +121,31 @@ def build_server(root: Path) -> MCPServer:
                 run_id, LifecycleState.PROMOTED, actor="agent", reason=reason, force=force
             )
             return _ops.run_summary(run)
+
+    @server.tool()
+    @_surfaced
+    def list_sessions(limit: int = 20) -> dict[str, Any]:
+        """List the client sessions that created runs, newest first: the
+        session id, how many runs it produced, the lifecycle-state breakdown,
+        and when its newest run was created. Runs that carry no session are
+        reported once as a count."""
+        with Workspace(root) as ws:
+            return _ops.sessions_summary(ws, limit=limit)
+
+    @server.tool()
+    @_surfaced
+    def promote_session(
+        session: str, reason: str | None = None, force: bool = False
+    ) -> dict[str, Any]:
+        """Promote every run one session created (full id or unique prefix).
+        Verified runs are promoted; already permanent runs are reported as
+        such; unverified runs are skipped unless force=True; failed runs are
+        skipped even then — promote those with promote_run, one at a time.
+        The result reports every run considered, so read the outcomes."""
+        with Workspace(root) as ws:
+            return _ops.promote_session(
+                ws, session, reason=reason, force=force, actor="agent"
+            )
 
     @server.tool()
     @_surfaced

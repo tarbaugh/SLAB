@@ -107,6 +107,14 @@ def run(
     intent: Annotated[
         str | None, typer.Option(help="Why this run exists — narrative provenance.")
     ] = None,
+    session: Annotated[
+        str | None,
+        typer.Option(
+            "--session",
+            envvar="SLAB_SESSION",
+            help="Stamp the run with the client session that launched it.",
+        ),
+    ] = None,
 ) -> None:
     """Execute a workflow script; the run lands in quarantine.
 
@@ -120,6 +128,7 @@ def run(
             script,
             name=name,
             intent=intent,
+            session=session,
             argv=tuple(args or ()),
         )
     except (FoundationError, SlabError, FileNotFoundError) as e:
@@ -150,14 +159,18 @@ def list_(
     status: Annotated[
         str | None, typer.Option(help="Filter by execution status (e.g. completed).")
     ] = None,
+    session: Annotated[
+        str | None,
+        typer.Option("--session", help="Only runs from this session (id or unique prefix)."),
+    ] = None,
     limit: Annotated[int, typer.Option(help="Maximum rows.")] = 20,
     quiet: Annotated[bool, typer.Option("--quiet", "-q", help="Print run ids only.")] = False,
 ) -> None:
     """List runs, newest first."""
     with _open(workspace) as ws:
         try:
-            runs = ws.runs.list_runs(state=state, status=status, limit=limit)
-        except ValueError as e:
+            runs = ws.runs.list_runs(state=state, status=status, session=session, limit=limit)
+        except (FoundationError, ValueError) as e:
             _fail(str(e))
         if quiet:
             for item in runs:
@@ -210,6 +223,8 @@ def _render_details(details: dict[str, object]) -> None:
     if isinstance(run_failure, dict) and not _explained_by_task(run_failure, tasks):
         _echo_failure(run_failure, indent="    ")
     typer.echo(f"  created: {run['created_at']}")
+    if run.get("session"):
+        typer.echo(f"  session: {run['session']}")
     if run.get("intent"):
         typer.echo(f"  intent:  {run['intent']}")
 
@@ -272,22 +287,97 @@ def _echo_failure(failure: object, indent: str) -> None:
 
 @app.command()
 def promote(
-    run_id: Annotated[str, typer.Argument(help="Run id or unique prefix.")],
+    run_ids: Annotated[
+        list[str] | None, typer.Argument(help="Run ids or unique prefixes.")
+    ] = None,
     workspace: _WorkspaceOpt = None,
+    session: Annotated[
+        str | None,
+        typer.Option(
+            "--session",
+            help="Promote every run this session created (id or unique prefix).",
+        ),
+    ] = None,
     reason: Annotated[str | None, typer.Option(help="Why this run is worth keeping.")] = None,
     force: Annotated[
         bool, typer.Option("--force", help="Promote a run that was never verified.")
     ] = False,
 ) -> None:
-    """Make a run permanent: verified -> promoted (--force: quarantined -> promoted)."""
+    """Make runs permanent: verified -> promoted (--force: quarantined -> promoted).
+
+    Name the runs, or name the session that created them with ``--session``.
+    A session promote reports every run it considered: it promotes the
+    verified ones, skips the unverified ones unless ``--force`` is given, and
+    never promotes a failed run. List the sessions with ``foundation sessions``.
+    """
+    if (run_ids and session) or not (run_ids or session):
+        _fail("give run ids or --session, not both (and not neither)")
+    with _open(workspace) as ws:
+        if session is not None:
+            _promote_session(ws, session, reason=reason, force=force)
+            return
+        failures = 0
+        for run_id in run_ids or []:
+            try:
+                updated = ws.runs.transition(
+                    run_id, LifecycleState.PROMOTED, actor="user", reason=reason, force=force
+                )
+            except (FoundationError, SlabError) as e:
+                typer.echo(f"error: {e}", err=True)
+                failures += 1
+                continue
+            typer.echo(f"promoted {updated.id}  {updated.name}")
+        if failures:
+            raise typer.Exit(code=1)
+
+
+def _promote_session(ws: Workspace, session: str, *, reason: str | None, force: bool) -> None:
+    """Promote one session's runs and report every outcome, one line each."""
+    try:
+        result = _ops.promote_session(ws, session, reason=reason, force=force)
+    except (FoundationError, SlabError) as e:
+        _fail(str(e))
+    marks = {"promoted": "+", "already": "=", "skipped": "-"}
+    for item in result["outcomes"]:
+        typer.echo(
+            f"  [{marks[item['outcome']]}] {item['id'][:10]}  {item['name'][:20]:<20} "
+            f"{item['outcome']:<8} {item['detail']}"
+        )
+    typer.echo(
+        f"session {result['session']}: {result['promoted']} promoted, "
+        f"{result['already']} already permanent, {result['skipped']} skipped"
+    )
+    if not result["complete"]:
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def sessions(
+    workspace: _WorkspaceOpt = None,
+    limit: Annotated[int, typer.Option(help="Maximum rows.")] = 20,
+) -> None:
+    """List the client sessions that created runs, newest first.
+
+    Each row is one conversation. Promote a whole row with
+    ``foundation promote --session <id>``.
+    """
     with _open(workspace) as ws:
         try:
-            updated = ws.runs.transition(
-                run_id, LifecycleState.PROMOTED, actor="user", reason=reason, force=force
-            )
-        except (FoundationError, SlabError) as e:
+            summary = _ops.sessions_summary(ws, limit=limit)
+        except ValueError as e:
             _fail(str(e))
-        typer.echo(f"promoted {updated.id}  {updated.name}")
+        rows = summary["sessions"]
+        if not rows:
+            typer.echo("no sessions")
+        else:
+            typer.echo(f"{'SESSION':<26} {'RUNS':>4} {'AGE':>5}  STATES")
+            for row in rows:
+                typer.echo(
+                    f"{row['session'][:26]:<26} {row['runs']:>4} "
+                    f"{_age(datetime.fromisoformat(row['newest_at'])):>5}  {row['breakdown']}"
+                )
+        if summary["unstamped"]:
+            typer.echo(f"({summary['unstamped']} run(s) carry no session)")
 
 
 @app.command()
