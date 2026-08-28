@@ -172,6 +172,10 @@ def _mason_session(
     # --endpoint flag outranks both the config and any discovered server.
     if updates:
         session.resolve_endpoint(endpoint)
+    # Child processes stamp their runs with this chat's id: the agent's shell
+    # tool runs 'foundation run' directly, and only an exported variable
+    # reaches it. In-process launches pass the id explicitly instead.
+    os.environ["SLAB_SESSION"] = session.session_id
     return session
 
 
@@ -258,6 +262,7 @@ def mason_chat(
             typer.echo(
                 f"tokens: {session.prompt_tokens} prompt, "
                 f"{session.completion_tokens} completion; "
+                f"session {session.session_id}; "
                 f"transcript {session.transcript_path}"
             )
             continue
@@ -317,6 +322,7 @@ def mason_run(
     typer.echo(
         f"[{result.stop_reason} after {result.steps} step(s); "
         f"tokens {session.prompt_tokens}+{session.completion_tokens}; "
+        f"session {session.session_id}; "
         f"transcript {session.transcript_path}]",
         err=True,
     )

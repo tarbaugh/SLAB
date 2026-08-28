@@ -509,6 +509,8 @@ def test_submit_job_files_land_in_the_workspace_jobs_dir(
     assert "submitted job 42" in answer
     assert captured["directory"] == session.workspace_root / "jobs"
     assert f"cd {tmp_path}" in str(captured["script"])
+    # the batch job's runs join this chat, so they promote with it
+    assert f"export SLAB_SESSION={session.session_id}" in str(captured["script"])
 
 
 def test_oversubscribed_launches_are_refused_where_they_run_here(
@@ -541,3 +543,36 @@ def test_the_environment_states_the_cpu_budget(
     assert "cpus:" in block
     assert "16 rank(s)" in block
     assert "refused" in block  # the promise the tools actually keep
+
+
+# -- session stamps ----------------------------------------------------------
+
+
+def test_launch_workflow_stamps_the_chat_session(tmp_path: Path) -> None:
+    from foundation import Workspace
+
+    session = _session(tmp_path)
+    (tmp_path / "wf.py").write_text("x = 1\n")
+    build_toolbox(session).dispatch(_call("launch_workflow", script="wf.py", intent="stamp me"))
+    with Workspace(session.workspace_root) as ws:
+        (run,) = ws.runs.list_runs()
+        assert run.session == session.session_id
+        assert run.session == session.transcript_path.stem
+
+
+def test_a_delegated_child_launches_into_the_parents_session(tmp_path: Path) -> None:
+    """One chat, one id: a specialist's runs promote with the PI's."""
+    from foundation import Workspace
+    from mason.config import MasonConfig
+
+    parent = _session(tmp_path)
+    child = parent.spawn("md-expert", MasonConfig.model_validate({}).agent)
+    grandchild = child.spawn("analysis-expert", MasonConfig.model_validate({}).agent)
+    assert child.session_id == parent.session_id
+    assert grandchild.session_id == parent.session_id
+    assert child.transcript_path != parent.transcript_path
+
+    (tmp_path / "wf.py").write_text("x = 1\n")
+    build_toolbox(child).dispatch(_call("launch_workflow", script="wf.py"))
+    with Workspace(tmp_path / ".slab") as ws:
+        assert ws.runs.list_runs()[0].session == parent.session_id

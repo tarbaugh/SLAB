@@ -784,6 +784,7 @@ def _add_workflow_tools(
             script,
             name=arguments.get("name"),
             intent=arguments.get("intent"),
+            session=session.session_id,
             capture_output=True,
         )
         lines = [
@@ -865,7 +866,14 @@ def _add_hpc_tools(box: Toolbox, session: MasonSession) -> None:
             partition=partition,
             config=session.hpc,
             time_limit=arguments.get("time_limit"),
-            prologue=(f"cd {shlex.quote(str(session.cwd))}",),
+            # The exported session id stamps every run the job launches, so a
+            # batch result joins the chat that asked for it. The export is
+            # explicit rather than inherited: a cluster may submit with
+            # --export=NONE.
+            prologue=(
+                f"export SLAB_SESSION={shlex.quote(session.session_id)}",
+                f"cd {shlex.quote(str(session.cwd))}",
+            ),
         )
         jobs_dir = session.workspace_root / "jobs"
         job = submit(script, job_name=name, partition=partition, directory=jobs_dir)

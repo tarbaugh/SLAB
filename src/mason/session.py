@@ -296,6 +296,19 @@ class MasonSession:
         )
         return child
 
+    @property
+    def session_id(self) -> str:
+        """The chat's id, stamped on every run this session launches.
+
+        The value is the root transcript's stem, so one chat has one id and a
+        delegated specialist's runs join the chat that asked for them. Foundation
+        stores it on each run, which is what makes ``foundation promote
+        --session <id>`` able to promote a whole conversation's results.
+        """
+        if self._parent is not None:
+            return self._parent.session_id
+        return self.transcript_path.stem
+
     def attribution(self) -> str:
         """The ``[agent]`` marker for approval previews — children only."""
         return f"[{self.agent_name}] " if self._parent is not None else ""

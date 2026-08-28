@@ -94,6 +94,8 @@ def test_mason_chat_status_and_quit(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     assert "mason ready: pi — fake" in result.output
     assert "hello!" in result.output
     assert "tokens: 10 prompt, 2 completion" in result.output
+    # the id a person types into 'foundation promote --session'
+    assert "session 20" in result.output
 
 
 def test_mason_chat_resume_requires_a_transcript(
@@ -431,3 +433,54 @@ def test_mason_read_renders_a_transcript_for_humans(tmp_path: Path) -> None:
 
     missing = runner.invoke(app, ["read", str(tmp_path / "nope.jsonl")])
     assert missing.exit_code != 0
+
+
+# -- session stamps ----------------------------------------------------------
+
+
+def test_mason_run_reports_and_exports_its_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The summary line names the session, and the exported variable stamps
+    the runs the agent's own shell launches."""
+    import os
+
+    monkeypatch.chdir(tmp_path)
+    _patch_client(monkeypatch, [_finish("done")])
+    result = runner.invoke(app, ["run", "measure a0", "-w", str(tmp_path / ".slab")])
+    assert result.exit_code == 0
+    exported = os.environ["SLAB_SESSION"]
+    assert f"session {exported}" in result.output
+    transcripts = list((tmp_path / ".slab" / "mason" / "sessions").glob("*.jsonl"))
+    assert [t.stem for t in transcripts] == [exported]
+
+
+def test_launched_runs_carry_the_session_end_to_end(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A goal that launches a workflow lands a run promotable by session."""
+    from foundation import Workspace
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "wf.py").write_text("x = 1\n")
+    launch = ChatReply(
+        content=None,
+        tool_calls=(
+            ToolCall(
+                id="l1",
+                name="launch_workflow",
+                arguments={"script": "wf.py", "intent": "stamped"},
+                arguments_raw=json.dumps({"script": "wf.py", "intent": "stamped"}),
+            ),
+        ),
+        prompt_tokens=1,
+        completion_tokens=1,
+    )
+    _patch_client(monkeypatch, [launch, _finish("launched")])
+    result = runner.invoke(app, ["run", "run wf", "-w", str(tmp_path / ".slab"), "--auto"])
+    assert result.exit_code == 0, result.output
+    with Workspace(tmp_path / ".slab") as ws:
+        (run,) = ws.runs.list_runs()
+        (row,) = ws.runs.list_sessions()
+        assert run.session == row.session
+        assert f"session {row.session}" in result.output
