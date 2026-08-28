@@ -86,7 +86,7 @@ def task(
     Args:
         name: Display name for records (defaults to the function's name).
         engines: Distribution names whose installed versions should be pinned
-            into the recipe and the cache key (e.g. ``engines=("mace", "ase")``).
+            into the recipe and the cache key (e.g. ``engines=("ase", "rootstock")``).
             A version bump of a listed engine invalidates the cache — same
             inputs through a different engine version is a different result.
         cache_extra: Callable receiving the bound arguments (as a dict) at

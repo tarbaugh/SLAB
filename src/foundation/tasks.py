@@ -41,7 +41,7 @@ from slab.backends import (
 # declared version) into the cache key: a maintainer bumping qe 7.3 -> 7.4 in
 # the cluster registry honestly invalidates cached qe results.
 @task(
-    engines=("ase", "mace-torch", "rootstock"),
+    engines=("ase", "rootstock"),
     cache_extra=lambda arguments: describe_engine(
         arguments["engine"], arguments.get("calculator_options")
     ),
@@ -49,7 +49,7 @@ from slab.backends import (
 def relax(
     atoms: Atoms,
     *,
-    engine: str = "mace",
+    engine: str,
     fmax: float = 0.05,
     steps: int = 200,
     calculator_options: dict[str, Any] | None = None,
@@ -107,7 +107,7 @@ def relax(
             per-atom force magnitude drops below this (eV/Å).
         steps: Maximum optimizer steps.
         calculator_options: Forwarded to the engine factory
-            (e.g. ``{"model": "medium"}`` for mace).
+            (e.g. ``{"cluster": "delta"}`` for a rootstock checkpoint id).
         label: Names the trajectory artifact; auto-suffixed on collision.
 
     Examples:
@@ -179,7 +179,7 @@ def relax(
 
 
 @task(
-    engines=("ase", "mace-torch", "rootstock"),
+    engines=("ase", "rootstock"),
     cache_extra=lambda arguments: describe_engine(
         arguments["engine"], arguments.get("calculator_options")
     ),
@@ -187,7 +187,7 @@ def relax(
 def single_point(
     atoms: Atoms,
     *,
-    engine: str = "mace",
+    engine: str,
     calculator_options: dict[str, Any] | None = None,
     label: str | None = None,
 ) -> tuple[Atoms, dict[str, Any]]:
