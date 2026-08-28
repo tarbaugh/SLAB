@@ -1,7 +1,8 @@
 # SLAB
 
-**Simplest Layer for Atomistic Backends** is an agent-native workflow
-orchestration layer for atomistic materials modeling.
+**Simplest Layer for Atomistic Backends** is an agent-native state layer
+for atomistic materials modeling. It keeps the record of what an agent
+computed, verifies the results, and retains only what you promote.
 
 Every run starts as temporary, and it becomes permanent only when you
 promote it. Nothing is stored permanently by default and deleted later.
@@ -27,6 +28,40 @@ with ws.start_run(name="si-relax", intent="baseline lattice constant") as run:
 # exit: checks evaluated -> quarantined becomes verified; promote it when you decide it matters
 ```
 
+## The problem SLAB owns
+
+An agent does not run one calculation. It runs hundreds while it explores,
+and most of them are drafts. Skill packs and agent harnesses make those
+calculations easy to start, but they leave the results as loose files in a
+repository. After a week of agentic work, nobody can say which numbers are
+verified, which files are safe to delete, or how the one result that
+matters was made.
+
+SLAB sits under that work. Every calculation lands as a run with a recorded
+recipe, a cache identity, and a lifecycle state. Verification is a property
+a run earns from its checks, not a claim in a notebook. Unpromoted data
+expires on its own, so the workspace stays small without manual cleanup.
+The archive holds only what someone decided to keep, and every kept run
+carries the complete recipe that reproduces it.
+
+## Use it from any harness
+
+SLAB does not require its own agent.
+
+- **Python.** Workflows are ordinary scripts. Any harness that can run
+  Python can hold a workspace.
+- **MCP.** `foundation mcp` serves a workspace as a set of MCP tools, so
+  Claude Code, Cursor, or any MCP client can start, inspect, and promote
+  runs. See [Agents over MCP](tutorials/agents-mcp.md).
+- **Mason.** The distribution includes a resident research agent for long
+  campaigns on a cluster, with its model server started as a batch job. It
+  is optional. See [Mason, the resident agent](tutorials/mason.md).
+
+Mason's skills follow the Agent Skills specification exactly, and skills
+written for other consumers load unmodified from a project or user skills
+directory. So you can bring an external skill pack and keep the SLAB
+lifecycle under it. See [The roster & skills](tutorials/roster-and-skills.md).
+
 ## Three packages
 
 SLAB is three packages in one distribution, `slab-stack`. Each installs a
@@ -43,7 +78,7 @@ command of the same name.
 and `slab` depends on neither. So you can drive an engine without a
 workspace, and keep a workspace without an agent.
 
-## Why another workflow engine?
+## Why not an existing workflow engine?
 
 Existing materials workflow engines (AiiDA, atomate2/jobflow, pyiron,
 FireWorks) were designed for human experts. Three of their costs are fatal
@@ -136,6 +171,10 @@ one optional layered TOML file. See
 - **[Mason, the resident agent](tutorials/mason.md)** introduces the
   built-in Claude-Code-class harness for open models, tuned for long
   research projects, with its model server started as a batch job.
+- **[The roster & skills](tutorials/roster-and-skills.md)** covers the agent
+  cards and the Agent Skills format, including skills from external packs.
+- **[Machine memory](tutorials/memory.md)** keeps what one session learns
+  for the next.
 
 ## Status
 
