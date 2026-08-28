@@ -491,6 +491,30 @@ def preflight(agent: AgentConfig, workspace_root: str | os.PathLike[str]) -> lis
     else:
         rows.append(("-", f"[agent.sandbox] image does not exist yet: {image}"))
 
+    if agent.endpoint:
+        rows.append(("+", f"upstream: {agent.endpoint} [[agent] endpoint]"))
+        key_env = agent.resolved_api_key_env
+        if key_env is None:
+            rows.append(("?", "no [agent] api_key_env: the bridge will send no key"))
+        elif os.environ.get(key_env):
+            rows.append(("+", f"${key_env} is set; the bridge reads it on the host"))
+        else:
+            rows.append(
+                (
+                    "-",
+                    f"${key_env} is not set here; sbatch exports the submitting "
+                    f"environment, so export it before you submit",
+                )
+            )
+        rows.append(
+            (
+                "?",
+                "only a compute node can prove a compute node reaches that host "
+                "(srun curl); this node's own reachability proves nothing",
+            )
+        )
+        return rows
+
     record = read_record(workspace_root)
     if record is None:
         rows.append(
@@ -1011,6 +1035,46 @@ def sandbox_toml(
     return "\n".join(out).rstrip() + "\n", warnings
 
 
+def _upstream_lines(agent: AgentConfig, workspace_root: Path) -> list[str]:
+    """The prologue lines that settle ``$UPSTREAM``, by where the model is.
+
+    The precedence is Mason's everywhere else
+    (:func:`mason.serve.discover_endpoint`): a configured endpoint wins, and
+    only without one does the job read a serve record. A machine pointed at
+    a gateway must not render a job that demands a server nobody started.
+    """
+    if agent.endpoint:
+        lines = [f"UPSTREAM={shlex.quote(agent.endpoint)}"]
+        key_env = agent.resolved_api_key_env
+        if key_env:
+            # By name, and never echoed. sbatch exports the submitting
+            # environment by default, but a cluster set to --export=NONE does
+            # not, and the job should die here saying which variable is
+            # missing rather than at the first request hours later.
+            lines.append(
+                # The name is escaped in the message: an unescaped $NAME would
+                # expand, printing an empty word when unset and the key itself
+                # if it ever were set.
+                f'[ -n "${key_env}" ] || {{ echo "\\${key_env} is not set in this '
+                f'job\'s environment, and the gateway at $UPSTREAM needs it" >&2; '
+                f"exit 1; }}"
+            )
+        return lines
+    record = record_path(workspace_root).resolve()
+    return [
+        f"RECORD={shlex.quote(str(record))}",
+        '[ -f "$RECORD" ] || { echo "no serve record at $RECORD;'
+        " start the model server first ('mason serve start')\" >&2; exit 1; }",
+        f'UPSTREAM=$({shlex.quote(_python())} -c {shlex.quote(_UPSTREAM_SNIPPET)} "$RECORD")',
+    ]
+
+
+def _key_flag(agent: AgentConfig) -> str:
+    """``--key-env NAME`` when a configured gateway needs a key, else nothing."""
+    key_env = agent.resolved_api_key_env if agent.endpoint else None
+    return f" --key-env {shlex.quote(key_env)}" if key_env else ""
+
+
 def render_sandbox_script(
     agent: AgentConfig,
     hpc: HpcConfig,
@@ -1027,11 +1091,16 @@ def render_sandbox_script(
 ) -> tuple[str, list[str]]:
     """The batch script for one autonomous, network-dark session.
 
-    Host side: resolve the serve record's endpoint, bridge it onto a unix
-    socket with a fixed-destination ``socat``. Container side: forward the
-    socket to loopback, prove darkness and reachability with
-    ``mason sandbox verify`` (either failing aborts the job), then run the
-    goal with ``mason run --auto``.
+    Host side: settle the upstream (a configured ``[agent] endpoint``, else
+    the serve record's), and bridge it onto a unix socket with one fixed
+    destination. Container side: forward the socket to loopback, prove
+    darkness and reachability with ``mason sandbox verify`` (either failing
+    aborts the job), then run the goal with ``mason run --auto``.
+
+    A gateway upstream authenticates with the key named by ``[agent]
+    api_key_env``, read on the host at job start. The container is launched
+    ``--cleanenv`` and its rendered config drops ``api_key_env``, so the key
+    never crosses the boundary.
     """
     from slab.hpc import render_sbatch
 
@@ -1065,18 +1134,14 @@ def render_sandbox_script(
         isolation_flags += " --nv"
 
     image = str(Path(agent.sandbox.image).expanduser())
-    record = record_path(workspace_root).resolve()
     prologue = [
         f"IMAGE={shlex.quote(image)}",
         '[ -f "$IMAGE" ] || { echo "no container image at $IMAGE; build it '
         "(e.g. 'apptainer build $IMAGE docker://rockylinux:9') on a filesystem "
         'the compute nodes mount" >&2; exit 1; }',
-        f"RECORD={shlex.quote(str(record))}",
-        '[ -f "$RECORD" ] || { echo "no serve record at $RECORD;'
-        " start the model server first ('mason serve start')\" >&2; exit 1; }",
-        f'UPSTREAM=$({shlex.quote(_python())} -c {shlex.quote(_UPSTREAM_SNIPPET)} "$RECORD")',
+        *_upstream_lines(agent, workspace_root),
         'BRIDGE="$(mktemp -d)/llm.sock"',
-        f'{mason} sandbox bridge "$BRIDGE" "$UPSTREAM" &',
+        f'{mason} sandbox bridge "$BRIDGE" "$UPSTREAM"{_key_flag(agent)} &',
         "BRIDGE_PID=$!",
         "trap 'kill \"$BRIDGE_PID\" 2>/dev/null || true' EXIT",
         'for _ in $(seq 50); do [ -S "$BRIDGE" ] && break; sleep 0.1; done',

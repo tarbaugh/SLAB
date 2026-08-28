@@ -138,6 +138,79 @@ def test_sandbox_toml_strips_hpc_and_warns_about_srun(tmp_path: Path) -> None:
     tomllib.loads(text)
 
 
+# -- rendering against a gateway ----------------------------------------------
+
+
+def test_render_prefers_the_configured_endpoint(tmp_path: Path) -> None:
+    """A machine pointed at a gateway must not render a job that demands a
+    server nobody started. The precedence is discover_endpoint's."""
+    agent = _agent(endpoint="https://gw.example/v1", api_key_env="GATEWAY_KEY")
+    script, _ = _render(tmp_path, agent, _slab_cfg())
+    assert "UPSTREAM=https://gw.example/v1" in script
+    assert "RECORD=" not in script
+    assert "no serve record" not in script
+    assert 'sandbox bridge "$BRIDGE" "$UPSTREAM" --key-env GATEWAY_KEY &' in script
+
+
+def test_render_guards_the_key_by_name_never_by_value(tmp_path: Path) -> None:
+    """The guard fails the job at start on an --export=NONE cluster, and the
+    escaped name keeps the value out of the job's output either way."""
+    agent = _agent(endpoint="https://gw.example/v1", api_key_env="GATEWAY_KEY")
+    script, _ = _render(tmp_path, agent, _slab_cfg())
+    assert '[ -n "$GATEWAY_KEY" ]' in script
+    assert 'echo "\\$GATEWAY_KEY is not set' in script  # escaped: never expands
+
+
+def test_render_without_a_key_sends_none(tmp_path: Path) -> None:
+    agent = _agent(endpoint="http://internal:8000/v1")
+    script, _ = _render(tmp_path, agent, _slab_cfg())
+    assert "UPSTREAM=http://internal:8000/v1" in script
+    assert "--key-env" not in script
+    assert "[ -n " not in script
+
+
+def test_render_for_a_served_model_is_unchanged(tmp_path: Path) -> None:
+    """The serve path is the one people already depend on; it keeps every
+    line it had, including the record guard."""
+    script, _ = _render(tmp_path, _agent(), _slab_cfg())
+    assert f"RECORD={tmp_path / 'ws' / 'mason' / 'endpoint.json'}" in script
+    assert "no serve record at $RECORD" in script
+    assert 'UPSTREAM=$(' in script
+    assert 'sandbox bridge "$BRIDGE" "$UPSTREAM" &' in script
+    assert "--key-env" not in script
+
+
+def test_the_sandbox_config_still_carries_no_key(tmp_path: Path) -> None:
+    """The container must not be able to authenticate on its own."""
+    agent = _agent(endpoint="https://gw.example/v1", api_key_env="GATEWAY_KEY")
+    text, _warnings = sandbox_toml(_slab_cfg(), agent, tmp_path / "ws")
+    assert "api_key_env" not in text
+    assert "GATEWAY_KEY" not in text
+    assert "gw.example" not in text  # nor where its requests go
+
+
+def test_preflight_reports_the_gateway_and_its_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = _agent(endpoint="https://gw.example/v1", api_key_env="GATEWAY_KEY")
+
+    monkeypatch.setenv("GATEWAY_KEY", "sk-secret")
+    rows = {message: mark for mark, message in preflight(agent, tmp_path / "ws")}
+    assert any(m.startswith("upstream: https://gw.example/v1") for m in rows)
+    assert rows["$GATEWAY_KEY is set; the bridge reads it on the host"] == "+"
+    assert not any("serve record" in m for m in rows)
+    assert any("only a compute node can prove" in m for m in rows)
+
+    monkeypatch.delenv("GATEWAY_KEY")
+    marks = {message: mark for mark, message in preflight(agent, tmp_path / "ws")}
+    assert any(mark == "-" and "is not set here" in m for m, mark in marks.items())
+
+
+def test_preflight_still_reports_the_serve_record(tmp_path: Path) -> None:
+    rows = [message for _mark, message in preflight(_agent(), tmp_path / "ws")]
+    assert any("no serve record" in m for m in rows)
+
+
 # -- the bridge and the proofs ------------------------------------------------
 
 
