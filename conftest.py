@@ -25,6 +25,9 @@ def _isolated_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("SLAB_CONFIG", raising=False)
     monkeypatch.delenv("SLAB_SITE_CONFIG", raising=False)
     monkeypatch.delenv("SLAB_WORKSPACE", raising=False)
+    # The machine-memory store reads this one; a developer with memories of
+    # their own must not have them enter the suite's catalogs.
+    monkeypatch.delenv("SLAB_MEMORY_DIR", raising=False)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config-isolated"))
     # Rootstock discovers installs on its own: $ROOTSTOCK_ROOT, then a user
     # config at a literal ~/.config/rootstock/config.toml that ignores

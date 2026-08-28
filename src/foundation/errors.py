@@ -357,6 +357,15 @@ class NestedRunError(FoundationError):
         super().__init__(message)
 
 
+class MemoryStoreError(FoundationError):
+    """A memory that cannot be read or written, naming the file and the rule.
+
+    Deliberately not named ``MemoryError``: that name belongs to the builtin
+    raised when allocation fails, and shadowing it would make every
+    ``except MemoryError`` in the stack ambiguous.
+    """
+
+
 class StorageError(FoundationError):
     """A storage-layer failure (bad data, I/O, or invariant violation)."""
 

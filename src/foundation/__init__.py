@@ -38,6 +38,7 @@ from foundation.errors import (
     FoundationError,
     IllegalStatusChangeError,
     IllegalTransitionError,
+    MemoryStoreError,
     NestedRunError,
     NoActiveRunError,
     RunExistsError,
@@ -61,6 +62,7 @@ from foundation.lifecycle import (
     validate_status_change,
     validate_transition,
 )
+from foundation.memory import Memory
 from foundation.models import (
     ArtifactRef,
     ArtifactRole,
@@ -108,6 +110,8 @@ __all__ = [
     "IllegalStatusChangeError",
     "IllegalTransitionError",
     "LifecycleState",
+    "Memory",
+    "MemoryStoreError",
     "NestedRunError",
     "NoActiveRunError",
     "PurgeReport",
