@@ -12,6 +12,7 @@ import platform
 from datetime import UTC, datetime
 from typing import Any
 
+from foundation import memory as memory_store
 from mason.notes import notes_block
 from mason.roster import AgentSpec
 from mason.session import MasonSession
@@ -272,6 +273,13 @@ def environment_block(
         lines.append("\n" + WORKING_BOUNDS)
     if skills:
         lines.append("\n" + catalog_block(skills))
+    if session.agent.memory:
+        # Read here rather than passed in, so the block is current after
+        # every compaction: a fact this session recorded an hour ago is in
+        # the rebuilt prompt, and one another session recorded is too.
+        memories = memory_store.catalog_block(memory_store.discover())
+        if memories:
+            lines.append("\n" + memories)
     if team:
         lines.append("\n" + team)
     agents_md = _conventions_text(session)

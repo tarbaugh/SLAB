@@ -168,6 +168,11 @@ class AgentConfig(BaseModel):
     # engines this machine's slab.toml enables (mason.notes). Context only:
     # it grants no capability, and list_engines stays the live inventory.
     software_notes: bool = True
+    # Whether this session reads and writes the machine's memory
+    # (foundation.memory): the catalog in the system prompt, and the recall
+    # and remember tools. False removes all three, so a session can be run
+    # memory-blind without emptying the store.
+    memory: bool = True
     # The file fence and the session lock are workflow controls, not security
     # boundaries: the shell tool can still reach anything the Unix user can,
     # behind its own allowlist and the approval gate. See docs/tutorials/

@@ -4,7 +4,9 @@ The tool set follows the SWE-agent lesson that agent performance is driven
 by interface design, not tool count: six file/shell primitives whose error
 messages teach recovery, plus the tools that make Mason a *research* agent —
 SLAB runs (list/show/launch), the SLURM plumbing when this machine has
-partitions configured, and the two memory instruments (notebook, plan).
+partitions configured, and the memory instruments: the notebook and plan
+for this project, recall and remember for what this machine has taught
+earlier sessions.
 
 Contracts the primitives enforce in code, not prompt text:
 
@@ -35,6 +37,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from mason.roster import AgentSpec
 
+from foundation import memory as memory_store
+from foundation.errors import MemoryStoreError
 from mason.client import ToolCall
 from mason.session import MasonSession
 from mason.skills import Skill, discover_skills, listing, visible_catalog
@@ -61,6 +65,8 @@ TOOL_VOCABULARY = frozenset(
         "notebook",
         "plan",
         "skill",
+        "recall",
+        "remember",
         "delegate",
         "finish",
     }
@@ -184,13 +190,25 @@ def _preview(call: ToolCall) -> str:
     if "command" in arguments:
         return str(arguments["command"])
     parts = []
-    for key in ("path", "script", "name", "partition", "old_string", "new_string", "content"):
+    for key in (
+        "path",
+        "script",
+        "name",
+        "partition",
+        "old_string",
+        "new_string",
+        "description",
+        "content",
+        "body",
+    ):
         if key in arguments:
             value = str(arguments[key])
-            # content is the thing being approved — a human shown 120 chars
-            # of a workflow script is approving blind. Head and tail, with
-            # the elision announced, is enough to actually read it.
-            limit = 1200 if key == "content" else 120
+            # content and body are the thing being approved — a human shown
+            # 120 chars of a workflow script, or of a fact about to be
+            # written into every future session's prompt, is approving
+            # blind. Head and tail, with the elision announced, is enough to
+            # actually read it.
+            limit = 1200 if key in ("content", "body") else 120
             shown = value if len(value) <= limit else _truncate_middle(value, limit)
             parts.append(f"{key}={shown!r}")
     return " ".join(parts)[:1600] if parts else json.dumps(arguments)[:200]
@@ -263,6 +281,8 @@ def build_toolbox(
     if session.hpc.partitions:
         _add_hpc_tools(box, session)
     _add_memory_tools(box, session)
+    if session.agent.memory:
+        _add_machine_memory_tools(box, session)
     if visible:
         _add_skill_tool(box, session, visible)
     if (
@@ -1030,7 +1050,7 @@ def _add_skill_tool(box: Toolbox, session: MasonSession, skills: dict[str, Skill
     )
 
 
-# -- memory ------------------------------------------------------------------
+# -- project memory: the notebook and the plan --------------------------------
 
 
 def _add_memory_tools(box: Toolbox, session: MasonSession) -> None:
@@ -1072,5 +1092,92 @@ def _add_memory_tools(box: Toolbox, session: MasonSession) -> None:
             ),
             parameters=_schema({"content": {"type": "string"}}, ["content"]),
             handler=plan,
+        )
+    )
+
+
+# -- machine memory: what this machine taught an earlier session --------------
+
+
+def _add_machine_memory_tools(box: Toolbox, session: MasonSession) -> None:
+    """``recall`` and ``remember``: the store in :mod:`foundation.memory`.
+
+    The notebook holds the project's record; this holds the machine's. Both
+    are memory, and the split is the scope: a fact about how software behaves
+    here outlives the project that discovered it, so it must not be buried in
+    one project's notebook.
+    """
+
+    def recall(arguments: dict[str, Any]) -> str:
+        name = str(arguments["name"])
+        memories = memory_store.discover()
+        found = memories.get(name)
+        if found is None:
+            known = ", ".join(sorted(memories)) or "none recorded yet"
+            return f"no memory named {name!r}; memories on this machine: {known}"
+        session.record({"type": "recall", "name": name})
+        return f"{found.body().rstrip()}\n\n[{found.provenance()}]"
+
+    box.add(
+        Tool(
+            name="recall",
+            description=(
+                "Read one memory in full by name. The catalog under '# Memory' "
+                "lists what this machine knows; each line is a summary, and this "
+                "returns the fact itself with who recorded it and when."
+            ),
+            parameters=_schema({"name": {"type": "string"}}, ["name"]),
+            handler=recall,
+        )
+    )
+
+    def remember(arguments: dict[str, Any]) -> str:
+        name = str(arguments["name"])
+        try:
+            written = memory_store.write(
+                name,
+                str(arguments["description"]),
+                str(arguments["body"]),
+                agent=session.agent_name,
+                model=session.agent.model,
+            )
+        except MemoryStoreError as e:
+            # A refusal is an observation the model can act on, not a crash:
+            # the message says which rule stopped the write.
+            return f"not recorded: {e}"
+        session.record({"type": "remember", "name": name, "path": str(written.path)})
+        return (
+            f"recorded as memory {written.name!r} in {written.path}; "
+            f"every later session on this machine reads it"
+        )
+
+    box.add(
+        Tool(
+            name="remember",
+            description=(
+                "Record one confirmed fact about this machine or its software so "
+                "later sessions start knowing it: a package that behaves unlike "
+                "its documentation, a flag that matters, a workaround. Write the "
+                "description as the line a future session reads when deciding "
+                "whether the fact applies. Re-using a name replaces that memory, "
+                "which is how you consolidate. Not for results (they belong to "
+                "runs), project decisions (the notebook), or credentials (nowhere)."
+            ),
+            parameters=_schema(
+                {
+                    "name": {
+                        "type": "string",
+                        "description": "lowercase-with-hyphens, e.g. 'vllm-mamba-cache'",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "one line: the fact and when it applies",
+                    },
+                    "body": {"type": "string", "description": "the fact in full"},
+                },
+                ["name", "description", "body"],
+            ),
+            handler=remember,
+            requires_approval=True,
         )
     )
