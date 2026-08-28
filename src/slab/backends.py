@@ -5,13 +5,12 @@ SLAB never implements physics. Engines are reached through the ASE
 instance. Three sources feed the mapping, in resolution order:
 
 * **Built-ins** — engines the ``slab`` package can construct on its own:
-  ``mace`` (in-process, via the ``slab[mace]`` extra), ``qe`` (Quantum
-  ESPRESSO's ``pw.x`` via ASE's file-IO calculator — no extra needed, just
-  the executable and pseudopotentials), ``lammps`` (the ``lmp`` binary via
-  ASE's ``lammpsrun`` calculator — likewise just the executable plus your
-  potential files), ``rootstock`` (an MLIP served from a cluster's pre-built
-  rootstock install, via the ``slab[rootstock]`` extra), and ASE's
-  ``emt``/``lj`` toys for tests.
+  ``qe`` (Quantum ESPRESSO's ``pw.x`` via ASE's file-IO calculator — no
+  extra needed, just the executable and pseudopotentials), ``lammps`` (the
+  ``lmp`` binary via ASE's ``lammpsrun`` calculator — likewise just the
+  executable plus your potential files), ``rootstock`` (an MLIP served from
+  a cluster's pre-built rootstock install, via the ``slab[rootstock]``
+  extra), and ASE's ``emt``/``lj`` toys for tests.
 * **The cluster engine registry** (:mod:`slab.engines`) — names a cluster
   maintainer declared (``vasp``, curated site aliases like ``qe-delta`` or
   ``lammps-delta``, site-specific MLIP aliases, ...), resolved
@@ -37,10 +36,9 @@ Engine choices worth knowing:
   cluster's pre-built environments, not in your Python environment; the
   calculator spawns a worker subprocess, so it must be closed —
   :func:`close_calculator` does this and :func:`foundation.tasks.relax` calls it
-  automatically.
-* ``mace`` — the MACE foundation model in-process; options are forwarded to
-  ``mace.calculators.mace_mp`` (``model=``, ``device=``, ...). First use
-  downloads the checkpoint to ``~/.cache/mace``.
+  automatically. This is the only route to an MLIP that SLAB knows: any MLIP
+  (MACE, UMA, ...) is served through it, either as a bare checkpoint id or
+  as a curated registry alias.
 * ``lammps`` — the LAMMPS binary through ``ase.calculators.lammpsrun``. The
   command comes from ``command=`` in ``calculator_options`` (or
   ``[engines.lammps]`` in the slab config, or ``$ASE_LAMMPSRUN_COMMAND``,
@@ -115,9 +113,9 @@ def available_engines(registry: EngineRegistry | None = None) -> tuple[str, ...]
 
     Examples:
         >>> available_engines()
-        ('emt', 'lammps', 'lj', 'mace', 'qe', 'rootstock')
+        ('emt', 'lammps', 'lj', 'qe', 'rootstock')
     """
-    builtin = ("emt", "lammps", "lj", "mace", "qe", "rootstock")
+    builtin = ("emt", "lammps", "lj", "qe", "rootstock")
     extra = tuple(name for name in registry_engine_names(registry) if name not in builtin)
     return builtin + extra
 
@@ -155,8 +153,6 @@ def get_calculator(engine: str, **options: Any) -> Any:
         from ase.calculators.lj import LennardJones
 
         return LennardJones(**options)
-    if normalized == "mace":
-        return _mace_calculator(**options)
     if normalized == "lammps":
         return _lammps_calculator(**options)
     if normalized == "qe":
@@ -219,29 +215,6 @@ def describe_engine(
     normalized = engine.strip().lower()
     if normalized in ("emt", "lj", "rootstock"):
         return {"engine": normalized, "source": "builtin", "version": None}
-    if normalized == "mace":
-        # Which MLIP actually runs = the resolved checkpoint plus the
-        # mace-torch code executing it, so both are cache identity: bumping
-        # the package or changing the resolved "small" default must
-        # invalidate cached results honestly — the default lives in
-        # _mace_calculator, whose source the cache key never hashes.
-        mace_identity: dict[str, Any] = {
-            "engine": "mace",
-            "source": "builtin",
-            "version": _dist_version("mace-torch"),
-            "model": str(options.get("model", "small")),
-        }
-        # model= may be a checkpoint FILE, and a path alone is not an
-        # identity — a retrain-in-place would silently keep serving the old
-        # cache. Size+mtime is the same freshness signal the version probes
-        # use for engine binaries (contents are not hashed, same as a bare
-        # pseudo_dir; named aliases like "small" stay identified by name).
-        model_path = Path(str(options.get("model", ""))).expanduser()
-        if str(options.get("model", "")) and model_path.is_file():
-            stat = model_path.stat()
-            mace_identity["model_mtime_ns"] = stat.st_mtime_ns
-            mace_identity["model_size"] = stat.st_size
-        return mace_identity
     if normalized == "lammps":
         # The detected LAMMPS version and the resolved command are the cache
         # identity, mirroring qe: upgrading the binary or pointing at a
@@ -495,7 +468,7 @@ def collect_engine_outputs(calculator: Any) -> list[tuple[str, Path]]:
     in the same directory for every force evaluation, overwriting the file);
     for ``lammps`` the last force evaluation's log (thermo table included) —
     the natural artifact to keep after a successful task. In-process
-    calculators (emt, mace, ...) write no files: empty list. Never raises.
+    calculators (emt, lj) write no files: empty list. Never raises.
 
     Both engine shapes are duck-typed (``template``/``directory`` for
     ASE's GenericFileIO calculators, ``name == "lammpsrun"`` plus a
@@ -2004,89 +1977,6 @@ def _qe_config_command() -> str | None:
 
         return f"{launcher} -np {allocated_tasks()} {shlex.quote(str(root / 'pw.x'))}"
     return _qe_configured("command")
-
-
-def _mace_calculator(**options: Any) -> Any:
-    try:
-        from mace.calculators import mace_mp
-    except ImportError as e:
-        # On clusters the MLIP normally is not installed in the client env at
-        # all — rootstock serves it from a pre-built env, and its checkpoint
-        # ids work directly as engine names. Point there when it exists,
-        # instead of teaching an agent to pip-install torch on a login node.
-        hint = ""
-        try:
-            import rootstock  # noqa: F401
-
-            hint = (
-                "; this machine has rootstock — prefer a served checkpoint id "
-                "as the engine name (e.g. engine='mace-mp-0-medium'; "
-                "'slab engines list' shows what is served)"
-            )
-        except ImportError:
-            pass
-        raise EngineNotAvailableError(
-            f"engine 'mace' needs the mace-torch package: pip install 'slab-stack[mace]'{hint}"
-        ) from e
-    options.setdefault("model", "small")
-    options.setdefault("device", "cpu")
-    options.setdefault("default_dtype", "float64")
-    return _fetch_named_checkpoint(mace_mp, options, engine="mace")
-
-
-_CHECKPOINT_FETCH_TIMEOUT_S = 60.0
-
-
-def _fetch_named_checkpoint(factory: Any, options: dict[str, Any], *, engine: str) -> Any:
-    """Call an MLIP factory whose named checkpoint may download on first use.
-
-    mace-torch resolves names like ``"small"`` against a local cache and
-    otherwise downloads — and on a firewalled compute node the download is
-    not a failure the user can read, it is a raw ``URLError`` (or, on paths
-    without their own timeout, a silent hang inside the batch job's time
-    limit). The bounded default socket timeout is a floor for the paths that
-    set none of their own; the translation into instructions — pre-warm,
-    point at a file, or serve — is the actual fix. A checkpoint already in
-    the cache never opens a socket, so pre-warmed nodes are unaffected; the
-    default-timeout window is scoped to the construction, and every other
-    slab network call sets its own explicit per-request timeout.
-    """
-    import socket
-    import urllib.error
-
-    previous = socket.getdefaulttimeout()
-    socket.setdefaulttimeout(_CHECKPOINT_FETCH_TIMEOUT_S)
-    try:
-        return factory(**options)
-    except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
-        raise _checkpoint_fetch_error(engine, options, e) from e
-    except RuntimeError as e:
-        # mace-torch wraps its whole download/locate block in
-        # RuntimeError("Model download failed and no local model found"),
-        # so the network shapes above arrive here in disguise — recognize
-        # them by cause or by the message, and let real RuntimeErrors pass.
-        network_cause = isinstance(
-            e.__cause__, (urllib.error.URLError, TimeoutError, ConnectionError, OSError)
-        )
-        if network_cause or "download" in str(e).lower():
-            raise _checkpoint_fetch_error(engine, options, e) from e
-        raise
-    finally:
-        socket.setdefaulttimeout(previous)
-
-
-def _checkpoint_fetch_error(
-    engine: str, options: dict[str, Any], error: BaseException
-) -> EngineNotAvailableError:
-    model = options.get("model", "small")
-    return EngineNotAvailableError(
-        f"engine {engine!r} could not fetch checkpoint {model!r}: {error} — "
-        f"compute nodes are typically firewalled. Pre-warm the cache from "
-        f"a node with internet (python -c \"from mace.calculators import "
-        f"mace_mp; mace_mp(model='{model}')\"), point model= at a "
-        f"checkpoint file on disk, or use a rootstock-served checkpoint "
-        f"id as the engine name"
-    )
 
 
 def _rootstock_setting(key: str) -> str | None:

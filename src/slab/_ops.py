@@ -27,7 +27,7 @@ def engines_overview(registry_path: str | os.PathLike[str] | None = None) -> dic
         >>> os.environ.pop("SLAB_ENGINES", None) and None
         >>> overview = engines_overview()
         >>> overview["builtin"]
-        ['emt', 'lammps', 'lj', 'mace', 'qe', 'rootstock']
+        ['emt', 'lammps', 'lj', 'qe', 'rootstock']
     """
     from slab.backends import available_engines
     from slab.engines import find_registry_path, load_registry

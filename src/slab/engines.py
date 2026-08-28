@@ -77,7 +77,7 @@ LAYOUT_VERSION = 1
 REGISTRY_ENV_VAR = "SLAB_ENGINES"
 _USER_REGISTRY = Path("~/.config/slab/engines.json")
 _PROBE_TIMEOUT_S = 120
-_BUILTIN_ENGINES = ("emt", "lammps", "lj", "mace", "qe", "rootstock")
+_BUILTIN_ENGINES = ("emt", "lammps", "lj", "qe", "rootstock")
 # Variables ASE reads exactly once, at import time — and slab imports ASE
 # before any registry entry runs, so declaring them in an entry's env would
 # silently never apply. Refused at validation instead (see EngineSpec).
@@ -226,7 +226,7 @@ class EngineRegistry(BaseModel):
             )
         # Engine names are canonical: lowercase, unpadded. Lookups normalize
         # the caller's name the same way, so a declared name and a resolvable
-        # name can never diverge (a case-variant like "MACE" would otherwise
+        # name can never diverge (a case-variant like "QE" would otherwise
         # validate and then silently resolve to the built-in).
         non_canonical = sorted(n for n in self.engines if n != n.strip().lower())
         if non_canonical:
@@ -239,7 +239,7 @@ class EngineRegistry(BaseModel):
         if shadowed:
             raise ValueError(
                 f"engine registry redefines built-in engine name(s) {shadowed}; "
-                f"pick distinct names (e.g. 'mace-mp' instead of 'mace')"
+                f"pick distinct names (e.g. 'qe-delta' instead of 'qe')"
             )
         return self
 

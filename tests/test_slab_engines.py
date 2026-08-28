@@ -54,13 +54,24 @@ def test_registry_refuses_newer_layout() -> None:
         EngineRegistry.model_validate({"layout_version": 99, "engines": {}})
 
 
-@pytest.mark.parametrize("shadowing", ["mace", "qe", "lammps"])
+@pytest.mark.parametrize("shadowing", ["qe", "lammps"])
 def test_registry_refuses_builtin_shadowing(shadowing: str) -> None:
-    with pytest.raises(ValidationError, match="mace-mp"):
+    with pytest.raises(ValidationError, match="qe-delta"):
         EngineRegistry.model_validate({"engines": {shadowing: EMT_SPEC}})
 
 
-@pytest.mark.parametrize("sneaky", ["MACE", "Emt", "rootstock ", " lj", "EMT"])
+def test_registry_permits_the_retired_mace_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """After the mace built-in retired, a site may declare ``mace`` as an
+    alias for its rootstock checkpoint. Reserving the name would block the
+    migration path; check the registry accepts it and it resolves."""
+    registry = _write_registry(
+        tmp_path / "engines.json", {"cluster": "delta", "engines": {"mace": EMT_SPEC}}
+    )
+    monkeypatch.setenv("SLAB_ENGINES", str(registry))
+    assert type(get_calculator("mace")).__name__ == "EMT"
+
+
+@pytest.mark.parametrize("sneaky", ["QE", "Emt", "rootstock ", " lj", "EMT"])
 def test_registry_refuses_case_and_whitespace_variants(sneaky: str) -> None:
     """A case-variant of a built-in would validate and then silently resolve
     to the built-in (lookups normalize); canonical names close the bypass."""
@@ -213,7 +224,6 @@ def test_get_calculator_resolves_registry_engine(
         "emt",
         "lammps",
         "lj",
-        "mace",
         "qe",
         "rootstock",
         "emt-cluster",

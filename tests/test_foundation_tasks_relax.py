@@ -32,27 +32,12 @@ def test_emt_and_lj_calculators_build() -> None:
 
 
 def test_unknown_engine_lists_options() -> None:
-    with pytest.raises(EngineNotAvailableError, match="emt, lammps, lj, mace, qe, rootstock"):
+    with pytest.raises(EngineNotAvailableError, match="emt, lammps, lj, qe, rootstock"):
         get_calculator("definitely-unknown-engine")
 
 
 def test_engine_list_is_sorted_and_stable() -> None:
-    assert available_engines() == ("emt", "lammps", "lj", "mace", "qe", "rootstock")
-
-
-def test_mace_missing_gives_install_hint(monkeypatch: pytest.MonkeyPatch) -> None:
-    import builtins
-
-    real_import = builtins.__import__
-
-    def hide_mace(name: str, *args: object, **kwargs: object) -> object:
-        if name.startswith("mace"):
-            raise ImportError("No module named 'mace'")
-        return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(builtins, "__import__", hide_mace)
-    with pytest.raises(EngineNotAvailableError, match=r"pip install 'slab-stack\[mace\]'"):
-        get_calculator("mace")
+    assert available_engines() == ("emt", "lammps", "lj", "qe", "rootstock")
 
 
 # -- relax, untraced -------------------------------------------------------------------
@@ -395,28 +380,3 @@ def test_relax_provenance_resolved_before_computation(
     assert info["engine_source"] == "registry:delta"
 
 
-def test_mace_extra_importable_when_installed() -> None:
-    """With slab[mace] installed, the import path the factory uses must resolve.
-
-    (Building the calculator itself downloads a model checkpoint, so the real
-    end-to-end exercise lives in examples/demo.py, not the unit suite.)
-    """
-    pytest.importorskip("mace.calculators", reason="mace-torch not installed")
-    from mace.calculators import mace_mp
-
-    assert callable(mace_mp)
-
-
-def test_mace_identity_names_model_and_dist_version() -> None:
-    """engine='mace' cache identity must say which MLIP actually runs: the
-    resolved checkpoint (slab's own 'small' default included) and the
-    mace-torch version — changing either must invalidate honestly."""
-    from importlib.metadata import version
-
-    pytest.importorskip("mace", reason="mace extra not installed")
-    from slab.backends import describe_engine
-
-    identity = describe_engine("mace")
-    assert identity["model"] == "small"
-    assert identity["version"] == version("mace-torch")
-    assert describe_engine("mace", {"model": "medium"})["model"] == "medium"
