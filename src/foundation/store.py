@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Protocol, Self, cast, runtime_checkable
 
 from foundation.errors import (
     AmbiguousRunIdError,
+    AmbiguousSessionError,
     ArtifactExistsError,
     ArtifactNotFoundError,
     IllegalTransitionError,
@@ -31,6 +32,7 @@ from foundation.errors import (
     RunNotFoundError,
     RunStateError,
     SchemaVersionError,
+    SessionNotFoundError,
     StorageError,
 )
 from foundation.lifecycle import (
@@ -46,12 +48,13 @@ from foundation.models import (
     ArtifactRole,
     CheckResult,
     Run,
+    SessionSummary,
     TaskRecord,
     Transition,
     utcnow,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -60,6 +63,7 @@ CREATE TABLE IF NOT EXISTS runs (
     state            TEXT NOT NULL,
     status           TEXT NOT NULL,
     intent           TEXT,
+    session          TEXT,
     meta             TEXT NOT NULL DEFAULT '{}',
     created_at       TEXT NOT NULL,
     updated_at       TEXT NOT NULL,
@@ -72,6 +76,7 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE INDEX IF NOT EXISTS ix_runs_state ON runs(state);
 CREATE INDEX IF NOT EXISTS ix_runs_status ON runs(status);
 CREATE INDEX IF NOT EXISTS ix_runs_created_at ON runs(created_at);
+CREATE INDEX IF NOT EXISTS ix_runs_session ON runs(session);
 CREATE TABLE IF NOT EXISTS transitions (
     seq         INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id      TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -134,6 +139,10 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         "ALTER TABLE runs ADD COLUMN failure TEXT",
         "ALTER TABLE tasks ADD COLUMN failure TEXT",
     ),
+    3: (  # which client session created the run
+        "ALTER TABLE runs ADD COLUMN session TEXT",
+        "CREATE INDEX IF NOT EXISTS ix_runs_session ON runs(session)",
+    ),
 }
 
 
@@ -153,14 +162,23 @@ class RunStore(Protocol):
         """Resolve a full id or unique prefix to the full run id."""
         ...
 
+    def resolve_session(self, session: str) -> str:
+        """Resolve a full session id or unique prefix to the full session id."""
+        ...
+
     def list_runs(
         self,
         *,
         state: LifecycleState | str | None = None,
         status: ExecutionStatus | str | None = None,
+        session: str | None = None,
         limit: int | None = None,
     ) -> list[Run]:
         """List runs, newest first, optionally filtered."""
+        ...
+
+    def list_sessions(self, *, limit: int | None = None) -> list[SessionSummary]:
+        """Summarize the sessions that created runs, newest first."""
         ...
 
     def transition(
@@ -344,15 +362,17 @@ class SQLiteRunStore:
         with self._txn() as conn:
             try:
                 conn.execute(
-                    "INSERT INTO runs (id, name, state, status, intent, meta, created_at,"
-                    " updated_at, state_entered_at, started_at, finished_at, error, failure)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO runs (id, name, state, status, intent, session, meta,"
+                    " created_at, updated_at, state_entered_at, started_at, finished_at,"
+                    " error, failure)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         run.id,
                         run.name,
                         run.state.value,
                         run.status.value,
                         run.intent,
+                        run.session,
                         meta_json,
                         run.created_at.isoformat(),
                         run.updated_at.isoformat(),
@@ -916,15 +936,21 @@ class SQLiteRunStore:
         *,
         state: LifecycleState | str | None = None,
         status: ExecutionStatus | str | None = None,
+        session: str | None = None,
         limit: int | None = None,
     ) -> list[Run]:
-        """List runs, newest first, optionally filtered by state and/or status.
+        """List runs, newest first, optionally filtered by state, status, session.
+
+        The *session* filter takes a full session id or a unique prefix, and is
+        resolved the same way run ids are.
 
         Examples:
             >>> store = SQLiteRunStore(":memory:")
             >>> _ = store.create(Run(name="a"))
-            >>> _ = store.create(Run(name="b"))
+            >>> _ = store.create(Run(name="b", session="chat-1"))
             >>> [r.name for r in store.list_runs(state="quarantined", limit=1)]
+            ['b']
+            >>> [r.name for r in store.list_runs(session="chat")]
             ['b']
             >>> store.list_runs(state=LifecycleState.PROMOTED)
             []
@@ -940,6 +966,9 @@ class SQLiteRunStore:
         if status is not None:
             clauses.append("status = ?")
             params.append(ExecutionStatus(status).value)
+        if session is not None:
+            clauses.append("session = ?")
+            params.append(self.resolve_session(session))
         sql = "SELECT * FROM runs"
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
@@ -950,6 +979,85 @@ class SQLiteRunStore:
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
         return [_row_to_run(row) for row in rows]
+
+    def resolve_session(self, session: str) -> str:
+        """Resolve a full session id or unique prefix to the full session id.
+
+        An exact match always wins, even if it is also a prefix of other
+        sessions — the same rule run ids follow.
+
+        Raises:
+            SessionNotFoundError: No run carries a matching session.
+            AmbiguousSessionError: The prefix matches several sessions.
+
+        Examples:
+            >>> store = SQLiteRunStore(":memory:")
+            >>> _ = store.create(Run(session="20260828-013504-48123"))
+            >>> store.resolve_session("20260828")
+            '20260828-013504-48123'
+            >>> store.close()
+        """
+        if not session:
+            raise ValueError("session id (or prefix) must be non-empty")
+        with self._lock:
+            exact = self._conn.execute(
+                "SELECT 1 FROM runs WHERE session = ? LIMIT 1", (session,)
+            ).fetchone()
+            if exact is not None:
+                return session
+            escaped = session.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            rows = self._conn.execute(
+                "SELECT DISTINCT session FROM runs WHERE session LIKE ? ESCAPE '\\'"
+                " ORDER BY session LIMIT 6",
+                (escaped + "%",),
+            ).fetchall()
+        if not rows:
+            raise SessionNotFoundError(session)
+        if len(rows) > 1:
+            raise AmbiguousSessionError(session, [str(r["session"]) for r in rows])
+        return str(rows[0]["session"])
+
+    def list_sessions(self, *, limit: int | None = None) -> list[SessionSummary]:
+        """Summarize the sessions that created runs, newest run first.
+
+        Runs with no session are not a session and never appear here; count
+        them with ``list_runs`` if you need the number.
+
+        Examples:
+            >>> store = SQLiteRunStore(":memory:")
+            >>> _ = store.create(Run(session="chat-1"))
+            >>> _ = store.create(Run(session="chat-1"))
+            >>> _ = store.create(Run())
+            >>> [(s.session, s.runs, s.breakdown()) for s in store.list_sessions()]
+            [('chat-1', 2, '2 quarantined')]
+            >>> store.close()
+        """
+        if limit is not None and limit < 0:
+            raise ValueError(f"limit must be >= 0, got {limit}")
+        sql = (
+            "SELECT session, state, COUNT(*) AS n, MAX(created_at) AS newest"
+            " FROM runs WHERE session IS NOT NULL GROUP BY session, state"
+        )
+        with self._lock:
+            rows = self._conn.execute(sql).fetchall()
+        states: dict[str, dict[str, int]] = {}
+        newest: dict[str, str] = {}
+        for row in rows:
+            session = str(row["session"])
+            states.setdefault(session, {})[str(row["state"])] = int(row["n"])
+            if str(row["newest"]) > newest.get(session, ""):
+                newest[session] = str(row["newest"])
+        summaries = [
+            SessionSummary(
+                session=session,
+                runs=sum(counts.values()),
+                states=counts,
+                newest_at=datetime.fromisoformat(newest[session]),
+            )
+            for session, counts in states.items()
+        ]
+        summaries.sort(key=lambda s: (s.newest_at, s.session), reverse=True)
+        return summaries if limit is None else summaries[:limit]
 
     def history(self, run_id: str) -> list[Transition]:
         """Return the run's lifecycle transitions, oldest first.
@@ -1092,6 +1200,7 @@ def _row_to_run(row: sqlite3.Row) -> Run:
         state=LifecycleState(row["state"]),
         status=ExecutionStatus(row["status"]),
         intent=row["intent"],
+        session=row["session"],
         meta=json.loads(row["meta"]),
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),

@@ -242,6 +242,36 @@ class AmbiguousRunIdError(FoundationError):
         super().__init__(f"run id prefix {prefix!r} is ambiguous ({count} matches): {shown}{more}")
 
 
+class SessionNotFoundError(FoundationError):
+    """No run carries the given session id or id prefix."""
+
+    def __init__(self, session: str) -> None:
+        self.session = session
+        super().__init__(
+            f"no run carries session {session!r}; list the known ones with "
+            f"'foundation sessions'"
+        )
+
+
+class AmbiguousSessionError(FoundationError):
+    """A session id prefix matches more than one session.
+
+    Attributes:
+        prefix: The prefix that was looked up.
+        matches: Matching session ids (capped at 6 by the store).
+    """
+
+    def __init__(self, prefix: str, matches: Sequence[str]) -> None:
+        self.prefix = prefix
+        self.matches = list(matches)
+        count = "6 or more" if len(self.matches) >= 6 else str(len(self.matches))
+        shown = ", ".join(self.matches[:5])
+        more = ", ..." if len(self.matches) > 5 else ""
+        super().__init__(
+            f"session prefix {prefix!r} is ambiguous ({count} matches): {shown}{more}"
+        )
+
+
 class RunExistsError(FoundationError):
     """A run with this id already exists in the store."""
 

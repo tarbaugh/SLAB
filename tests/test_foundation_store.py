@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from foundation import (
     AmbiguousRunIdError,
+    AmbiguousSessionError,
     ArtifactExistsError,
     ArtifactNotFoundError,
     ArtifactRole,
@@ -23,6 +24,7 @@ from foundation import (
     RunStateError,
     RunStore,
     SchemaVersionError,
+    SessionNotFoundError,
     SQLiteRunStore,
     StorageError,
     TaskRecord,
@@ -456,6 +458,8 @@ def test_migrates_v1_database_in_place(db_path: Path) -> None:
     conn = sqlite3.connect(db_path)
     conn.execute("ALTER TABLE runs DROP COLUMN failure")
     conn.execute("ALTER TABLE tasks DROP COLUMN failure")
+    conn.execute("DROP INDEX ix_runs_session")
+    conn.execute("ALTER TABLE runs DROP COLUMN session")
     conn.execute("PRAGMA user_version = 1")
     conn.close()
 
@@ -468,9 +472,117 @@ def test_migrates_v1_database_in_place(db_path: Path) -> None:
         failed = s2.set_status(run.id, "running")
         failed = s2.set_status(run.id, "failed", error="x", failure={"type": "X", "message": "y"})
         assert failed.failure == {"type": "X", "message": "y"}
+        assert loaded.session is None  # every later migration ran too
         conn = sqlite3.connect(db_path)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
         conn.close()
+
+
+def test_migrates_v2_database_in_place(db_path: Path) -> None:
+    """A workspace created before session stamps (schema v2) opens cleanly:
+    the migration adds the column and old rows read back with session=None."""
+    with SQLiteRunStore(db_path) as s1:
+        run = s1.create(Run(name="pre-session"))
+    # Rewind the database to schema v2 by dropping the v3 column and index.
+    conn = sqlite3.connect(db_path)
+    conn.execute("DROP INDEX ix_runs_session")
+    conn.execute("ALTER TABLE runs DROP COLUMN session")
+    conn.execute("PRAGMA user_version = 2")
+    conn.close()
+
+    with SQLiteRunStore(db_path) as s2:
+        loaded = s2.get(run.id)
+        assert loaded.name == "pre-session"
+        assert loaded.session is None
+        assert s2.list_sessions() == []
+        # and the migrated column is fully writable and indexed
+        fresh = s2.create(Run(name="post-session", session="chat-1"))
+        assert s2.get(fresh.id).session == "chat-1"
+        assert [r.id for r in s2.list_runs(session="chat-1")] == [fresh.id]
+        conn = sqlite3.connect(db_path)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list(runs)")}
+        assert "ix_runs_session" in indexes
+        conn.close()
+
+
+# -- sessions --------------------------------------------------------------------------
+
+
+def test_session_stamp_roundtrips_and_filters(store: SQLiteRunStore) -> None:
+    first = store.create(Run(name="a", session="chat-1"))
+    second = store.create(Run(name="b", session="chat-1"))
+    other = store.create(Run(name="c", session="chat-2"))
+    unstamped = store.create(Run(name="d"))
+    assert store.get(first.id).session == "chat-1"
+    assert store.get(unstamped.id).session is None
+    assert [r.id for r in store.list_runs(session="chat-1")] == [second.id, first.id]
+    assert [r.id for r in store.list_runs(session="chat-2")] == [other.id]
+
+
+def test_list_runs_combines_session_with_other_filters(store: SQLiteRunStore) -> None:
+    kept = store.create(Run(name="a", session="chat-1"))
+    store.transition(kept.id, V)
+    store.create(Run(name="b", session="chat-1"))
+    store.create(Run(name="c", session="chat-2"))
+    assert [r.id for r in store.list_runs(session="chat-1", state=V)] == [kept.id]
+    assert len(store.list_runs(session="chat-1", limit=1)) == 1
+
+
+def test_list_sessions_counts_states_and_orders_by_newest(store: SQLiteRunStore) -> None:
+    old = store.create(
+        Run(name="a", session="chat-1", created_at=datetime(2026, 8, 1, tzinfo=UTC))
+    )
+    store.transition(old.id, V)
+    store.create(Run(name="b", session="chat-1", created_at=datetime(2026, 8, 2, tzinfo=UTC)))
+    store.create(Run(name="c", session="chat-2", created_at=datetime(2026, 8, 3, tzinfo=UTC)))
+    store.create(Run(name="d"))  # unstamped: not a session
+
+    summaries = store.list_sessions()
+    assert [s.session for s in summaries] == ["chat-2", "chat-1"]
+    first, second = summaries
+    assert (first.runs, first.states) == (1, {"quarantined": 1})
+    assert (second.runs, second.states) == (2, {"quarantined": 1, "verified": 1})
+    assert second.newest_at == datetime(2026, 8, 2, tzinfo=UTC)
+    assert second.breakdown() == "1 quarantined, 1 verified"
+
+
+def test_list_sessions_limit_and_validation(store: SQLiteRunStore) -> None:
+    for index in range(3):
+        store.create(
+            Run(session=f"chat-{index}", created_at=datetime(2026, 8, 1 + index, tzinfo=UTC))
+        )
+    assert [s.session for s in store.list_sessions(limit=2)] == ["chat-2", "chat-1"]
+    assert store.list_sessions(limit=0) == []
+    with pytest.raises(ValueError, match="limit must be >= 0"):
+        store.list_sessions(limit=-1)
+
+
+def test_resolve_session_exact_prefix_and_failures(store: SQLiteRunStore) -> None:
+    store.create(Run(session="20260828-013504-48123"))
+    store.create(Run(session="20260829-090000-51001"))
+    assert store.resolve_session("20260828-013504-48123") == "20260828-013504-48123"
+    assert store.resolve_session("20260828") == "20260828-013504-48123"
+    with pytest.raises(AmbiguousSessionError, match="ambiguous"):
+        store.resolve_session("2026")
+    with pytest.raises(SessionNotFoundError, match="foundation sessions"):
+        store.resolve_session("nope")
+    with pytest.raises(ValueError, match="non-empty"):
+        store.resolve_session("")
+
+
+def test_resolve_session_prefers_exact_over_prefix(store: SQLiteRunStore) -> None:
+    """A session that is also a prefix of another resolves to itself."""
+    exact = store.create(Run(session="chat-1"))
+    store.create(Run(session="chat-10"))
+    assert store.resolve_session("chat-1") == "chat-1"
+    assert [r.id for r in store.list_runs(session="chat-1")] == [exact.id]
+
+
+def test_list_runs_unknown_session_is_loud(store: SQLiteRunStore) -> None:
+    store.create(Run(session="chat-1"))
+    with pytest.raises(SessionNotFoundError):
+        store.list_runs(session="chat-2")
 
 
 # -- fidelity --------------------------------------------------------------------------

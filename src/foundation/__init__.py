@@ -33,6 +33,7 @@ from foundation.checks import Assertion, converged, finite, units, within_bounds
 from foundation.errors import (
     AmbiguousHashError,
     AmbiguousRunIdError,
+    AmbiguousSessionError,
     ArtifactExistsError,
     ArtifactNotFoundError,
     FoundationError,
@@ -47,6 +48,7 @@ from foundation.errors import (
     SchemaVersionError,
     ScriptExitError,
     SerializationError,
+    SessionNotFoundError,
     StorageError,
 )
 from foundation.lifecycle import (
@@ -68,6 +70,7 @@ from foundation.models import (
     ArtifactRole,
     CheckResult,
     Run,
+    SessionSummary,
     TaskRecord,
     Transition,
     utcnow,
@@ -82,7 +85,13 @@ from foundation.retention import (
     gc,
     purge_expired,
 )
-from foundation.runtime import ActiveRun, Workspace, check, current_run
+from foundation.runtime import (
+    ActiveRun,
+    Workspace,
+    check,
+    current_run,
+    resolve_session_id,
+)
 from foundation.serialize import dumps, fingerprint, loads
 from foundation.store import RunStore, SQLiteRunStore
 from foundation.tracing import task
@@ -97,6 +106,7 @@ __all__ = [
     "ActiveRun",
     "AmbiguousHashError",
     "AmbiguousRunIdError",
+    "AmbiguousSessionError",
     "ArtifactExistsError",
     "ArtifactNotFoundError",
     "ArtifactRef",
@@ -125,6 +135,8 @@ __all__ = [
     "SchemaVersionError",
     "ScriptExitError",
     "SerializationError",
+    "SessionNotFoundError",
+    "SessionSummary",
     "StateRule",
     "StorageError",
     "TaskRecord",
@@ -144,6 +156,7 @@ __all__ = [
     "loads",
     "purge_expired",
     "requires_force",
+    "resolve_session_id",
     "task",
     "units",
     "utcnow",

@@ -28,6 +28,11 @@ def _isolated_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # The machine-memory store reads this one; a developer with memories of
     # their own must not have them enter the suite's catalogs.
     monkeypatch.delenv("SLAB_MEMORY_DIR", raising=False)
+    # Runs read this one to stamp the session that created them. 'mason chat'
+    # and 'mason run' export it for their child processes, and that export
+    # outlives the CLI call inside one pytest process, so clear it for every
+    # test; a test that wants a session stamp sets the variable itself.
+    monkeypatch.delenv("SLAB_SESSION", raising=False)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config-isolated"))
     # Rootstock discovers installs on its own: $ROOTSTOCK_ROOT, then a user
     # config at a literal ~/.config/rootstock/config.toml that ignores

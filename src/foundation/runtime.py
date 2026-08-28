@@ -61,6 +61,34 @@ _CURRENT: ContextVar[ActiveRun | None] = ContextVar("slab_active_run", default=N
 _CheckFn = Callable[[], object]
 
 
+SESSION_ENV = "SLAB_SESSION"
+
+
+def resolve_session_id(explicit: str | None = None) -> str | None:
+    """The session stamp for a new run: explicit argument > ``$SLAB_SESSION``.
+
+    Foundation treats the value as an opaque string. Mason passes its chat's
+    transcript stem; another client passes whatever identifies its own
+    conversation. An empty value means "no session", so an exported but blank
+    variable never stamps runs with the empty string.
+
+    Examples:
+        >>> import os
+        >>> os.environ.pop("SLAB_SESSION", None) and None
+        >>> resolve_session_id("chat-1")
+        'chat-1'
+        >>> resolve_session_id() is None
+        True
+        >>> os.environ["SLAB_SESSION"] = "from-env"
+        >>> (resolve_session_id(), resolve_session_id("explicit"))
+        ('from-env', 'explicit')
+        >>> del os.environ["SLAB_SESSION"]
+    """
+    if explicit:
+        return explicit
+    return os.environ.get(SESSION_ENV) or None
+
+
 def current_run() -> ActiveRun | None:
     """Return the run active in this context, or None.
 
@@ -352,7 +380,9 @@ class Workspace:
         self.close()
 
     @contextmanager
-    def start_run(self, *, name: str = "", intent: str | None = None) -> Iterator[ActiveRun]:
+    def start_run(
+        self, *, name: str = "", intent: str | None = None, session: str | None = None
+    ) -> Iterator[ActiveRun]:
         """Open a traced run; yield its :class:`ActiveRun` handle.
 
         The run is created ``quarantined``/``running``. On normal exit it is
@@ -362,6 +392,10 @@ class Workspace:
         and a structured failure record (trimmed traceback and diagnostic
         notes, see :func:`foundation.errors.failure_record`) — checks are skipped,
         and the exception propagates.
+
+        *session* stamps the run with the client session that created it (see
+        :func:`resolve_session_id`), so one conversation's runs can be listed
+        and promoted together.
 
         Raises:
             NestedRunError: A run is already active in this context.
@@ -374,11 +408,15 @@ class Workspace:
             >>> final = ws.runs.get(run.id)
             >>> (final.status.value, final.state.value)  # no checks: stays quarantined
             ('completed', 'quarantined')
+            >>> final.session is None
+            True
             >>> ws.close()
         """
         if _CURRENT.get() is not None:
             raise NestedRunError()
-        created = self.runs.create(Run(name=name, intent=intent))
+        created = self.runs.create(
+            Run(name=name, intent=intent, session=resolve_session_id(session))
+        )
         self.runs.set_status(created.id, ExecutionStatus.RUNNING)
         active = ActiveRun(self.runs, self.artifacts, created.id)
         token = _CURRENT.set(active)

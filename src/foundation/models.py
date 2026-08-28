@@ -71,6 +71,9 @@ class Run(BaseModel):
         state: Lifecycle (retention) state.
         status: Execution status, orthogonal to ``state``.
         intent: Free-text narrative provenance — the stated goal of the run.
+        session: Opaque id of the client session that created the run (a Mason
+            chat, an MCP client). Runs sharing one id were produced by one
+            conversation, so they can be listed and promoted together.
         meta: Small JSON-serializable extras; not for bulk data.
         created_at / updated_at: Aware UTC timestamps, maintained by the store.
         state_entered_at: When the run entered its current lifecycle state —
@@ -100,6 +103,7 @@ class Run(BaseModel):
     state: LifecycleState = LifecycleState.QUARANTINED
     status: ExecutionStatus = ExecutionStatus.PENDING
     intent: str | None = None
+    session: str | None = None
     meta: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
@@ -122,6 +126,50 @@ class Run(BaseModel):
                 if data.get(key) is None:
                     data = {**data, key: created}
         return data
+
+
+class SessionSummary(BaseModel):
+    """One client session's runs, counted. Immutable.
+
+    Produced by :meth:`foundation.store.SQLiteRunStore.list_sessions`, which
+    groups the runs table by :attr:`Run.session`. It answers the question a
+    user asks before promoting a session: which chat produced how many runs,
+    in what states, and how recently.
+
+    Examples:
+        >>> s = SessionSummary(
+        ...     session="20260828-013504-48123",
+        ...     runs=4,
+        ...     states={"verified": 3, "quarantined": 1},
+        ...     newest_at=utcnow(),
+        ... )
+        >>> s.breakdown()
+        '3 verified, 1 quarantined'
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    session: str
+    runs: int = Field(ge=0)
+    states: dict[str, int] = Field(default_factory=dict)
+    newest_at: datetime
+
+    def breakdown(self) -> str:
+        """The state counts as one line, most common first, ties by state name.
+
+        Examples:
+            >>> SessionSummary(
+            ...     session="s", runs=2, states={"promoted": 1, "expired": 1},
+            ...     newest_at=utcnow(),
+            ... ).breakdown()
+            '1 expired, 1 promoted'
+            >>> SessionSummary(session="s", runs=0, newest_at=utcnow()).breakdown()
+            'no runs'
+        """
+        if not self.states:
+            return "no runs"
+        ordered = sorted(self.states.items(), key=lambda item: (-item[1], item[0]))
+        return ", ".join(f"{count} {state}" for state, count in ordered)
 
 
 class ArtifactRole(StrEnum):

@@ -17,6 +17,7 @@ from foundation import (
     current_run,
     finite,
     loads,
+    resolve_session_id,
 )
 
 Q = LifecycleState.QUARANTINED
@@ -278,3 +279,51 @@ def test_numpy_bool_check_return_coerced(ws: Workspace) -> None:
     assert ws.runs.get(run.id).state is V
     (result,) = ws.runs.list_check_results(run.id)
     assert result.passed is True
+
+
+# -- session stamps ----------------------------------------------------------
+
+
+def test_start_run_stamps_explicit_session(ws: Workspace) -> None:
+    with ws.start_run(name="probe", session="chat-1") as run:
+        pass
+    assert ws.runs.get(run.id).session == "chat-1"
+
+
+def test_start_run_falls_back_to_the_environment(
+    ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SLAB_SESSION", "from-env")
+    with ws.start_run(name="probe") as run:
+        pass
+    assert ws.runs.get(run.id).session == "from-env"
+
+
+def test_explicit_session_beats_the_environment(
+    ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SLAB_SESSION", "from-env")
+    with ws.start_run(name="probe", session="explicit") as run:
+        pass
+    assert ws.runs.get(run.id).session == "explicit"
+
+
+def test_unstamped_run_has_no_session(ws: Workspace, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SLAB_SESSION", raising=False)
+    with ws.start_run(name="probe") as run:
+        pass
+    assert ws.runs.get(run.id).session is None
+
+
+def test_blank_environment_session_never_stamps(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SLAB_SESSION", "")
+    assert resolve_session_id() is None
+    assert resolve_session_id("chat-1") == "chat-1"
+
+
+def test_failed_run_keeps_its_session(ws: Workspace) -> None:
+    """A session promote must be able to see the failures it refuses."""
+    with pytest.raises(RuntimeError), ws.start_run(name="boom", session="chat-1") as run:
+        raise RuntimeError("nope")
+    failed = ws.runs.get(run.id)
+    assert (failed.session, failed.status) == ("chat-1", ExecutionStatus.FAILED)
