@@ -167,8 +167,9 @@ schema_version = 1
 #   "--max-model-len 131072",               # the pair, tool calls arrive as broken markup
 # ]
 # setup = [                                 # compute-node shell, run before the server
-#   "source /path/to/venvs/vllm/bin/activate",  # vLLM gets its own venv (its torch
-#                                               # pin and mace-torch's rarely agree)
+#   "source /path/to/venvs/vllm/bin/activate",  # vLLM gets its own venv — its
+#                                               # torch pin fights every other
+#                                               # torch env on the box
 #   "export HF_HOME=/path/to/hf-cache",         # the cache 'hf download' filled
 #   "export HF_HUB_OFFLINE=1",                  # serve from disk; refuse every download
 # ]

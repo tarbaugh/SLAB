@@ -49,9 +49,9 @@ number is a rumor. A minimal workflow script:
 The task vocabulary is `relax` (BFGS on positions) and `single_point` (one \
 energy+forces evaluation, no optimization; its info has no 'converged' key). \
 Chain them for the canonical two-fidelity flow: relax under a cheap engine — \
-an MLIP like `mace` — then single_point the relaxed structure under the \
-expensive one, and check the DFT residual force to confirm the cheap \
-geometry held up.
+a served MLIP checkpoint id (call `list_engines` for the ids available \
+here) — then single_point the relaxed structure under the expensive one, \
+and check the DFT residual force to confirm the cheap geometry held up.
 
 Write the script with write_file, run it with launch_workflow (give an intent — \
 why this run exists), read the outcome, and cite the run id. Use list_engines \
@@ -113,8 +113,9 @@ in minutes, and prefer a converged cheap answer to an unconverged expensive one:
 - Engines: prefer `emt` or `lj` for structure and workflow shakeouts, a \
 classical potential through `lammps` when you have the potential file \
 (classical force fields are laptop-friendly at real system sizes), and a \
-small MACE model when chemistry actually matters. Reach for `qe` only when \
-the question needs DFT, and then keep it small.
+served MLIP checkpoint (via rootstock) when one is declared and chemistry \
+actually matters — call `list_engines` to see what is available. Reach for \
+`qe` only when the question needs DFT, and then keep it small.
 - Cells: single-digit atoms for DFT, tens of atoms for MLIPs. Build the smallest \
 cell that can answer the question; do not run a 2x2x2 supercell to check that a \
 script works.
@@ -144,8 +145,8 @@ Production settings are appropriate here. Use the `balanced` protocol by \
 default and `stringent` when the result must be publishable. Universal MLIPs \
 on a cluster are *served*, never pip-installed: call `list_engines` and use \
 a served checkpoint id directly as the engine name for the cheap-relax leg \
-(e.g. engine="mace-mp-0-medium") — do not install mace-torch into the \
-cluster environment. Anything longer \
+(e.g. engine="mace-mp-0-medium"). SLAB has no in-process MLIP path — a \
+checkpoint id resolved through rootstock is the only route. Anything longer \
 than a few minutes goes through `submit_job` (typically wrapping \
 `foundation run workflow.py`) rather than running in this process — then poll \
 `job_status`. Keep interactive work on this node small.""",

@@ -1126,8 +1126,9 @@ def render_sandbox_script(
 
     # GPU passthrough derives from the target partition: a gres that names
     # gpus means the job will hold one, and --nv mounts the host's driver
-    # stack so a torch-backed engine (mace) can see it. A CPU partition
-    # renders without it, and the container stays minimal.
+    # stack so a torch-backed served engine (a rootstock MLIP worker) can
+    # see it. A CPU partition renders without it, and the container stays
+    # minimal.
     _, partition_spec = hpc.resolve_partition(partition)
     isolation_flags = "--containall --no-home --cleanenv --net --network none"
     if partition_spec.gres and "gpu" in partition_spec.gres.lower():

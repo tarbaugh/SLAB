@@ -29,12 +29,13 @@ from pathlib import Path
 from slab.config import EnginesConfig, user_config_path
 
 #: Prompt order: the engines the agent reaches for first come first.
-_CANONICAL = ("mace", "qe", "lammps", "rootstock", "emt", "lj")
+_CANONICAL = ("rootstock", "qe", "lammps", "emt", "lj")
 
-#: Notes that load regardless of configuration: these engines need no
-#: ``[engines]`` table to work (ASE built-ins; mace's note explains its own
-#: two availability routes).
-_ALWAYS = frozenset({"emt", "lj", "mace"})
+#: Notes that load regardless of configuration. ``emt`` and ``lj`` are ASE
+#: built-ins that need no table. ``rootstock`` is here because it is the only
+#: route to an MLIP the agent has, and the note names the route a machine
+#: without ``[engines.rootstock]`` must configure to reach one.
+_ALWAYS = frozenset({"emt", "lj", "rootstock"})
 
 
 def _builtin_root() -> Path:
@@ -50,10 +51,10 @@ def enabled_notes(engines: EnginesConfig) -> tuple[str, ...]:
 
     Examples:
         >>> enabled_notes(EnginesConfig())
-        ('mace', 'emt', 'lj')
+        ('rootstock', 'emt', 'lj')
         >>> cfg = EnginesConfig.model_validate({"qe": {"command": "pw.x"}})
         >>> enabled_notes(cfg)
-        ('mace', 'qe', 'emt', 'lj')
+        ('rootstock', 'qe', 'emt', 'lj')
     """
     names = []
     for name in _CANONICAL:

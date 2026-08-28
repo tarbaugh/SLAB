@@ -29,11 +29,11 @@ def test_every_canonical_note_ships_and_is_substantive() -> None:
 
 
 def test_selection_follows_the_engines_tables() -> None:
-    assert enabled_notes(EnginesConfig()) == ("mace", "emt", "lj")
+    assert enabled_notes(EnginesConfig()) == ("rootstock", "emt", "lj")
     cfg = EnginesConfig.model_validate(
         {"qe": {"command": "srun pw.x"}, "lammps": {"command": "lmp"}}
     )
-    assert enabled_notes(cfg) == ("mace", "qe", "lammps", "emt", "lj")
+    assert enabled_notes(cfg) == ("rootstock", "qe", "lammps", "emt", "lj")
     served = EnginesConfig.model_validate({"rootstock": {"cluster": "delta"}})
     assert "rootstock" in enabled_notes(served)
 
@@ -43,14 +43,15 @@ def test_a_user_note_replaces_the_packaged_one(
 ) -> None:
     xdg = tmp_path / "xdg"
     (xdg / "slab" / "notes").mkdir(parents=True)
-    (xdg / "slab" / "notes" / "mace.md").write_text(
-        "Our MACE runs on the H100 partition only.\n"
+    (xdg / "slab" / "notes" / "rootstock.md").write_text(
+        "Our rootstock install serves mace-mp-0-medium only.\n"
     )
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
-    assert note_text("mace") == "Our MACE runs on the H100 partition only."
+    assert note_text("rootstock") == "Our rootstock install serves mace-mp-0-medium only."
     block = notes_block(EnginesConfig())
-    assert "H100 partition" in block
-    assert "~/.cache/mace" not in block  # the packaged note is fully replaced
+    assert "mace-mp-0-medium only" in block
+    # A sentence from the packaged note must not survive the override.
+    assert "worker subprocess" not in block
     # Other notes still come from the package.
     assert "effective-medium theory" in block
 
@@ -58,7 +59,7 @@ def test_a_user_note_replaces_the_packaged_one(
 def test_the_system_prompt_carries_the_notes_by_default(tmp_path: Path) -> None:
     (content,) = [m["content"] for m in system_messages(_session(tmp_path))]
     assert "# Software notes" in content
-    assert "## mace" in content
+    assert "## rootstock" in content
     # No [engines.qe] table in this project, so no qe note.
     assert "## qe" not in content
 
