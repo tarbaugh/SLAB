@@ -645,3 +645,37 @@ def test_spawned_child_shares_the_observer(tmp_path: Path) -> None:
     session.observer = lambda kind, attribution, text: None
     child = session.spawn("materials", session.agent)
     assert child.observer is session.observer
+
+
+def test_repeated_identical_calls_get_escalating_notes(tmp_path: Path) -> None:
+    """The model cannot see that a result is byte-identical to the last one;
+    the harness can, and says so with increasing force. A changed result
+    resets the streak, so polling stays unannotated while it informs."""
+    same = _tool_reply("shell", command="echo probe")
+    loop = Mason(
+        _session(tmp_path),
+        client=FakeClient([same, same, same, same, _text_reply("done")]),
+    )
+    loop.run_turn("probe the thing")
+    tool_results = [
+        m["content"] for m in loop.messages if m.get("role") == "tool"
+    ]
+    assert "[note" not in tool_results[0]  # first time: no annotation
+    assert "result is identical" in tool_results[1]
+    assert "3 times in a row" in tool_results[2]
+    assert "4 times in a row" in tool_results[3]
+    assert "finish with a report naming the blocker" in tool_results[3]
+
+
+def test_a_changed_result_resets_the_repetition_streak(tmp_path: Path) -> None:
+    marker = tmp_path / "marker"
+    poll = _tool_reply("shell", command=f"ls {marker} 2>/dev/null | wc -l")
+    write = _tool_reply("shell", command=f"touch {marker}")
+    loop = Mason(
+        _session(tmp_path),
+        client=FakeClient([poll, write, poll, _text_reply("done")]),
+    )
+    loop.run_turn("poll the thing")
+    tool_results = [m["content"] for m in loop.messages if m.get("role") == "tool"]
+    # Same command twice, but the result changed between calls: no note.
+    assert all("[note" not in r for r in tool_results)

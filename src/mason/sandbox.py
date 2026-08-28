@@ -299,6 +299,7 @@ class SetupSnapshot:
         error: str | None = None,
         path_prepends: dict[str, tuple[str, ...]] | None = None,
         extra_binaries: tuple[str, ...] = (),
+        system_libs: tuple[str, ...] = (),
     ) -> None:
         self.engine = engine
         self.payload = payload
@@ -306,6 +307,9 @@ class SetupSnapshot:
         self.lib_dirs = lib_dirs
         self.error = error
         self.path_prepends = path_prepends or {}
+        # Host-installed system libraries (ordinary RPMs in /usr/lib64 the
+        # base image does not ship); bound file-by-file, never by directory.
+        self.system_libs = system_libs
         # Launchers and helpers the engine command needs besides the payload
         # (mpirun, notably). Each contributes its install prefix to the
         # binds: a launcher reachable on PATH but with an unbound bin/ is
@@ -360,20 +364,49 @@ def _env_entries(raw: bytes) -> dict[str, str]:
     return entries
 
 
-def _lib_dirs(ldd_output: str) -> tuple[str, ...]:
+#: Sonames the container image MUST provide itself: binding the host's
+#: copies would splice one machine's core runtime into another's loader.
+_CORE_SONAMES = (
+    "libc.so",
+    "libm.so",
+    "libpthread.so",
+    "libdl.so",
+    "librt.so",
+    "libutil.so",
+    "libresolv.so",
+    "ld-linux",
+    "libgcc_s.so",
+    "libstdc++.so",
+)
+
+
+def _lib_closure(ldd_output: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """``(site_dirs, system_files)`` from an ldd listing.
+
+    A library under a site prefix means its whole directory gets bound. A
+    library under a *system* directory is a different case: the base image
+    has its own /usr/lib64, but only with the distro's default packages —
+    an ordinary RPM like libpciaccess (the first real run's actual missing
+    piece) is host-installed and absent from a minimal image. Those are
+    bound as individual files, so they fill the gap without shadowing the
+    image's own core runtime, which stays on the deny list above.
+    """
     dirs: set[str] = set()
+    files: set[str] = set()
     for line in ldd_output.splitlines():
         _name, arrow, rest = line.partition("=>")
         target = rest.split()[0] if arrow and rest.split() else ""
         if not target.startswith("/"):
             continue
         parent = str(Path(target).parent)
-        if any(
+        system = any(
             parent == base or parent.startswith(base + "/") for base in _BASE_IMAGE_LIBS
-        ):
-            continue
-        dirs.add(parent)
-    return tuple(sorted(dirs))
+        )
+        if not system:
+            dirs.add(parent)
+        elif not any(core in Path(target).name for core in _CORE_SONAMES):
+            files.add(target)
+    return tuple(sorted(dirs)), tuple(sorted(files))
 
 
 def snapshot_setup(
@@ -458,14 +491,16 @@ def snapshot_setup(
                     prepends[key] = added
             else:
                 plain[key] = value
-        libs = _lib_dirs(files["ldd"].read_text()) if files["ldd"].exists() else ()
+        ldd_text = files["ldd"].read_text() if files["ldd"].exists() else ""
+        lib_dirs, system_libs = _lib_closure(ldd_text)
         return SetupSnapshot(
             engine,
             resolved[0],
             plain,
-            libs,
+            lib_dirs,
             path_prepends=prepends,
             extra_binaries=tuple(resolved[1:]),
+            system_libs=system_libs,
         )
 
 
@@ -513,7 +548,10 @@ def _snapshot_binds(snapshot: SetupSnapshot) -> list[str]:
     for binary in (snapshot.payload, *snapshot.extra_binaries):
         bin_dir = Path(binary).parent
         prefixes.append(str(bin_dir.parent if bin_dir.name == "bin" else bin_dir))
-    return [f"{d}:{d}:ro" for d in dict.fromkeys([*prefixes, *snapshot.lib_dirs])]
+    return [
+        f"{d}:{d}:ro"
+        for d in dict.fromkeys([*prefixes, *snapshot.lib_dirs, *snapshot.system_libs])
+    ]
 
 
 def _collapse_binds(binds: list[str]) -> list[str]:

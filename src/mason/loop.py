@@ -209,6 +209,10 @@ class Mason:
         self._catalog = catalog
         self._last_prompt_tokens: int | None = None
         self._messages_at_last_compaction = 0
+        # Repetition guard state: the last (name, arguments, result) triple
+        # and how many consecutive times it has recurred unchanged.
+        self._last_identical: tuple[str, str, str] | None = None
+        self._repeat_streak = 0
         if resume_from:
             # Re-record the replayed history into THIS session's transcript so
             # each transcript stays self-contained: resuming a resumed session
@@ -303,6 +307,7 @@ class Mason:
                     self.session.record({"type": "finish", "report": report})
                     return TurnResult(text=report, stop_reason="finish", steps=step)
                 result, ok = self._dispatch(call)
+                result = self._note_repetition(call, result)
                 self._append_tool_result(call, result, as_text=from_text)
                 error_streak = 0 if ok else error_streak + 1
                 if error_streak >= _ERROR_STREAK_LIMIT:
@@ -324,6 +329,36 @@ class Mason:
             ),
             stop_reason="max_turns",
             steps=self.session.agent.max_turns,
+        )
+
+    def _note_repetition(self, call: Any, result: str) -> str:
+        """Annotate a result identical to the same call's previous result.
+
+        An open model in a loop can re-run one command dozens of times,
+        reading each identical result as new information (a real 240-call
+        session spent 82 calls on one byte-identical readelf pipeline).
+        The model cannot see the sameness; the harness can. The call still
+        executes every time — polling a queue legitimately repeats, and its
+        result changes when it matters — but a repeat with an unchanged
+        result carries an escalating note the model reads as evidence.
+        """
+        key = (call.name, call.arguments_raw, result)
+        if key == self._last_identical:
+            self._repeat_streak += 1
+        else:
+            self._last_identical = key
+            self._repeat_streak = 1
+            return result
+        if self._repeat_streak == 2:
+            return (
+                f"{result}\n[note: this is the same call as the previous step, "
+                f"and the result is identical]"
+            )
+        return (
+            f"{result}\n[note: this exact call has now returned this exact result "
+            f"{self._repeat_streak} times in a row. Repeating it cannot produce new "
+            f"information. Record what you learned in the notebook, change the "
+            f"approach, or finish with a report naming the blocker.]"
         )
 
     def _answer_unrun(self, calls: list[Any], *, from_text: bool) -> None:

@@ -518,3 +518,29 @@ def test_the_container_env_tames_openmpi_and_can_pin_ranks(tmp_path: Path) -> No
     )
     assert "--env SLURM_NTASKS=16" in pinned
     assert "${SLURM_NTASKS:-1}" not in pinned
+
+
+def test_system_libraries_are_bound_file_by_file(tmp_path: Path) -> None:
+    """An ordinary RPM's library in /usr/lib64 (libpciaccess, the third real
+    run's blocker) is absent from a minimal image: bind the file itself.
+    Core runtime sonames stay the image's own."""
+    from mason.sandbox import SetupSnapshot, _lib_closure, _snapshot_binds
+
+    ldd = "\n".join(
+        [
+            "\tlibpciaccess.so.0 => /usr/lib64/libpciaccess.so.0 (0x1)",
+            "\tlibgfortran.so.5 => /usr/lib64/libgfortran.so.5 (0x2)",
+            "\tlibc.so.6 => /lib64/libc.so.6 (0x3)",
+            "\tld-linux-x86-64.so.2 => /lib64/ld-linux-x86-64.so.2 (0x4)",
+            "\tlibmkl_core.so.2 => /opt/intel/mkl/lib/libmkl_core.so.2 (0x5)",
+        ]
+    )
+    dirs, files = _lib_closure(ldd)
+    assert dirs == ("/opt/intel/mkl/lib",)
+    assert files == ("/usr/lib64/libgfortran.so.5", "/usr/lib64/libpciaccess.so.0")
+    snapshot = SetupSnapshot(
+        "qe", "/apps/qe/bin/pw.x", {}, dirs, system_libs=files
+    )
+    binds = _snapshot_binds(snapshot)
+    assert "/usr/lib64/libpciaccess.so.0:/usr/lib64/libpciaccess.so.0:ro" in binds
+    assert not any(b.startswith("/lib64/libc") for b in binds)
