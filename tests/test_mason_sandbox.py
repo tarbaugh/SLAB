@@ -610,3 +610,29 @@ def test_a_gpu_partition_mounts_the_driver_stack(tmp_path: Path) -> None:
         "quench a glass", toml_path=tmp_path / "sandbox" / "slab.toml",
     )
     assert "--nv" not in cpu_script
+
+
+def test_the_machine_memory_is_bound_read_write_and_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--no-home hides ~/.config, so the memory directory travels explicitly."""
+    memories = tmp_path / "memory"
+    monkeypatch.setenv("SLAB_MEMORY_DIR", str(memories))
+    assert not memories.exists()  # an untouched machine has nothing here yet
+
+    script, _ = _render(tmp_path, _agent(), _slab_cfg())
+    assert f"--bind {memories}:{memories}:rw" in script
+    assert f"--env SLAB_MEMORY_DIR={memories}" in script
+    # Apptainer refuses a bind whose source is missing, so the render made it.
+    assert memories.is_dir()
+
+
+def test_a_memory_blind_session_binds_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    memories = tmp_path / "memory"
+    monkeypatch.setenv("SLAB_MEMORY_DIR", str(memories))
+    script, _ = _render(tmp_path, _agent(memory=False), _slab_cfg())
+    assert str(memories) not in script
+    assert "SLAB_MEMORY_DIR" not in script
+    assert not memories.exists()

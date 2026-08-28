@@ -52,6 +52,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from foundation.memory import memory_dir
 from mason.config import AgentConfig
 from mason.errors import MasonError
 from mason.serve import read_record, record_path
@@ -803,6 +804,15 @@ def render_sandbox_script(
         )
     binds, warnings = default_binds(project, workspace_root, slab_cfg, snapshots)
     binds.extend(agent.sandbox.binds)
+    # The machine's memory, read-write. --no-home hides ~/.config, so without
+    # this the job neither reads what earlier sessions learned nor keeps what
+    # it learns itself, which is exactly the case memory exists for: the
+    # overnight job that trips on a quirk at 03:00. Apptainer refuses a bind
+    # whose source is missing, so an untouched machine gets the directory now.
+    memories = memory_dir()
+    if agent.memory:
+        memories.mkdir(parents=True, exist_ok=True)
+        binds.append(f"{memories}:{memories}:rw")
     binds = _collapse_binds(binds)
     mason = _mason_bin()
 
@@ -852,6 +862,13 @@ def render_sandbox_script(
             f'--bind "$BRIDGE":{_SOCKET_IN_CONTAINER}',
             f"--env SLAB_WORKSPACE={shlex.quote(str(workspace_root))}",
             f"--env SLAB_CONFIG={shlex.quote(str(toml_path))}",
+            # Name the memory directory rather than letting it derive from a
+            # $HOME the container does not have.
+            *(
+                [f"--env SLAB_MEMORY_DIR={shlex.quote(str(memories))}"]
+                if agent.memory
+                else []
+            ),
             # --cleanenv would strip it, and the bin-form qe command sizes
             # its mpirun from it — 1 if the scheduler did not set it. An
             # explicit --engine-tasks pins it instead: a whole node's rank
