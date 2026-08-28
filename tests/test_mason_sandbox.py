@@ -6,7 +6,9 @@ import shutil
 import socketserver
 import subprocess
 import threading
+from collections.abc import Iterator
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 from typer.testing import CliRunner
@@ -17,9 +19,11 @@ from mason.sandbox import (
     SandboxError,
     default_binds,
     forward,
+    forward_http,
     preflight,
     render_sandbox_script,
     sandbox_toml,
+    upstream_path,
     verify,
 )
 from slab.config import HpcConfig, SlabConfig
@@ -405,6 +409,225 @@ def test_bridge_refuses_a_malformed_upstream() -> None:
 
     with pytest.raises(SandboxError, match="host:port"):
         bridge("/tmp/nope.sock", "not-an-endpoint")
+
+
+# -- the forwarder: a gateway upstream ----------------------------------------
+
+
+class _Gateway(http.server.BaseHTTPRequestHandler):
+    """A stub gateway that records what it was sent and answers chunked.
+
+    Chunked on purpose: http.client decodes it, so a forwarder that relayed
+    the upstream's own framing headers would describe a body that no longer
+    exists. The reframing test below is what catches that.
+    """
+
+    protocol_version = "HTTP/1.1"
+    # Class-level on purpose: http.server builds a fresh handler per request,
+    # so what the gateway saw has to outlive the instance.
+    seen: ClassVar[dict[str, object]] = {}
+    status = 200
+
+    def do_GET(self) -> None:  # http.server's naming contract
+        self._record(None)
+        self._chunked(json.dumps({"data": [{"id": "gateway-model"}]}).encode())
+
+    def do_POST(self) -> None:  # http.server's naming contract
+        length = int(self.headers.get("Content-Length") or 0)
+        self._record(self.rfile.read(length).decode())
+        payload = {"choices": [{"message": {"content": "x" * 5_000}}]}
+        self._chunked(json.dumps(payload).encode())
+
+    def _record(self, body: str | None) -> None:
+        type(self).seen = {
+            "path": self.path,
+            "authorization": self.headers.get("Authorization"),
+            "content_type": self.headers.get("Content-Type"),
+            "body": body,
+        }
+
+    def _chunked(self, raw: bytes) -> None:
+        self.send_response(type(self).status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        for start in range(0, len(raw), 64):
+            piece = raw[start : start + 64]
+            self.wfile.write(b"%x\r\n%s\r\n" % (len(piece), piece))
+        self.wfile.write(b"0\r\n\r\n")
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+@pytest.fixture()
+def gateway() -> Iterator[tuple[str, type[_Gateway]]]:
+    """A live stub gateway based under a path, as a real one would be."""
+    from http.server import HTTPServer
+
+    _Gateway.seen = {}
+    _Gateway.status = 200
+    server = HTTPServer(("127.0.0.1", 0), _Gateway)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_address[1]}/llm/openai/v1", _Gateway
+    server.shutdown()
+
+
+def _bridged_gateway(base: str, *, key_env: str | None = None) -> int:
+    """The rendered job's chain, with a gateway upstream: returns the port
+    the container-side client would call."""
+    import tempfile
+    import time
+
+    sock = str(Path(tempfile.mkdtemp()) / "llm.sock")
+    threading.Thread(
+        target=forward_http, args=(sock, base), kwargs={"key_env": key_env}, daemon=True
+    ).start()
+    for _ in range(50):
+        if Path(sock).exists():
+            break
+        time.sleep(0.1)
+    port = next(_PORTS)
+    threading.Thread(target=forward, args=(sock, port), daemon=True).start()
+    return port
+
+
+def _get(port: int, path: str = "/v1/models") -> tuple[int, bytes, dict[str, str]]:
+    import urllib.request
+
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=10) as response:
+        return response.status, response.read(), dict(response.headers)
+
+
+def _post(port: int, body: dict[str, object]) -> tuple[int, bytes, dict[str, str]]:
+    import urllib.request
+
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", "Authorization": "Bearer slab"},
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return response.status, response.read(), dict(response.headers)
+
+
+def test_forwarder_authenticates_with_the_hosts_key(
+    gateway: tuple[str, type[_Gateway]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The container's client sends its own placeholder. That must be
+    replaced, never appended to, or the placeholder reaches the gateway."""
+    base, stub = gateway
+    monkeypatch.setenv("GATEWAY_KEY", "sk-secret")
+    port = _bridged_gateway(base, key_env="GATEWAY_KEY")
+
+    status, body, _headers = _post(port, {"model": "m", "messages": []})
+    assert status == 200
+    assert json.loads(body)["choices"][0]["message"]["content"].startswith("x")
+    assert stub.seen["authorization"] == "Bearer sk-secret"
+    assert "slab" not in str(stub.seen["authorization"])
+    assert stub.seen["body"] == '{"model": "m", "messages": []}'
+    assert stub.seen["content_type"] == "application/json"
+
+
+def test_forwarder_without_a_key_sends_no_authorization(
+    gateway: tuple[str, type[_Gateway]],
+) -> None:
+    """An unauthenticated internal gateway gets no header at all. The
+    container's placeholder is an artifact of its client, not a credential."""
+    base, stub = gateway
+    port = _bridged_gateway(base)
+    assert _post(port, {"model": "m", "messages": []})[0] == 200
+    assert stub.seen["authorization"] is None
+
+
+def test_forwarder_rewrites_the_path_onto_the_gateways_base(
+    gateway: tuple[str, type[_Gateway]],
+) -> None:
+    """The container always speaks /v1 because the render writes it, so a
+    gateway based at .../openai/v1 must not be asked for /v1/v1/...."""
+    base, stub = gateway
+    port = _bridged_gateway(base)
+
+    status, body, _headers = _get(port)
+    assert status == 200
+    assert json.loads(body)["data"][0]["id"] == "gateway-model"
+    assert stub.seen["path"] == "/llm/openai/v1/models"
+
+    _post(port, {"model": "m", "messages": []})
+    assert stub.seen["path"] == "/llm/openai/v1/chat/completions"
+
+
+def test_forwarder_reframes_a_chunked_answer(gateway: tuple[str, type[_Gateway]]) -> None:
+    """http.client decodes chunked transparently, so relaying the upstream's
+    framing headers would describe a body that no longer exists. The client
+    must get one honest Content-Length and no Transfer-Encoding."""
+    base, _stub = gateway
+    port = _bridged_gateway(base)
+
+    status, body, headers = _post(port, {"model": "m", "messages": []})
+    assert status == 200
+    assert "Transfer-Encoding" not in headers
+    assert int(headers["Content-Length"]) == len(body)
+    # a body well past one chunk arrives whole
+    assert len(json.loads(body)["choices"][0]["message"]["content"]) == 5_000
+    assert headers["Content-Type"] == "application/json"
+
+
+def test_forwarder_passes_a_gateway_refusal_through(
+    gateway: tuple[str, type[_Gateway]],
+) -> None:
+    """A 401 must arrive as a 401 with the gateway's own words. Dropping the
+    connection instead would leave the agent guessing."""
+    import urllib.error
+
+    base, stub = gateway
+    stub.status = 401
+    port = _bridged_gateway(base)
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        _get(port)
+    assert caught.value.code == 401
+    assert json.loads(caught.value.read())["data"][0]["id"] == "gateway-model"
+
+
+def test_forwarder_answers_502_when_the_gateway_is_unreachable() -> None:
+    """A transport failure has no status of its own; the bridge gives it one
+    the agent's client can read."""
+    import urllib.error
+
+    port = _bridged_gateway("http://127.0.0.1:1/v1")
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        _get(port)
+    assert caught.value.code == 502
+    assert "could not reach the gateway" in json.loads(caught.value.read())["error"]["message"]
+
+
+def test_forwarder_refuses_a_named_key_that_is_not_exported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Before serving, not per request: starting without the key would make
+    every answer read as the gateway rejecting us."""
+    monkeypatch.delenv("GATEWAY_KEY", raising=False)
+    with pytest.raises(SandboxError, match=r"\$GATEWAY_KEY is not set"):
+        forward_http("/tmp/never-served.sock", "https://gw.example/v1", key_env="GATEWAY_KEY")
+
+
+def test_bridge_picks_its_mode_from_the_upstream_form() -> None:
+    """Shape decides, so every script rendered before the forwarder existed
+    keeps working. A byte relay cannot send a key and says so."""
+    from mason.sandbox import bridge
+
+    with pytest.raises(SandboxError, match="host:port or an http"):
+        bridge("/tmp/nope.sock", "ftp://gw.example/v1")
+    with pytest.raises(SandboxError, match="byte relay"):
+        bridge("/tmp/nope.sock", "gpu-node:8000", key_env="GATEWAY_KEY")
+
+
+def test_upstream_path_maps_onto_the_gateways_own_base() -> None:
+    assert upstream_path("/v1", "/v1/chat/completions") == "/v1/chat/completions"
+    assert upstream_path("/llm/openai/v1", "/v1/models") == "/llm/openai/v1/models"
+    assert upstream_path("", "/v1/models") == "/models"
+    # a path the container did not prefix rides through untouched
+    assert upstream_path("/v1", "/healthz") == "/v1/healthz"
 
 
 def test_snapshot_resolves_the_bin_form_payload_by_absolute_path(tmp_path: Path) -> None:

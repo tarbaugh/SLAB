@@ -37,16 +37,21 @@ script, the result is pure text — render it, read it, then submit it.
 from __future__ import annotations
 
 import contextlib
+import http.client
+import http.server
 import json
 import os
 import shlex
 import shutil
 import socket
+import socketserver
+import ssl
 import subprocess
 import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
@@ -128,15 +133,38 @@ def forward(socket_path: str, port: int = BRIDGE_PORT) -> None:
     _relay(server, connect)
 
 
-def bridge(socket_path: str, upstream: str) -> None:
-    """Serve a unix socket by relaying every connection to ``host:port``.
+def bridge(socket_path: str, upstream: str, *, key_env: str | None = None) -> None:
+    """Serve a unix socket, relaying every connection to one fixed upstream.
 
     The host half of the bridge, run outside the container by the rendered
     job. *upstream* is fixed at start — the agent inside can neither see nor
     change the destination. Pure stdlib on purpose: the host already has
-    this environment, so the sandbox needs no socat or other relay tool.
-    Runs until killed.
+    this environment, so the sandbox needs no relay tool of its own. Runs
+    until killed.
+
+    Two forms, and the argument's shape picks between them:
+
+    - ``host:port`` — a byte relay, for a model this cluster serves.
+    - a URL (``https://gateway.example/v1``) — an HTTP forwarder
+      (:func:`forward_http`), which speaks TLS and authenticates, for a
+      model behind a gateway.
+
+    The shape decides rather than a flag, so every job script rendered
+    before the forwarder existed keeps working unchanged. Those files live
+    on disk and get resubmitted for months.
+
+    Raises:
+        SandboxError: *upstream* is neither form, or a key is named for a
+            byte relay, which cannot send one.
     """
+    if "://" in upstream:
+        forward_http(socket_path, upstream, key_env=key_env)
+        return
+    if key_env is not None:
+        raise SandboxError(
+            f"a key can only be sent to a URL upstream; {upstream!r} is a byte "
+            f"relay to a host and port, which forwards what the client sends"
+        )
     host, _sep, port_text = upstream.rpartition(":")
     if not host or not port_text.isdigit():
         raise SandboxError(f"bridge upstream must be host:port, got {upstream!r}")
@@ -159,6 +187,217 @@ def bridge(socket_path: str, upstream: str) -> None:
     server = socket.socket(socket.AF_UNIX)
     server.bind(socket_path)
     _relay(server, connect)
+
+
+#: Headers that describe one hop and never survive being forwarded
+#: (RFC 9110 7.6.1). ``host`` and ``content-length`` are reframed per hop
+#: too, and ``authorization`` is replaced rather than relayed.
+_HOP_BY_HOP = frozenset(
+    {
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    }
+)
+_DROPPED_REQUEST_HEADERS = _HOP_BY_HOP | {"host", "content-length", "authorization"}
+_DROPPED_RESPONSE_HEADERS = _HOP_BY_HOP | {"content-length"}
+
+#: The version prefix the container always speaks, because the render
+#: writes its endpoint. Stripped here and replaced by the upstream's own
+#: base path, or a gateway based at ``https://gw/v1`` would be asked for
+#: ``/v1/v1/chat/completions``.
+_CONTAINER_PREFIX = "/v1"
+
+
+def upstream_path(base_path: str, request_path: str) -> str:
+    """Map a request path from the container onto the upstream's base path.
+
+    Examples:
+        >>> upstream_path("/v1", "/v1/chat/completions")
+        '/v1/chat/completions'
+        >>> upstream_path("/llm/openai/v1", "/v1/models")
+        '/llm/openai/v1/models'
+        >>> upstream_path("/", "/v1/models")
+        '/models'
+    """
+    suffix = (
+        request_path[len(_CONTAINER_PREFIX) :]
+        if request_path.startswith(_CONTAINER_PREFIX)
+        else request_path
+    )
+    return (base_path.rstrip("/") + suffix) or "/"
+
+
+def _resolve_key(key_env: str | None) -> str | None:
+    """The key the forwarder will send, refusing a named-but-unset variable.
+
+    Starting without the key the job was told to use would make every
+    request fail as "the gateway rejected us", when the truth is that we
+    sent nothing.
+    """
+    if key_env is None:
+        return None
+    key = os.environ.get(key_env)
+    if not key:
+        raise SandboxError(
+            f"${key_env} is not set in the job's environment, so the bridge has "
+            f"no key for the gateway (sbatch exports the submitting environment "
+            f"by default; a cluster set to --export=NONE needs it exported in "
+            f"the job itself)"
+        )
+    return key
+
+
+def forward_http(socket_path: str, upstream: str, *, key_env: str | None = None) -> None:
+    """Serve a unix socket as an HTTP forwarder to one fixed gateway URL.
+
+    The authenticating half of the bridge. It terminates the plain HTTP the
+    container speaks, re-issues each request to *upstream* over TLS when the
+    URL says so, and sends back the answer. The key named by *key_env* is
+    read from this process's environment, which lives on the host: the
+    container is launched ``--cleanenv``, and the rendered ``slab.toml``
+    carries no ``api_key_env``, so the agent can neither read the key nor
+    change where its requests go.
+
+    Nothing is logged per request. A SLURM ``.out`` file is readable by
+    anyone who can read the job's directory, and headers do not belong in
+    one.
+
+    Raises:
+        SandboxError: The URL is unusable, or the named key variable is unset.
+    """
+    parts = urllib.parse.urlsplit(upstream)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise SandboxError(
+            f"bridge upstream must be host:port or an http(s) URL, got {upstream!r}"
+        )
+    key = _resolve_key(key_env)
+    handler = _forwarder(parts, key)
+    with contextlib.suppress(OSError):
+        os.unlink(socket_path)
+    server = _UnixHTTPServer(socket_path, handler)
+    server.serve_forever()
+
+
+class _UnixHTTPServer(socketserver.ThreadingUnixStreamServer):
+    """An HTTP server on a unix socket: one thread per connection."""
+
+    daemon_threads = True
+
+
+def _forwarder(
+    parts: urllib.parse.SplitResult, key: str | None
+) -> type[http.server.BaseHTTPRequestHandler]:
+    """Build the request handler bound to one upstream and one key."""
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        # The container's client opens a connection per request through the
+        # relay, so HTTP/1.0's close-when-done framing is the whole protocol
+        # needed here, and it keeps every response's length explicit.
+        protocol_version = "HTTP/1.0"
+
+        def do_GET(self) -> None:  # http.server's naming contract
+            self._forward("GET")
+
+        def do_POST(self) -> None:  # http.server's naming contract
+            self._forward("POST")
+
+        def _forward(self, method: str) -> None:
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length else None
+            headers = {
+                name: value
+                for name, value in self.headers.items()
+                if name.lower() not in _DROPPED_REQUEST_HEADERS
+            }
+            # Replaced, never appended: the container sends its client's
+            # placeholder, and that must not reach the gateway.
+            if key is not None:
+                headers["Authorization"] = f"Bearer {key}"
+            if body is not None:
+                headers["Content-Length"] = str(len(body))
+            try:
+                status, reason, answer, payload = self._issue(method, headers, body)
+            except OSError as e:
+                # A transport failure has no status of its own. Say so as one
+                # the agent's client can read, rather than dropping the
+                # connection and leaving it to guess.
+                self._answer_error(f"the bridge could not reach the gateway: {e}")
+                return
+            self.send_response(status, reason)
+            for name, value in answer:
+                if name.lower() not in _DROPPED_RESPONSE_HEADERS:
+                    self.send_header(name, value)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def _issue(
+            self, method: str, headers: dict[str, str], body: bytes | None
+        ) -> tuple[int, str, list[tuple[str, str]], bytes]:
+            """One upstream round trip, returning its status, headers, body.
+
+            http.client decodes a chunked response transparently, so the
+            body here is the real one and the caller reframes its length.
+            Relaying the upstream's own framing headers would describe a
+            body that no longer exists.
+            """
+            connection: http.client.HTTPConnection
+            if parts.scheme == "https":
+                connection = http.client.HTTPSConnection(
+                    parts.hostname or "",
+                    parts.port,
+                    timeout=_CONNECT_TIMEOUT_S,
+                    context=ssl.create_default_context(),
+                )
+            else:
+                connection = http.client.HTTPConnection(
+                    parts.hostname or "", parts.port, timeout=_CONNECT_TIMEOUT_S
+                )
+            try:
+                connection.connect()
+                # The timeout bounds the connect only, the same lesson the
+                # byte relay records: a model legitimately says nothing for
+                # minutes while it generates, and a timed-out idle read
+                # would tear down a request the gateway is still serving.
+                if connection.sock is not None:
+                    connection.sock.settimeout(None)
+                connection.request(
+                    method, upstream_path(parts.path, self.path), body=body, headers=headers
+                )
+                response = connection.getresponse()
+                return (
+                    response.status,
+                    response.reason or "",
+                    response.getheaders(),
+                    response.read(),
+                )
+            finally:
+                connection.close()
+
+        def _answer_error(self, message: str) -> None:
+            payload = json.dumps({"error": {"message": message, "type": "bridge_error"}})
+            raw = payload.encode("utf-8")
+            self.send_response(502, "Bad Gateway")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def address_string(self) -> str:
+            # A unix socket peer has no address, and the stdlib's default
+            # would index an empty tuple.
+            return "-"
+
+        def log_message(self, *args: Any) -> None:
+            """Silent by design; see :func:`forward_http`."""
+
+    return Handler
 
 
 def verify(
@@ -202,8 +441,8 @@ def verify(
             time.sleep(1.0)
     raise SandboxError(
         f"the bridged endpoint at 127.0.0.1:{port} did not answer within "
-        f"{ready_timeout_s:.0f}s (last error: {last}). Is the serve job "
-        f"running, and did the host-side socat start?"
+        f"{ready_timeout_s:.0f}s (last error: {last}). Did the host-side "
+        f"'mason sandbox bridge' start, and is its upstream answering?"
     )
 
 

@@ -706,13 +706,23 @@ def mason_sandbox_forward(
 @sandbox_app.command("bridge")
 def mason_sandbox_bridge(
     socket_path: Annotated[str, typer.Argument(help="The unix socket to serve.")],
-    upstream: Annotated[str, typer.Argument(help="Fixed destination, host:port.")],
+    upstream: Annotated[
+        str, typer.Argument(help="Fixed destination: host:port, or an http(s) URL.")
+    ],
+    key_env: Annotated[
+        str | None,
+        typer.Option(
+            "--key-env",
+            help="Name of the environment variable holding the gateway's API key "
+            "(URL upstreams only; the value never enters the container).",
+        ),
+    ] = None,
 ) -> None:
-    """In-job plumbing: relay the bridge socket to the serve endpoint (host side)."""
+    """In-job plumbing: relay the bridge socket to the model endpoint (host side)."""
     from mason.sandbox import bridge
 
     try:
-        bridge(socket_path, upstream)
+        bridge(socket_path, upstream, key_env=key_env)
     except (MasonError, FoundationError, SlabError) as e:
         _fail(str(e))
 
