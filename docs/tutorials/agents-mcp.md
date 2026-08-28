@@ -25,14 +25,16 @@ The workspace is resolved exactly as for the CLI: `-w/--workspace` flag > `$SLAB
 
 ## The toolbox
 
-Seven tools, each a thin wrapper over the operations layer:
+Nine tools, each a thin wrapper over the operations layer:
 
 | Tool | What it does |
 | --- | --- |
 | `launch_workflow` | Execute a plain-Python workflow script in a fresh traced run. |
-| `list_runs` | Runs newest first, filterable by lifecycle `state` and execution `status`. |
+| `list_runs` | Runs newest first, filterable by lifecycle `state`, execution `status`, and the `session` that created them. |
 | `show_run` | Everything about one run: checks, tasks, artifacts, history, failure evidence. |
 | `promote_run` | Make a run permanent (`verified -> promoted`), with a recorded reason. |
+| `list_sessions` | The client sessions that created runs, with run counts and state breakdowns. |
+| `promote_session` | Promote every run one session created, reporting each outcome. |
 | `expire_runs` | Expire unpromoted runs past their TTL. `older_than="0d"` means everything, now. |
 | `gc` | Drop artifact bytes no retention rule demands. `dry_run=True` only reports. |
 | `list_engines` | Built-in engines, the cluster registry's declarations, rootstock checkpoint ids, QE protocols, installed pseudo families. |

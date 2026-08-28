@@ -1,6 +1,6 @@
 # SLAB — Simplest Layer for Atomistic Backends
 
-Agent-native workflow orchestration for atomistic materials modeling.
+An agent-native state layer for atomistic materials modeling.
 
 **Documentation: [tarbaugh.github.io/SLAB](https://tarbaugh.github.io/SLAB/)**
 has the overview, the tutorials (every code block executed against the real
@@ -170,9 +170,11 @@ $ foundation show 01m0v7tefx          $ foundation show 01m0v7th31   # expired
 | Verb | What it does |
 | --- | --- |
 | `foundation run script.py` | Execute a zero-ceremony workflow script inside a traced run (lands in quarantine). Scripts that manage their own runs are executed with plain `python`. |
-| `foundation list [--state S] [--status S] [-q]` | List runs, newest first. |
+| `foundation list [--state S] [--status S] [--session S] [-q]` | List runs, newest first. |
 | `foundation show <id> [--json]` | One run: state, intent, checks, tasks, artifacts, history. Ids accept unique prefixes, git-style. |
-| `foundation promote <id> [--reason ...] [--force]` | Make a run permanent. `--force` promotes an unverified run and is recorded as forced. |
+| `foundation promote <id>... [--reason ...] [--force]` | Make runs permanent. `--force` promotes an unverified run and is recorded as forced. |
+| `foundation promote --session <id> [--force]` | Promote every run one agent session created, reporting each outcome. Failed runs are never promoted this way. |
+| `foundation sessions` | List the sessions that created runs, with run counts and state breakdowns. |
 | `foundation expire [--older-than 30d] [--include-running]` | Expire unpromoted runs past their TTL (state change only). `0d` = everything unpromoted, now. Runs at status `running` are protected unless `--include-running` (for hard-killed processes that can never advance their own status; they are marked failed first). |
 | `foundation gc [--dry-run]` | Drop artifact bytes no retention rule demands. |
 | `slab engines list` / `slab engines verify` | Inspect / smoke-test the cluster engine registry. |
@@ -436,7 +438,7 @@ what recipes record.
 ```
 
 Tools: `launch_workflow`, `list_runs`, `show_run`, `promote_run`,
-`expire_runs`, `gc`, `list_engines`. They use the same code paths as the
+`list_sessions`, `promote_session`, `expire_runs`, `gc`, `list_engines`. They use the same code paths as the
 CLI and return structured JSON, and script output is captured into the
 result, so prints cannot corrupt the protocol channel.
 

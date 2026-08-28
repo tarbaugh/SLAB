@@ -204,6 +204,112 @@ Two safety valves follow the same logic:
 - Blobs that no run references are reported as `orphans` but never deleted, because they may belong to an in-flight run that has not recorded its references yet.
 - Runs at status `running` are never swept by default. A hard-killed process leaves its run at `running` forever, so `expire --include-running` (or `include_running=True`) exists for when you know those processes are dead. Such runs are marked failed first, then expired.
 
+## Promote a whole session
+
+One conversation with the agent produces several runs. A convergence study is a smoke test and three ladders. Every run records the session that created it, so you can promote the whole conversation without collecting run ids.
+
+Mason stamps each run it launches with the chat's id, which is the name of that chat's transcript. Type `/status` in `mason chat` to read it. Foundation treats the value as an opaque string, so any client can stamp its own runs. Pass `--session` to `foundation run`, or export `$SLAB_SESSION` before it.
+
+The example creates four runs in one session. Three pass their checks, and the fourth has none:
+
+```python
+import time
+
+from foundation import Workspace, check, converged
+
+chat_ws = Workspace("session-demo")
+chat = "20260828-013504-48123"
+ladders = [
+    ("nb-smoke", "one balanced-protocol single point", 0.0004),
+    ("nb-kmesh-ladder", "k-point ladder at 40 Ry", 0.0002),
+    ("nb-cutoff-ladder", "cutoff ladder at a dense mesh", 0.0005),
+]
+
+for name, intent, residual in ladders:
+    with chat_ws.start_run(name=name, intent=intent, session=chat):
+        @check
+        def converged_to_1_meV(residual=residual):
+            return converged(residual, below=0.001, label="meV/atom")
+    time.sleep(1.1)
+
+with chat_ws.start_run(name="nb-probe", intent="eyeball one rung; no checks", session=chat):
+    pass
+
+for run in chat_ws.runs.list_runs(session=chat):
+    print(f"{run.name:17s} {run.state.value:12s} session={run.session}")
+chat_ws.close()
+```
+
+```text
+nb-probe          quarantined  session=20260828-013504-48123
+nb-cutoff-ladder  verified     session=20260828-013504-48123
+nb-kmesh-ladder   verified     session=20260828-013504-48123
+nb-smoke          verified     session=20260828-013504-48123
+```
+
+List the sessions in the workspace to find the id:
+
+```bash
+foundation sessions
+```
+
+```text
+SESSION                    RUNS   AGE  STATES
+20260828-013504-48123         4    4s  3 verified, 1 quarantined
+```
+
+Then promote the session. A full id works, and so does a unique prefix:
+
+```bash
+foundation promote --session 20260828 --reason "the Nb convergence study"
+```
+
+```text
+  [+] 01m14tsx0f  nb-smoke             promoted checks passed
+  [+] 01m14tsy31  nb-kmesh-ladder      promoted checks passed
+  [+] 01m14tsz5m  nb-cutoff-ladder     promoted checks passed
+  [-] 01m14tt088  nb-probe             skipped  not verified: pass --force to promote it anyway
+session 20260828-013504-48123: 3 promoted, 0 already permanent, 1 skipped
+```
+
+The command reports every run it considered, and the reason lands in each promoted run's history. The exit code is 1 while any run stays behind, so a script can tell a whole promotion from a partial one.
+
+Add `--force` to take the runs that were never verified:
+
+```bash
+foundation promote --session 20260828 --force --reason "probe kept for the record"
+```
+
+```text
+  [=] 01m14tsx0f  nb-smoke             already  already permanent
+  [=] 01m14tsy31  nb-kmesh-ladder      already  already permanent
+  [=] 01m14tsz5m  nb-cutoff-ladder     already  already permanent
+  [+] 01m14tt088  nb-probe             promoted forced: never verified
+session 20260828-013504-48123: 1 promoted, 3 already permanent, 0 skipped
+```
+
+Every outcome is idempotent, so rerunning the command is safe. Each run commits on its own, and a run that is already permanent is reported rather than touched.
+
+The table states what a session promote does with each run:
+
+| Run is | Without `--force` | With `--force` |
+|---|---|---|
+| verified | promoted | promoted |
+| promoted or archived | reported as already permanent | reported as already permanent |
+| never verified, not failed | skipped | promoted |
+| failed | skipped | skipped |
+| expired | skipped | skipped |
+
+A failed run never becomes permanent this way. A bulk command must not sweep failures into permanence, so promote such a run by its own id, where you can read what failed first.
+
+Two limits are worth knowing. Runs created before session stamping carry no session, and `foundation sessions` counts them in a trailing line. Promote those by id, because `foundation promote` takes several ids at once:
+
+```bash
+foundation promote 01m13035ys 01m12zww7j 01m12ztp0f
+```
+
+`mason chat --resume` opens a new session with a new id, so the runs of a resumed chat promote as their own session.
+
 ## Fast-forward, then purge
 
 The two phases above respect the retention policy. The `slab-stack` command holds the two verbs that override it. Use them when a line of work is finished and you have promoted everything you intend to keep.

@@ -342,6 +342,16 @@ outside. The fence blocks the file tools mechanically. The prompt guidance
 covers the shell, which the fence never bounded, so an approval prompt for
 an out-of-bounds `ls` should now arrive with a reason or not at all.
 
+Every run a chat launches carries the chat's session id, which is the name
+of that chat's transcript. `launch_workflow` stamps the run directly, and
+`submit_job` exports `$SLAB_SESSION` into the batch script so the runs of a
+queued job join the same chat. A delegated specialist stamps the id of the
+chat that asked for it, so one conversation is one session. `mason run`
+prints the id in its closing line, and `/status` prints it in chat. Promote
+a whole conversation's results with `foundation promote --session <id>`, and
+see [Lifecycle & retention](lifecycle-and-retention.md) for what that
+command does with each run.
+
 Job scripts and SLURM output files from `submit_job` land in
 `<workspace>/jobs/`, not in the project directory. The job itself still
 runs in the project directory. The workspace sits inside the file fence,
