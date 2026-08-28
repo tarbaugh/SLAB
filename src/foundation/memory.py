@@ -68,6 +68,20 @@ MAX_MEMORIES = 100
 _NAME = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
 
+class _PlainDumper(yaml.SafeDumper):
+    """A dumper that never writes anchors.
+
+    ``created`` and ``updated`` hold the same date on the day a memory is
+    written, and PyYAML would collapse the second into an alias
+    (``updated: *id001``). It parses back correctly and reads as line noise
+    to the person editing the file, who might then delete the anchor and
+    leave a dangling alias behind.
+    """
+
+    def ignore_aliases(self, data: Any) -> bool:
+        return True
+
+
 @dataclass(frozen=True)
 class Memory:
     """One recorded fact: its trigger line, its home, and who wrote it."""
@@ -179,6 +193,14 @@ def _provenance(meta: dict[str, Any], key: str) -> str | None:
     if isinstance(value, str) and value.strip():
         return value.strip()
     raise MemoryStoreError(f"frontmatter {key!r} must be a date or a non-empty string")
+
+
+def _as_date(value: str) -> date | str:
+    """A stored date back as a ``date``, or unchanged when a human wrote prose."""
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return value
 
 
 def parse_memory(path: Path) -> Memory:
@@ -298,19 +320,22 @@ def write(
             f"({MAX_MEMORIES}); update an existing memory instead, or ask the user to "
             f"prune with 'slab-stack memory forget <name>'"
         )
-    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    today = datetime.now(UTC).date()
     previous = existing.get(name)
-    created = previous.created if previous is not None and previous.created else today
     frontmatter: dict[str, Any] = {
         "description": collapsed,
-        "created": created,
+        # Written as YAML dates, not strings, so the file a person opens in
+        # an editor reads as 'created: 2026-08-28' rather than quoted text.
+        "created": _as_date(previous.created) if previous and previous.created else today,
         "updated": today,
     }
     if agent:
         frontmatter["agent"] = agent
     if model:
         frontmatter["model"] = model
-    rendered = yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True, width=88)
+    rendered = yaml.dump(
+        frontmatter, Dumper=_PlainDumper, sort_keys=False, allow_unicode=True, width=88
+    )
     text = f"---\n{rendered}---\n{body.strip()}\n"
     root.mkdir(parents=True, exist_ok=True)
     descriptor, staged = tempfile.mkstemp(dir=root, prefix=f".{name}.", suffix=".tmp")

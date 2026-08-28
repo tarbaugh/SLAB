@@ -56,4 +56,5 @@ nav:
       - Agents over MCP: tutorials/agents-mcp.md
       - Mason, the resident agent: tutorials/mason.md
       - The roster & skills: tutorials/roster-and-skills.md
+      - Machine memory: tutorials/memory.md
   - Architecture: architecture.md

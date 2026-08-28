@@ -403,6 +403,12 @@ declares a `gres` that names gpus, the rendered `apptainer exec` adds
 `--nv`, so a torch-backed engine such as `mace` sees the device the job
 holds. A CPU partition renders without it.
 
+The machine's memory travels into the job. `--no-home` hides
+`~/.config`, so the render binds the memory directory read-write and
+exports `$SLAB_MEMORY_DIR` to name it. An overnight job therefore reads
+what earlier sessions learned about this machine, and keeps what it
+learns itself. See [Machine memory](memory.md).
+
 Engine `setup` lines get snapshotted. A `module load` works on the host
 and means nothing inside the container, so the render runs each engine's
 setup once, on the host, and records what it did: the resolved binaries —

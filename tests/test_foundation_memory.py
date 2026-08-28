@@ -205,6 +205,16 @@ def test_the_catalog_block_lists_one_line_per_memory(memory_root: Path) -> None:
     assert memory_store.catalog_block({}) == ""
 
 
+def test_the_file_stays_readable_by_the_person_editing_it(memory_root: Path) -> None:
+    """Dates unquoted, no YAML anchors: a memory is edited by hand sometimes."""
+    memory_store.write("a-fact", "A fact.", "Body.", agent="pi", directory=memory_root)
+    text = (memory_root / "a-fact.md").read_text(encoding="utf-8")
+    stamp = memory_store.discover(memory_root)["a-fact"].created
+    assert f"created: {stamp}\n" in text
+    assert f"updated: {stamp}\n" in text  # not collapsed into an alias
+    assert "&id" not in text and "*id" not in text
+
+
 def test_a_multiline_description_becomes_one_line(memory_root: Path) -> None:
     memory_store.write(
         "wrapped",

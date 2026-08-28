@@ -451,7 +451,10 @@ projects. Calculations run as SLAB workflow scripts through its
 `@check` assertions. Memory lives in `NOTEBOOK.md` and `PLAN.md` in the
 project directory, because files outlive context windows, and history
 compacts into structured summaries well before the model's window fills.
-SLURM tools appear exactly when the config declares partitions.
+Facts about the machine rather than the project go to a separate store
+that every project on that machine reads, so a quirk of the local
+software is worked out once. SLURM tools appear exactly when the config
+declares partitions.
 
 ```bash
 mason serve start --wait # start the model on a GPU node (a batch job)
