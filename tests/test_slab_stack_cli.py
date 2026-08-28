@@ -158,3 +158,123 @@ def test_version_flag(tmp_path: Path) -> None:
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
     assert "slab-stack" in result.output
+
+
+# -- machine memory ----------------------------------------------------------
+
+
+@pytest.fixture()
+def memories(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A memory store of this test's own, seeded with two facts."""
+    from foundation import memory as memory_store
+
+    root = tmp_path / "memory"
+    monkeypatch.setenv("SLAB_MEMORY_DIR", str(root))
+    memory_store.write(
+        "vllm-mamba-cache",
+        "vLLM refuses hybrid-Mamba models at the default batch size.",
+        "Lower max-num-seqs below the available Mamba cache blocks.",
+        agent="pi",
+        model="qwen3-30b",
+        directory=root,
+    )
+    memory_store.write(
+        "srun-in-sandbox", "srun cannot reach the controller here.", "Use mpirun.",
+        agent="md-expert", directory=root,
+    )
+    return root
+
+
+def test_memory_list_names_what_the_machine_knows(memories: Path) -> None:
+    result = runner.invoke(app, ["memory", "list"])
+    assert result.exit_code == 0, result.output
+    assert "vllm-mamba-cache" in result.output
+    assert "vLLM refuses hybrid-Mamba models" in result.output
+    assert "md-expert" in result.output
+    assert "2 memory(s)" in result.output
+    assert str(memories) in result.output
+
+
+def test_memory_list_json_carries_the_provenance(memories: Path) -> None:
+    result = runner.invoke(app, ["memory", "list", "--json"])
+    assert result.exit_code == 0, result.output
+    rows = json.loads(result.output)
+    assert [row["name"] for row in rows] == ["srun-in-sandbox", "vllm-mamba-cache"]
+    assert rows[1]["agent"] == "pi" and rows[1]["model"] == "qwen3-30b"
+    assert rows[1]["created"] == rows[1]["updated"]
+
+
+def test_memory_list_on_an_empty_machine_says_where_it_looked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SLAB_MEMORY_DIR", str(tmp_path / "nothing"))
+    result = runner.invoke(app, ["memory", "list"])
+    assert result.exit_code == 0
+    assert "no memories recorded yet" in result.output
+    assert str(tmp_path / "nothing") in result.output
+
+
+def test_memory_show_prints_the_file_verbatim(memories: Path) -> None:
+    result = runner.invoke(app, ["memory", "show", "vllm-mamba-cache"])
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith("---\n")
+    assert "agent: pi" in result.output
+    assert "Lower max-num-seqs" in result.output
+
+
+def test_memory_show_of_an_unknown_name_lists_what_exists(memories: Path) -> None:
+    result = runner.invoke(app, ["memory", "show", "ghost"])
+    assert result.exit_code == 1
+    assert "no memory named 'ghost'" in result.output
+    assert "vllm-mamba-cache" in result.output
+
+
+def test_memory_forget_confirms_before_deleting(memories: Path) -> None:
+    from foundation import memory as memory_store
+
+    refused = runner.invoke(app, ["memory", "forget", "srun-in-sandbox"], input="n\n")
+    assert refused.exit_code == 1
+    assert "srun cannot reach the controller here." in refused.output
+    assert (memories / "srun-in-sandbox.md").is_file()
+
+    accepted = runner.invoke(app, ["memory", "forget", "srun-in-sandbox"], input="y\n")
+    assert accepted.exit_code == 0, accepted.output
+    assert "forgot" in accepted.output
+    assert list(memory_store.discover(memories)) == ["vllm-mamba-cache"]
+
+
+def test_memory_forget_yes_skips_the_prompt(memories: Path) -> None:
+    result = runner.invoke(app, ["memory", "forget", "vllm-mamba-cache", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert not (memories / "vllm-mamba-cache.md").exists()
+
+
+def test_memory_forget_of_an_unknown_name_deletes_nothing(memories: Path) -> None:
+    result = runner.invoke(app, ["memory", "forget", "ghost", "--yes"])
+    assert result.exit_code == 1
+    assert "no memory named 'ghost'" in result.output
+    assert len(list(memories.glob("*.md"))) == 2
+
+
+def test_memory_path_prints_the_directory(memories: Path) -> None:
+    result = runner.invoke(app, ["memory", "path"])
+    assert result.exit_code == 0
+    assert result.output.strip() == str(memories)
+
+
+def test_a_malformed_memory_is_reported_not_skipped(memories: Path) -> None:
+    (memories / "broken.md").write_text("no frontmatter\n", encoding="utf-8")
+    result = runner.invoke(app, ["memory", "list"])
+    assert result.exit_code == 1
+    assert "broken.md" in result.output
+    assert "frontmatter" in result.output
+
+
+def test_purge_leaves_the_machine_memory_alone(tmp_path: Path, memories: Path) -> None:
+    root = tmp_path / ".slab"
+    _seed_runs(root)
+    result = runner.invoke(app, ["fast-forward", "--workspace", str(root)])
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, ["purge", "--workspace", str(root), "--yes"])
+    assert result.exit_code == 0, result.output
+    assert len(list(memories.glob("*.md"))) == 2

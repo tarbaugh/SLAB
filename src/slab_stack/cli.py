@@ -1,4 +1,4 @@
-"""The ``slab-stack`` command-line interface: the destructive pair.
+"""The ``slab-stack`` command-line interface: the destructive pair, and memory.
 
 ``fast-forward`` and ``purge`` together are the "I am done with everything
 I did not promote" gesture. They stay out of the per-package CLIs on
@@ -6,10 +6,17 @@ purpose: ``foundation``'s verbs each honor the retention policy, and
 these two exist to override it — the command name should say whose rules
 apply. Deletion only ever reaches the ``expired`` state, so the promoted
 record survives any invocation.
+
+``memory`` is here for the same layering reason rather than the same
+destructive one. The store (:mod:`foundation.memory`) holds what agents
+learned about this *machine*, so it belongs to no single project and to no
+single package: mason writes it, foundation owns it, and the human reads
+and prunes it from here.
 """
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Annotated, NoReturn
@@ -17,6 +24,7 @@ from typing import Annotated, NoReturn
 import typer
 
 from foundation import _ops
+from foundation import memory as memory_store
 from foundation.errors import FoundationError
 from foundation.runtime import Workspace
 from mason.serve import mason_dir, read_record
@@ -152,6 +160,11 @@ def purge(
     .out files are swept from the workspace; jobs still in the queue, the
     running model server included, keep theirs. Irreversible — run with
     --dry-run first.
+
+    The machine's memory is not touched. This command clears project state
+    that was never promoted; a memory is durable machine state that no
+    project owns, so it is forgotten one at a time and on purpose, with
+    'slab-stack memory forget'.
     """
     try:
         root = _ops.resolve_root(workspace)
@@ -212,6 +225,97 @@ def purge(
         f"{verb} {removed_transcripts} transcript file(s) and "
         f"{len(job_files)} job file(s)"
     )
+
+
+memory_app = typer.Typer(
+    help="Read and prune what agents learned about this machine.",
+    no_args_is_help=True,
+)
+app.add_typer(memory_app, name="memory")
+
+
+@memory_app.command("list")
+def memory_list(
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit the catalog as JSON.")
+    ] = False,
+) -> None:
+    """List every memory on this machine: name, date, writer, description."""
+    try:
+        memories = memory_store.discover()
+    except FoundationError as e:
+        _fail(str(e))
+    if as_json:
+        typer.echo(
+            json.dumps(
+                [
+                    {
+                        "name": m.name,
+                        "description": m.description,
+                        "path": str(m.path),
+                        "created": m.created,
+                        "updated": m.updated,
+                        "agent": m.agent,
+                        "model": m.model,
+                    }
+                    for m in memories.values()
+                ],
+                indent=2,
+            )
+        )
+        return
+    if not memories:
+        typer.echo(f"no memories recorded yet ({memory_store.memory_dir()})")
+        return
+    width = max(len(name) for name in memories)
+    for memory in memories.values():
+        stamp = memory.updated or memory.created or "-"
+        typer.echo(f"{memory.name:<{width}}  {stamp}  {memory.agent or '-':<16}  "
+                   f"{memory.description}")
+    typer.echo(f"{len(memories)} memory(s) in {memory_store.memory_dir()}")
+
+
+@memory_app.command("show")
+def memory_show(name: Annotated[str, typer.Argument(help="The memory's name.")]) -> None:
+    """Print one memory whole, exactly as it is stored."""
+    try:
+        memories = memory_store.discover()
+        if name not in memories:
+            known = ", ".join(memories) or "none"
+            _fail(f"no memory named {name!r} (memories here: {known})")
+        typer.echo(memories[name].path.read_text(encoding="utf-8").rstrip())
+    except (FoundationError, OSError) as e:
+        _fail(str(e))
+
+
+@memory_app.command("forget")
+def memory_forget(
+    name: Annotated[str, typer.Argument(help="The memory's name.")],
+    yes: Annotated[bool, typer.Option("--yes", help="Skip the confirmation prompt.")] = False,
+) -> None:
+    """Delete one memory.
+
+    The only way a memory leaves the machine. Agents consolidate by
+    rewriting, so nothing an agent does can erase a fact you still want.
+    """
+    try:
+        memories = memory_store.discover()
+        found = memories.get(name)
+        if found is None:
+            known = ", ".join(memories) or "none"
+            _fail(f"no memory named {name!r} (memories here: {known})")
+        if not yes:
+            typer.echo(f"{found.name}: {found.description}")
+            typer.confirm(f"permanently delete {found.path}?", abort=True)
+        typer.echo(f"forgot {memory_store.delete(name)}")
+    except FoundationError as e:
+        _fail(str(e))
+
+
+@memory_app.command("path")
+def memory_path() -> None:
+    """Print the memory directory, for reading or editing the files by hand."""
+    typer.echo(memory_store.memory_dir())
 
 
 if __name__ == "__main__":  # pragma: no cover - module execution convenience
