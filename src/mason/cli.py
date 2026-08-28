@@ -813,19 +813,21 @@ def mason_doctor(
     typer.echo(f"endpoint: {resolved_endpoint}  [{origin}]")
     typer.echo(f"model:    {resolved_model or '(not configured)'}")
     client: Any
+    api_key = _probe_key(agent, label="")
     if agent.provider == "anthropic":
         from mason.anthropic import AnthropicClient
 
-        key_var = agent.resolved_api_key_env or "ANTHROPIC_API_KEY"
-        api_key = os.environ.get(key_var)
-        if not api_key:
-            typer.echo(f"[x] ${key_var} is not set — the Anthropic provider needs a key")
-            raise typer.Exit(code=1)
+        assert api_key is not None  # resolved_api_key_env always names one here
         client = AnthropicClient(
             resolved_model or "unconfigured", api_key, endpoint=resolved_endpoint, timeout_s=60.0
         )
     else:
-        client = ChatClient(resolved_endpoint, resolved_model or "unconfigured", timeout_s=60.0)
+        client = ChatClient(
+            resolved_endpoint,
+            resolved_model or "unconfigured",
+            api_key=api_key,
+            timeout_s=60.0,
+        )
     failed = 0
     try:
         names = client.model_names()
@@ -872,6 +874,23 @@ def mason_doctor(
         raise typer.Exit(code=1)
 
 
+def _probe_key(agent: AgentConfig, *, label: str) -> str | None:
+    """The API key a doctor probe must send, or exit reporting the missing one.
+
+    The probe has to authenticate exactly as the session will. Sending
+    nothing where the config names a key turns a working connection into a
+    401 whose message tells you to configure what you already configured.
+    """
+    key_var = agent.resolved_api_key_env
+    if key_var is None:
+        return None
+    api_key = os.environ.get(key_var)
+    if not api_key:
+        typer.echo(f"[x] {label}${key_var} is not set — [agent] api_key_env names it")
+        raise typer.Exit(code=1)
+    return api_key
+
+
 def _doctor_roster(
     agent: AgentConfig, root: Path, *, seen: set[tuple[str, str, str | None]]
 ) -> int:
@@ -911,20 +930,20 @@ def _doctor_roster(
             failures += 1
             continue
         client: Any
+        try:
+            api_key = _probe_key(effective, label=f"{name}: ")
+        except typer.Exit:
+            failures += 1
+            continue
         if effective.provider == "anthropic":
             from mason.anthropic import AnthropicClient
 
-            key_var = effective.resolved_api_key_env or "ANTHROPIC_API_KEY"
-            api_key = os.environ.get(key_var)
-            if not api_key:
-                typer.echo(f"[x] {name}: ${key_var} is not set for its Anthropic connection")
-                failures += 1
-                continue
+            assert api_key is not None  # resolved_api_key_env always names one here
             client = AnthropicClient(
                 effective.model, api_key, endpoint=endpoint, timeout_s=60.0
             )
         else:
-            client = ChatClient(endpoint, effective.model, timeout_s=60.0)
+            client = ChatClient(endpoint, effective.model, api_key=api_key, timeout_s=60.0)
         try:
             names = client.model_names()
         except LlmError as e:

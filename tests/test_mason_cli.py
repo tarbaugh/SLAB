@@ -142,6 +142,67 @@ def test_mason_doctor_healthy(
     assert "[+] native tool calls work" in result.output
 
 
+def test_mason_doctor_sends_the_configured_api_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, llm_server: tuple[str, LlmScript]
+) -> None:
+    """The probe must authenticate exactly as the session will. Sending the
+    client's placeholder instead turned a working gateway into a 401 whose
+    message told you to configure what you had already configured."""
+    url, script = llm_server
+    script.get_response = (200, {"data": [{"id": "served"}]})
+    script.responses.append(_tool_probe_response())
+    (tmp_path / "slab.toml").write_text(
+        '[agent]\nmodel = "served"\napi_key_env = "GATEWAY_KEY"\n'
+    )
+    monkeypatch.setenv("GATEWAY_KEY", "sk-real-key")
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["doctor", "--endpoint", url])
+    assert result.exit_code == 0, result.output
+    assert script.requests[0]["_auth"] == "Bearer sk-real-key"
+
+
+def test_mason_doctor_names_the_missing_key_variable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, llm_server: tuple[str, LlmScript]
+) -> None:
+    """A named variable that is not exported is reported as itself, not as
+    an authentication failure from the far end."""
+    url, _script = llm_server
+    (tmp_path / "slab.toml").write_text(
+        '[agent]\nmodel = "served"\napi_key_env = "GATEWAY_KEY"\n'
+    )
+    monkeypatch.delenv("GATEWAY_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["doctor", "--endpoint", url])
+    assert result.exit_code == 1
+    assert "$GATEWAY_KEY is not set" in result.output
+
+
+def test_mason_doctor_roster_probe_sends_its_own_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, llm_server: tuple[str, LlmScript]
+) -> None:
+    """A specialist on its own gateway authenticates with its own key."""
+    url, script = llm_server
+    script.get_response = (200, {"data": [{"id": "primary"}, {"id": "bigger"}]})
+    script.responses.append(_tool_probe_response())
+    (tmp_path / "slab.toml").write_text(
+        '[agent]\nmodel = "primary"\napi_key_env = "GATEWAY_KEY"\n\n'
+        '[agent.roster.dft-expert]\nmodel = "bigger"\napi_key_env = "SPECIALIST_KEY"\n'
+    )
+    monkeypatch.setenv("GATEWAY_KEY", "sk-primary")
+    monkeypatch.setenv("SPECIALIST_KEY", "sk-specialist")
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["doctor", "--endpoint", url])
+    assert result.exit_code == 0, result.output
+    assert "[+] dft-expert: model 'bigger' is served" in result.output
+
+    monkeypatch.delenv("SPECIALIST_KEY")
+    script.get_response = (200, {"data": [{"id": "primary"}, {"id": "bigger"}]})
+    script.responses.append(_tool_probe_response())
+    missing = runner.invoke(app, ["doctor", "--endpoint", url])
+    assert missing.exit_code == 1
+    assert "dft-expert: $SPECIALIST_KEY is not set" in missing.output
+
+
 def test_mason_doctor_flags_missing_model_and_no_tools(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, llm_server: tuple[str, LlmScript]
 ) -> None:
