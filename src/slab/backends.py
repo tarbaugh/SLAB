@@ -497,14 +497,21 @@ def collect_engine_outputs(calculator: Any) -> list[tuple[str, Path]]:
         return []
 
 
-def collect_failure_evidence(calculator: Any) -> tuple[list[str], list[tuple[str, Path]]]:
-    """What a failed file-IO engine left behind: notes plus files worth keeping.
+def collect_failure_evidence(
+    calculator: Any, exc: BaseException | None = None
+) -> tuple[list[str], list[tuple[str, Path]]]:
+    """What a failed engine left behind: notes plus files worth keeping.
 
     A crashed engine surfaces in Python as a bare
     ``CalledProcessError: ... returned non-zero exit status`` (``pw.x``) or a
     ``RuntimeError: Failed to retrieve any thermo_style-output`` (LAMMPS,
     whose real ``ERROR: ...`` line dies in a reader thread) — the actual
-    story is in the files the engine wrote. Returns ``(notes, files)``:
+    story is in the files the engine wrote. A worker-backed engine
+    (rootstock) crashes as a ``WorkerDiedError`` whose message already
+    carries the post-mortem tails; we surface that as a tagged note so an
+    agent reading the failure record gets the same story pattern.
+
+    Returns ``(notes, files)``:
 
     * *notes* — short strings for ``Exception.add_note``: for ``qe`` the
       parsed ``Error in routine ...`` block(s) from the output file (QE
@@ -512,13 +519,16 @@ def collect_failure_evidence(calculator: Any) -> tuple[list[str], list[tuple[str
       falling back to the output tail, plus the stderr tail when non-empty;
       for ``lammps`` the ``ERROR`` line(s) from the log with one line of
       preceding context (the echoed command or the last thermo row before
-      death), with the same flagged-lines-then-tail fallback.
+      death), with the same flagged-lines-then-tail fallback; for
+      ``rootstock`` the ``WorkerDiedError`` message from the exception chain
+      (empty when *exc* is None or the chain has no such exception).
     * *files* — ``(suffix, path)`` pairs of the engine's input, output,
       stderr, and ``CRASH``/data files that exist and are non-empty, for
-      keeping as artifacts before the scratch directory vanishes.
+      keeping as artifacts before the scratch directory vanishes. Empty for
+      rootstock: the worker holds its state in memory, not on disk.
 
-    Both empty for in-process calculators. Best-effort: never raises (it runs
-    inside exception handlers).
+    Both empty for in-process calculators (emt, lj). Best-effort: never
+    raises (it runs inside exception handlers).
 
     Examples:
         >>> collect_failure_evidence(get_calculator("emt"))
@@ -526,6 +536,8 @@ def collect_failure_evidence(calculator: Any) -> tuple[list[str], list[tuple[str
     """
     notes: list[str] = []
     files: list[tuple[str, Path]] = []
+    if _looks_like_rootstock(calculator):
+        return _rootstock_failure_evidence(exc), files
     try:
         lammps_dir = _lammpsrun_dir(calculator)
         if lammps_dir is not None:
@@ -593,6 +605,56 @@ def collect_failure_evidence(calculator: Any) -> tuple[list[str], list[tuple[str
 # Lines worth surfacing from an engine output that stopped without a fenced
 # error block: QE prints these for SCF non-convergence, walltime stops, ...
 _FAILURE_MARKERS = ("error", "not achieved", "stopping", "maximum cpu time", "timed out")
+
+#: Rootstock's WorkerDiedError message can be many kilobytes when it carries
+#: full stderr; keep this a note, not the entire log.
+_WORKER_MESSAGE_CAP = 4_000
+
+
+def _looks_like_rootstock(calculator: Any) -> bool:
+    """True when *calculator* is a rootstock RootstockCalculator (or subclass).
+
+    Duck-typed check by class hierarchy — importing rootstock here would
+    force the dependency on every failure path; a name+module check hits
+    the same target without the import. A user's registry entry whose
+    calculator is a RootstockCalculator subclass qualifies too.
+    """
+    try:
+        for cls in type(calculator).__mro__:
+            top_module = cls.__module__.split(".")[0]
+            if cls.__name__ == "RootstockCalculator" and top_module == "rootstock":
+                return True
+    except Exception:  # pragma: no cover - hostile calculator
+        return False
+    return False
+
+
+def _rootstock_failure_evidence(exc: BaseException | None) -> list[str]:
+    """Notes drawn from a rootstock ``WorkerDiedError`` in *exc*'s chain.
+
+    Rootstock's worker holds its state in memory: there is no espresso.pwo
+    or LAMMPS log to keep. What we have is the exception message it raises
+    when the socket dies, and that message already carries the post-mortem
+    ('process fate plus captured output tails', per rootstock's own
+    docstring). Surfacing it as an ``engine error (rootstock worker): ...``
+    note gives an agent the same pattern the file-IO engines' notes carry.
+    """
+    if exc is None:
+        return []
+    try:
+        current: BaseException | None = exc
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            if type(current).__name__ == "WorkerDiedError":
+                message = str(current).strip() or "(no message)"
+                if len(message) > _WORKER_MESSAGE_CAP:
+                    message = message[:_WORKER_MESSAGE_CAP] + " [...]"
+                return [f"engine error (rootstock worker): {message}"]
+            current = current.__cause__ or current.__context__
+    except Exception:  # pragma: no cover - hostile exception __str__
+        return []
+    return []
 
 
 def _error_blocks(text: str) -> list[str]:

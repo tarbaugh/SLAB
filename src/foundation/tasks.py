@@ -542,7 +542,7 @@ def _attach_engine_evidence(
     engine's scratch directory vanishes. Never raises.
     """
     try:
-        notes, evidence_files = collect_failure_evidence(calculator)
+        notes, evidence_files = collect_failure_evidence(calculator, e)
         # Parsed evidence attaches before any storage happens: a failing
         # artifact store (disk full) must not cost the already-extracted
         # engine error message.
