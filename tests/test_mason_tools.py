@@ -339,6 +339,56 @@ def test_list_engines_reports_capabilities(box: Toolbox) -> None:
     assert '"builtin"' in answer and '"qe"' in answer
 
 
+def test_list_and_describe_task_expose_the_vocabulary(box: Toolbox) -> None:
+    """The agent can ask what foundation.tasks offers without shelling into
+    the source (which is what the 82-of-120 M0 transcript spent 38 steps on)."""
+    listing = box.dispatch(_call("list_tasks"))
+    lines = listing.splitlines()
+    assert any(line.startswith("relax(atoms, ") for line in lines)
+    assert any(line.startswith("single_point(atoms, ") for line in lines)
+    import json as _json
+
+    describe_relax = ToolCall(
+        id="t", name="describe_task",
+        arguments={"name": "relax"}, arguments_raw=_json.dumps({"name": "relax"}),
+    )
+    detail = box.dispatch(describe_relax)
+    assert detail.startswith("relax(atoms, ")
+    # The engine kwarg is required post-Part-A: no default in the signature.
+    assert "engine, " in detail.splitlines()[0]
+    assert "Positions only" in detail
+    describe_missing = ToolCall(
+        id="t", name="describe_task",
+        arguments={"name": "not-a-task"}, arguments_raw=_json.dumps({"name": "not-a-task"}),
+    )
+    bad = box.dispatch(describe_missing)
+    assert "no task 'not-a-task'" in bad and "relax" in bad
+
+
+def test_read_file_can_reach_installed_slab_sources(box: Toolbox) -> None:
+    """The file fence lets read_file inspect the four slab-stack packages
+    so an agent can answer 'does foundation.tasks define relax_cell?' as
+    one Read tool call, not a source-code shell expedition."""
+    for module in (
+        "foundation/tasks.py",
+        "slab/backends.py",
+        "mason/loop.py",
+        "slab_stack/__init__.py",
+    ):
+        import importlib.resources
+
+        pkg, _, tail = module.partition("/")
+        path = Path(str(importlib.resources.files(pkg))) / tail
+        answer = box.dispatch(_call("read_file", path=str(path)))
+        assert "refused:" not in answer, f"{module}: {answer[:200]}"
+    # Writes into installed sources stay refused (read scope only).
+    from foundation import tasks
+
+    tasks_path = Path(tasks.__file__)
+    refused = box.dispatch(_call("write_file", path=str(tasks_path), content="broken\n"))
+    assert refused.startswith("refused:")
+
+
 # -- memory tools ------------------------------------------------------------
 
 

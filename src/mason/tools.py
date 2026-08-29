@@ -59,6 +59,8 @@ TOOL_VOCABULARY = frozenset(
         "show_run",
         "launch_workflow",
         "list_engines",
+        "list_tasks",
+        "describe_task",
         "submit_job",
         "job_status",
         "cancel_job",
@@ -273,7 +275,11 @@ def build_toolbox(
         _scope_root(session, session.cwd),
         _scope_root(session, session.workspace_root),
     )
-    read_roots = write_roots + tuple(_scope_root(session, s.root) for s in skills.values())
+    read_roots = (
+        write_roots
+        + tuple(_scope_root(session, s.root) for s in skills.values())
+        + _installed_package_roots(session)
+    )
     _add_file_tools(box, session, read_roots, write_roots)
     _add_shell_tool(box, session)
     _add_workflow_tools(box, session, read_roots)
@@ -330,6 +336,29 @@ def _scope_root(session: MasonSession, root: Path) -> Path:
     return absolute.resolve()
 
 
+def _installed_package_roots(session: MasonSession) -> tuple[Path, ...]:
+    """The four slab-stack package roots, resolved to their on-disk locations.
+
+    Adds read-only reach into the harness's own source so ``read_file`` can
+    answer questions the vocabulary alone cannot — 'does foundation.tasks
+    have a cell relaxation task?' is one Read tool call, not thirty shell
+    calls poking at sed and grep. In an editable install the roots are the
+    ``src/<pkg>/`` directories; in a site-packages install they point there.
+    Write scope is unchanged: the fence still refuses edits into the source.
+    """
+    import importlib.resources
+
+    roots: list[Path] = []
+    for name in ("slab", "foundation", "mason", "slab_stack"):
+        try:
+            root = Path(str(importlib.resources.files(name)))
+        except (ModuleNotFoundError, TypeError):  # pragma: no cover - always installed
+            continue
+        if root.is_dir():
+            roots.append(_scope_root(session, root))
+    return tuple(roots)
+
+
 def _out_of_scope(session: MasonSession, path: Path, roots: tuple[Path, ...]) -> str | None:
     """The refusal observation when *path* leaves the file fence, else None.
 
@@ -348,9 +377,10 @@ def _out_of_scope(session: MasonSession, path: Path, roots: tuple[Path, ...]) ->
             return None
     return (
         f"refused: {path} is outside this session's file scope. File tools read "
-        f"within the project directory, the workspace, and skill directories, "
-        f"and write within the project and workspace. Work there, use the shell "
-        f"tool (approval-gated), or set [agent] file_scope = \"anywhere\"."
+        f"within the project directory, the workspace, skill directories, and "
+        f"the installed slab-stack packages (slab/foundation/mason/slab_stack); "
+        f"they write within the project and workspace only. Work there, use the "
+        f"shell tool (approval-gated), or set [agent] file_scope = \"anywhere\"."
     )
 
 
@@ -851,12 +881,110 @@ def _add_engine_tools(box: Toolbox, session: MasonSession) -> None:
             name="list_engines",
             description=(
                 "What can be computed here: engines, QE protocols, pseudopotential "
-                "families, HPC partitions."
+                "families, HPC partitions. Call this BEFORE choosing an engine — "
+                "there is no in-process MLIP fallback, so the available checkpoint "
+                "ids are the entire MLIP surface on this machine."
             ),
             parameters=_schema({}, []),
             handler=list_engines,
         )
     )
+
+    def list_tasks(arguments: dict[str, Any]) -> str:
+        entries = [f"{name}({sig}) — {summary}" for name, sig, summary in _catalog_tasks()]
+        return "\n".join(entries)
+
+    box.add(
+        Tool(
+            name="list_tasks",
+            description=(
+                "The traced tasks foundation.tasks exposes to workflow scripts. "
+                "One line per task: name, signature, one-sentence summary. Call "
+                "describe_task for the full docstring."
+            ),
+            parameters=_schema({}, []),
+            handler=list_tasks,
+        )
+    )
+
+    def describe_task(arguments: dict[str, Any]) -> str:
+        name = str(arguments.get("name", "")).strip()
+        if not name:
+            raise ValueError("describe_task requires 'name' — call list_tasks to see them")
+        catalog = {entry[0]: entry for entry in _catalog_tasks()}
+        if name not in catalog:
+            raise ValueError(f"no task {name!r}; known: {', '.join(sorted(catalog))}")
+        from foundation import tasks as _tasks
+
+        function = getattr(_tasks, name)
+        _, signature, _ = catalog[name]
+        doc = (function.__doc__ or "").strip() or "(no docstring)"
+        return f"{name}({signature})\n\n{doc}"
+
+    box.add(
+        Tool(
+            name="describe_task",
+            description=(
+                "Full signature and docstring of one foundation.tasks task, so an "
+                "agent can consult the harness's own vocabulary instead of reading "
+                "its source through shell."
+            ),
+            parameters=_schema(
+                {"name": {"type": "string", "description": "e.g. 'relax'"}},
+                ["name"],
+            ),
+            handler=describe_task,
+        )
+    )
+
+
+def _catalog_tasks() -> list[tuple[str, str, str]]:
+    """(name, signature, first-line summary) for every public foundation task.
+
+    Public = not underscore-prefixed and callable with `@task` applied, i.e.
+    every symbol foundation.tasks exports that a workflow script may name.
+    """
+    import inspect
+
+    from foundation import tasks as _tasks
+
+    entries: list[tuple[str, str, str]] = []
+    for name in sorted(vars(_tasks)):
+        if name.startswith("_"):
+            continue
+        obj = getattr(_tasks, name)
+        if not callable(obj) or not getattr(obj, "__doc__", None):
+            continue
+        try:
+            sig = inspect.signature(obj)
+        except (TypeError, ValueError):
+            continue
+        # A traced task decorated with @task wraps the underlying function;
+        # signature() correctly returns the wrapped signature. Skip helpers
+        # by requiring the function be defined in the tasks module itself.
+        if getattr(obj, "__module__", "") != _tasks.__name__:
+            continue
+        summary = (obj.__doc__ or "").strip().splitlines()[0]
+        entries.append((name, _short_signature(sig), summary))
+    return entries
+
+
+def _short_signature(sig: Any) -> str:
+    """Signature rendering the agent can read: drop annotations, keep names."""
+    parts: list[str] = []
+    for param in sig.parameters.values():
+        kind = param.kind
+        if kind is param.VAR_POSITIONAL:
+            parts.append(f"*{param.name}")
+            continue
+        if kind is param.VAR_KEYWORD:
+            parts.append(f"**{param.name}")
+            continue
+        if kind is param.KEYWORD_ONLY and "*" not in parts:
+            parts.append("*")
+        default = "" if param.default is param.empty else f"={param.default!r}"
+        parts.append(f"{param.name}{default}")
+    return ", ".join(parts)
 
 
 # -- hpc ---------------------------------------------------------------------
