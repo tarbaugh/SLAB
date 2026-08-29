@@ -366,11 +366,13 @@ def delete(name: str, directory: Path | None = None) -> Path:
 
 
 def catalog_block(memories: dict[str, Memory]) -> str:
-    """The ``# Memory`` section of the system prompt, or empty when none apply.
+    """The ``# Memory`` section of the system prompt.
 
-    One line per memory. The body stays on disk until the agent calls
-    ``recall``, so the always-loaded cost is the trigger line — the same
-    progressive disclosure the skill catalog uses.
+    One line per memory when the store is populated; a shorter form when it
+    is empty, so a fresh machine still tells the agent this surface exists
+    and when to write to it. The body stays on disk until ``recall``, so the
+    always-loaded cost is the trigger lines — the same progressive
+    disclosure the skill catalog uses.
 
     Examples:
         >>> block = catalog_block(
@@ -380,10 +382,23 @@ def catalog_block(memories: dict[str, Memory]) -> str:
         '# Memory'
         >>> block.splitlines()[-1]
         '- vllm-cache: vLLM refuses a big batch.'
+        >>> catalog_block({}).splitlines()[0]
+        '# Memory'
     """
     listed = [memory for _, memory in sorted(memories.items())]
     if not listed:
-        return ""
+        return "\n".join(
+            [
+                "# Memory",
+                "",
+                "No machine facts recorded on this machine yet. When you find a "
+                "quirk of this machine or its software worth keeping — a package "
+                "flag, a workaround, a path that surprised you — call the "
+                "remember tool with a name, a one-line description, and the "
+                "detail. Machine facts only: results belong in runs, project "
+                "decisions in the notebook, and credentials nowhere.",
+            ]
+        )
     lines = [
         "# Memory",
         "",

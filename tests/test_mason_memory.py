@@ -60,9 +60,14 @@ def test_the_prompt_carries_the_catalog_when_memories_exist(
     assert "Lower max-num-seqs." not in content
 
 
-def test_an_empty_store_adds_no_section(tmp_path: Path, memory_root: Path) -> None:
+def test_empty_store_still_shows_the_memory_surface(tmp_path: Path, memory_root: Path) -> None:
+    """A fresh machine's agent still needs to see 'this surface exists,
+    call remember when you find a machine fact worth keeping' — otherwise
+    the tool never gets called the first time a blocker is solved."""
     (content,) = [m["content"] for m in system_messages(_session(tmp_path))]
-    assert "# Memory" not in content
+    assert "# Memory" in content
+    assert "No machine facts recorded on this machine yet" in content
+    assert "remember" in content
 
 
 def test_memory_false_removes_the_block_and_the_tools(

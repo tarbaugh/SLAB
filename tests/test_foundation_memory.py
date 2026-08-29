@@ -202,7 +202,17 @@ def test_the_catalog_block_lists_one_line_per_memory(memory_root: Path) -> None:
     assert lines[0] == "# Memory"
     assert lines[-2:] == ["- a-fact: The first fact.", "- b-fact: The second fact."]
     assert "recall" in block and "remember" in block
-    assert memory_store.catalog_block({}) == ""
+
+
+def test_empty_store_still_carries_the_remember_doctrine() -> None:
+    """A machine with no memories yet must still be told this surface exists
+    and when to write to it — otherwise the agent has no reason to reach for
+    the remember tool the first time it solves a machine-level blocker."""
+    block = memory_store.catalog_block({})
+    assert block.startswith("# Memory")
+    assert "remember" in block
+    assert "No machine facts recorded on this machine yet" in block
+    assert not any(line.startswith("- ") for line in block.splitlines())
 
 
 def test_the_file_stays_readable_by_the_person_editing_it(memory_root: Path) -> None:

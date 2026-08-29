@@ -181,7 +181,9 @@ def test_resume_replays_messages_after_fresh_system(tmp_path: Path) -> None:
 
 
 def test_compaction_folds_history_and_writes_the_per_session_file(tmp_path: Path) -> None:
-    session = _session(tmp_path, context_window=4_096, compact_at=0.5)
+    # memory=False keeps the prompt small: this test targets a specific
+    # token budget and the memory doctrine block would nudge the estimate.
+    session = _session(tmp_path, context_window=4_096, compact_at=0.5, memory=False)
     replies: list[ChatReply | Exception] = [
         _tool_reply("list_dir", prompt_tokens=tokens)
         for tokens in (200, 400, 900, 1_500, 2_500)  # the fifth crosses 2048
@@ -724,3 +726,43 @@ def test_budget_hint_escalates_in_the_last_stretch(tmp_path: Path) -> None:
     for late in contents[8:]:
         assert "the budget is nearly out" in late
         assert "finish with the result you can defend" in late
+
+
+def test_memory_catalog_survives_context_compaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A memory added mid-session must reappear in the rebuilt system prompt
+    after compaction, so an agent that recorded a machine fact still sees it
+    on the next turn — the whole point of the 'remember once, recall
+    forever' contract."""
+    from foundation import memory as memory_store
+
+    memory_dir = tmp_path / "memory"
+    monkeypatch.setenv("SLAB_MEMORY_DIR", str(memory_dir))
+    memory_store.write(
+        "no-c-compiler",
+        "This box has no C compiler; skip Triton bmm overrides.",
+        "Set TORCH_DISABLE_NATIVE_JIT=1 in every mace-driven job.",
+        directory=memory_dir,
+    )
+
+    session = _session(tmp_path, context_window=4_096, compact_at=0.5)
+    replies: list[ChatReply | Exception] = [
+        _tool_reply("list_dir", prompt_tokens=tokens)
+        for tokens in (200, 400, 900, 1_500, 2_500)  # the fifth crosses 2048
+    ]
+    # Summarizer, then a small post-compaction step:
+    replies.append(_text_reply("STATE: swept the tree."))
+    replies.append(_text_reply("done"))
+    client = FakeClient(replies)
+    mason = Mason(session, client=client)
+    result = mason.run_turn("go")
+    assert result.stop_reason == "answer"
+    # The last request's system message (rebuilt by _compact) must still
+    # carry the memory catalog — the store is re-read on every rebuild.
+    final_request = client.requests[-1][0]
+    rebuilt_system = "\n".join(
+        str(m.get("content", "")) for m in final_request if m.get("role") == "system"
+    )
+    assert "# Memory" in rebuilt_system
+    assert "- no-c-compiler:" in rebuilt_system
