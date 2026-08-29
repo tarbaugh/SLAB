@@ -425,13 +425,15 @@ class Mason:
 
     def _call_model(self, *, hint: str | None = None) -> ChatReply:
         tools = None if self.fenced else self.toolbox.specs()
-        # An ephemeral system message tacked onto the end each turn — the
+        # An ephemeral user message tacked onto the end each turn — the
         # step-of-budget line, and stricter guidance near the ceiling.
         # Never persisted: the counter changes each turn and stale copies
-        # in the transcript would mislead --resume.
+        # in the transcript would mislead --resume. Deliberately not
+        # role="system": most chat templates (Qwen's included) accept a
+        # system message only at position 0, and the server 400s otherwise.
         messages = self.messages
         if hint is not None:
-            messages = [*messages, {"role": "system", "content": hint}]
+            messages = [*messages, {"role": "user", "content": hint}]
         try:
             reply = self.client.chat(messages, tools)
         except ContextOverflowError as e:
@@ -446,7 +448,7 @@ class Mason:
                 ) from e
             messages = self.messages
             if hint is not None:
-                messages = [*messages, {"role": "system", "content": hint}]
+                messages = [*messages, {"role": "user", "content": hint}]
             reply = self.client.chat(messages, tools)
         self.session.count_usage(reply.prompt_tokens, reply.completion_tokens)
         self._last_prompt_tokens = reply.prompt_tokens

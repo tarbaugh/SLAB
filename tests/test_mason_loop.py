@@ -691,8 +691,10 @@ def test_a_changed_result_resets_the_repetition_streak(tmp_path: Path) -> None:
 
 def test_budget_hint_reaches_the_model_each_turn(tmp_path: Path) -> None:
     """Every model call carries the step-of-budget line as a trailing
-    system message. The counter changes each turn; the line stays
-    ephemeral (never persisted into ``self.messages``)."""
+    user message — not role="system", which most chat templates accept
+    only at position 0 (the gateway 400s a trailing one). The counter
+    changes each turn; the line stays ephemeral (never persisted into
+    ``self.messages``)."""
     client = FakeClient(
         [
             _tool_reply("list_dir"),
@@ -704,13 +706,16 @@ def test_budget_hint_reaches_the_model_each_turn(tmp_path: Path) -> None:
     mason.run_turn("do a couple of things")
     hints_per_turn = [msgs[-1] for msgs, _ in client.requests]
     contents = [h["content"] for h in hints_per_turn]
-    assert all(h["role"] == "system" for h in hints_per_turn)
+    assert all(h["role"] == "user" for h in hints_per_turn)
     assert contents[0].startswith("[step 1 of 100]")
     assert contents[1].startswith("[step 2 of 100]")
     assert contents[2].startswith("[step 3 of 100]")
     # None of the hints made it into the persisted transcript.
-    persisted = [m for m in mason.messages if m.get("role") == "system"]
-    assert not any("[step " in (m.get("content") or "") for m in persisted)
+    assert not any("[step " in str(m.get("content") or "") for m in mason.messages)
+    # And no system message anywhere but the front: chat templates refuse it.
+    for msgs, _ in client.requests:
+        roles = [m["role"] for m in msgs]
+        assert "system" not in roles[roles.index("user") :]
 
 
 def test_budget_hint_escalates_in_the_last_stretch(tmp_path: Path) -> None:
