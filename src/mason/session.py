@@ -357,7 +357,11 @@ class MasonSession:
     # -- durable files --------------------------------------------------------
 
     def notebook_append(self, entry: str, *, heading: str | None = None) -> None:
-        """Append one entry to the lab notebook (created on first write)."""
+        """Append one entry to the lab notebook (created on first write).
+
+        The notebook is a curated record: entries only land here when an
+        agent (or a person) calls it a result. Machinery like context
+        compaction writes elsewhere — see :meth:`compactions_append`."""
         stamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
         title = f" — {heading}" if heading else ""
         # The notebook is shared across the whole session (it is the group's
@@ -367,6 +371,28 @@ class MasonSession:
         if not self.notebook_path.exists():
             block = "# Lab notebook\n" + block
         with open(self.notebook_path, "a", encoding="utf-8") as handle:
+            handle.write(block)
+
+    @property
+    def compactions_path(self) -> Path:
+        """Where context-compaction summaries land, one file per session.
+
+        A sibling of the JSONL transcript. Not the lab notebook: the notebook
+        is what the agent decided to keep, this is what the harness folded
+        because the window filled. Reading it back is a debugging surface,
+        not the running context — the summary is also prepended into the
+        rebuilt conversation as a user message, and recorded in the
+        transcript, so nothing here is load-bearing at run time."""
+        return self.sessions_dir / f"{self.transcript_path.stem}.compactions.md"
+
+    def compactions_append(self, summary: str) -> None:
+        """Persist one context-compaction summary to the per-session file."""
+        stamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+        block = f"\n## {stamp} — context compaction\n\n{summary.rstrip()}\n"
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        if not self.compactions_path.exists():
+            block = "# Context compactions\n" + block
+        with open(self.compactions_path, "a", encoding="utf-8") as handle:
             handle.write(block)
 
     def notebook_tail(self, max_chars: int = 3_000) -> str:

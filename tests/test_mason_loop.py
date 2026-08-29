@@ -180,7 +180,7 @@ def test_resume_replays_messages_after_fresh_system(tmp_path: Path) -> None:
     assert any("first answer" in c for c in contents)
 
 
-def test_compaction_folds_history_and_writes_notebook(tmp_path: Path) -> None:
+def test_compaction_folds_history_and_writes_the_per_session_file(tmp_path: Path) -> None:
     session = _session(tmp_path, context_window=4_096, compact_at=0.5)
     replies: list[ChatReply | Exception] = [
         _tool_reply("list_dir", prompt_tokens=tokens)
@@ -194,10 +194,14 @@ def test_compaction_folds_history_and_writes_notebook(tmp_path: Path) -> None:
     mason = Mason(session, client=client)
     result = mason.run_turn("inspect")
     assert result.stop_reason == "answer"
-    notebook = (tmp_path / "NOTEBOOK.md").read_text()
-    assert "context compaction" in notebook
-    assert "listed the directory five times" in notebook
-    # The compacted conversation carries the summary marker:
+    # The lab notebook is untouched by compaction — nothing here got written
+    # by the agent, and the machinery stops pretending otherwise.
+    assert not (tmp_path / "NOTEBOOK.md").exists()
+    # The summary lands in the per-session compactions file instead.
+    compactions = session.compactions_path.read_text()
+    assert "context compaction" in compactions
+    assert "listed the directory five times" in compactions
+    # The compacted conversation still carries the summary marker:
     compacted_request = client.requests[6][0]
     assert any(
         "[history compacted; working summary]" in str(m.get("content"))
@@ -219,7 +223,9 @@ def test_context_overflow_from_server_forces_compaction(tmp_path: Path) -> None:
     result = Mason(session, client=client).run_turn("go")
     assert result.stop_reason == "answer"
     assert result.text == "recovered"
-    assert "summary after overflow" in (tmp_path / "NOTEBOOK.md").read_text()
+    assert "summary after overflow" in session.compactions_path.read_text()
+    # The lab notebook stays clean — compaction is not an agent entry.
+    assert not (tmp_path / "NOTEBOOK.md").exists()
 
 
 def test_fenced_protocol_end_to_end(tmp_path: Path) -> None:
@@ -404,7 +410,7 @@ def test_compaction_does_not_refire_without_progress(tmp_path: Path) -> None:
         mason.messages.append({"role": "user", "content": f"filler {i}"})
     result = mason.run_turn("go")
     assert result.stop_reason == "answer"
-    assert (tmp_path / "NOTEBOOK.md").read_text().count("context compaction") == 1
+    assert session.compactions_path.read_text().count("context compaction") == 1
 
 
 def test_overflow_with_nothing_to_compact_is_a_teaching_error(tmp_path: Path) -> None:

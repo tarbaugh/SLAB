@@ -556,7 +556,12 @@ class Mason:
         )
         summary = (summary_reply.content or "").strip() or "(the summarizer said nothing)"
         self.session.count_usage(summary_reply.prompt_tokens, summary_reply.completion_tokens)
-        self.session.notebook_append(summary, heading="context compaction")
+        # The summary already travels two ways: as a user message prepended
+        # to the rebuilt conversation, and as a {type: compaction} event in
+        # the transcript. The per-session file is a human debugging aid,
+        # deliberately not the notebook — the notebook is what the AGENT
+        # kept, this is what the HARNESS folded.
+        self.session.compactions_append(summary)
         rebuilt = system_messages(
             self.session, self.spec, self._catalog, skills=self.skills, team=self._team
         )
