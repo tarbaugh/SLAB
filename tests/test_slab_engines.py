@@ -850,4 +850,39 @@ def test_engines_overview_labels_the_root_source(
     (project / "slab.toml").write_text('[engines.rootstock]\ncluster = "no-such-cluster"\n')
     monkeypatch.chdir(project)
     section = engines_overview()["rootstock"]
-    assert section is None or section.get("checkpoints") == {}
+    assert section is not None
+    assert section["checkpoints"] == {}
+    assert section["root_source"] == "engines.rootstock.cluster (unknown)"
+    assert "no-such-cluster" in section["error"]
+
+
+def test_installed_rootstock_with_nothing_configured_explains_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one null that reached a real cluster session: the package is
+    installed but no install root is declared anywhere (no [engines.rootstock]
+    in reach of the working directory, no $ROOTSTOCK_ROOT). A bare null hid
+    which of the three preconditions was missing; the overview must say.
+    Fake modules make this path testable on machines without the extra."""
+    import sys
+    import types
+
+    fake = types.ModuleType("rootstock")
+    fake_config = types.ModuleType("rootstock.config")
+    fake_config.resolve_default_root = lambda: None  # type: ignore[attr-defined]
+    fake_env = types.ModuleType("rootstock.environment")
+    fake_env.list_declared_checkpoints = lambda root: {}  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "rootstock", fake)
+    monkeypatch.setitem(sys.modules, "rootstock.config", fake_config)
+    monkeypatch.setitem(sys.modules, "rootstock.environment", fake_env)
+    monkeypatch.delenv("ROOTSTOCK_ROOT", raising=False)
+    monkeypatch.chdir(tmp_path)  # no slab.toml here
+
+    from slab._ops import engines_overview
+
+    section = engines_overview()["rootstock"]
+    assert section is not None
+    assert section["root"] is None
+    assert section["root_source"] == "rootstock defaults"
+    assert "[engines.rootstock]" in section["error"]
+    assert section["checkpoints"] == {}

@@ -105,15 +105,22 @@ def _rootstock_checkpoints_overview() -> dict[str, Any] | None:
     would show ``null`` otherwise while a served ``engine=<checkpoint-id>``
     call succeeded, which was silently misleading — the calculator and the
     inventory now agree on where the install is.
+
+    ``None`` means exactly one thing: the rootstock package is not
+    installed. Every other outcome returns a dict, and a dict with no
+    checkpoints carries an ``error`` line saying what to fix.
     """
     try:
         from rootstock.config import resolve_default_root
         from rootstock.environment import list_declared_checkpoints
     except ImportError:
         return None
-    root, source = _resolved_rootstock_root(resolve_default_root)
+    root, source, note = _resolved_rootstock_root(resolve_default_root)
     if root is None:
-        return None
+        # The package is installed, so this machine has a rootstock story —
+        # a bare null here would hide the one actionable fact (where the
+        # install root was looked for and why none was found).
+        return {"root": None, "root_source": source, "error": note, "checkpoints": {}}
     try:
         declared = list_declared_checkpoints(root)
     except OSError as e:
@@ -125,14 +132,15 @@ def _rootstock_checkpoints_overview() -> dict[str, Any] | None:
     }
 
 
-def _resolved_rootstock_root(default_root: Any) -> tuple[Any, str | None]:
+def _resolved_rootstock_root(default_root: Any) -> tuple[Any, str | None, str | None]:
     """Locate the rootstock install root the calculator layer would use.
 
-    Returns ``(root, source)``: the path (or ``None`` when nothing declares
-    one) and a short label naming where it came from — ``"engines.rootstock.root"``,
-    ``"engines.rootstock.cluster"``, or ``"rootstock defaults"``. The source
-    label rides into the overview so a viewer sees why the id list is what
-    it is (or why it is empty).
+    Returns ``(root, source, note)``: the path (or ``None`` when nothing
+    declares one), a short label naming where it came from —
+    ``"engines.rootstock.root"``, ``"engines.rootstock.cluster"``, or
+    ``"rootstock defaults"`` — and, when the root is ``None``, one sentence
+    saying what to fix. The label and the note ride into the overview so a
+    viewer sees why the id list is what it is (or why it is empty).
     """
     from slab.backends import _rootstock_setting
     from slab.config import ConfigError
@@ -149,17 +157,28 @@ def _resolved_rootstock_root(default_root: Any) -> tuple[Any, str | None]:
     if root_setting is not None:
         from pathlib import Path
 
-        return Path(root_setting).expanduser(), "engines.rootstock.root"
+        return Path(root_setting).expanduser(), "engines.rootstock.root", None
     if cluster_setting is not None:
         try:
             from rootstock import get_root_for_cluster
         except ImportError:  # pragma: no cover - rootstock present if we got here
-            return None, None
+            return None, None, None
         try:
-            return get_root_for_cluster(cluster_setting), "engines.rootstock.cluster"
-        except Exception:
+            return get_root_for_cluster(cluster_setting), "engines.rootstock.cluster", None
+        except Exception as e:
             # An unknown cluster name is a live config problem; surface a
-            # readable overview instead of the traceback. The caller reports
-            # checkpoints={} and a source label the viewer can act on.
-            return None, "engines.rootstock.cluster (unknown)"
-    return default_root(), "rootstock defaults"
+            # readable overview instead of the traceback.
+            return (
+                None,
+                "engines.rootstock.cluster (unknown)",
+                f"cluster {cluster_setting!r} is not known to this rootstock client: {e}",
+            )
+    root = default_root()
+    if root is None:
+        return (
+            None,
+            "rootstock defaults",
+            "no install root configured — set root or cluster under "
+            "[engines.rootstock] in slab.toml, or export ROOTSTOCK_ROOT",
+        )
+    return root, "rootstock defaults", None
