@@ -297,6 +297,34 @@ def test_list_runs_empty_then_launch_then_show(box: Toolbox, tmp_path: Path) -> 
     assert '"passed": true' in details
 
 
+def test_list_runs_filters_by_session_id(tmp_path: Path) -> None:
+    """The session filter mirrors the CLI and the MCP server: a full id or
+    a unique prefix returns only that session's runs, no session shows all."""
+    import os
+
+    from foundation.runtime import Workspace
+
+    session = _session(tmp_path)
+    box = build_toolbox(session)
+    with Workspace(session.workspace_root) as ws:
+        with ws.start_run(name="other", intent="other chat", session="other-abc") as _:
+            pass
+        os.environ["SLAB_SESSION"] = session.session_id
+        try:
+            with ws.start_run(name="mine", intent="this chat") as _:
+                pass
+        finally:
+            os.environ.pop("SLAB_SESSION", None)
+    all_runs = box.dispatch(_call("list_runs"))
+    assert "other" in all_runs and "mine" in all_runs
+    filtered = box.dispatch(_call("list_runs", session=session.session_id))
+    assert "mine" in filtered and "other" not in filtered
+    # An unknown id raises loudly through the tool — the store's
+    # SessionNotFoundError surfaces with the recovery hint intact.
+    missing = box.dispatch(_call("list_runs", session="unknown-session-id"))
+    assert "unknown-session-id" in missing and "foundation sessions" in missing
+
+
 def test_launch_workflow_failure_carries_the_record(box: Toolbox, tmp_path: Path) -> None:
     script = tmp_path / "boom.py"
     script.write_text("raise ValueError('SCF exploded')\n")

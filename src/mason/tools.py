@@ -717,10 +717,12 @@ def _add_workflow_tools(
 
         state = arguments.get("state")
         limit = int(arguments.get("limit", 10))
+        session_filter = arguments.get("session") or None
         with Workspace(session.workspace_root) as ws:
-            runs = ws.runs.list_runs(state=state, limit=limit)
+            runs = ws.runs.list_runs(state=state, session=session_filter, limit=limit)
             if not runs:
-                return "no runs in this workspace yet"
+                where = f" for session {session_filter!r}" if session_filter else ""
+                return f"no runs in this workspace yet{where}"
             lines = [
                 f"{run.id[:10]}  {run.state.value:<11} {run.status.value:<10} "
                 f"{run.name[:24]:<24} {run.intent or ''}"
@@ -731,12 +733,23 @@ def _add_workflow_tools(
     box.add(
         Tool(
             name="list_runs",
-            description="List SLAB runs in this workspace, newest first.",
+            description=(
+                "List SLAB runs in this workspace, newest first. Pass "
+                "'session' (full id or a unique prefix) to see only runs "
+                "this chat's session created — the same filter 'foundation "
+                "list --session' takes."
+            ),
             parameters=_schema(
                 {
                     "state": {
                         "type": "string",
                         "description": "quarantined | verified | promoted | expired",
+                    },
+                    "session": {
+                        "type": "string",
+                        "description": (
+                            "session id (or unique prefix) to filter by; omit for all runs"
+                        ),
                     },
                     "limit": {"type": "integer"},
                 },
