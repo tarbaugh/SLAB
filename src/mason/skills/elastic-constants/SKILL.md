@@ -19,8 +19,12 @@ assembles C_ij, the Voigt-Reuss-Hill moduli, E, and nu.
 Copy `assets/strain_scan.py` into the project directory and adapt the
 constants at the top:
 
-- `STRUCTURE`: the *relaxed* cell. An unrelaxed reference leaves a linear
-  term in every ladder, and the fit script warns about exactly that.
+- `STRUCTURE`: the cell at the engine's own equilibrium — positions AND
+  cell relaxed to zero force and near-zero stress. Use
+  `foundation.tasks.relax_cell` with the symmetry that matches the crystal
+  (`isotropic` for cubic, `orthorhombic` for Pnma/Cmcm, `triclinic`
+  otherwise). An unrelaxed reference leaves a linear term in every ladder,
+  and the fit script warns about exactly that.
 - `ENGINE`: the engine for the energies. The template runs as-is under
   `emt` as a shakeout.
 - `SYMMETRY`: `isotropic` (2 modes; use for glasses and amorphous cells),
@@ -47,7 +51,8 @@ machine-readable.
 
 - The template's checks gate the run: energies finite, every ladder's
   minimum interior. A minimum at a ladder's edge means the reference is
-  strained; re-relax and rerun.
+  strained; re-run `relax_cell` (tighten `smax` if needed) and repeat the
+  scan against the fresh equilibrium.
 - Heed the script's warnings. A large linear term means the reference is
   not at its minimum. A non-positive-definite matrix means the structure
   is mechanically unstable or a ladder is noise; do not report averages
@@ -66,4 +71,4 @@ machine-readable.
 - Finite-temperature (relaxed isothermal) constants need strained MD
   averages, not static ladders; this skill's numbers are athermal.
 - Cells under residual stress need a stress-strain treatment; fix the
-  reference first instead of fitting through the warning.
+  reference first with `relax_cell` instead of fitting through the warning.

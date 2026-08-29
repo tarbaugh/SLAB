@@ -20,7 +20,11 @@ procedure has traps the checklist below guards.
 ## 1. Compute the pair
 
 - Build the slab with `ase.build.surface` (or `fcc111` and friends) from
-  the *relaxed* bulk, with vacuum on both sides.
+  the bulk at the engine's own equilibrium — call
+  `foundation.tasks.relax_cell` with the crystal's symmetry
+  (`isotropic` for cubic, `orthorhombic` for Pnma/Cmcm, `triclinic`
+  otherwise) so gamma is measured against a stress-free reference. Add
+  vacuum on both sides of the slab.
 - Compute E_bulk and E_slab in one workflow, with the same engine, the
   same protocol expansion, the same pseudopotential family, and k-meshes
   that match in the in-plane directions (the slab's normal direction

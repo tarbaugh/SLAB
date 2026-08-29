@@ -17,12 +17,13 @@ from __future__ import annotations
 import tempfile
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from ase import Atoms
 from ase.calculators.singlepoint import SinglePointCalculator
-from ase.optimize import BFGS
+from ase.filters import FrechetCellFilter
+from ase.optimize import BFGS, CellAwareBFGS
 
 from foundation.errors import ArtifactExistsError
 from foundation.models import ArtifactRole
@@ -173,6 +174,155 @@ def relax(
 
     # Detach the live calculator (it may hold an unpicklable torch model) but
     # keep the results on the returned structure.
+    relaxed = system.copy()
+    relaxed.calc = SinglePointCalculator(relaxed, energy=energy, forces=forces)
+    return relaxed, info
+
+
+#: Voigt masks for :func:`relax_cell`'s ``symmetry`` argument. Six-tuple in
+#: the order ASE's cell filters expect (xx, yy, zz, yz, xz, xy). ``isotropic``
+#: uses a full mask paired with the filter's ``hydrostatic_strain=True`` flag,
+#: which ties the three normal components to one volumetric degree of freedom.
+_CELL_MASKS: dict[str, tuple[bool, bool, bool, bool, bool, bool]] = {
+    "isotropic": (True, True, True, False, False, False),
+    "orthorhombic": (True, True, True, False, False, False),
+    "triclinic": (True, True, True, True, True, True),
+}
+
+
+@task(
+    engines=("ase", "rootstock"),
+    cache_extra=lambda arguments: describe_engine(
+        arguments["engine"], arguments.get("calculator_options")
+    ),
+)
+def relax_cell(
+    atoms: Atoms,
+    *,
+    engine: str,
+    symmetry: Literal["isotropic", "orthorhombic", "triclinic"] = "triclinic",
+    fmax: float = 0.05,
+    smax: float = 0.005,
+    steps: int = 200,
+    calculator_options: dict[str, Any] | None = None,
+    label: str | None = None,
+) -> tuple[Atoms, dict[str, Any]]:
+    """Relax positions AND cell to zero force and near-zero stress.
+
+    The companion to :func:`relax` for tasks whose *reference* must be the
+    engine's own equilibrium cell — the elastic-constants and surface-energy
+    skills both name this as their prerequisite. Uses
+    :class:`ase.optimize.CellAwareBFGS` on a
+    :class:`ase.filters.FrechetCellFilter`-wrapped structure.
+
+    Args:
+        atoms: Structure to relax (calculator-free). Never mutated.
+        engine: A built-in name, a cluster-registry name, or a rootstock
+            checkpoint id — same resolution as :func:`relax`. The engine must
+            produce a stress tensor (rootstock-served MLIPs do; ``qe``'s
+            ASE calculator does, but for ``qe`` the honest route is pw.x's
+            own ``calculation='vc-relax'`` inside :func:`single_point` —
+            this task would relax the cell against a fixed k-mesh, which
+            gives a k-mesh-dependent equilibrium).
+        symmetry: Cell degrees of freedom.
+            ``"isotropic"`` allows only volumetric scaling (one dof, cubic
+            or fully-constrained shapes); ``"orthorhombic"`` allows the
+            three axis lengths to vary independently but keeps angles at
+            their input (fits Pnma, Cmcm, ...); ``"triclinic"`` (the
+            default) allows all six strain components.
+        fmax: Force convergence target (eV/Å) — the same meaning as in
+            :func:`relax`, applied to atomic positions.
+        smax: Stress convergence target (eV/Å³) — the largest allowed
+            magnitude of any (masked) stress component. 0.005 eV/Å³ ≈
+            0.8 GPa; tighten it (e.g. 0.001) when the run feeds an elastic
+            or surface-energy calculation that needs zero residual stress.
+        steps: Maximum optimizer steps.
+        calculator_options: Forwarded to the engine factory.
+        label: Names the trajectory artifact; auto-suffixed on collision.
+
+    Returns ``(relaxed, info)`` where ``info`` mirrors :func:`relax` and
+    additionally carries ``smax`` (the achieved residual), ``smax_target``,
+    ``symmetry``, ``cell_lengths``, ``cell_angles``, and ``volume``.
+
+    Failure evidence follows :func:`relax`'s contract: partial trajectory
+    kept as ``{label or 'relax_cell'}-failed.traj``, engine files kept with
+    the same prefix, and diagnostic notes on the exception.
+
+    Examples:
+        >>> from ase.build import bulk
+        >>> atoms = bulk("Cu", "fcc", a=3.4)  # compressed vs EMT equilibrium
+        >>> relaxed, info = relax_cell(atoms, engine="emt", symmetry="isotropic")
+        >>> info["converged"], info["smax"] < 0.005, info["symmetry"]
+        (True, True, 'isotropic')
+    """
+    if _qe_shaped(engine, calculator_options):
+        _guard_qe_kpoints(atoms, calculator_options, task="relax_cell")
+    if symmetry not in _CELL_MASKS:
+        raise ValueError(
+            f"unknown symmetry {symmetry!r} — expected one of "
+            f"{sorted(_CELL_MASKS)}"
+        )
+    described = describe_engine(engine, calculator_options)
+    system = atoms.copy()
+    calculator = get_calculator(engine, **(calculator_options or {}))
+    system.calc = calculator
+
+    mask = list(_CELL_MASKS[symmetry])
+    hydrostatic = symmetry == "isotropic"
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="slab-relax-cell-") as tmp:
+            trajectory = Path(tmp) / "relax_cell.traj"
+            filt = FrechetCellFilter(system, mask=mask, hydrostatic_strain=hydrostatic)
+            # ASE's CellAwareBFGS accepts a filter-wrapped Atoms and a None
+            # logfile in practice, but its type stub narrows both. Ignoring
+            # here keeps the idiomatic call; everything else stays typed.
+            optimizer = CellAwareBFGS(filt, trajectory=str(trajectory), logfile=None)  # type: ignore[arg-type]
+            try:
+                converged = bool(optimizer.run(fmax=fmax, smax=smax, steps=steps))
+                energy = float(system.get_potential_energy())
+                forces = system.get_forces()
+                stress = system.get_stress()  # voigt: xx, yy, zz, yz, xz, xy
+            except Exception as e:
+                _attach_failure_diagnostics(
+                    e, optimizer, trajectory, label, calculator, task_name="relax_cell"
+                )
+                raise
+            achieved_fmax = float(np.sqrt((forces**2).sum(axis=1).max()))
+            # Only the masked stress components are relaxed toward zero; the
+            # frozen ones (off-diagonal in "orthorhombic", every non-volumetric
+            # component in "isotropic") stay at whatever the equilibrium leaves.
+            masked_stress = np.array(stress)[np.array(mask, dtype=bool)]
+            achieved_smax = float(np.abs(masked_stress).max()) if masked_stress.size else 0.0
+
+            active = current_run()
+            if active is not None:
+                _keep_unique(active, f"{label or 'relax_cell'}.traj", trajectory)
+                for suffix, produced in collect_engine_outputs(calculator):
+                    _keep_unique(active, f"{label or 'relax_cell'}.{suffix}", produced)
+    finally:
+        close_calculator(calculator)
+
+    cell = system.cell.cellpar()
+    info: dict[str, Any] = {
+        "engine": engine,
+        "engine_source": described["source"],
+        "engine_version": described.get("version"),
+        "converged": converged,
+        "fmax": achieved_fmax,
+        "fmax_target": fmax,
+        "smax": achieved_smax,
+        "smax_target": smax,
+        "steps": optimizer.get_number_of_steps(),
+        "energy": energy,
+        "energy_unit": "eV",
+        "n_atoms": len(system),
+        "symmetry": symmetry,
+        "cell_lengths": (float(cell[0]), float(cell[1]), float(cell[2])),
+        "cell_angles": (float(cell[3]), float(cell[4]), float(cell[5])),
+        "volume": float(system.get_volume()),
+    }
+
     relaxed = system.copy()
     relaxed.calc = SinglePointCalculator(relaxed, energy=energy, forces=forces)
     return relaxed, info
@@ -343,7 +493,13 @@ def _qe_scf_options(options: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _attach_failure_diagnostics(
-    e: Exception, optimizer: BFGS, trajectory: Path, label: str | None, calculator: Any
+    e: Exception,
+    optimizer: BFGS,
+    trajectory: Path,
+    label: str | None,
+    calculator: Any,
+    *,
+    task_name: str = "relax",
 ) -> None:
     """Best-effort failure evidence: note the last-known state on *e*, keep
     the partial trajectory, and fold in whatever the engine itself left
@@ -354,7 +510,10 @@ def _attach_failure_diagnostics(
     structure fly apart, did the SCF diverge, what did ``pw.x`` actually say.
     """
     try:
-        note = f"relax failed after {optimizer.get_number_of_steps()} completed step(s)"
+        note = (
+            f"{task_name} failed after "
+            f"{optimizer.get_number_of_steps()} completed step(s)"
+        )
         last = _last_trajectory_frame(trajectory)
         if last is not None:
             note += (
@@ -363,16 +522,20 @@ def _attach_failure_diagnostics(
             )
         active = current_run()
         if active is not None and trajectory.exists() and trajectory.stat().st_size > 0:
-            kept_as = _keep_unique(active, f"{label or 'relax'}-failed.traj", trajectory)
+            kept_as = _keep_unique(active, f"{label or task_name}-failed.traj", trajectory)
             note += f"; partial trajectory kept as artifact {kept_as!r}"
         e.add_note(note)
     except Exception as diagnostics_error:
         with suppress(Exception):
-            e.add_note(f"(relax failure diagnostics unavailable: {diagnostics_error})")
-    _attach_engine_evidence(e, calculator, label)
+            e.add_note(
+                f"({task_name} failure diagnostics unavailable: {diagnostics_error})"
+            )
+    _attach_engine_evidence(e, calculator, label, task_name=task_name)
 
 
-def _attach_engine_evidence(e: Exception, calculator: Any, label: str | None) -> None:
+def _attach_engine_evidence(
+    e: Exception, calculator: Any, label: str | None, *, task_name: str = "relax"
+) -> None:
     """File-IO engines tell their failure story in files (``espresso.pwo``,
     ``CRASH``), not in the exception — which is a bare ``CalledProcessError``.
     Note the story on *e* and, inside a run, keep the files before the
@@ -388,7 +551,7 @@ def _attach_engine_evidence(e: Exception, calculator: Any, label: str | None) ->
         active = current_run()
         if active is not None and evidence_files:
             kept = [
-                _keep_unique(active, f"{label or 'relax'}-failed.{suffix}", path)
+                _keep_unique(active, f"{label or task_name}-failed.{suffix}", path)
                 for suffix, path in evidence_files
             ]
             e.add_note("engine files kept as artifacts: " + ", ".join(repr(k) for k in kept))

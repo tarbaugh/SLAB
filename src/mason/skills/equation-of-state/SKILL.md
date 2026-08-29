@@ -20,8 +20,10 @@ the recorded points.
 Copy `assets/eos_scan.py` into the project directory and adapt the three
 constants at the top:
 
-- `STRUCTURE`: the bulk cell. Use a relaxed structure, or at least a
-  reasonable experimental lattice constant.
+- `STRUCTURE`: the bulk cell. The experimental lattice constant is a
+  reasonable start; `foundation.tasks.relax_cell` at the same engine is
+  the honest one, and the scan then brackets a real minimum instead of a
+  reference-strain artefact.
 - `ENGINE`: the engine for the single points. The template runs as-is
   under `emt` as a shakeout; switch to the production engine for a real
   number.

@@ -380,3 +380,60 @@ def test_relax_provenance_resolved_before_computation(
     assert info["engine_source"] == "registry:delta"
 
 
+
+
+# -- relax_cell ------------------------------------------------------------------------
+
+
+def test_relax_cell_isotropic_converges_a_compressed_reference() -> None:
+    from foundation.tasks import relax_cell
+
+    # EMT's Cu equilibrium is a=3.61 A (Cu bulk primitive edge = a/sqrt(2)),
+    # so a=3.4 is compressed and the isotropic mode should scale to equilibrium.
+    atoms = bulk("Cu", "fcc", a=3.4)
+    relaxed, info = relax_cell(atoms, engine="emt", symmetry="isotropic", smax=0.005)
+    assert info["converged"] is True
+    assert info["smax"] < 0.005
+    assert info["symmetry"] == "isotropic"
+    assert info["energy_unit"] == "eV"
+    assert info["engine_source"] == "builtin"
+    a, b, c = info["cell_lengths"]
+    assert a == pytest.approx(b) == pytest.approx(c)
+    assert info["volume"] > atoms.get_volume()  # relaxation expanded the cell
+    # The input structure was not mutated.
+    assert atoms.cell.array == pytest.approx(bulk("Cu", "fcc", a=3.4).cell.array)
+    assert relaxed.calc.__class__.__name__ == "SinglePointCalculator"
+
+
+def test_relax_cell_orthorhombic_holds_shear_at_zero() -> None:
+    from foundation.tasks import relax_cell
+
+    atoms = bulk("Cu", "fcc", a=3.4)
+    _, info = relax_cell(atoms, engine="emt", symmetry="orthorhombic")
+    alpha, beta, gamma = info["cell_angles"]
+    assert alpha == pytest.approx(60.0, abs=1e-6)
+    assert beta == pytest.approx(60.0, abs=1e-6)
+    assert gamma == pytest.approx(60.0, abs=1e-6)
+
+
+def test_relax_cell_refuses_unknown_symmetry() -> None:
+    from foundation.tasks import relax_cell
+
+    with pytest.raises(ValueError, match="unknown symmetry 'hexagonal'"):
+        relax_cell(bulk("Cu", "fcc", a=3.6), engine="emt", symmetry="hexagonal")  # type: ignore[arg-type]
+
+
+def test_relax_cell_records_the_task_and_trajectory(ws: Workspace) -> None:
+    from foundation.tasks import relax_cell
+
+    atoms = bulk("Cu", "fcc", a=3.4)
+    with ws.start_run(name="cu-cell", intent="Cu EMT cell relax") as run:
+        _, info = relax_cell(atoms, engine="emt", symmetry="isotropic", label="cu-cell")
+    assert info["converged"] is True
+    (record,) = ws.runs.list_tasks(run.id)
+    assert record.name == "relax_cell"
+    assert record.recipe["params"]["engine"] == "emt"
+    assert record.recipe["params"]["symmetry"] == "isotropic"
+    (traj,) = ws.runs.list_artifacts(run.id)
+    assert traj.name == "cu-cell.traj"
+    assert traj.role is ArtifactRole.INTERMEDIATE
