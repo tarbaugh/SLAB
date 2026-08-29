@@ -20,7 +20,7 @@ from foundation.tasks import relax
 
 ws = Workspace(".slab")
 with ws.start_run(name="si-relax", intent="baseline lattice constant") as run:
-    relaxed, info = relax(atoms, engine="mace", fmax=0.05)   # traced, cached, recorded
+    relaxed, info = relax(atoms, engine="emt", fmax=0.05)    # traced, cached, recorded
 
     @check
     def forces_converged():
@@ -92,7 +92,6 @@ version, engine versions, parameters) stay on the run forever.
 
 ```bash
 pip install -e .              # core: pydantic + typer + ase
-pip install -e ".[mace]"      # + MACE foundation model in-process (torch)
 pip install -e ".[rootstock]" # + cluster-served MLIPs (thin client, no torch)
 pip install -e ".[mcp]"       # + MCP server for agents
 pip install -e ".[dev]"       # tests, lint, types
@@ -105,27 +104,27 @@ a content-addressed store.
 
 ## The demo
 
-Relax 5 perturbed variants of a Si supercell with MACE, promote the best,
+Relax 5 perturbed variants of a Cu supercell under EMT, promote the best,
 expire the rest, and garbage-collect:
 
 ```bash
-python examples/demo.py                # MACE + Si (downloads the model on first use)
-python examples/demo.py --engine emt   # EMT + Cu: no extras, runs in seconds
+python examples/demo.py                                   # EMT + Cu, no extras, runs in seconds
+python examples/demo.py --engine mace-mp-0-medium         # a served MLIP checkpoint through rootstock
 ```
 
-The output, with MACE's own loader messages omitted:
+The output:
 
 ```text
-workspace: .slab   engine: mace   system: Si x 64 atoms
-  run 01m0v7tefx  E = -343.628458 eV  fmax = 0.0382  steps = 10  -> verified
-  run 01m0v7th31  E = -343.626565 eV  fmax = 0.0442  steps = 14  -> verified
-  run 01m0v7tjhz  E = -343.628352 eV  fmax = 0.0417  steps = 19  -> verified
-  run 01m0v7tmg4  E = -343.626973 eV  fmax = 0.0472  steps = 20  -> verified
-  run 01m0v7tph3  E = -343.626718 eV  fmax = 0.0450  steps = 21  -> verified
+workspace: .slab   engine: emt   system: Cu x 32 atoms
+  run 01m15d2fv9  E = -0.213146 eV  fmax = 0.0407  steps =  6  -> verified
+  run 01m15d2fwh  E = -0.213732 eV  fmax = 0.0439  steps = 10  -> verified
+  run 01m15d2fxn  E = -0.214059 eV  fmax = 0.0315  steps = 13  -> verified
+  run 01m15d2fyz  E = -0.213770 eV  fmax = 0.0419  steps = 13  -> verified
+  run 01m15d2g09  E = -0.214043 eV  fmax = 0.0301  steps = 14  -> verified
 
-lowest energy: run 01m0v7tefx  (E = -343.628458 eV)
+lowest energy: run 01m15d2fxn  (E = -0.214059 eV)
 decide what deserves permanence, then clean up:
-  foundation promote 01m0v7tefx --reason 'lowest energy of 5 variants'
+  foundation promote 01m15d2fxn --reason 'lowest energy of 5 variants'
   foundation expire --older-than 0d
   foundation gc
 ```
@@ -309,8 +308,8 @@ spacing, cold smearing, and per-atom-scaled thresholds:
 from slab.protocols import qe_protocol_options
 from foundation.tasks import single_point
 
-options = qe_protocol_options(atoms, protocol="balanced")   # explicit, never a default
-relaxed, info = relax(atoms, engine="mace", fmax=0.02)      # cheap geometry
+options = qe_protocol_options(atoms, protocol="balanced")                        # explicit, never a default
+relaxed, info = relax(atoms, engine="mace-mp-0-medium", fmax=0.02)                # cheap geometry, MLIP served
 final, dft = single_point(relaxed, engine="qe", calculator_options=options)
 ```
 
@@ -355,8 +354,10 @@ code says `engine="vasp"` and runs unchanged on any cluster whose registry
 declares `vasp`. Resolution order is built-ins, then registry, then
 rootstock checkpoint ids, so a maintainer's curated alias (with baked-in
 options) always beats bare checkpoint resolution. Entries may not shadow
-built-in names (`qe`, `lammps`, `mace`, ...), so site aliases pick distinct
-names.
+built-in names (`qe`, `lammps`, `rootstock`, ...), so site aliases pick
+distinct names. Names retired from the built-ins (`mace`) are legal, and
+declaring them is how a site keeps `engine="mace"` working in existing
+scripts by pointing at a rootstock checkpoint.
 
 ```json
 {
@@ -544,8 +545,8 @@ MVP vertical slice, working end to end. It includes:
 - a content-addressed artifact store with tiered retention;
 - define-by-run tracing with content-hash caching;
 - verification hooks;
-- relaxation and single-point tasks for MACE, ASE, Quantum ESPRESSO, and
-  LAMMPS;
+- relaxation and single-point tasks for ASE, Quantum ESPRESSO, LAMMPS, and
+  MLIPs served through rootstock;
 - AiiDA-style input protocols and SSSP pseudopotential families;
 - layered HPC configuration with a SLURM submission layer;
 - the Mason agent harness, for open models self-served on a GPU node or for

@@ -1,20 +1,20 @@
 # Engines
 
 SLAB implements no physics. Every engine is reached through exactly one
-seam, the ASE `Calculator` contract, whether that engine is the EMT toy,
-in-process MACE, a `pw.x` binary, LAMMPS on a cluster, or an MLIP served
-from a rootstock install. This page follows that seam from laptop built-ins
-to cluster registries.
+seam, the ASE `Calculator` contract, whether that engine is the EMT toy, a
+`pw.x` binary, LAMMPS on a cluster, or an MLIP served from a rootstock
+install. This page follows that seam from laptop built-ins to cluster
+registries.
 
 ## One seam, three sources
 
 `get_calculator(engine, **options)` maps an engine name to a ready ASE
 calculator. Three sources feed the mapping, tried in order:
 
-1. **Built-ins.** `emt` and `lj` (ASE toys), `mace` (in-process,
-   `slab-stack[mace]`), `qe` (Quantum ESPRESSO's `pw.x`, no extra needed),
-   `lammps` (the `lmp` binary, likewise no extra), and `rootstock`
-   (cluster-served MLIPs, `slab-stack[rootstock]`).
+1. **Built-ins.** `emt` and `lj` (ASE toys), `qe` (Quantum ESPRESSO's
+   `pw.x`, no extra needed), `lammps` (the `lmp` binary, likewise no
+   extra), and `rootstock` (cluster-served MLIPs,
+   `slab-stack[rootstock]`).
 2. **The cluster engine registry.** Names that a cluster maintainer declared
    in an `engines.json` that lives with the install, such as `vasp`, curated
    site aliases like `qe-delta`, and MLIP aliases.
@@ -42,7 +42,7 @@ print(type(calc).__name__)
 ```
 
 ```text
-('emt', 'lammps', 'lj', 'mace', 'qe', 'rootstock')
+('emt', 'lammps', 'lj', 'qe', 'rootstock')
 EMT
 ```
 
@@ -73,26 +73,9 @@ E = -0.053417 eV   fmax = 0.0388   steps = 9
 EMT is deterministic and the rattle seed is fixed, so these numbers reproduce
 exactly. EMT and LJ run in milliseconds per step, and they fit only the
 elements they parametrize, which makes them ideal for tests and tutorials
-but not for science. For real work in-process, use the MACE foundation
-model:
-
-<!-- no-verify -->
-```python
-relaxed, info = relax(
-    atoms,
-    engine="mace",
-    calculator_options={"model": "medium", "device": "cuda"},
-)
-```
-
-!!! note
-    Options for `mace` are forwarded to `mace.calculators.mace_mp`, and the
-    defaults are `model="small"`, `device="cpu"`, `default_dtype="float64"`.
-    First use downloads the checkpoint to `~/.cache/mace`. On a cluster, do
-    that once from a node with internet, because compute nodes are typically
-    firewalled, or skip in-process MACE and use a rootstock-served checkpoint
-    id as the engine name. The resolved model and the mace-torch version are
-    both part of the engine's cache identity.
+but not for science. For real work SLAB has no in-process MLIP path; the
+route to a MACE, UMA, or any other foundation model is `rootstock`, covered
+below.
 
 ## Quantum ESPRESSO
 
@@ -246,11 +229,10 @@ registry below under a distinct alias like `lammps-delta`, the same as QE.
 ## Per-engine environments
 
 Each engine runs isolated by construction. QE and LAMMPS are external
-binaries in private slab-managed scratch directories, rootstock and the
-Mason model server live behind HTTP in their own environments, and only
-mace-torch is deliberately in-process, because its cluster-grade isolation
-is rootstock. What crosses the seam is the command line, and when one engine
-needs its own environment variables, the command line carries those too:
+binaries in private slab-managed scratch directories, and rootstock and the
+Mason model server live behind HTTP in their own environments. What crosses
+the seam is the command line, and when one engine needs its own environment
+variables, the command line carries those too:
 
 ```toml
 [engines.qe]
@@ -351,10 +333,9 @@ Three boundaries to know about:
   apply to the whole job, so anything one engine needs and another must not
   see belongs in that engine's own `[engines.X] setup`, or in the `env`
   command wrapper for plain variables, and never in job-global setup.
-- A named MACE checkpoint downloads on first use, and it has no offline
-  mode. On firewalled compute nodes, slab bounds the attempt and refuses with
-  instructions instead of hanging, but the real fix is the pre-warm (or
-  rootstock) described under [Built-ins](#built-ins).
+- Rootstock-served MLIPs live in the site's own pre-built environment, so
+  compute nodes never touch a checkpoint download or a torch install. A
+  named checkpoint id used as an engine name is the whole surface.
 - Slab-managed scratch directories default to `$TMPDIR`, which clusters often
   point at small node-local tmpfs. Set `[paths] scratch` to a shared scratch
   root, so pw.x's wavefunctions fit and MPI ranks on other nodes can see
@@ -380,7 +361,8 @@ from foundation.tasks import relax, single_point
 atoms = bulk("Si", "diamond", a=5.43)
 atoms.rattle(stdev=0.05, seed=11)
 
-relaxed, cheap = relax(atoms, engine="mace", fmax=0.02, label="si-mace")
+relaxed, cheap = relax(atoms, engine="mace-mp-0-medium", fmax=0.02, label="si-mace",
+                       calculator_options={"cluster": "delta"})
 
 options = qe_protocol_options(relaxed, protocol="fast")
 final, dft = single_point(relaxed, engine="qe", label="si-scf",
@@ -391,12 +373,13 @@ def dft_confirms_geometry():
     return converged(dft["fmax"], below=0.1, label="dft fmax")
 ```
 
-Executed for real, with MACE-MP small on CPU and Quantum ESPRESSO 7.5 with
-the SSSP PBEsol efficiency family through the `fast` protocol:
+Executed for real, with a rootstock-served MACE-MP-0 medium checkpoint and
+Quantum ESPRESSO 7.5 with the SSSP PBEsol efficiency family through the
+`fast` protocol:
 
 <!-- no-verify -->
 ```text
-MACE relax: converged=True E=-10.7384560555 eV fmax=0.013715 eV/A steps=4
+MLIP relax: converged=True E=-10.7384560555 eV fmax=0.013715 eV/A steps=4
 QE single point: E=-308.5312843034 eV fmax=0.021275 eV/A version=7.5 n_atoms=2
 run 01m08kqbd1sv4cadjxcre2tcaa  si-two-fidelity  state=verified status=completed checks=3/3 tasks=2
 ```
@@ -406,7 +389,7 @@ was optimized, and an engine whose own self-consistency fails raises, with
 the engine's error report attached as notes, instead of returning. Its
 artifacts follow relax's rules. The SCF's output is kept as the intermediate
 `si-scf.pwo`. Both tasks cache, so rerunning the script serves both results
-without re-invoking MACE or `pw.x`. Provenance links the chain by hash
+without re-invoking the MLIP or `pw.x`. Provenance links the chain by hash
 equality, because `single_point`'s `atoms` input hash is `relax`'s first
 output hash.
 
@@ -477,10 +460,13 @@ slab engines verify    # run every entry's probe; exit nonzero on failure
 ```
 
 Two refusals keep resolution honest. An entry that shadows a built-in name
-(`mace`, `emt`, ...) is rejected loudly at load, because it would silently
+(`qe`, `emt`, ...) is rejected loudly at load, because it would silently
 win or lose depending on resolution order, and either way you would get a
-different engine than someone intended. And a registry that declares a newer
-`layout_version` than the client understands refuses rather than misreads.
+different engine than someone intended. Names retired from the built-ins
+(`mace`) are legal, and declaring one is how a site keeps `engine="mace"`
+working in existing scripts by pointing at a rootstock checkpoint. A
+registry that declares a newer `layout_version` than the client
+understands refuses rather than misreads.
 
 You can exercise the whole chain locally, because the registry is just a
 file, and nothing says its calculator must live on a cluster:
@@ -511,7 +497,7 @@ print(info["engine"], info["engine_source"], info["engine_version"])
 ```
 
 ```text
-('emt', 'lammps', 'lj', 'mace', 'qe', 'rootstock', 'emt-cluster')
+('emt', 'lammps', 'lj', 'qe', 'rootstock', 'emt-cluster')
 emt-cluster registry:laptop 1.0
 ```
 

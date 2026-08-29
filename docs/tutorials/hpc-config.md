@@ -269,14 +269,11 @@ reason, so an unknown is never presented as a known.
 2. Write `/sw/slab/config.toml` (paths, `[engines.qe]`, `[hpc]`
    partitions) and, optionally, `/sw/slab/engines.json`, starting from the
    files in `templates/`. See [Engines](engines.md) for the registry.
-3. Pre-stage the two downloads that compute nodes cannot make themselves,
-   because they are typically firewalled. Install the pseudopotential
-   families that protocols will ask for (`slab pseudos install sssp` into a
-   shared `paths.pseudos` root), and warm the MLIP checkpoint cache from a
-   node with internet, where
-   `python -c "from mace.calculators import mace_mp; mace_mp(model='small')"`
-   populates `~/.cache/mace`. Or serve MLIPs through rootstock and skip
-   local checkpoints entirely.
+3. Pre-stage what compute nodes cannot download themselves, because they
+   are typically firewalled. Install the pseudopotential families that
+   protocols will ask for (`slab pseudos install sssp` into a shared
+   `paths.pseudos` root). MLIPs run through rootstock, so the checkpoint
+   lives in the site's pre-built environment rather than a per-user cache.
 4. Export from the module file:
    `setenv SLAB_SITE_CONFIG /sw/slab/config.toml`.
 5. Users check their view with `slab config show` and

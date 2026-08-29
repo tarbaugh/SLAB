@@ -60,7 +60,9 @@ def test_registry_refuses_builtin_shadowing(shadowing: str) -> None:
         EngineRegistry.model_validate({"engines": {shadowing: EMT_SPEC}})
 
 
-def test_registry_permits_the_retired_mace_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_registry_permits_the_retired_mace_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """After the mace built-in retired, a site may declare ``mace`` as an
     alias for its rootstock checkpoint. Reserving the name would block the
     migration path; check the registry accepts it and it resolves."""
@@ -69,6 +71,23 @@ def test_registry_permits_the_retired_mace_name(tmp_path: Path, monkeypatch: pyt
     )
     monkeypatch.setenv("SLAB_ENGINES", str(registry))
     assert type(get_calculator("mace")).__name__ == "EMT"
+
+
+def test_retired_mace_message_names_both_migration_routes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A script still saying engine='mace' must land on a message that points
+    at both migration routes: a registry alias, and a rootstock-served
+    checkpoint id used directly as the engine name."""
+    monkeypatch.delenv("SLAB_ENGINES", raising=False)
+    with pytest.raises(EngineNotAvailableError) as excinfo:
+        get_calculator("mace")
+    text = str(excinfo.value)
+    assert "'mace'" in text
+    assert "emt, lammps, lj, qe, rootstock" in text
+    # Points at the two migration paths: a registry, or a served checkpoint.
+    assert "engine registry" in text or "SLAB_ENGINES" in text
+    assert "rootstock" in text or "checkpoint" in text
 
 
 @pytest.mark.parametrize("sneaky", ["QE", "Emt", "rootstock ", " lj", "EMT"])

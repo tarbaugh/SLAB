@@ -249,7 +249,7 @@ function; outside a run context it *is* the plain function. Inside
    `atoms, info = relax(...)` leaves per-value hashes; tuple subclasses like
    NamedTuple are stored whole so cache restores preserve their type), and
    the record is finalized with the full recipe: inputs, code version, engine
-   versions (`@task(engines=("mace-torch",))` pins installed versions into
+   versions (`@task(engines=("ase", "rootstock"))` pins installed versions into
    both recipe and cache key), python/slab versions, and human-readable
    parameters.
 
@@ -369,7 +369,7 @@ rule points one way only:
 └───────────────────────┬─────────────────────────────────────────┘
                         │ depends on
 ┌─ slab ────────────────▼─────────────────────────────────────────┐
-│  backends.get_calculator("mace"|"qe"|"lammps"|"emt")             │
+│  backends.get_calculator("qe"|"lammps"|"rootstock"|"emt")        │
 │                                           ← ASE Calculator seam  │
 │  engine registry · QE protocols · pseudo families · SLURM · config│
 └─────────────────────────────────────────────────────────────────┘
@@ -398,10 +398,10 @@ invisible to `slab engines list`.
   daemon and nothing to configure. `RunStore` is a protocol — the Postgres
   seam — and schema versions are tracked via `PRAGMA user_version`.
 - **Engines.** `slab.backends` maps names to ASE calculators from two
-  sources: built-ins (`mace` in-process, `qe` driving `pw.x` and `lammps`
-  driving `lmp` through ASE's file-IO calculators, `rootstock`
-  cluster-served, ASE's toys) and the cluster engine registry (§7a). SLAB
-  implements no physics; adding VASP means adding a registry entry, and
+  sources: built-ins (`qe` driving `pw.x` and `lammps` driving `lmp`
+  through ASE's file-IO calculators, `rootstock` cluster-served, ASE's
+  toys) and the cluster engine registry (§7a). SLAB implements no
+  physics; adding VASP means adding a registry entry, and
   nothing in tracing, lifecycle, or retention changes. Heavy imports (ASE, torch) are
   quarantined behind `foundation.tasks`/`slab.backends`, so importing either
   package root — and every CLI that does — stays cheap.

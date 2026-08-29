@@ -145,5 +145,5 @@ foundation gc
 `foundation show` prints the state, the intent, the checks with their compared
 values, the tasks, the artifacts (with `bytes` or `hash-only` presence), and
 the full transition history. Agents get the identical surface as MCP tools,
-as described in [Agents over MCP](agents-mcp.md). To swap EMT for MACE or a
-cluster-served code, see [Engines](engines.md).
+as described in [Agents over MCP](agents-mcp.md). To swap EMT for a
+cluster-served code or a rootstock MLIP, see [Engines](engines.md).

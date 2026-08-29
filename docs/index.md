@@ -18,7 +18,7 @@ from foundation.tasks import relax
 
 ws = Workspace(".slab")
 with ws.start_run(name="si-relax", intent="baseline lattice constant") as run:
-    relaxed, info = relax(atoms, engine="mace", fmax=0.05)   # traced, cached, recorded
+    relaxed, info = relax(atoms, engine="emt", fmax=0.05)    # traced, cached, recorded
 
     @check
     def forces_converged():
@@ -136,7 +136,6 @@ SLAB delivers evidence rather than running an error protocol. See the
 
 ```bash
 pip install -e .              # core: pydantic + typer + ase
-pip install -e ".[mace]"      # + MACE foundation model in-process (torch)
 pip install -e ".[rootstock]" # + cluster-served MLIPs (thin client, no torch)
 pip install -e ".[mcp]"       # + MCP server for agents
 ```
@@ -159,7 +158,7 @@ one optional layered TOML file. See
   `verified`.
 - **[Caching & resume](tutorials/caching-and-resume.md)** shows why
   rerunning a script is the resume mechanism.
-- **[Engines](tutorials/engines.md)** covers MACE in-process, cluster
+- **[Engines](tutorials/engines.md)** covers the built-in engines, cluster
   registries, and rootstock checkpoints served by name.
 - **[HPC configuration & SLURM](tutorials/hpc-config.md)** describes the one
   layered TOML file per cluster, with paths, engines, partitions, and batch
@@ -184,8 +183,8 @@ MVP vertical slice, working end to end. It includes:
 - a content-addressed artifact store with tiered retention;
 - define-by-run tracing with content-hash caching;
 - verification hooks;
-- relaxation and single-point tasks for MACE, ASE, Quantum ESPRESSO, and
-  LAMMPS;
+- relaxation and single-point tasks for ASE, Quantum ESPRESSO, LAMMPS, and
+  MLIPs served through rootstock;
 - AiiDA-style input protocols and SSSP pseudopotential families;
 - layered HPC configuration with a SLURM submission layer;
 - the Mason agent harness, for open models self-served on a GPU node or for
@@ -201,8 +200,8 @@ way.
 Key paths are verified against real software, not only mocks:
 
 - the QE engine, against a real `pw.x` 7.4.1;
-- the two-fidelity chain (a MACE-MP relax, then a QE single point on the
-  relaxed geometry), against a real `pw.x` 7.5;
+- the two-fidelity chain (a rootstock-served MLIP relax, then a QE single
+  point on the relaxed geometry), against a real `pw.x` 7.5;
 - the LAMMPS engine, against a real `lmp` (22 Jul 2025);
 - the balanced protocol, against a real SSSP install;
 - Mason, against a real Llama 3.1 served by Ollama, in an autonomous relax

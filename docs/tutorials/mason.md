@@ -225,7 +225,7 @@ The `cluster` profile allows production settings. It uses the `balanced`
 protocol by default, and `stringent` when a result must be publishable, and
 it submits anything past a few minutes through `submit_job` rather than
 running it on the login node. The `laptop` profile puts hard limits in the
-prompt instead. It prefers `emt`, `lj`, and small MACE models, keeps DFT to
+prompt instead. It prefers `emt`, `lj`, and a served MLIP checkpoint when one is declared, keeps DFT to
 single-digit atoms and the `fast` protocol, keeps MD to picoseconds, and
 asks before anything expected to run past ten minutes. It also adds an
 honesty requirement, because this is where a fast loop can quietly produce
@@ -252,15 +252,16 @@ because its payload runs in its own allocation with its own budget.
 Without context, a model spends its first steps searching the filesystem for
 what `slab` already knows. The system prompt therefore carries a curated
 note for each engine this machine enables. A note says what the engine is
-for, how to invoke it correctly, and which mistakes it invites. The `mace`
-note names the two routes to a served checkpoint, the `qe` note points at
-the named protocols instead of hand-picked cutoffs, and the `lammps` note
-says where the real error message hides.
+for, how to invoke it correctly, and which mistakes it invites. The
+`rootstock` note names the served-checkpoint route to any MLIP, the `qe`
+note points at the named protocols instead of hand-picked cutoffs, and the
+`lammps` note says where the real error message hides.
 
-Selection follows the configuration. The always-available engines (`emt`,
-`lj`, `mace`) load their notes unconditionally. The engines that need a
-table (`qe`, `lammps`, `rootstock`) load their notes when `slab.toml`
-configures `[engines.<name>]`. Set `[agent] software_notes = false` to turn
+Selection follows the configuration. The always-available notes (`emt`,
+`lj`, `rootstock`) load unconditionally, since a machine with no
+`[engines.rootstock]` table still needs to see how to configure the only
+route SLAB has to an MLIP. The engines that need a table (`qe`, `lammps`)
+load their notes when `slab.toml` configures `[engines.<name>]`. Set `[agent] software_notes = false` to turn
 the block off. The notes are starting context only: they grant no
 capability, and `list_engines` stays the live inventory.
 
@@ -471,8 +472,8 @@ sbatch sandbox/mason-sandbox.sbatch
 
 The partition also decides GPU visibility. When the target partition
 declares a `gres` that names gpus, the rendered `apptainer exec` adds
-`--nv`, so a torch-backed engine such as `mace` sees the device the job
-holds. A CPU partition renders without it.
+`--nv`, so a torch-backed served engine (a rootstock MLIP worker) sees the
+device the job holds. A CPU partition renders without it.
 
 The machine's memory travels into the job. `--no-home` hides
 `~/.config`, so the render binds the memory directory read-write and

@@ -191,7 +191,7 @@ def build_server(root: Path) -> MCPServer:
     @_surfaced
     def list_engines() -> dict[str, Any]:
         """What can be computed here: slab's built-in engines
-        (emt/lammps/lj/mace/qe/rootstock — qe drives pw.x and needs only the
+        (emt/lammps/lj/qe/rootstock — qe drives pw.x and needs only the
         executable plus pseudopotentials; lammps drives lmp and needs the
         executable plus your pair_style/pair_coeff/files potential options),
         everything this cluster's engine registry declares (VASP, site

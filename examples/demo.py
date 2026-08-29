@@ -1,12 +1,12 @@
-"""SLAB end-to-end demo: relax 5 perturbed supercell variants, keep only the best.
+"""SLAB end-to-end demo: relax 5 perturbed Cu supercell variants, keep only the best.
 
 Five perturbed variants of a supercell are relaxed, each in its own run with a
 stated intent. Verification checks (force convergence, finite energy, declared
 units) gate each run to `verified`. Nothing here is "production" — that
 decision happens *after* the results exist, from the CLI:
 
-    python examples/demo.py                 # MACE + Si (needs: pip install 'slab-stack[mace]')
-    python examples/demo.py --engine emt    # EMT + Cu, no extra install, seconds
+    python examples/demo.py                               # EMT + Cu, no extras, seconds
+    python examples/demo.py --engine mace-mp-0-medium     # served MLIP via rootstock; add --cluster
 
     foundation list
     foundation show <best-run-id>
@@ -41,7 +41,12 @@ def build_base(engine: str):  # returns ase.Atoms
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--engine", default="mace", choices=["mace", "emt"])
+    parser.add_argument(
+        "--engine",
+        default="emt",
+        help="any name get_calculator accepts: a built-in ('emt', 'qe', 'lammps'), "
+        "a registry entry, or a rootstock checkpoint id (e.g. 'mace-mp-0-medium')",
+    )
     parser.add_argument("--workspace", default=".slab")
     parser.add_argument("--fmax", type=float, default=0.05)
     args = parser.parse_args()
