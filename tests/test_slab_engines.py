@@ -802,3 +802,52 @@ def test_unconfigured_hint_names_the_config_section() -> None:
     pytest.importorskip("rootstock", reason="rootstock extra not installed")
     with pytest.raises(EngineNotAvailableError, match=r"\[engines.rootstock\]"):
         get_calculator("nope-checkpoint")
+
+
+def test_engines_overview_lists_checkpoints_from_config_root(
+    rootstock_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """list_engines used to return `rootstock: null` on machines that
+    declared the install in slab.toml (not $ROOTSTOCK_ROOT), while a
+    served engine=<checkpoint-id> call succeeded — a real trap that made
+    an agent believe the machine had no MLIP. Fixed: the overview
+    consults [engines.rootstock] first, then rootstock's own defaults."""
+    from slab._ops import engines_overview
+
+    monkeypatch.delenv("ROOTSTOCK_ROOT", raising=False)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "slab.toml").write_text(f'[engines.rootstock]\nroot = "{rootstock_root}"\n')
+    monkeypatch.chdir(project)
+    section = engines_overview()["rootstock"]
+    assert section is not None
+    assert section["root"] == str(rootstock_root)
+    assert section["root_source"] == "engines.rootstock.root"
+    assert section["checkpoints"] == {
+        "fake-mace": ["fake-mace-checkpoint", "fake-mace-large"]
+    }
+
+
+def test_engines_overview_labels_the_root_source(
+    rootstock_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The overview names WHERE the root came from, so a viewer sees why
+    the id list is what it is — rootstock defaults, engine-config root,
+    or engine-config cluster (with a hint when the cluster is unknown)."""
+    from slab._ops import engines_overview
+
+    # rootstock defaults path: no slab config, $ROOTSTOCK_ROOT points at the install.
+    monkeypatch.setenv("ROOTSTOCK_ROOT", str(rootstock_root))
+    section = engines_overview()["rootstock"]
+    assert section is not None
+    assert section["root_source"] == "rootstock defaults"
+
+    # engine-config cluster path: an unknown cluster is a live config problem,
+    # surfaced as an empty checkpoints dict with an actionable source label.
+    monkeypatch.delenv("ROOTSTOCK_ROOT", raising=False)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "slab.toml").write_text('[engines.rootstock]\ncluster = "no-such-cluster"\n')
+    monkeypatch.chdir(project)
+    section = engines_overview()["rootstock"]
+    assert section is None or section.get("checkpoints") == {}

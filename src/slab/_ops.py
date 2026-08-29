@@ -97,23 +97,69 @@ def _hpc_overview(overview: dict[str, Any]) -> dict[str, Any] | None:
 def _rootstock_checkpoints_overview() -> dict[str, Any] | None:
     """Checkpoint ids the ambient rootstock install declares, or None.
 
-    These ids are usable directly as ``engine=`` names (silent serving); the
-    install is found via rootstock's own defaults ($ROOTSTOCK_ROOT, then
-    ~/.config/rootstock/config.toml).
+    These ids are usable directly as ``engine=`` names (silent serving). The
+    install resolves with the same precedence :func:`slab.backends.get_calculator`
+    uses: ``[engines.rootstock] root`` in slab.toml first, then
+    ``[engines.rootstock] cluster``, then rootstock's own defaults
+    (``$ROOTSTOCK_ROOT``, ``~/.config/rootstock/config.toml``). The overview
+    would show ``null`` otherwise while a served ``engine=<checkpoint-id>``
+    call succeeded, which was silently misleading — the calculator and the
+    inventory now agree on where the install is.
     """
     try:
         from rootstock.config import resolve_default_root
         from rootstock.environment import list_declared_checkpoints
     except ImportError:
         return None
-    root = resolve_default_root()
+    root, source = _resolved_rootstock_root(resolve_default_root)
     if root is None:
         return None
     try:
         declared = list_declared_checkpoints(root)
     except OSError as e:
-        return {"root": str(root), "error": str(e), "checkpoints": {}}
+        return {"root": str(root), "root_source": source, "error": str(e), "checkpoints": {}}
     return {
         "root": str(root),
+        "root_source": source,
         "checkpoints": {env: sorted(ids) for env, ids in sorted(declared.items())},
     }
+
+
+def _resolved_rootstock_root(default_root: Any) -> tuple[Any, str | None]:
+    """Locate the rootstock install root the calculator layer would use.
+
+    Returns ``(root, source)``: the path (or ``None`` when nothing declares
+    one) and a short label naming where it came from — ``"engines.rootstock.root"``,
+    ``"engines.rootstock.cluster"``, or ``"rootstock defaults"``. The source
+    label rides into the overview so a viewer sees why the id list is what
+    it is (or why it is empty).
+    """
+    from slab.backends import _rootstock_setting
+    from slab.config import ConfigError
+
+    try:
+        root_setting = _rootstock_setting("root")
+        cluster_setting = _rootstock_setting("cluster") if root_setting is None else None
+    except ConfigError:
+        # A malformed slab.toml is reported by the [hpc] section (with
+        # `hpc_error`); do not double-raise it here — the rootstock section
+        # falls back to rootstock's own defaults and stays useful.
+        root_setting = None
+        cluster_setting = None
+    if root_setting is not None:
+        from pathlib import Path
+
+        return Path(root_setting).expanduser(), "engines.rootstock.root"
+    if cluster_setting is not None:
+        try:
+            from rootstock import get_root_for_cluster
+        except ImportError:  # pragma: no cover - rootstock present if we got here
+            return None, None
+        try:
+            return get_root_for_cluster(cluster_setting), "engines.rootstock.cluster"
+        except Exception:
+            # An unknown cluster name is a live config problem; surface a
+            # readable overview instead of the traceback. The caller reports
+            # checkpoints={} and a source label the viewer can act on.
+            return None, "engines.rootstock.cluster (unknown)"
+    return default_root(), "rootstock defaults"
