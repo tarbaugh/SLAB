@@ -47,8 +47,38 @@ from mason.tools import Toolbox, build_toolbox
 _ERROR_STREAK_LIMIT = 5
 _COMPACTION_KEEP_MESSAGES = 6
 _CHARS_PER_TOKEN = 4  # the usual rough estimate; real usage numbers override it
+#: Ratio at which the budget hint escalates from a bare counter to a
+#: land-the-plane instruction. 0.9 means the last 10% of turns carry the
+#: stricter form.
+_BUDGET_LAST_STRETCH = 0.9
 
 StopReason = Literal["answer", "finish", "max_turns", "error_streak"]
+
+
+def _budget_hint(step: int, max_turns: int) -> str:
+    """One-line reminder appended (ephemerally) to every turn's request.
+
+    Bare counter for the bulk of the run; a land-the-plane instruction once
+    the run is past its last stretch, so a model that lost the plot on
+    step 82 of 120 does not spend the rest reading library source.
+
+    Examples:
+        >>> _budget_hint(1, 120)
+        '[step 1 of 120]'
+        >>> _budget_hint(108, 120).startswith('[step 108 of 120] the budget')
+        True
+        >>> _budget_hint(3, 3).startswith('[step 3 of 3] the budget')
+        True
+    """
+    line = f"[step {step} of {max_turns}]"
+    if step >= max(1, int(max_turns * _BUDGET_LAST_STRETCH)):
+        return (
+            f"{line} the budget is nearly out. Stop opening new lines of "
+            f"inquiry. Write what you have to the notebook and call finish "
+            f"with the result you can defend, even if it names an incomplete "
+            f"gate — a truthful partial answer beats a stopped-at-max_turns."
+        )
+    return line
 
 
 class ChatBackend(Protocol):
@@ -247,9 +277,10 @@ class Mason:
         """Drive one goal until an answer, a finish, or a harness stop."""
         self._append({"role": "user", "content": user_text})
         error_streak = 0
-        for step in range(1, self.session.agent.max_turns + 1):
+        max_turns = self.session.agent.max_turns
+        for step in range(1, max_turns + 1):
             self._maybe_compact()
-            reply = self._call_model()
+            reply = self._call_model(hint=_budget_hint(step, max_turns))
             calls = list(reply.tool_calls)
             from_text = False
             if not calls:
@@ -392,10 +423,17 @@ class Mason:
         )
         return result, not hard_failure
 
-    def _call_model(self) -> ChatReply:
+    def _call_model(self, *, hint: str | None = None) -> ChatReply:
         tools = None if self.fenced else self.toolbox.specs()
+        # An ephemeral system message tacked onto the end each turn — the
+        # step-of-budget line, and stricter guidance near the ceiling.
+        # Never persisted: the counter changes each turn and stale copies
+        # in the transcript would mislead --resume.
+        messages = self.messages
+        if hint is not None:
+            messages = [*messages, {"role": "system", "content": hint}]
         try:
-            reply = self.client.chat(self.messages, tools)
+            reply = self.client.chat(messages, tools)
         except ContextOverflowError as e:
             # The server knows the window better than our estimate: compact
             # once and retry. If there was nothing left to fold, retrying
@@ -406,7 +444,10 @@ class Mason:
                     f"plan, notebook tail, and current goal already exceed the model's "
                     f"window. Shorten PLAN.md/AGENTS.md, or serve a larger context."
                 ) from e
-            reply = self.client.chat(self.messages, tools)
+            messages = self.messages
+            if hint is not None:
+                messages = [*messages, {"role": "system", "content": hint}]
+            reply = self.client.chat(messages, tools)
         self.session.count_usage(reply.prompt_tokens, reply.completion_tokens)
         self._last_prompt_tokens = reply.prompt_tokens
         self.session.record(

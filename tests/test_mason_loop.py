@@ -679,3 +679,42 @@ def test_a_changed_result_resets_the_repetition_streak(tmp_path: Path) -> None:
     tool_results = [m["content"] for m in loop.messages if m.get("role") == "tool"]
     # Same command twice, but the result changed between calls: no note.
     assert all("[note" not in r for r in tool_results)
+
+
+def test_budget_hint_reaches_the_model_each_turn(tmp_path: Path) -> None:
+    """Every model call carries the step-of-budget line as a trailing
+    system message. The counter changes each turn; the line stays
+    ephemeral (never persisted into ``self.messages``)."""
+    client = FakeClient(
+        [
+            _tool_reply("list_dir"),
+            _tool_reply("list_dir"),
+            _text_reply("done"),
+        ]
+    )
+    mason = Mason(_session(tmp_path, max_turns=100), client=client)
+    mason.run_turn("do a couple of things")
+    hints_per_turn = [msgs[-1] for msgs, _ in client.requests]
+    contents = [h["content"] for h in hints_per_turn]
+    assert all(h["role"] == "system" for h in hints_per_turn)
+    assert contents[0].startswith("[step 1 of 100]")
+    assert contents[1].startswith("[step 2 of 100]")
+    assert contents[2].startswith("[step 3 of 100]")
+    # None of the hints made it into the persisted transcript.
+    persisted = [m for m in mason.messages if m.get("role") == "system"]
+    assert not any("[step " in (m.get("content") or "") for m in persisted)
+
+
+def test_budget_hint_escalates_in_the_last_stretch(tmp_path: Path) -> None:
+    """Past 90% of max_turns the hint carries the land-the-plane guidance,
+    so an agent that has lost the plot is told to stop opening new work."""
+    client = FakeClient([_tool_reply("list_dir") for _ in range(10)])
+    mason = Mason(_session(tmp_path, max_turns=10), client=client)
+    mason.run_turn("burn the whole budget")
+    contents = [msgs[-1]["content"] for msgs, _ in client.requests]
+    # Steps 1..8 are the bare counter; step 9 (>= int(10*0.9)) and 10 escalate.
+    assert contents[0] == "[step 1 of 10]"
+    assert contents[7] == "[step 8 of 10]"
+    for late in contents[8:]:
+        assert "the budget is nearly out" in late
+        assert "finish with the result you can defend" in late
