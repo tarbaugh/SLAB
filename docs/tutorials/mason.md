@@ -377,6 +377,13 @@ Apptainer container with an empty network namespace, no home directory, a
 clean environment, and file access limited to explicit bind mounts. The
 shell tool then reaches only what the fence was always meant to bound.
 
+The render also writes `context.md` next to the script. It describes the
+container the agent will wake up in: the dark network, the mounted paths
+and their modes, the missing scheduler, and the GPU. The job exports
+`SLAB_SANDBOX_CONTEXT` naming the file, and the session prompt includes
+it, so the agent does not spend its opening steps reading the submission
+script to learn these facts.
+
 The model stays reachable through exactly one path. On the host side of the
 job, `mason sandbox bridge` relays a unix socket to one fixed upstream.
 Inside the container, `mason sandbox forward` relays that socket to

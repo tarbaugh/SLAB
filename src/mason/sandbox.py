@@ -1075,6 +1075,53 @@ def _key_flag(agent: AgentConfig) -> str:
     return f" --key-env {shlex.quote(key_env)}" if key_env else ""
 
 
+def _sandbox_context(
+    binds: list[str],
+    *,
+    gpu: bool,
+    memories: Path | None,
+    engine_tasks: int | None,
+) -> str:
+    """The sandbox facts as a prompt block, written at render time.
+
+    Every autonomous run used to spend its opening steps reading the
+    submission script to learn its own cage — the binds, the darkness, the
+    missing scheduler. The render already knows all of it, so it says so
+    once, and the session prompt carries it from step one.
+    """
+    rows = []
+    for spec in binds:
+        parts = spec.split(":")
+        destination = parts[1] if len(parts) > 1 else parts[0]
+        mode = parts[2] if len(parts) > 2 else "rw"
+        rows.append(f"    {mode:<2}  {destination}")
+    lines = [
+        "# Sandbox",
+        "",
+        "This session runs inside an Apptainer container on a compute node.",
+        "These facts come from the job that launched you; do not spend steps",
+        "inspecting the submission script to rediscover them.",
+        "",
+        "- The network is dark: no internet, no DNS. Downloads fail by",
+        "  design, and HF_HUB_OFFLINE/TRANSFORMERS_OFFLINE are set so hub",
+        "  clients refuse up front instead of hanging.",
+        "- There is no scheduler here: no sbatch, srun, or squeue. Engine",
+        "  legs run in this container, on this job's allocation.",
+        "- The model endpoint is a local bridge to the outside; do not",
+        "  reconfigure it.",
+        "- $HOME is not mounted."
+        + (f" Machine memories are at {memories} (rw)." if memories else ""),
+        "- GPU: the host driver stack is mounted (--nv); the job holds a GPU."
+        if gpu
+        else "- GPU: none on this partition.",
+        "- Mounted paths and their modes (nothing else exists in here):",
+        *rows,
+    ]
+    if engine_tasks is not None:
+        lines.append(f"- MPI engines launch with {engine_tasks} rank(s).")
+    return "\n".join(lines)
+
+
 def render_sandbox_script(
     agent: AgentConfig,
     hpc: HpcConfig,
@@ -1088,8 +1135,14 @@ def render_sandbox_script(
     time_limit: str | None = None,
     snapshots: dict[str, SetupSnapshot] | None = None,
     engine_tasks: int | None = None,
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], str]:
     """The batch script for one autonomous, network-dark session.
+
+    Returns ``(script, warnings, context)`` — *context* is the ``# Sandbox``
+    prompt block describing the rendered cage (binds, darkness, GPU, no
+    scheduler). The CLI writes it next to the script as ``context.md``, the
+    job exports ``SLAB_SANDBOX_CONTEXT`` naming it, and the session prompt
+    then carries the facts from step one.
 
     Host side: settle the upstream (a configured ``[agent] endpoint``, else
     the serve record's), and bridge it onto a unix socket with one fixed
@@ -1198,6 +1251,10 @@ def render_sandbox_script(
             "--env HF_HUB_OFFLINE=1",
             "--env TRANSFORMERS_OFFLINE=1",
             "--env HF_DATASETS_OFFLINE=1",
+            # The prompt-block description of this cage, written by the
+            # render next to this script; the session reads it at startup.
+            f"--env SLAB_SANDBOX_CONTEXT="
+            f"{shlex.quote(str(toml_path.with_name('context.md')))}",
             # The venv on PATH, so the agent's shell probes find python and
             # the console scripts without knowing the install layout.
             f"--env PATH={shlex.quote(str(Path(_python()).parent))}"
@@ -1218,4 +1275,17 @@ def render_sandbox_script(
         # inside one they resolve against the wrong filesystem anyway.
         include_global_setup=False,
     )
-    return script, warnings
+    context = _sandbox_context(
+        binds,
+        gpu="--nv" in isolation_flags,
+        memories=memories if agent.memory else None,
+        engine_tasks=engine_tasks,
+    )
+    context_path = toml_path.with_name("context.md")
+    if not context_path.is_relative_to(project):
+        warnings.append(
+            f"{context_path} is outside the project bind, so the in-job "
+            f"prompt cannot carry the sandbox context; render into the "
+            f"project (the default) to keep it"
+        )
+    return script, warnings, context

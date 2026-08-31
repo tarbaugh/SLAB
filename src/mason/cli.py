@@ -644,7 +644,7 @@ def mason_sandbox_render(
         ),
     ] = None,
 ) -> None:
-    """Write the sandbox batch script and its slab.toml — read both, then sbatch."""
+    """Write the batch script, its slab.toml, and context.md — read them, then sbatch."""
     from mason.sandbox import render_sandbox_script, sandbox_toml, snapshot_engines
     from slab.config import load_config as load_slab_config
 
@@ -659,7 +659,7 @@ def mason_sandbox_render(
         # can actually use.
         snapshots = snapshot_engines(slab_cfg)
         toml_text, toml_warnings = sandbox_toml(slab_cfg, agent, root.resolve(), snapshots)
-        script, bind_warnings = render_sandbox_script(
+        script, bind_warnings, sandbox_context = render_sandbox_script(
             agent,
             hpc,
             slab_cfg,
@@ -678,6 +678,8 @@ def mason_sandbox_render(
     script_path = out_dir / "mason-sandbox.sbatch"
     script_path.write_text(script.rstrip("\n") + "\n", encoding="utf-8")
     toml_path.write_text(toml_text, encoding="utf-8")
+    context_path = out_dir / "context.md"
+    context_path.write_text(sandbox_context.rstrip("\n") + "\n", encoding="utf-8")
     for note in (*toml_warnings, *bind_warnings):
         if "snapshotted from the host" in note:
             typer.echo(f"[=] {note}")
@@ -685,6 +687,7 @@ def mason_sandbox_render(
             typer.secho(f"[!] {note}", err=True, fg=typer.colors.YELLOW)
     typer.echo(f"wrote {script_path}")
     typer.echo(f"wrote {toml_path}")
+    typer.echo(f"wrote {context_path}")
     typer.echo(
         "read both files, then submit with: "
         f"sbatch {script_path} — the job aborts unless the container "

@@ -8,8 +8,10 @@ stable within one; the conversation grows append-only after that.
 
 from __future__ import annotations
 
+import os
 import platform
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from foundation import memory as memory_store
@@ -246,6 +248,23 @@ def team_block(spec: AgentSpec, roster: dict[str, AgentSpec]) -> str:
     return "\n".join(lines)
 
 
+def _sandbox_context_text() -> str:
+    """The render-time sandbox facts, when this session runs inside one.
+
+    The sandbox job exports ``SLAB_SANDBOX_CONTEXT`` naming the context
+    file its render wrote. Carrying it in the prompt saves every session
+    the opening steps of inspecting the submission script to learn its
+    own cage. Unset or unreadable means not a sandbox: say nothing.
+    """
+    path = os.environ.get("SLAB_SANDBOX_CONTEXT")
+    if not path:
+        return ""
+    try:
+        return Path(path).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 def environment_block(
     session: MasonSession,
     skills: dict[str, Skill] | None = None,
@@ -277,6 +296,9 @@ def environment_block(
         lines.append(f"cluster: {cluster}; partitions: {partitions}{suffix}")
     else:
         lines.append("cluster: none configured (no SLURM tools this session)")
+    sandbox = _sandbox_context_text()
+    if sandbox:
+        lines.append("\n" + sandbox)
     if session.agent.file_scope == "project":
         lines.append("\n" + WORKING_BOUNDS)
     if skills:

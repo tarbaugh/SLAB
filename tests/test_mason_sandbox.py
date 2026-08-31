@@ -45,7 +45,9 @@ def _agent(**extra: object) -> AgentConfig:
     )
 
 
-def _render(tmp_path: Path, agent: AgentConfig, slab_cfg: SlabConfig) -> tuple[str, list[str]]:
+def _render(
+    tmp_path: Path, agent: AgentConfig, slab_cfg: SlabConfig
+) -> tuple[str, list[str], str]:
     return render_sandbox_script(
         agent,
         _HPC,
@@ -61,7 +63,7 @@ def _render(tmp_path: Path, agent: AgentConfig, slab_cfg: SlabConfig) -> tuple[s
 
 
 def test_render_isolates_and_fails_closed(tmp_path: Path) -> None:
-    script, _ = _render(tmp_path, _agent(), _slab_cfg())
+    script, _, _ = _render(tmp_path, _agent(), _slab_cfg())
     assert "--net --network none" in script
     assert "--containall --no-home --cleanenv" in script
     # Hub clients refuse downloads up front instead of burning a worker on
@@ -79,10 +81,60 @@ def test_render_isolates_and_fails_closed(tmp_path: Path) -> None:
     assert "#SBATCH --partition=cpu" in script
 
 
+def test_render_describes_the_cage_for_the_prompt(tmp_path: Path) -> None:
+    """Every run used to spend its opening steps reading the submission
+    script to learn the sandbox facts. The render says them once; the job
+    exports SLAB_SANDBOX_CONTEXT so the session prompt carries them."""
+    cfg = _slab_cfg(
+        paths={"pseudos": "/shared/pseudos", "scratch": "/scratch/me"},
+    )
+    script, _, context = _render(tmp_path, _agent(), cfg)
+    assert context.startswith("# Sandbox")
+    assert "network is dark" in context
+    assert "no sbatch, srun, or squeue" in context
+    assert f"rw  {tmp_path / 'project'}" in context
+    assert "ro  /shared/pseudos" in context
+    assert "GPU: none on this partition" in context
+    assert "Machine memories are at" in context
+    assert "--env SLAB_SANDBOX_CONTEXT=" in script
+    assert str(tmp_path / "sandbox" / "context.md") in script
+
+
+def test_the_cage_description_notices_the_gpu(tmp_path: Path) -> None:
+    gpu_hpc = HpcConfig.model_validate(
+        {"default_partition": "a40", "partitions": {"a40": {"gres": "gpu:1"}}}
+    )
+    _, _, context = render_sandbox_script(
+        _agent(),
+        gpu_hpc,
+        _slab_cfg(),
+        tmp_path / "ws",
+        tmp_path / "project",
+        "goal",
+        toml_path=tmp_path / "sandbox" / "slab.toml",
+        engine_tasks=4,
+    )
+    assert "the job holds a GPU" in context
+    assert "MPI engines launch with 4 rank(s)." in context
+
+
+def test_a_context_outside_the_project_is_warned(tmp_path: Path) -> None:
+    _, warnings, _ = render_sandbox_script(
+        _agent(),
+        _HPC,
+        _slab_cfg(),
+        tmp_path / "ws",
+        tmp_path / "project",
+        "goal",
+        toml_path=tmp_path / "elsewhere" / "slab.toml",
+    )
+    assert any("outside the project bind" in w for w in warnings)
+
+
 def test_render_is_valid_bash(tmp_path: Path) -> None:
     bash = shutil.which("bash")
     assert bash is not None
-    script, _ = _render(tmp_path, _agent(), _slab_cfg())
+    script, _, _ = _render(tmp_path, _agent(), _slab_cfg())
     check = subprocess.run(
         [bash, "-n", "/dev/stdin"], input=script, capture_output=True, text=True
     )
@@ -107,7 +159,7 @@ def test_binds_derive_from_the_config(tmp_path: Path) -> None:
 def test_extra_binds_and_the_gaps_warned(tmp_path: Path) -> None:
     cfg = _slab_cfg(engines={"rootstock": {"cluster": "delta"}})
     agent = _agent(sandbox={"image": "/i.sif", "binds": ["/opt/qe:/opt/qe:ro"]})
-    script, warnings = _render(tmp_path, agent, cfg)
+    script, warnings, _ = _render(tmp_path, agent, cfg)
     assert "--bind /opt/qe:/opt/qe:ro" in script
     assert any("cluster form" in w for w in warnings)
     assert any("no pseudopotentials will be visible" in w for w in warnings)
@@ -149,7 +201,7 @@ def test_render_prefers_the_configured_endpoint(tmp_path: Path) -> None:
     """A machine pointed at a gateway must not render a job that demands a
     server nobody started. The precedence is discover_endpoint's."""
     agent = _agent(endpoint="https://gw.example/v1", api_key_env="GATEWAY_KEY")
-    script, _ = _render(tmp_path, agent, _slab_cfg())
+    script, _, _ = _render(tmp_path, agent, _slab_cfg())
     assert "UPSTREAM=https://gw.example/v1" in script
     assert "RECORD=" not in script
     assert "no serve record" not in script
@@ -160,14 +212,14 @@ def test_render_guards_the_key_by_name_never_by_value(tmp_path: Path) -> None:
     """The guard fails the job at start on an --export=NONE cluster, and the
     escaped name keeps the value out of the job's output either way."""
     agent = _agent(endpoint="https://gw.example/v1", api_key_env="GATEWAY_KEY")
-    script, _ = _render(tmp_path, agent, _slab_cfg())
+    script, _, _ = _render(tmp_path, agent, _slab_cfg())
     assert '[ -n "$GATEWAY_KEY" ]' in script
     assert 'echo "\\$GATEWAY_KEY is not set' in script  # escaped: never expands
 
 
 def test_render_without_a_key_sends_none(tmp_path: Path) -> None:
     agent = _agent(endpoint="http://internal:8000/v1")
-    script, _ = _render(tmp_path, agent, _slab_cfg())
+    script, _, _ = _render(tmp_path, agent, _slab_cfg())
     assert "UPSTREAM=http://internal:8000/v1" in script
     assert "--key-env" not in script
     assert "[ -n " not in script
@@ -176,7 +228,7 @@ def test_render_without_a_key_sends_none(tmp_path: Path) -> None:
 def test_render_for_a_served_model_is_unchanged(tmp_path: Path) -> None:
     """The serve path is the one people already depend on; it keeps every
     line it had, including the record guard."""
-    script, _ = _render(tmp_path, _agent(), _slab_cfg())
+    script, _, _ = _render(tmp_path, _agent(), _slab_cfg())
     assert f"RECORD={tmp_path / 'ws' / 'mason' / 'endpoint.json'}" in script
     assert "no serve record at $RECORD" in script
     assert 'UPSTREAM=$(' in script
@@ -316,6 +368,38 @@ def test_cli_render_writes_both_files_and_next_steps(
     assert str(tmp_path / "sandbox" / "slab.toml") in script  # SLAB_CONFIG points at it
     assert "[hpc]" not in toml_text
     assert "read both files" in result.output
+    context = (tmp_path / "sandbox" / "context.md").read_text()
+    assert context.startswith("# Sandbox")
+    assert str(tmp_path / "sandbox" / "context.md") in script  # SLAB_SANDBOX_CONTEXT
+
+
+def test_the_prompt_carries_the_sandbox_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Inside the job, SLAB_SANDBOX_CONTEXT names the rendered context.md
+    and the environment block includes it verbatim; outside, silence."""
+    from mason.prompts import system_messages
+    from mason.session import MasonSession
+
+    def _messages() -> str:
+        session = MasonSession(
+            tmp_path,
+            agent=AgentConfig(memory=False),
+            hpc=HpcConfig(),
+            workspace_root=tmp_path / ".slab",
+        )
+        return "\n".join(m["content"] for m in system_messages(session))
+
+    monkeypatch.delenv("SLAB_SANDBOX_CONTEXT", raising=False)
+    assert "# Sandbox" not in _messages()
+
+    context = tmp_path / "context.md"
+    context.write_text("# Sandbox\n\nThe network is dark.\n", encoding="utf-8")
+    monkeypatch.setenv("SLAB_SANDBOX_CONTEXT", str(context))
+    assert "The network is dark." in _messages()
+
+    context.unlink()  # a stale pointer is not an error, just not a sandbox
+    assert "# Sandbox" not in _messages()
 
 
 def test_cli_render_without_an_image_fails_loudly(
@@ -349,7 +433,7 @@ def test_qe_bin_is_bound_whole_install_and_ntasks_forwarded(tmp_path: Path) -> N
     cfg = _slab_cfg(engines={"qe": {"bin": "/shared/qe-7.4/bin"}})
     binds, _ = default_binds(tmp_path / "p", tmp_path / "ws", cfg)
     assert "/shared/qe-7.4:/shared/qe-7.4:ro" in binds  # the prefix, not just bin/
-    script, warnings = _render(tmp_path, _agent(), cfg)
+    script, warnings, _ = _render(tmp_path, _agent(), cfg)
     assert '--env SLURM_NTASKS="${SLURM_NTASKS:-1}"' in script
     assert not any("srun" in w for w in warnings)  # nothing to hand-edit
 
@@ -428,7 +512,7 @@ def test_snapshot_binds_reach_the_script_and_collapse(tmp_path: Path) -> None:
     snapshot = SetupSnapshot(
         "qe", "/apps/qe/bin/pw.x", {"PATH": "/apps/qe/bin"}, ("/apps/qe/lib", "/apps/mpi/lib")
     )
-    script, _ = render_sandbox_script(
+    script, _, _ = render_sandbox_script(
         _agent(),
         _HPC,
         cfg,
@@ -797,16 +881,16 @@ def test_sandbox_toml_sets_a_workstation_profile_by_default(tmp_path: Path) -> N
 def test_the_container_path_carries_the_venv(tmp_path: Path) -> None:
     import sys
 
-    script, _ = _render(tmp_path, _agent(), _slab_cfg())
+    script, _, _ = _render(tmp_path, _agent(), _slab_cfg())
     assert f"--env PATH={Path(sys.executable).parent}:" in script
 
 
 def test_the_container_env_tames_openmpi_and_can_pin_ranks(tmp_path: Path) -> None:
-    script, _ = _render(tmp_path, _agent(), _slab_cfg())
+    script, _, _ = _render(tmp_path, _agent(), _slab_cfg())
     assert "--env OMPI_MCA_plm=isolated" in script  # no ssh, no scheduler inside
     assert "--env OMPI_MCA_btl_vader_single_copy_mechanism=none" in script
     assert '--env SLURM_NTASKS="${SLURM_NTASKS:-1}"' in script
-    pinned, _ = render_sandbox_script(
+    pinned, _, _ = render_sandbox_script(
         _agent(),
         _HPC,
         _slab_cfg(),
@@ -898,14 +982,14 @@ def test_a_gpu_partition_mounts_the_driver_stack(tmp_path: Path) -> None:
             },
         }
     )
-    gpu_script, _ = render_sandbox_script(
+    gpu_script, _, _ = render_sandbox_script(
         _agent(), hpc, _slab_cfg(), tmp_path / "ws", tmp_path / "project",
         "quench a glass", toml_path=tmp_path / "sandbox" / "slab.toml", partition="a100",
     )
     assert "--network none --nv" in gpu_script
     assert "#SBATCH --gres=gpu:a100:1" in gpu_script
 
-    cpu_script, _ = render_sandbox_script(
+    cpu_script, _, _ = render_sandbox_script(
         _agent(), hpc, _slab_cfg(), tmp_path / "ws", tmp_path / "project",
         "quench a glass", toml_path=tmp_path / "sandbox" / "slab.toml",
     )
@@ -920,7 +1004,7 @@ def test_the_machine_memory_is_bound_read_write_and_named(
     monkeypatch.setenv("SLAB_MEMORY_DIR", str(memories))
     assert not memories.exists()  # an untouched machine has nothing here yet
 
-    script, _ = _render(tmp_path, _agent(), _slab_cfg())
+    script, _, _ = _render(tmp_path, _agent(), _slab_cfg())
     assert f"--bind {memories}:{memories}:rw" in script
     assert f"--env SLAB_MEMORY_DIR={memories}" in script
     # Apptainer refuses a bind whose source is missing, so the render made it.
@@ -932,7 +1016,7 @@ def test_a_memory_blind_session_binds_nothing(
 ) -> None:
     memories = tmp_path / "memory"
     monkeypatch.setenv("SLAB_MEMORY_DIR", str(memories))
-    script, _ = _render(tmp_path, _agent(memory=False), _slab_cfg())
+    script, _, _ = _render(tmp_path, _agent(memory=False), _slab_cfg())
     assert str(memories) not in script
     assert "SLAB_MEMORY_DIR" not in script
     assert not memories.exists()
