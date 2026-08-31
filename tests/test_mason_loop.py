@@ -181,9 +181,12 @@ def test_resume_replays_messages_after_fresh_system(tmp_path: Path) -> None:
 
 
 def test_compaction_folds_history_and_writes_the_per_session_file(tmp_path: Path) -> None:
-    # memory=False keeps the prompt small: this test targets a specific
-    # token budget and the memory doctrine block would nudge the estimate.
-    session = _session(tmp_path, context_window=4_096, compact_at=0.5, memory=False)
+    # memory=False and software_notes=False keep the prompt small: this
+    # test targets a specific token budget, and the doctrine blocks (which
+    # grow over time) would nudge the estimate across it at a different step.
+    session = _session(
+        tmp_path, context_window=4_096, compact_at=0.5, memory=False, software_notes=False
+    )
     replies: list[ChatReply | Exception] = [
         _tool_reply("list_dir", prompt_tokens=tokens)
         for tokens in (200, 400, 900, 1_500, 2_500)  # the fifth crosses 2048

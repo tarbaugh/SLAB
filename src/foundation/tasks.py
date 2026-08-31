@@ -273,7 +273,12 @@ def relax_cell(
     try:
         with tempfile.TemporaryDirectory(prefix="slab-relax-cell-") as tmp:
             trajectory = Path(tmp) / "relax_cell.traj"
-            filt = FrechetCellFilter(system, mask=mask, hydrostatic_strain=hydrostatic)
+            # exp_cell_factor defaults to len(atoms) since ASE 3.29, and
+            # CellAwareBFGS asserts it is exactly 1.0 — any multi-atom cell
+            # crashes without the explicit pin.
+            filt = FrechetCellFilter(
+                system, mask=mask, hydrostatic_strain=hydrostatic, exp_cell_factor=1.0
+            )
             # ASE's CellAwareBFGS accepts a filter-wrapped Atoms and a None
             # logfile in practice, but its type stub narrows both. Ignoring
             # here keeps the idiomatic call; everything else stays typed.

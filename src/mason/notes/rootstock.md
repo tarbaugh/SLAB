@@ -13,6 +13,15 @@ A served calculator runs in a worker subprocess. The `foundation.tasks`
 functions close it automatically; only long-lived hand-rolled scripts
 need to care.
 
+A declared checkpoint id is a promise the install may not keep: if a
+worker dies while trying to download model weights, the checkpoint is
+declared but its weights are not cached in the install. The sandbox has
+no network and the install is mounted read-only, so no workaround exists
+from here. Record the gap with `remember`, report it as a machine
+blocker naming the checkpoint id, and move on or stop. Do not explore
+the install's directories, and do not attempt a download — the install
+belongs to the site, not to this session.
+
 Trust its forces and geometries across broad chemistry. Do not trust its
 absolute energies as DFT-grade, and do not use it for charged defects,
 magnetism, or electronic properties. Energy differences between similar

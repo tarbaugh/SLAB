@@ -375,12 +375,13 @@ def _out_of_scope(session: MasonSession, path: Path, roots: tuple[Path, ...]) ->
     for root in roots:
         if resolved.is_relative_to(root):
             return None
+    listed = "\n".join(f"  {root}" for root in roots)
     return (
-        f"refused: {path} is outside this session's file scope. File tools read "
-        f"within the project directory, the workspace, skill directories, and "
-        f"the installed slab-stack packages (slab/foundation/mason/slab_stack); "
-        f"they write within the project and workspace only. Work there, use the "
-        f"shell tool (approval-gated), or set [agent] file_scope = \"anywhere\"."
+        f"refused: {path} is outside this session's file scope. This "
+        f"operation works within these roots — retry with a path under one "
+        f"of them:\n{listed}\n"
+        f"Otherwise use the shell tool (approval-gated), or set "
+        f"[agent] file_scope = \"anywhere\"."
     )
 
 

@@ -405,6 +405,19 @@ def test_relax_cell_isotropic_converges_a_compressed_reference() -> None:
     assert relaxed.calc.__class__.__name__ == "SinglePointCalculator"
 
 
+def test_relax_cell_accepts_a_multi_atom_cell() -> None:
+    """ASE >= 3.29 defaults FrechetCellFilter's exp_cell_factor to the atom
+    count, and CellAwareBFGS asserts it is 1.0 — so every cell with more
+    than one atom crashed until the task pinned the factor. The primitive
+    fixtures elsewhere have one atom and never saw it."""
+    from foundation.tasks import relax_cell
+
+    atoms = bulk("Cu", "fcc", a=3.4, cubic=True)  # 4 atoms
+    _, info = relax_cell(atoms, engine="emt", symmetry="isotropic", smax=0.005)
+    assert info["converged"] is True
+    assert info["n_atoms"] == 4
+
+
 def test_relax_cell_orthorhombic_holds_shear_at_zero() -> None:
     from foundation.tasks import relax_cell
 

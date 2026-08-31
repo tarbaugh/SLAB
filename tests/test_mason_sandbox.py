@@ -64,6 +64,10 @@ def test_render_isolates_and_fails_closed(tmp_path: Path) -> None:
     script, _ = _render(tmp_path, _agent(), _slab_cfg())
     assert "--net --network none" in script
     assert "--containall --no-home --cleanenv" in script
+    # Hub clients refuse downloads up front instead of burning a worker on
+    # a doomed fetch against the dark network and the read-only binds.
+    assert "--env HF_HUB_OFFLINE=1" in script
+    assert "--env TRANSFORMERS_OFFLINE=1" in script
     assert "mason sandbox verify" in script  # either proof failing aborts the job
     assert "mason run --auto" in script
     assert "'relax Cu and report'" in script

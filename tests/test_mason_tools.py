@@ -488,6 +488,9 @@ def test_file_tools_refuse_paths_outside_the_fence(
         answer = box.dispatch(call)
         assert "outside this session's file scope" in answer, call.name
         assert "file_scope" in answer, call.name
+        # The refusal names the concrete roots, so the retry can land
+        # in-fence instead of falling back to shell introspection.
+        assert str(tmp_path) in answer, call.name
     assert not (elsewhere / "new.txt").exists()
     assert secret.read_text() == "credentials\n"
 

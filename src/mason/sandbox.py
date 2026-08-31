@@ -1190,6 +1190,14 @@ def render_sandbox_script(
             # implementations ignore both variables.
             "--env OMPI_MCA_plm=isolated",
             "--env OMPI_MCA_btl_vader_single_copy_mechanism=none",
+            # The network namespace is dark, but ML stacks that do not know
+            # that will still *attempt* a model download — burning a worker
+            # on a doomed fetch against a read-only bind. These flags make
+            # hub clients refuse up front with a message that says offline,
+            # which is the truth, instead of a half-written cache.
+            "--env HF_HUB_OFFLINE=1",
+            "--env TRANSFORMERS_OFFLINE=1",
+            "--env HF_DATASETS_OFFLINE=1",
             # The venv on PATH, so the agent's shell probes find python and
             # the console scripts without knowing the install layout.
             f"--env PATH={shlex.quote(str(Path(_python()).parent))}"
