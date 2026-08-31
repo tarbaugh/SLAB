@@ -1,10 +1,11 @@
-"""Ready-made traced tasks: structure relaxation and single-point evaluation.
+"""Ready-made traced tasks: structure building, relaxation, single-point evaluation.
 
 These are ordinary ``@task`` functions — call them like functions, inside or
 outside a run context. They demonstrate the pattern for wrapping any ASE
 calculator as a SLAB task; no physics lives here. Together they cover the
-canonical two-fidelity workflow: ``relax`` under a cheap engine, then
-``single_point`` on the result under an expensive one.
+canonical workflow: ``build_structure`` makes the geometry (atomsk), ``relax``
+optimizes it under a cheap engine, then ``single_point`` evaluates the result
+under an expensive one.
 
 Importing this module pulls in ASE (and numpy) through :mod:`slab.backends`;
 both ``foundation`` and ``slab`` stay import-light, which is why these tasks
@@ -14,6 +15,8 @@ are not re-exported from either package root — use
 
 from __future__ import annotations
 
+import shlex
+import shutil
 import tempfile
 from contextlib import suppress
 from pathlib import Path
@@ -23,12 +26,15 @@ import numpy as np
 from ase import Atoms
 from ase.calculators.singlepoint import SinglePointCalculator
 from ase.filters import FrechetCellFilter
+from ase.io import read as ase_read
+from ase.io import write as ase_write
 from ase.optimize import BFGS, CellAwareBFGS
 
 from foundation.errors import ArtifactExistsError
 from foundation.models import ArtifactRole
 from foundation.runtime import current_run
 from foundation.tracing import task
+from slab.atomsk import build_scratch_dir, describe_atomsk, run_atomsk
 from slab.backends import (
     close_calculator,
     collect_engine_outputs,
@@ -36,6 +42,7 @@ from slab.backends import (
     describe_engine,
     get_calculator,
 )
+from slab.errors import BuilderError
 
 
 # cache_extra folds the resolved engine's identity (source + the registry's
@@ -430,6 +437,187 @@ def single_point(
     evaluated = system.copy()
     evaluated.calc = SinglePointCalculator(evaluated, energy=energy, forces=forces)
     return evaluated, info
+
+
+# cache_extra folds the atomsk install's identity (resolved command, detected
+# version) into the cache key: pointing at a different binary, or upgrading
+# it, honestly invalidates cached structures.
+@task(
+    engines=("ase",),
+    cache_extra=lambda arguments: describe_atomsk(command=arguments.get("command")),
+)
+def build_structure(
+    args: str | list[str] | tuple[str, ...],
+    *,
+    inputs: dict[str, Atoms | str] | None = None,
+    output: str | None = None,
+    command: str | None = None,
+    label: str | None = None,
+    timeout_s: float = 600.0,
+) -> tuple[Atoms, dict[str, Any]]:
+    """Build or transform a structure with atomsk, traced.
+
+    Atomsk is a *builder*, not an engine: it creates and transforms
+    structures (unit cells, supercells, defects, interfaces, polycrystals)
+    and computes no energies. This task runs one atomsk invocation in a
+    private scratch directory, reads the structure it wrote back through
+    ASE, and returns it ready for :func:`relax` or :func:`single_point`.
+    Configure the install under ``[builders.atomsk]`` in ``slab.toml``.
+
+    *args* is atomsk's own argument list — mode, options, and bare file
+    names — without the leading ``atomsk``; a single string is split with
+    shell rules. Every file name must be bare: the invocation runs in a
+    fresh scratch directory, and an argument that names a path elsewhere is
+    refused, because a traced build reading undeclared files records a
+    cache identity that lies. Files the invocation reads enter through
+    ``inputs``, a mapping of bare file name to value: an ``Atoms`` is
+    written as a structure file (format from its extension — ``.xsf``
+    round-trips cell and species reliably), and a plain string is written
+    verbatim (a ``--polycrystal`` parameter file). Every input is traced.
+
+    ``output`` names the produced file to read back. Leave it None when the
+    invocation produces exactly one new file; with several (extra output
+    formats, polycrystal statistics files), name the one that is the
+    result. Inside a run context every produced file is kept as an
+    intermediate artifact (``{label or 'build'}.{suffix}``), and the full
+    atomsk log as ``{label or 'build'}.log``. On failure the extracted
+    ``X!X ERROR`` lines ride on the exception as notes and the log is kept
+    as ``{label or 'build'}-failed.log`` — the same evidence contract as
+    the engine tasks.
+
+    Returns ``(atoms, info)``: the structure, and an ``info`` dict with
+    ``builder`` (``"atomsk"``), ``version``, ``command``, ``args``,
+    ``output``, ``produced`` (every new file name), ``n_atoms``,
+    ``formula``, and ``pbc``.
+
+    Example::
+
+        supercell, info = build_structure(
+            "--create fcc 4.046 Al -duplicate 4 4 4 al.xsf", label="al-444"
+        )
+        relaxed, opt = relax(supercell, engine="mace-mp-0-medium")
+
+    Args:
+        args: Atomsk's argument list (or one string, shell-split).
+        inputs: Files to stage into the scratch directory, by bare file
+            name: ``Atoms`` values become structure files, string values
+            are written verbatim (parameter files).
+        output: The produced file holding the result; required only when
+            the invocation produces more than one new file.
+        command: Overrides the resolved atomsk command for this call
+            (else ``[builders.atomsk] command``, else ``atomsk``).
+        label: Names the kept artifacts.
+        timeout_s: Kill the invocation after this long.
+    """
+    argv = shlex.split(args) if isinstance(args, str) else [str(token) for token in args]
+    # Builder identity resolves BEFORE the invocation, mirroring the engine
+    # tasks: the tracer's cache_extra made the same resolution moments ago.
+    described = describe_atomsk(command=command)
+    name = label or "build"
+    scratch = build_scratch_dir()
+    try:
+        for input_name, staged_value in (inputs or {}).items():
+            _guard_staged_name(input_name)
+            if isinstance(staged_value, str):
+                (scratch / input_name).write_text(staged_value, encoding="utf-8")
+            else:
+                ase_write(scratch / input_name, staged_value)
+        staged = {entry.name for entry in scratch.iterdir()}
+        try:
+            outcome = run_atomsk(argv, cwd=scratch, command=command, timeout_s=timeout_s)
+        except BuilderError as e:
+            active = current_run()
+            if active is not None and e.log:
+                log_path = scratch / "slab-atomsk.log"
+                log_path.write_text(e.log, encoding="utf-8")
+                kept = _keep_unique(active, f"{name}-failed.log", log_path)
+                e.add_note(f"full atomsk log kept as artifact {kept!r}")
+            raise
+        produced = sorted(
+            entry.name for entry in scratch.iterdir() if entry.name not in staged
+        )
+        result_name = _pick_output(output, produced)
+        try:
+            structure = _read_built(scratch / result_name)
+        except Exception as e:
+            e.add_note(
+                f"atomsk wrote {result_name!r} but ASE cannot read it back; "
+                "write an ASE-readable format too (xsf) and name it with "
+                "output="
+            )
+            raise
+        if not isinstance(structure, Atoms):  # a multi-frame file
+            structure = structure[-1]
+        active = current_run()
+        if active is not None:
+            log_path = scratch / "slab-atomsk.log"
+            log_path.write_text(outcome.log, encoding="utf-8")
+            _keep_unique(active, f"{name}.log", log_path)
+            for produced_name in produced:
+                suffix = Path(produced_name).suffix.lstrip(".").lower() or produced_name
+                _keep_unique(active, f"{name}.{suffix}", scratch / produced_name)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+    info: dict[str, Any] = {
+        "builder": "atomsk",
+        "version": described.get("version"),
+        "command": described["command"],
+        "args": argv,
+        "output": result_name,
+        "produced": produced,
+        "n_atoms": len(structure),
+        "formula": structure.get_chemical_formula(),
+        "pbc": [bool(flag) for flag in structure.pbc],
+    }
+    return structure, info
+
+
+# Extensions atomsk writes that ASE reads only under an explicit format name.
+_BUILDER_FORMATS = {
+    ".lmp": "lammps-data",
+    ".pw": "espresso-in",
+    ".pos": "vasp",
+}
+
+
+def _read_built(path: Path) -> Any:
+    """Read a builder's output file, naming the format where ASE cannot infer it."""
+    explicit = _BUILDER_FORMATS.get(path.suffix.lower())
+    if explicit is not None:
+        return ase_read(path, format=explicit)
+    return ase_read(path)
+
+
+def _guard_staged_name(name: str) -> None:
+    """Refuse an ``inputs`` key that is not a bare file name."""
+    if not name or "/" in name or "\\" in name or name.startswith(("~", ".")):
+        raise BuilderError(
+            f"inputs name {name!r} must be a bare file name (it is written "
+            "into the scratch directory the build runs in)"
+        )
+
+
+def _pick_output(output: str | None, produced: list[str]) -> str:
+    """The produced file to read back, or a refusal that names the candidates."""
+    if output is not None:
+        if output not in produced:
+            raise BuilderError(
+                f"output={output!r} was not produced; atomsk wrote: "
+                f"{', '.join(produced) or 'nothing'}"
+            )
+        return output
+    if len(produced) == 1:
+        return produced[0]
+    if not produced:
+        raise BuilderError(
+            "atomsk terminated without writing any file; check that the "
+            "argument list names an output file"
+        )
+    raise BuilderError(
+        f"atomsk produced {len(produced)} files ({', '.join(produced)}); "
+        "pass output= to name the one holding the result"
+    )
 
 
 def _qe_shaped(engine: str, options: dict[str, Any] | None) -> bool:

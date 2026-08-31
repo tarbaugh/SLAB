@@ -20,3 +20,19 @@ class SlabError(Exception):
 
 class EngineNotAvailableError(SlabError):
     """A requested calculation engine is unknown, or known but not installed."""
+
+
+class BuilderNotAvailableError(SlabError):
+    """A structure builder's executable cannot be found on this machine."""
+
+
+class BuilderError(SlabError):
+    """A structure builder ran and failed, or was invoked incorrectly.
+
+    Carries the builder's full captured output on ``log`` so a caller can
+    keep it as evidence; the message itself holds the extracted error lines.
+    """
+
+    def __init__(self, message: str, *, log: str = "") -> None:
+        super().__init__(message)
+        self.log = log

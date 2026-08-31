@@ -108,7 +108,7 @@ experience, and nothing requires you to delegate.
 
 A skill is a directory with a `SKILL.md` file, in the
 [Agent Skills format](https://agentskills.io/specification). Mason adds
-no dialect, so skills written for other tools load unmodified. Thirteen
+no dialect, so skills written for other tools load unmodified. Sixteen
 skills ship built in:
 
 ```bash
@@ -116,6 +116,9 @@ mason skills
 ```
 
 ```text
+atomsk-defects             built-in  dft-expert md-expert         0 script(s)
+atomsk-interfaces          built-in  dft-expert md-expert         0 script(s)
+atomsk-structures          built-in  dft-expert md-expert         1 script(s)
 convergence-study          built-in  dft-expert                   1 script(s)
 elastic-constants          built-in  analysis-expert dft-expert   1 script(s)
 equation-of-state          built-in  analysis-expert dft-expert   1 script(s)
@@ -131,11 +134,12 @@ thermal-response           built-in  analysis-expert md-expert    1 script(s)
 two-phase-melting          built-in  md-expert                    0 script(s)
 ```
 
-The catalog covers the static side (equations of state, convergence,
-surfaces, elastic constants, interface adhesion) and the dynamic side
-(melt-quench glasses, thermal response, two-phase melting, NEMD
-transport, diffusion, nucleation), with the fits and unit conversions in
-tested scripts.
+The catalog covers structure building (the atomsk skills: crystals and
+supercells, defects and dislocations, interfaces and polycrystals), the
+static side (equations of state, convergence, surfaces, elastic
+constants, interface adhesion), and the dynamic side (melt-quench
+glasses, thermal response, two-phase melting, NEMD transport, diffusion,
+nucleation), with the fits and unit conversions in tested scripts.
 
 The third column is the categorization: which agent cards see the skill.
 The PI sees every skill, because its card sets `skills: all`. A
@@ -146,6 +150,9 @@ mason skills --agent md-expert
 ```
 
 ```text
+atomsk-defects             built-in  dft-expert md-expert         0 script(s)
+atomsk-interfaces          built-in  dft-expert md-expert         0 script(s)
+atomsk-structures          built-in  dft-expert md-expert         1 script(s)
 kinetic-fits               built-in  analysis-expert md-expert    1 script(s)
 melt-quench                built-in  md-expert                    1 script(s)
 msd-diffusion              built-in  analysis-expert md-expert    1 script(s)

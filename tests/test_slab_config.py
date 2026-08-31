@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 from slab.cli import app
 from slab.config import (
     CONFIG_TEMPLATE,
+    AtomskBuilderConfig,
     ConfigError,
     HpcConfig,
     LammpsEngineConfig,
@@ -265,6 +266,7 @@ def test_every_key_the_template_shows_is_a_key_the_schema_accepts() -> None:
         "[paths]": PathsConfig,
         "[engines.qe]": QeEngineConfig,
         "[engines.lammps]": LammpsEngineConfig,
+        "[builders.atomsk]": AtomskBuilderConfig,
         "[engines.rootstock]": RootstockEngineConfig,
         "[hpc]": HpcConfig,
         "[hpc.partitions.cpu]": Partition,
@@ -480,7 +482,7 @@ def test_an_unknown_top_level_table_is_refused_naming_the_file(tmp_path: Path) -
     (tmp_path / "slab.toml").write_text('[agnet]\nmodel = "x"\n')
     with pytest.raises(ConfigError, match="unknown top-level key 'agnet'"):
         load_merged(tmp_path)
-    with pytest.raises(ConfigError, match="known: agent, engines, hpc, paths"):
+    with pytest.raises(ConfigError, match="known: agent, builders, engines, hpc, paths"):
         load_config(tmp_path)
 
 

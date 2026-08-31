@@ -64,7 +64,7 @@ PROJECT_FILE_NAME = "slab.toml"
 # typo cannot masquerade as a section owned by a package that is not loaded,
 # and it never imports the owners' models.
 KNOWN_TOP_LEVEL_KEYS = frozenset(
-    {"schema_version", "paths", "engines", "hpc", "workspace", "agent"}
+    {"schema_version", "paths", "engines", "builders", "hpc", "workspace", "agent"}
 )
 
 # Keys that moved between packages. Refusing them by name is the migration:
@@ -207,6 +207,32 @@ class EnginesConfig(BaseModel):
     rootstock: RootstockEngineConfig = RootstockEngineConfig()
 
 
+class AtomskBuilderConfig(BaseModel):
+    """How to invoke atomsk on this machine (``[builders.atomsk]``).
+
+    Atomsk builds and transforms structures; it computes no energies, so it
+    is a *builder*, not an engine — it never appears as an ``engine=`` name.
+    ``command`` is the invocation (default ``atomsk``); ``setup`` lines
+    (module loads, exports) run in a private fail-fast login shell around
+    the atomsk subprocess only, the same per-tool rule as
+    ``[engines.qe] setup``. Nothing is expanded at load.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    command: str | None = None
+    setup: tuple[str, ...] = ()
+
+
+class BuildersConfig(BaseModel):
+    """Per-builder defaults (``[builders]``): tools that make structures,
+    not energies."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    atomsk: AtomskBuilderConfig = AtomskBuilderConfig()
+
+
 class PathsConfig(BaseModel):
     """Where things live on this machine (``[paths]``).
 
@@ -328,6 +354,7 @@ class SlabConfig(BaseModel):
     schema_version: int = 1
     paths: PathsConfig = PathsConfig()
     engines: EnginesConfig = EnginesConfig()
+    builders: BuildersConfig = BuildersConfig()
     hpc: HpcConfig = HpcConfig()
 
     @field_validator("schema_version")
@@ -613,10 +640,10 @@ CONFIG_TEMPLATE = '''\
 schema_version = 1
 
 # One file, three packages. Each table below is owned by exactly one of them:
-# [paths], [engines], and [hpc] by slab; [workspace] by foundation; [agent] by
-# mason. A table's owner validates it, so a typo inside [agent] is refused by
-# 'mason doctor' rather than by 'slab engines list'. A table name no package
-# owns is refused by every command that reads the file.
+# [paths], [engines], [builders], and [hpc] by slab; [workspace] by foundation;
+# [agent] by mason. A table's owner validates it, so a typo inside [agent] is
+# refused by 'mason doctor' rather than by 'slab engines list'. A table name no
+# package owns is refused by every command that reads the file.
 
 [workspace]
 # root = "/scratch/${USER}/slab-workspace"        # run database + artifacts
@@ -672,6 +699,15 @@ schema_version = 1
 #                                      # same per-engine setup rule as qe —
 #                                      # purge first so whatever the job (or
 #                                      # your profile) loaded can't reach it
+
+[builders.atomsk]
+# command = "atomsk"                   # atomsk builds and transforms structures
+#                                      # (unit cells, supercells, dislocations,
+#                                      # polycrystals, format conversions); it
+#                                      # computes no energies, so it is a
+#                                      # builder, never an engine= name. Used by
+#                                      # foundation's build_structure task
+# setup = ["module load atomsk/0.13"]  # same per-tool setup rule as the engines
 
 [engines.rootstock]
 # root = "/path/to/rootstock-install"  # a LOCAL rootstock install (the directory

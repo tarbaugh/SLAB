@@ -809,3 +809,78 @@ def test_the_ramp_template_runs_verified_and_yields_a_classical_cp(
     # volumetric value in the couple-of-1e6 J/(m^3 K) range.
     assert 1.5e6 < fit["cp_vol_J_m3K"] < 8.0e6
     assert fit["cte_per_K"] > 0
+
+
+# -- check_structure (atomsk-structures) --------------------------------------
+
+CHECK = SKILLS / "atomsk-structures" / "scripts" / "check_structure.py"
+DATA = Path(__file__).parent / "data"
+
+
+def test_check_structure_reports_the_recorded_atomsk_supercell(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Real data: the 2x2x2 fcc Al supercell a real atomsk wrote. Known facts:
+    a = 8.092 A, nearest neighbor a0/sqrt(2) = 2.861 A, density 2.70 g/cm^3."""
+    code, out = _run(
+        CHECK, str(DATA / "atomsk-al-fcc-222.xsf"), "--json",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    report = json.loads(out)
+    assert report["n_atoms"] == 32
+    assert report["formula"] == "Al32"
+    assert report["cell_lengths_A"] == pytest.approx([8.092, 8.092, 8.092])
+    assert report["min_distance_A"] == pytest.approx(2.8614, abs=1e-3)
+    assert report["density_g_cm3"] == pytest.approx(2.70, abs=0.03)
+    assert report["close_pairs"] == 0
+
+
+def test_check_structure_flags_overlapping_atoms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ase.build import bulk
+
+    atoms = bulk("Cu", "fcc", a=3.615) * (2, 2, 2)
+    atoms += atoms[:1]  # a duplicate atom: the classic bad-merge artifact
+    atoms.positions[-1, 0] += 0.3
+    bad = tmp_path / "overlap.xsf"
+    ase_write(bad, atoms)
+
+    code, out = _run(CHECK, str(bad), "--json", monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 0
+    report = json.loads(out)
+    assert report["min_distance_A"] == pytest.approx(0.3, abs=1e-6)
+    assert report["close_pairs"] >= 1
+
+    code, _ = _run(
+        CHECK, str(bad), "--fail-below", "1.0", monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert isinstance(code, str) and "atoms overlap" in code
+
+
+def test_check_structure_large_cells_take_the_neighborlist_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ase.build import bulk
+
+    atoms = bulk("Al", "fcc", a=4.046, cubic=True) * (8, 8, 8)  # 2048 atoms
+    big = tmp_path / "big.xsf"
+    ase_write(big, atoms)
+    code, out = _run(CHECK, str(big), "--json", monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 0
+    report = json.loads(out)
+    assert report["n_atoms"] == 2048
+    assert report["min_distance_A"] == pytest.approx(2.8614, abs=1e-3)
+
+
+def test_check_structure_refuses_missing_or_junk_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _ = _run(CHECK, str(tmp_path / "gone.xsf"), monkeypatch=monkeypatch, capsys=capsys)
+    assert isinstance(code, str) and "no such file" in code
+
+    junk = tmp_path / "junk.xsf"
+    junk.write_text("not a structure")
+    code, _ = _run(CHECK, str(junk), monkeypatch=monkeypatch, capsys=capsys)
+    assert isinstance(code, str) and "cannot read" in code

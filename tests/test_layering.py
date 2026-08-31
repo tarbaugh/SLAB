@@ -207,6 +207,9 @@ def test_builtin_cards_and_skills_ship_inside_the_package() -> None:
         p.name for p in (SRC / "mason" / "skills").iterdir() if p.is_dir()
     )
     assert skills == [
+        "atomsk-defects",
+        "atomsk-interfaces",
+        "atomsk-structures",
         "convergence-study",
         "elastic-constants",
         "equation-of-state",

@@ -1,0 +1,43 @@
+ ___________________________________________________
+|              ___________                          |
+|     o---o    A T O M S K                          |
+|    o---o|    Version master-2026-07-24 (Beta)     |
+|    |   |o    (C) 2010 Pierre Hirel                |
+|    o---o     https://atomsk.univ-lille.fr         |
+|___________________________________________________|
+X!X ERROR: non-conform statement in mode: create
+ ..> Create mode:
+           atomsk --create <structure> <a> [<c>] <species> <outputfile> [orient hkl hkl hkl] [<formats>] [options]
+                             <structure> | N.lattice cst. | N.at.sp.
+                            -------------+----------------+----------
+              CUBIC                  sc  |       1        |     1
+              LATTICES              bcc  |       1        |   1 or 2
+                                    fcc  |       1        |   1 or 2
+                                diamond  |       1        |   1 or 2
+                                   L1_2  |       1        |     2
+                               fluorite  |       1        |     2
+                              rock-salt  |       1        |     2
+                             perovskite  |       1        |     3
+                                    A15  |       1        |     2
+                                    C15  |       1        |     2
+                            -------------+----------------+----------
+              TETRAGONAL             st  |  2 (a and c)   |   1 or 2
+              LATTICES              bct  |  2 (a and c)   |   1 or 2
+                                    fct  |  2 (a and c)   |   1 or 2
+                            -------------+----------------+----------
+              HEXAGONAL             hcp  |  2 (a and c)   |   1 or 2
+              LATTICES         wurtzite  |  2 (a and c)   |     2
+                               graphite  |  2 (a and c)   |   1 or 2
+                                     BN  |  2 (a and c)   |     2
+                                    C14  |  2 (a and c)   |     2
+                                    C36  |  2 (a and c)   |     2
+           atomsk --create nanotube <a> <m> <n> <sp1> [<sp2>] [options] <outputfile> [<formats>]
+ 
+ >>> Look at the /doc/ folder provided with the program
+     or go to: https://atomsk.univ-lille.fr/
+ 
+\o/ Program terminated successfully!
+    Total time: 0.001 s.; CPU time: 0.001 s.
+ ___________________________________________________
+|  X!X ERRORS:   1                                 |
+|___________________________________________________|

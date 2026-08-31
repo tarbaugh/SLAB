@@ -48,12 +48,16 @@ number is a rumor. A minimal workflow script:
     def forces_converged():
         return converged(info["fmax"], below=0.05)
 
-The task vocabulary is `relax` (BFGS on positions) and `single_point` (one \
-energy+forces evaluation, no optimization; its info has no 'converged' key). \
-Chain them for the canonical two-fidelity flow: relax under a cheap engine — \
-a served MLIP checkpoint id (call `list_engines` for the ids available \
-here) — then single_point the relaxed structure under the expensive one, \
-and check the DFT residual force to confirm the cheap geometry held up.
+The task vocabulary is `relax` (BFGS on positions), `single_point` (one \
+energy+forces evaluation, no optimization; its info has no 'converged' key), \
+and `build_structure` (run the atomsk structure builder — supercells, \
+defects, interfaces, polycrystals — and get the produced structure back as \
+Atoms; needs atomsk installed or `[builders.atomsk]` configured, and the \
+atomsk-* skills carry the recipes). Chain them for the canonical flow: \
+build the geometry, relax under a cheap engine — a served MLIP checkpoint \
+id (call `list_engines` for the ids available here) — then single_point \
+the relaxed structure under the expensive one, and check the DFT residual \
+force to confirm the cheap geometry held up.
 
 Write the script with write_file, run it with launch_workflow (give an intent — \
 why this run exists), read the outcome, and cite the run id. Use list_engines \

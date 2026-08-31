@@ -1,0 +1,16 @@
+ ___________________________________________________
+|              ___________                          |
+|     o---o    A T O M S K                          |
+|    o---o|    Version master-2026-07-24 (Beta)     |
+|    |   |o    (C) 2010 Pierre Hirel                |
+|    o---o     https://atomsk.univ-lille.fr         |
+|___________________________________________________|
+>>> Creating system:
+..> Fcc Al.
+..> System was successfully created.
+>>> Duplicating the system: 2 x 2 x 2
+..> System was successfully duplicated (32 atoms).
+>>> Writing output file(s) (32 atoms):
+..> Successfully wrote XSF file: al.xsf (2.2 kB)
+\o/ Program terminated successfully!
+    Total time: 0.002 s.; CPU time: 0.002 s.

@@ -393,6 +393,57 @@ without re-invoking the MLIP or `pw.x`. Provenance links the chain by hash
 equality, because `single_point`'s `atoms` input hash is `relax`'s first
 output hash.
 
+## Builders: atomsk
+
+Some external codes make structures, not energies. SLAB names them
+*builders*, and ships one: [atomsk](https://atomsk.univ-lille.fr), which
+creates unit cells, supercells, defects, interfaces, and polycrystals, and
+converts between the file formats the engines read. A builder is not an
+engine. `engine="atomsk"` does not exist, and nothing about it passes
+through `get_calculator`.
+
+Point SLAB at the install in `slab.toml`:
+
+<!-- no-verify -->
+```toml
+[builders.atomsk]
+command = "atomsk"                       # or an absolute path
+setup = ["module load atomsk/0.13"]      # per-builder scoped shell, like the engines
+```
+
+The traced task is `foundation.tasks.build_structure`. It runs one atomsk
+invocation in a private scratch directory, reads the produced file back as
+ASE `Atoms`, and keeps the file and the atomsk log as artifacts. The atomsk
+version and the resolved command enter the cache key, exactly like an
+engine's:
+
+<!-- no-verify -->
+```python
+from foundation.tasks import build_structure, relax
+
+supercell, build = build_structure(
+    "--create fcc 4.046 Al -duplicate 4 4 4 al.xsf", label="al-444"
+)
+relaxed, opt = relax(supercell, engine="emt", fmax=0.05, label="al-444")
+```
+
+Executed for real, with atomsk built from source:
+
+<!-- no-verify -->
+```text
+built: Al256 atomsk=master-2026-07-24 output=al.xsf
+relax: converged=True E=-0.5030025151477417 eV n_atoms=256
+```
+
+The argument list is atomsk's own. File names must be bare, because the
+invocation runs in a fresh scratch directory; structures and parameter
+files the invocation reads enter through the task's `inputs=` mapping, and
+each is a traced input. On failure the `X!X ERROR` lines from atomsk's log
+ride on the exception as notes, and the full log is kept as
+`{label}-failed.log` — the same evidence contract as the engine tasks. The
+`atomsk-structures`, `atomsk-defects`, and `atomsk-interfaces` skills carry
+the recipes and a bundled structure checker.
+
 ## The cluster engine registry
 
 For VASP, site-specific MLIP aliases, and curated site setups of the built-in

@@ -94,7 +94,7 @@ module = [
     "fit_elastic", "strain_scan",
     "quench_report", "melt_quench",
     "fit_thermal_ramp", "thermal_ramp",
-    "fit_rates", "fit_nemd", "adhesion", "cnt",
+    "fit_rates", "fit_nemd", "adhesion", "cnt", "check_structure",
 ]
 disallow_untyped_calls = false
 
