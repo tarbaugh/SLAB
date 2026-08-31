@@ -531,7 +531,7 @@ def test_the_fence_admits_project_workspace_and_skill_roots(
     session = _session(tmp_path)
     box = build_toolbox(session)
     (tmp_path / "notes.txt").write_text("in project\n")
-    workspace_file = session.workspace_root / "mason" / "sessions" / "old.jsonl"
+    workspace_file = session.workspace_root / "mason" / "roster.json"
     workspace_file.parent.mkdir(parents=True, exist_ok=True)
     workspace_file.write_text("{}\n")
 
@@ -543,6 +543,28 @@ def test_the_fence_admits_project_workspace_and_skill_roots(
     )
     assert "outside this session's file scope" in answer
     assert "fence test skill" in (skill_dir / "SKILL.md").read_text()
+
+
+def test_past_session_transcripts_are_refused_with_the_doctrine(tmp_path: Path) -> None:
+    """The sessions directory sits inside the workspace, but past sessions
+    are not context: a real run burned six steps excavating an old
+    campaign's compaction file and inherited its stale decisions. The
+    refusal points at the sanctioned channels instead."""
+    session = _session(tmp_path)
+    box = build_toolbox(session)
+    old = session.sessions_dir / "20260829-134153-23.compactions.md"
+    old.parent.mkdir(parents=True, exist_ok=True)
+    old.write_text("# Context compactions\nstale decisions\n")
+
+    for call in (
+        _call("read_file", path=str(old)),
+        _call("list_dir", path=str(session.sessions_dir)),
+        _call("search", pattern="stale", path=str(session.sessions_dir)),
+    ):
+        answer = box.dispatch(call)
+        assert "past sessions are not context" in answer, call.name
+        assert "recall" in answer and "remember" in answer, call.name
+    assert "stale decisions" not in box.dispatch(_call("read_file", path=str(old)))
 
 
 def test_file_scope_anywhere_lifts_the_fence(

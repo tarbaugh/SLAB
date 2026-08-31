@@ -364,7 +364,9 @@ def _out_of_scope(session: MasonSession, path: Path, roots: tuple[Path, ...]) ->
 
     The fence is the sandbox principle at the tool layer: the agent reads and
     runs within its project, its workspace, and the skills it was shown, and
-    writes only within the project and workspace. Comparison happens on
+    writes only within the project and workspace. One carve-out inside the
+    workspace: the sessions directory (transcripts and compaction files) is
+    refused, because past sessions are not context. Comparison happens on
     fully resolved paths, so a symlink pointing out of the fence counts as
     outside it. This is a workflow control, not a security boundary — the
     shell tool remains the honest escape, behind its own gate.
@@ -372,6 +374,19 @@ def _out_of_scope(session: MasonSession, path: Path, roots: tuple[Path, ...]) ->
     if session.agent.file_scope == "anywhere":
         return None
     resolved = path.expanduser().resolve()
+    # The sessions directory sits inside the workspace but is not context.
+    # A past transcript is a losing substitute for durable state: it is
+    # huge, it records what *seemed* true mid-investigation, and it may
+    # describe a different campaign entirely. Everything a past session
+    # kept on purpose arrives through the project files and the memories.
+    if resolved.is_relative_to(session.sessions_dir):
+        return (
+            f"refused: {path} is a session transcript, and past sessions are "
+            f"not context. What earlier sessions kept for you arrives three "
+            f"ways: the goal text, the project files (BRIEF/PLAN/notebook), "
+            f"and machine memories — call `recall`. A fact worth carrying "
+            f"between sessions belongs in `remember`, not in a transcript."
+        )
     for root in roots:
         if resolved.is_relative_to(root):
             return None
