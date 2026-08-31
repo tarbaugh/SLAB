@@ -37,10 +37,12 @@ script, the result is pure text — render it, read it, then submit it.
 from __future__ import annotations
 
 import contextlib
+import functools
 import http.client
 import http.server
 import json
 import os
+import re
 import shlex
 import shutil
 import socket
@@ -100,17 +102,41 @@ def _pump(source: socket.socket, sink: socket.socket) -> None:
 
 
 def _relay(server: socket.socket, connect: Callable[[], socket.socket]) -> None:
-    """Accept forever; pair every client with a fresh upstream connection."""
+    """Accept forever; pair every client with a fresh upstream connection.
+
+    Concurrency is capped at :data:`_MAX_INFLIGHT`. The client is an
+    untrusted sandbox, and each accepted connection opens a fresh upstream
+    connection and two pump threads; without a bound a flood of connections
+    would grow the host's thread and socket count without end. Past the cap
+    a new client is closed at once, and a slot frees when both of a pair's
+    pumps finish.
+    """
     server.listen()
+    slots = threading.BoundedSemaphore(_MAX_INFLIGHT)
+
+    def serve(client: socket.socket, upstream: socket.socket) -> None:
+        try:
+            a = threading.Thread(target=_pump, args=(client, upstream), daemon=True)
+            b = threading.Thread(target=_pump, args=(upstream, client), daemon=True)
+            a.start()
+            b.start()
+            a.join()
+            b.join()
+        finally:
+            slots.release()
+
     while True:
         client, _addr = server.accept()
+        if not slots.acquire(blocking=False):
+            client.close()
+            continue
         try:
             upstream = connect()
         except OSError:
             client.close()
+            slots.release()
             continue
-        threading.Thread(target=_pump, args=(client, upstream), daemon=True).start()
-        threading.Thread(target=_pump, args=(upstream, client), daemon=True).start()
+        threading.Thread(target=serve, args=(client, upstream), daemon=True).start()
 
 
 def forward(socket_path: str, port: int = BRIDGE_PORT) -> None:
@@ -133,7 +159,13 @@ def forward(socket_path: str, port: int = BRIDGE_PORT) -> None:
     _relay(server, connect)
 
 
-def bridge(socket_path: str, upstream: str, *, key_env: str | None = None) -> None:
+def bridge(
+    socket_path: str,
+    upstream: str,
+    *,
+    key_env: str | None = None,
+    headers: dict[str, str] | None = None,
+) -> None:
     """Serve a unix socket, relaying every connection to one fixed upstream.
 
     The host half of the bridge, run outside the container by the rendered
@@ -154,16 +186,22 @@ def bridge(socket_path: str, upstream: str, *, key_env: str | None = None) -> No
     on disk and get resubmitted for months.
 
     Raises:
-        SandboxError: *upstream* is neither form, or a key is named for a
-            byte relay, which cannot send one.
+        SandboxError: *upstream* is neither form, or a key or injected
+            headers are named for a byte relay, which cannot send them.
     """
     if "://" in upstream:
-        forward_http(socket_path, upstream, key_env=key_env)
+        forward_http(socket_path, upstream, key_env=key_env, headers=headers)
         return
     if key_env is not None:
         raise SandboxError(
             f"a key can only be sent to a URL upstream; {upstream!r} is a byte "
             f"relay to a host and port, which forwards what the client sends"
+        )
+    if headers:
+        raise SandboxError(
+            f"headers can only be injected toward a URL upstream; {upstream!r} "
+            f"is a byte relay to a host and port, which forwards what the "
+            f"client sends"
         )
     host, _sep, port_text = upstream.rpartition(":")
     if not host or not port_text.isdigit():
@@ -204,8 +242,39 @@ _HOP_BY_HOP = frozenset(
         "upgrade",
     }
 )
-_DROPPED_REQUEST_HEADERS = _HOP_BY_HOP | {"host", "content-length", "authorization"}
 _DROPPED_RESPONSE_HEADERS = _HOP_BY_HOP | {"content-length"}
+
+#: The ONLY request headers that cross to the gateway. Everything the
+#: sandbox sends is dropped unless it is on this list: ``Authorization`` is
+#: replaced with the host's key, ``Host`` and ``Content-Length`` are
+#: reframed per hop, and every other client header is discarded. A deny
+#: list would be wrong here. The upstream is a gateway, and a gateway
+#: routes by request header: forwarding an attacker-chosen ``x-portkey-*``,
+#: ``x-*``, or ``forwarded`` header would let a sandbox that is supposed to
+#: reach one fixed model repoint the gateway at a provider or host of its
+#: choosing, on the host's credential. Only the two headers a plain
+#: OpenAI-compatible request needs are allowed through; if a deployment's
+#: gateway needs a fixed routing header, the bridge must inject it host-side
+#: with a fixed value, never trust the sandbox to send it.
+_FORWARDED_REQUEST_HEADERS = frozenset({"content-type", "accept"})
+
+#: A request body larger than this is refused rather than read. The sandbox
+#: is untrusted; without a cap a single request can name an unbounded
+#: ``Content-Length`` and pin a host thread reading it. OpenAI-shaped
+#: requests are comfortably under this.
+_MAX_REQUEST_BODY = 64 * 1024 * 1024
+
+#: A per-operation timeout on the connection the sandbox speaks to. It
+#: bounds reading the request only — the long, legitimate wait is on the
+#: upstream socket while the model generates, and that connection is left
+#: untimed (see :func:`bridge`). A sandbox that opens a connection and
+#: dribbles a request would otherwise hold a host thread forever.
+_REQUEST_READ_TIMEOUT_S = 60.0
+
+#: The most connections the host-side bridge serves at once. Past it, new
+#: connections are refused instead of spawning an unbounded number of host
+#: threads. Generous: a real session's concurrency is far below it.
+_MAX_INFLIGHT = 64
 
 #: The version prefix the container always speaks, because the render
 #: writes its endpoint. Stripped here and replaced by the upstream's own
@@ -233,6 +302,133 @@ def upstream_path(base_path: str, request_path: str) -> str:
     return (base_path.rstrip("/") + suffix) or "/"
 
 
+def _safe_upstream_path(base_path: str, request_path: str) -> str | None:
+    """Map the container's request target onto the gateway, or None if unsafe.
+
+    The sandbox controls the request line, so the target is validated before
+    it is used:
+
+    - Origin-form only. It must be an absolute path (start with ``/``).
+      Absolute-form (``http://elsewhere/x``) and authority-form name a
+      destination, and a header- or URL-routed gateway would honour it,
+      which is exactly the pin this bridge is supposed to hold.
+    - No control characters, so nothing can be smuggled into the request
+      line sent upstream.
+    - No ``..`` segment, so the sandbox cannot climb out of the gateway's
+      own base path to another route on the same host.
+
+    A rejected target returns None; the caller answers 400 rather than
+    forwarding it.
+    """
+    if not request_path.startswith("/"):
+        return None
+    if any(ord(ch) < 0x20 or ch == "\x7f" for ch in request_path):
+        return None
+    path_only = request_path.split("?", 1)[0]
+    if ".." in path_only.split("/"):
+        return None
+    return upstream_path(base_path, request_path)
+
+
+#: Header names the bridge itself owns. An injected header must not collide
+#: with them: ``Authorization`` comes from ``--key-env``, ``Host`` and
+#: ``Content-Length`` are reframed per hop, and the hop-by-hop set never
+#: crosses a hop at all.
+_RESERVED_INJECTED = _HOP_BY_HOP | {"authorization", "host", "content-length"}
+
+_HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+
+
+def parse_bridge_headers(specs: list[str] | tuple[str, ...]) -> dict[str, str]:
+    """Parse operator-chosen ``Name: value`` specs into injectable headers.
+
+    These are the fixed routing headers a deployment's gateway requires
+    (``x-portkey-provider: openai``, an ``x-portkey-config`` id, ...). They
+    are chosen host-side by the operator, which is exactly why they are safe
+    to send where sandbox-chosen headers are not; the forwarder injects them
+    into every request, overriding a sandbox-sent header of the same name.
+
+    Raises:
+        SandboxError: a spec has no ``:``, an invalid or reserved name, a
+            control character in the value, or repeats a name.
+
+    Examples:
+        >>> parse_bridge_headers(["x-portkey-provider: openai"])
+        {'x-portkey-provider': 'openai'}
+    """
+    parsed: dict[str, str] = {}
+    for spec in specs:
+        name, separator, value = spec.partition(":")
+        name, value = name.strip(), value.strip()
+        if not separator or not name or not value:
+            raise SandboxError(
+                f"header {spec!r} must look like 'Name: value' (both sides non-empty)"
+            )
+        if not _HEADER_NAME.match(name):
+            raise SandboxError(f"header name {name!r} is not a valid HTTP header name")
+        if name.lower() in _RESERVED_INJECTED:
+            raise SandboxError(
+                f"header {name!r} cannot be injected: the bridge sets it itself "
+                f"(Authorization comes from --key-env; Host and Content-Length "
+                f"are reframed per hop; hop-by-hop headers never cross)"
+            )
+        if any(ord(ch) < 0x20 or ch == "\x7f" for ch in value):
+            raise SandboxError(f"header {name!r} has a control character in its value")
+        if name.lower() in {existing.lower() for existing in parsed}:
+            raise SandboxError(f"header {name!r} is given twice")
+        parsed[name] = value
+    return parsed
+
+
+@functools.cache
+def _bridge_user_agent() -> str:
+    """What the bridge calls itself upstream.
+
+    The allow list drops the client's ``User-Agent``, and some gateway
+    front ends refuse a request that has none at all — so the bridge sends
+    a fixed, host-chosen one.
+    """
+    try:
+        from importlib.metadata import version
+
+        return f"slab-mason-bridge/{version('slab-stack')}"
+    except Exception:
+        return "slab-mason-bridge"
+
+
+def _unreachable_hint(error: OSError) -> str:
+    """One actionable clause for the 502 body, keyed on how the trip failed.
+
+    The exception text says what happened; this says what to check. The
+    reader is the agent (or the operator reading its transcript), on a
+    cluster, mid-job — name the likely cause and the concrete probe.
+    """
+    if isinstance(error, ssl.SSLCertVerificationError):
+        return (
+            " (the gateway's TLS certificate did not verify on this host; if the "
+            "gateway is signed by a site CA, point $SSL_CERT_FILE at the site's "
+            "CA bundle before starting the bridge)"
+        )
+    if isinstance(error, http.client.RemoteDisconnected):
+        return (
+            " (the gateway, or a front end before it, closed the connection "
+            "without answering; front ends often drop requests missing a header "
+            "they require — start the bridge with --header to inject the fixed "
+            "header your gateway documents)"
+        )
+    if isinstance(error, socket.gaierror):
+        return " (the gateway's hostname did not resolve on this host)"
+    if isinstance(error, ConnectionRefusedError):
+        return " (the host resolved and answered, but refused the port)"
+    if isinstance(error, TimeoutError):
+        return (
+            f" (no connection within {_CONNECT_TIMEOUT_S:.0f}s; the bridge needs "
+            f"direct egress from this host and does not use $https_proxy — probe "
+            f"with: curl --noproxy '*' -sS -m 10 <gateway URL>/models)"
+        )
+    return ""
+
+
 def _resolve_key(key_env: str | None) -> str | None:
     """The key the forwarder will send, refusing a named-but-unset variable.
 
@@ -253,7 +449,13 @@ def _resolve_key(key_env: str | None) -> str | None:
     return key
 
 
-def forward_http(socket_path: str, upstream: str, *, key_env: str | None = None) -> None:
+def forward_http(
+    socket_path: str,
+    upstream: str,
+    *,
+    key_env: str | None = None,
+    headers: dict[str, str] | None = None,
+) -> None:
     """Serve a unix socket as an HTTP forwarder to one fixed gateway URL.
 
     The authenticating half of the bridge. It terminates the plain HTTP the
@@ -263,6 +465,11 @@ def forward_http(socket_path: str, upstream: str, *, key_env: str | None = None)
     container is launched ``--cleanenv``, and the rendered ``slab.toml``
     carries no ``api_key_env``, so the agent can neither read the key nor
     change where its requests go.
+
+    *headers* are fixed, operator-chosen headers injected into every
+    upstream request (the routing header a gateway deployment requires);
+    they override a sandbox-sent header of the same name and never come
+    from the sandbox. See :func:`parse_bridge_headers`.
 
     Nothing is logged per request. A SLURM ``.out`` file is readable by
     anyone who can read the job's directory, and headers do not belong in
@@ -277,7 +484,7 @@ def forward_http(socket_path: str, upstream: str, *, key_env: str | None = None)
             f"bridge upstream must be host:port or an http(s) URL, got {upstream!r}"
         )
     key = _resolve_key(key_env)
-    handler = _forwarder(parts, key)
+    handler = _forwarder(parts, key, headers or {})
     with contextlib.suppress(OSError):
         os.unlink(socket_path)
     server = _UnixHTTPServer(socket_path, handler)
@@ -285,21 +492,52 @@ def forward_http(socket_path: str, upstream: str, *, key_env: str | None = None)
 
 
 class _UnixHTTPServer(socketserver.ThreadingUnixStreamServer):
-    """An HTTP server on a unix socket: one thread per connection."""
+    """An HTTP server on a unix socket: one thread per connection, capped.
+
+    The default threading server spawns a thread per connection without
+    limit. The peer is an untrusted sandbox, so the count is bounded: past
+    :data:`_MAX_INFLIGHT` concurrent connections, new ones are closed at
+    once rather than growing the host's thread count without end.
+    """
 
     daemon_threads = True
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._slots = threading.BoundedSemaphore(_MAX_INFLIGHT)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        threading.Thread(
+            target=self._serve, args=(request, client_address), daemon=True
+        ).start()
+
+    def _serve(self, request: Any, client_address: Any) -> None:
+        try:
+            self.finish_request(request, client_address)
+        except Exception:  # mirror ThreadingMixIn's own broad guard
+            self.handle_error(request, client_address)
+        finally:
+            self.shutdown_request(request)
+            self._slots.release()
+
 
 def _forwarder(
-    parts: urllib.parse.SplitResult, key: str | None
+    parts: urllib.parse.SplitResult, key: str | None, injected: dict[str, str]
 ) -> type[http.server.BaseHTTPRequestHandler]:
-    """Build the request handler bound to one upstream and one key."""
+    """Build the request handler bound to one upstream, one key, fixed headers."""
 
     class Handler(http.server.BaseHTTPRequestHandler):
         # The container's client opens a connection per request through the
         # relay, so HTTP/1.0's close-when-done framing is the whole protocol
         # needed here, and it keeps every response's length explicit.
         protocol_version = "HTTP/1.0"
+        # Bounds reading a request from the untrusted sandbox; the upstream
+        # connection is timed separately (untimed) so a slow generation is
+        # never cut short.
+        timeout = _REQUEST_READ_TIMEOUT_S
 
         def do_GET(self) -> None:  # http.server's naming contract
             self._forward("GET")
@@ -308,13 +546,48 @@ def _forwarder(
             self._forward("POST")
 
         def _forward(self, method: str) -> None:
-            length = int(self.headers.get("Content-Length") or 0)
+            # The sandbox chooses the request target. Pin it to an
+            # origin-form path under the gateway's base before anything
+            # else: absolute-form ('http://elsewhere/') or a '..' climb
+            # would otherwise become a request the gateway routes away from
+            # the one model this bridge exists to reach.
+            path = _safe_upstream_path(parts.path, self.path)
+            if path is None:
+                self._answer_error(
+                    "the bridge refused a request target that was not a plain "
+                    "path under the gateway",
+                    status=400,
+                    reason="Bad Request",
+                )
+                return
+            length = self._body_length()
+            if length is None:
+                self._answer_error(
+                    "the bridge refused a request with a bad or oversized "
+                    "Content-Length",
+                    status=413,
+                    reason="Payload Too Large",
+                )
+                return
             body = self.rfile.read(length) if length else None
+            # An allow list, not a deny list: only these client headers cross
+            # to the gateway. See _FORWARDED_REQUEST_HEADERS.
             headers = {
                 name: value
                 for name, value in self.headers.items()
-                if name.lower() not in _DROPPED_REQUEST_HEADERS
+                if name.lower() in _FORWARDED_REQUEST_HEADERS
             }
+            # Operator-injected headers are fixed at bridge start and win
+            # over anything the sandbox sent under the same name.
+            for name, value in injected.items():
+                for existing in [h for h in headers if h.lower() == name.lower()]:
+                    del headers[existing]
+                headers[name] = value
+            # The allow list dropped the client's User-Agent; a request with
+            # none at all trips some gateway front ends, so the bridge sends
+            # its own fixed one (an injected header may replace it).
+            if not any(name.lower() == "user-agent" for name in headers):
+                headers["User-Agent"] = _bridge_user_agent()
             # Replaced, never appended: the container sends its client's
             # placeholder, and that must not reach the gateway.
             if key is not None:
@@ -322,12 +595,16 @@ def _forwarder(
             if body is not None:
                 headers["Content-Length"] = str(len(body))
             try:
-                status, reason, answer, payload = self._issue(method, headers, body)
+                status, reason, answer, payload = self._issue(method, path, headers, body)
             except OSError as e:
                 # A transport failure has no status of its own. Say so as one
                 # the agent's client can read, rather than dropping the
-                # connection and leaving it to guess.
-                self._answer_error(f"the bridge could not reach the gateway: {e}")
+                # connection and leaving it to guess — and say what to check,
+                # keyed on how the trip failed.
+                self._answer_error(
+                    f"the bridge could not reach the gateway: "
+                    f"{e}{_unreachable_hint(e)}"
+                )
                 return
             self.send_response(status, reason)
             for name, value in answer:
@@ -337,8 +614,27 @@ def _forwarder(
             self.end_headers()
             self.wfile.write(payload)
 
+        def _body_length(self) -> int | None:
+            """The request body length to read, or None if it is unusable.
+
+            A missing length is no body. A non-numeric, negative, or
+            oversized length is refused: ``read(-1)`` would drain the socket
+            to EOF and pin a thread, and an unbounded length invites the same
+            by another name.
+            """
+            raw = self.headers.get("Content-Length")
+            if raw is None:
+                return 0
+            try:
+                length = int(raw)
+            except ValueError:
+                return None
+            if length < 0 or length > _MAX_REQUEST_BODY:
+                return None
+            return length
+
         def _issue(
-            self, method: str, headers: dict[str, str], body: bytes | None
+            self, method: str, path: str, headers: dict[str, str], body: bytes | None
         ) -> tuple[int, str, list[tuple[str, str]], bytes]:
             """One upstream round trip, returning its status, headers, body.
 
@@ -367,9 +663,7 @@ def _forwarder(
                 # would tear down a request the gateway is still serving.
                 if connection.sock is not None:
                     connection.sock.settimeout(None)
-                connection.request(
-                    method, upstream_path(parts.path, self.path), body=body, headers=headers
-                )
+                connection.request(method, path, body=body, headers=headers)
                 response = connection.getresponse()
                 return (
                     response.status,
@@ -380,10 +674,12 @@ def _forwarder(
             finally:
                 connection.close()
 
-        def _answer_error(self, message: str) -> None:
+        def _answer_error(
+            self, message: str, *, status: int = 502, reason: str = "Bad Gateway"
+        ) -> None:
             payload = json.dumps({"error": {"message": message, "type": "bridge_error"}})
             raw = payload.encode("utf-8")
-            self.send_response(502, "Bad Gateway")
+            self.send_response(status, reason)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
@@ -400,32 +696,46 @@ def _forwarder(
     return Handler
 
 
+#: The darkness probes run when the caller names none. Two on purpose, and
+#: one is a raw IP: a namespace with a route but no resolver would let a
+#: DNS-name probe "fail" and read as dark when it is not, so a probe that
+#: needs no DNS closes that gap. Neither proves isolation on its own — only
+#: ``--net --network none`` does that — so this stays a fail-closed sanity
+#: check, not the boundary.
+_DARKNESS_PROBES = ("http://example.com/", "http://1.1.1.1/")
+
+
 def verify(
     port: int = BRIDGE_PORT,
     *,
-    probe_url: str = "http://example.com",
+    probe_url: str | None = None,
     ready_timeout_s: float = 30.0,
 ) -> list[str]:
     """Prove the sandbox is dark and the bridge answers, or refuse to start.
 
-    Two checks, both mandatory. *probe_url* must be unreachable — any
-    response at all means the namespace has a route out, and an autonomous
-    run must not start. The bridged endpoint must list its models within
-    *ready_timeout_s* (retried, because the forwarder starts moments before
-    this check). Returns the served model names.
+    Two checks, both mandatory. Every darkness probe must be unreachable —
+    any response at all means the namespace has a route out, and an
+    autonomous run must not start. *probe_url* names one probe; left unset,
+    the defaults in :data:`_DARKNESS_PROBES` run, which include a raw-IP
+    probe so a broken resolver cannot masquerade as darkness. The bridged
+    endpoint must list its models within *ready_timeout_s* (retried, because
+    the forwarder starts moments before this check). Returns the served
+    model names.
     """
-    try:
-        with urllib.request.urlopen(probe_url, timeout=3.0):
-            pass
-        raise SandboxError(
-            f"the sandbox can reach {probe_url} — the network namespace is not "
-            f"isolated. Refusing to start an autonomous run. Check that the "
-            f"container was launched with --net --network none."
-        )
-    except SandboxError:
-        raise
-    except (urllib.error.URLError, OSError, TimeoutError):
-        pass  # dark, as required
+    probes = (probe_url,) if probe_url is not None else _DARKNESS_PROBES
+    for probe in probes:
+        try:
+            with urllib.request.urlopen(probe, timeout=3.0):
+                pass
+            raise SandboxError(
+                f"the sandbox can reach {probe} — the network namespace is not "
+                f"isolated. Refusing to start an autonomous run. Check that the "
+                f"container was launched with --net --network none."
+            )
+        except SandboxError:
+            raise
+        except (urllib.error.URLError, OSError, TimeoutError):
+            continue  # dark, as required
 
     deadline = time.monotonic() + ready_timeout_s
     last = "no attempt made"
@@ -1075,6 +1385,20 @@ def _key_flag(agent: AgentConfig) -> str:
     return f" --key-env {shlex.quote(key_env)}" if key_env else ""
 
 
+def _header_flags(agent: AgentConfig) -> str:
+    """``--header 'Name: value'`` per configured gateway header, else nothing.
+
+    Follows :func:`_key_flag`'s rule: only a URL upstream (a configured
+    endpoint) takes them — a byte relay to a served model forwards what the
+    client sends and the bridge would refuse the flag.
+    """
+    if not agent.endpoint:
+        return ""
+    return "".join(
+        f" --header {shlex.quote(spec)}" for spec in agent.sandbox.gateway_headers
+    )
+
+
 def _sandbox_context(
     binds: list[str],
     *,
@@ -1195,7 +1519,8 @@ def render_sandbox_script(
         'the compute nodes mount" >&2; exit 1; }',
         *_upstream_lines(agent, workspace_root),
         'BRIDGE="$(mktemp -d)/llm.sock"',
-        f'{mason} sandbox bridge "$BRIDGE" "$UPSTREAM"{_key_flag(agent)} &',
+        f'{mason} sandbox bridge "$BRIDGE" "$UPSTREAM"'
+        f"{_key_flag(agent)}{_header_flags(agent)} &",
         "BRIDGE_PID=$!",
         "trap 'kill \"$BRIDGE_PID\" 2>/dev/null || true' EXIT",
         'for _ in $(seq 50); do [ -S "$BRIDGE" ] && break; sleep 0.1; done',

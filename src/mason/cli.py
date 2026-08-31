@@ -720,12 +720,27 @@ def mason_sandbox_bridge(
             "(URL upstreams only; the value never enters the container).",
         ),
     ] = None,
+    header: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--header",
+            help="Fixed 'Name: value' header injected into every gateway request "
+            "(repeatable; URL upstreams only) — the routing header a gateway "
+            "deployment requires, e.g. 'x-portkey-provider: openai'. Chosen "
+            "here on the host, never by the sandbox.",
+        ),
+    ] = None,
 ) -> None:
     """In-job plumbing: relay the bridge socket to the model endpoint (host side)."""
-    from mason.sandbox import bridge
+    from mason.sandbox import bridge, parse_bridge_headers
 
     try:
-        bridge(socket_path, upstream, key_env=key_env)
+        bridge(
+            socket_path,
+            upstream,
+            key_env=key_env,
+            headers=parse_bridge_headers(header or []),
+        )
     except (MasonError, FoundationError, SlabError) as e:
         _fail(str(e))
 
@@ -734,8 +749,13 @@ def mason_sandbox_bridge(
 def mason_sandbox_verify(
     port: Annotated[int, typer.Option("--port", help="The bridged loopback port.")] = 8000,
     probe_url: Annotated[
-        str, typer.Option("--probe-url", help="A URL that must NOT be reachable.")
-    ] = "http://example.com",
+        str | None,
+        typer.Option(
+            "--probe-url",
+            help="A URL that must NOT be reachable. Unset probes a default set "
+            "including a raw IP, so a broken resolver cannot look like darkness.",
+        ),
+    ] = None,
     timeout: Annotated[
         float, typer.Option("--timeout", help="Seconds to wait for the endpoint.")
     ] = 30.0,
@@ -747,7 +767,7 @@ def mason_sandbox_verify(
         names = verify(port, probe_url=probe_url, ready_timeout_s=timeout)
     except (MasonError, FoundationError, SlabError) as e:
         _fail(str(e))
-    typer.echo(f"[+] {probe_url} is unreachable (the sandbox is dark)")
+    typer.echo("[+] no external route is reachable (the sandbox is dark)")
     typer.echo(f"[+] 127.0.0.1:{port} answers; serving: {', '.join(names) or 'none'}")
 
 

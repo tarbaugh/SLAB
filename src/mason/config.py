@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from slab.config import load_merged, validate
 
@@ -81,6 +81,22 @@ class SandboxConfig(BaseModel):
 
     image: str | None = None
     binds: tuple[str, ...] = ()
+    gateway_headers: tuple[str, ...] = ()
+
+    @field_validator("gateway_headers")
+    @classmethod
+    def _injectable(cls, specs: tuple[str, ...]) -> tuple[str, ...]:
+        # ``Name: value`` headers the bridge injects into every gateway
+        # request. Validated at load, so a typo refuses naming the file
+        # rather than surfacing as a gateway error mid-job. The import is
+        # lazy because mason.sandbox imports this module.
+        from mason.sandbox import SandboxError, parse_bridge_headers
+
+        try:
+            parse_bridge_headers(specs)
+        except SandboxError as e:
+            raise ValueError(str(e)) from e
+        return specs
 
 
 class RosterOverride(BaseModel):

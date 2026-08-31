@@ -827,6 +827,11 @@ schema_version = 1
 #   "/opt/qe-7.4:/opt/qe-7.4:ro",           # derivation cannot see: engine installs
 #   "/opt/openmpi:/opt/openmpi:ro",         # and their library closures ('ldd pw.x')
 # ]
+# gateway_headers = [                       # fixed 'Name: value' headers the bridge
+#   "x-portkey-provider: openai",           # injects into every gateway request —
+# ]                                         # the routing header your gateway
+#                                           # requires. Chosen here, host-side; a
+#                                           # header the sandbox sends never crosses
 '''
 
 

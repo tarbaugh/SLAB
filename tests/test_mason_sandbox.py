@@ -3,9 +3,12 @@
 import http.server
 import json
 import shutil
+import socket
 import socketserver
 import subprocess
 import threading
+import time
+import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
 from typing import ClassVar
@@ -604,6 +607,7 @@ class _Gateway(http.server.BaseHTTPRequestHandler):
             "path": self.path,
             "authorization": self.headers.get("Authorization"),
             "content_type": self.headers.get("Content-Type"),
+            "headers": {name.lower(): value for name, value in self.headers.items()},
             "body": body,
         }
 
@@ -634,15 +638,19 @@ def gateway() -> Iterator[tuple[str, type[_Gateway]]]:
     server.shutdown()
 
 
-def _bridged_gateway(base: str, *, key_env: str | None = None) -> int:
+def _bridged_gateway(
+    base: str, *, key_env: str | None = None, headers: dict[str, str] | None = None
+) -> int:
     """The rendered job's chain, with a gateway upstream: returns the port
     the container-side client would call."""
     import tempfile
-    import time
 
     sock = str(Path(tempfile.mkdtemp()) / "llm.sock")
     threading.Thread(
-        target=forward_http, args=(sock, base), kwargs={"key_env": key_env}, daemon=True
+        target=forward_http,
+        args=(sock, base),
+        kwargs={"key_env": key_env, "headers": headers},
+        daemon=True,
     ).start()
     for _ in range(50):
         if Path(sock).exists():
@@ -650,6 +658,14 @@ def _bridged_gateway(base: str, *, key_env: str | None = None) -> int:
         time.sleep(0.1)
     port = next(_PORTS)
     threading.Thread(target=forward, args=(sock, port), daemon=True).start()
+    # Wait until the TCP side actually accepts: returning on thread start
+    # races the listener's bind under a loaded test machine.
+    for _ in range(100):
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+            break
+        except OSError:
+            time.sleep(0.05)
     return port
 
 
@@ -789,6 +805,239 @@ def test_upstream_path_maps_onto_the_gateways_own_base() -> None:
     assert upstream_path("", "/v1/models") == "/models"
     # a path the container did not prefix rides through untouched
     assert upstream_path("/v1", "/healthz") == "/v1/healthz"
+
+
+# -- the forwarder holds the pin: headers, path, and body are constrained -----
+
+
+def _raw_request(
+    port: int, request_line: bytes, *, headers: bytes = b"", body: bytes = b""
+) -> tuple[int, bytes]:
+    """Send a handcrafted request the way a hostile sandbox process would,
+    bypassing any well-behaved client, and return (status, whole response)."""
+    import socket as _socket
+
+    conn = _socket.create_connection(("127.0.0.1", port), timeout=10)
+    conn.sendall(request_line + b"\r\n" + headers + b"\r\n" + body)
+    chunks = []
+    while True:
+        piece = conn.recv(4096)
+        if not piece:
+            break
+        chunks.append(piece)
+    conn.close()
+    data = b"".join(chunks)
+    return int(data.split(b" ", 2)[1]), data
+
+
+def test_forwarder_drops_sandbox_chosen_headers(gateway: tuple[str, type[_Gateway]]) -> None:
+    """A gateway routes by request header, so a forwarded x-portkey-*, cookie,
+    or forwarded header would let the sandbox repoint the gateway off its one
+    fixed model. Only content-type and accept cross; the rest are dropped."""
+    base, stub = gateway
+    port = _bridged_gateway(base)
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        data=json.dumps({"model": "m", "messages": []}).encode(),
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-Portkey-Provider": "attacker",
+            "X-Portkey-Custom-Host": "https://evil.example",
+            "Cookie": "session=1",
+            "Forwarded": "for=evil.example",
+            "X-Forwarded-For": "10.0.0.1",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        assert response.status == 200
+    seen = stub.seen["headers"]
+    assert isinstance(seen, dict)
+    for dropped in ("x-portkey-provider", "x-portkey-custom-host", "cookie", "forwarded"):
+        assert dropped not in seen
+    assert "evil.example" not in seen.get("host", "")
+    assert seen["content-type"] == "application/json"
+    assert seen["accept"] == "application/json"
+
+
+def test_forwarder_sends_a_fixed_user_agent(gateway: tuple[str, type[_Gateway]]) -> None:
+    """The allow list drops the client's User-Agent, and some gateway front
+    ends reset requests with none at all — the bridge sends its own."""
+    base, stub = gateway
+    port = _bridged_gateway(base)
+    status, _, _ = _get(port)
+    assert status == 200
+    assert stub.seen["headers"]["user-agent"].startswith("slab-mason-bridge")
+
+
+def test_injected_headers_cross_and_beat_the_sandbox(
+    gateway: tuple[str, type[_Gateway]],
+) -> None:
+    """Operator-injected routing headers reach the gateway; a sandbox-sent
+    header of the same name never does."""
+    base, stub = gateway
+    port = _bridged_gateway(base, headers={"x-portkey-provider": "openai"})
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/v1/models",
+        headers={"X-Portkey-Provider": "attacker", "Accept": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        assert response.status == 200
+    seen = stub.seen["headers"]
+    assert seen["x-portkey-provider"] == "openai"
+    assert seen["accept"] == "application/json"
+
+
+def test_parse_bridge_headers_accepts_and_refuses() -> None:
+    from mason.sandbox import parse_bridge_headers
+
+    parsed = parse_bridge_headers(
+        ["x-portkey-provider: openai", "X-Portkey-Config: pc-abc:123"]
+    )
+    assert parsed == {
+        "x-portkey-provider": "openai",
+        "X-Portkey-Config": "pc-abc:123",  # value keeps its own colons
+    }
+    for bad, why in [
+        ("no-colon-here", "Name: value"),
+        (": value", "Name: value"),
+        ("name:", "Name: value"),
+        ("Authorization: Bearer x", "sets it itself"),
+        ("Host: evil.example", "sets it itself"),
+        ("Content-Length: 0", "sets it itself"),
+        ("Connection: close", "sets it itself"),
+        ("x-a: bad\r\nInjected: yes", "control character"),
+        ("bad name: x", "not a valid HTTP header name"),
+    ]:
+        with pytest.raises(SandboxError, match=why):
+            parse_bridge_headers([bad])
+    with pytest.raises(SandboxError, match="given twice"):
+        parse_bridge_headers(["x-a: 1", "X-A: 2"])
+
+
+def test_byte_relay_refuses_injected_headers() -> None:
+    from mason.sandbox import bridge
+
+    with pytest.raises(SandboxError, match="byte relay"):
+        bridge("/tmp/never.sock", "node01:8000", headers={"x-a": "1"})
+
+
+def test_unreachable_hints_name_the_failure() -> None:
+    import http.client
+    import socket
+    import ssl
+
+    from mason.sandbox import _unreachable_hint
+
+    assert "SSL_CERT_FILE" in _unreachable_hint(
+        ssl.SSLCertVerificationError(1, "certificate verify failed")
+    )
+    assert "--header" in _unreachable_hint(
+        http.client.RemoteDisconnected("Remote end closed connection")
+    )
+    assert "did not resolve" in _unreachable_hint(socket.gaierror(8, "nodename"))
+    assert "refused the port" in _unreachable_hint(ConnectionRefusedError(61, "refused"))
+    assert "https_proxy" in _unreachable_hint(TimeoutError("timed out"))
+    assert _unreachable_hint(OSError("something else")) == ""
+
+
+def test_unreachable_gateway_answers_502_with_a_hint() -> None:
+    """End to end: a dead upstream port comes back as a readable 502 whose
+    body says what failed and what to check, not a dropped connection."""
+    port = _bridged_gateway("http://127.0.0.1:9")  # discard port; nothing listens
+    request = urllib.request.Request(f"http://127.0.0.1:{port}/v1/models")
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        urllib.request.urlopen(request, timeout=10)
+    assert excinfo.value.code == 502
+    body = json.loads(excinfo.value.read())
+    message = body["error"]["message"]
+    assert "could not reach the gateway" in message
+    assert "refused the port" in message or "timed out" in message.lower()
+
+
+def test_render_emits_configured_gateway_headers(tmp_path: Path) -> None:
+    agent = _agent(
+        endpoint="https://gw.example/v1",
+        sandbox={
+            "image": "/containers/slab.sif",
+            "gateway_headers": ["x-portkey-provider: openai"],
+        },
+    )
+    script, _, _ = _render(tmp_path, agent, _slab_cfg())
+    assert "--header 'x-portkey-provider: openai'" in script
+
+    served = _agent()  # no endpoint: byte relay to the serve record
+    script, _, _ = _render(tmp_path, served, _slab_cfg())
+    assert "--header" not in script
+
+
+def test_safe_upstream_path_refuses_escapes() -> None:
+    from mason.sandbox import _safe_upstream_path
+
+    # an ordinary origin-form path is mapped as before
+    assert _safe_upstream_path("/v1", "/v1/chat/completions") == "/v1/chat/completions"
+    # absolute-form names a destination; a routed gateway would honour it
+    assert _safe_upstream_path("/v1", "http://evil.example/v1/models") is None
+    assert _safe_upstream_path("/v1", "//evil.example/x") == "/v1//evil.example/x"
+    # a '..' segment climbs out of the gateway's base path
+    assert _safe_upstream_path("/v1", "/v1/../admin") is None
+    # control characters cannot be smuggled into the upstream request line
+    assert _safe_upstream_path("/v1", "/v1/models\r\nX-Injected: 1") is None
+    assert _safe_upstream_path("/v1", "/v1/a\x00b") is None
+
+
+def test_forwarder_refuses_absolute_form_and_traversal(
+    gateway: tuple[str, type[_Gateway]],
+) -> None:
+    """A hostile request line never reaches the gateway: the forwarder answers
+    it 400 and makes no upstream call."""
+    base, stub = gateway
+    port = _bridged_gateway(base)
+    status, _ = _raw_request(port, b"GET http://evil.example/v1/models HTTP/1.0")
+    assert status == 400
+    status, _ = _raw_request(port, b"GET /v1/../admin HTTP/1.0")
+    assert status == 400
+    assert stub.seen == {}  # the gateway was never contacted
+
+
+def test_forwarder_refuses_a_bad_content_length(
+    gateway: tuple[str, type[_Gateway]],
+) -> None:
+    """A negative or oversized Content-Length is refused up front: read(-1)
+    would drain the socket to EOF and pin a host thread."""
+    base, stub = gateway
+    port = _bridged_gateway(base)
+    status, _ = _raw_request(
+        port, b"POST /v1/chat/completions HTTP/1.0", headers=b"Content-Length: -1\r\n"
+    )
+    assert status == 413
+    status, _ = _raw_request(
+        port,
+        b"POST /v1/chat/completions HTTP/1.0",
+        headers=b"Content-Length: 999999999999\r\n",
+    )
+    assert status == 413
+    assert stub.seen == {}
+
+
+def test_verify_probes_a_raw_ip_when_none_is_named(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no probe named, a raw-IP probe runs alongside the DNS one, so a
+    namespace with a route but a broken resolver cannot read as dark."""
+    import urllib.error
+
+    seen: list[str] = []
+
+    def fake_urlopen(url: object, *args: object, **kwargs: object) -> object:
+        seen.append(str(url))
+        raise urllib.error.URLError("dark")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(SandboxError, match="did not answer"):
+        verify(9999, ready_timeout_s=0.5)
+    assert any(u.startswith("http://1.1.1.1") for u in seen)
+    assert any("example.com" in u for u in seen)
 
 
 def test_snapshot_resolves_the_bin_form_payload_by_absolute_path(tmp_path: Path) -> None:
