@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date
 from pathlib import Path
 from typing import Annotated, NoReturn
 
@@ -310,6 +311,71 @@ def memory_forget(
         typer.echo(f"forgot {memory_store.delete(name)}")
     except FoundationError as e:
         _fail(str(e))
+
+
+@memory_app.command("purge")
+def memory_purge(
+    patterns: Annotated[
+        list[str] | None,
+        typer.Argument(
+            help="Shell-style glob(s) matched against memory names "
+            "(e.g. 'rootstock-*'). No pattern matches every memory.",
+        ),
+    ] = None,
+    before: Annotated[
+        str | None,
+        typer.Option(
+            "--before",
+            help="Only memories last updated before this date (YYYY-MM-DD).",
+        ),
+    ] = None,
+    yes: Annotated[bool, typer.Option("--yes", help="Skip the confirmation prompt.")] = False,
+) -> None:
+    """Delete every memory that matches, in one confirmed gesture.
+
+    Use it after a change that makes a family of memories stale: a harness
+    fix that retires the workarounds agents recorded, or a machine
+    reinstall. Filters combine: a memory must match a pattern (any of
+    them) and, with ``--before``, be older than the date. The command
+    lists what will go and asks once.
+    """
+    from fnmatch import fnmatch
+
+    if before is not None:
+        try:
+            date.fromisoformat(before)
+        except ValueError:
+            _fail(f"--before wants YYYY-MM-DD, got {before!r}")
+    try:
+        memories = memory_store.discover()
+    except FoundationError as e:
+        _fail(str(e))
+    def hits(memory: memory_store.Memory) -> bool:
+        if patterns and not any(fnmatch(memory.name, p) for p in patterns):
+            return False
+        if before is None:
+            return True
+        stamp = memory.updated or memory.created
+        # An undated file (hand-made) never matches an age filter.
+        return stamp is not None and str(stamp) < before
+
+    matched = [m for m in memories.values() if hits(m)]
+    if not matched:
+        typer.echo(f"nothing matched (memories here: {len(memories)})")
+        return
+    for memory in matched:
+        typer.echo(f"{memory.name}: {memory.description}")
+    if not yes:
+        typer.confirm(
+            f"permanently delete these {len(matched)} of {len(memories)} memory(s)?",
+            abort=True,
+        )
+    try:
+        for memory in matched:
+            memory_store.delete(memory.name)
+    except FoundationError as e:
+        _fail(str(e))
+    typer.echo(f"purged {len(matched)} memory(s) from {memory_store.memory_dir()}")
 
 
 @memory_app.command("path")

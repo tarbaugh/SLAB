@@ -249,6 +249,59 @@ def test_memory_forget_yes_skips_the_prompt(memories: Path) -> None:
     assert not (memories / "vllm-mamba-cache.md").exists()
 
 
+def test_memory_purge_matches_globs_and_confirms(memories: Path) -> None:
+    from foundation import memory as memory_store
+
+    refused = runner.invoke(app, ["memory", "purge", "vllm-*"], input="n\n")
+    assert refused.exit_code != 0
+    assert "vllm-mamba-cache: vLLM refuses" in refused.output
+    assert sorted(memory_store.discover()) == ["srun-in-sandbox", "vllm-mamba-cache"]
+
+    accepted = runner.invoke(app, ["memory", "purge", "vllm-*"], input="y\n")
+    assert accepted.exit_code == 0, accepted.output
+    assert "1 of 2" in accepted.output
+    assert "purged 1 memory(s)" in accepted.output
+    assert list(memory_store.discover()) == ["srun-in-sandbox"]
+
+
+def test_memory_purge_without_a_pattern_takes_everything(memories: Path) -> None:
+    from foundation import memory as memory_store
+
+    result = runner.invoke(app, ["memory", "purge", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "purged 2 memory(s)" in result.output
+    assert memory_store.discover() == {}
+
+
+def test_memory_purge_before_filters_by_date(memories: Path) -> None:
+    from foundation import memory as memory_store
+
+    (memories / "old-fact.md").write_text(
+        "---\ndescription: An old fact.\ncreated: 2020-01-02\nupdated: 2020-01-02\n"
+        "---\nBody.\n",
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["memory", "purge", "--before", "2021-01-01", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "purged 1 memory(s)" in result.output
+    assert sorted(memory_store.discover()) == ["srun-in-sandbox", "vllm-mamba-cache"]
+
+
+def test_memory_purge_with_no_match_deletes_nothing(memories: Path) -> None:
+    from foundation import memory as memory_store
+
+    result = runner.invoke(app, ["memory", "purge", "ghost-*", "--yes"])
+    assert result.exit_code == 0
+    assert "nothing matched (memories here: 2)" in result.output
+    assert len(memory_store.discover()) == 2
+
+
+def test_memory_purge_refuses_a_malformed_date(memories: Path) -> None:
+    result = runner.invoke(app, ["memory", "purge", "--before", "yesterday", "--yes"])
+    assert result.exit_code == 1
+    assert "YYYY-MM-DD" in result.output
+
+
 def test_memory_forget_of_an_unknown_name_deletes_nothing(memories: Path) -> None:
     result = runner.invoke(app, ["memory", "forget", "ghost", "--yes"])
     assert result.exit_code == 1

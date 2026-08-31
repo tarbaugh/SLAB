@@ -168,9 +168,28 @@ mace-model-inside-the-fence: The sandbox cannot reach ~/.cache, so a MACE model 
 permanently delete /Users/you/.config/slab/memory/mace-model-inside-the-fence.md? [y/N]:
 ```
 
-This is the only way a memory leaves the machine. `slab-stack purge`
-deletes project state that nobody promoted, and it does not touch
-memories, which are durable machine state that outlives every project.
+`slab-stack memory purge` deletes every memory that matches, in one
+confirmed step. Give it shell-style globs against the names, or no
+pattern to select everything. Add `--before YYYY-MM-DD` to keep recent
+memories, and `--yes` to skip the question. Use it after a change that
+makes a family of memories stale, such as a SLAB fix that retires the
+workarounds agents recorded.
+
+```bash
+slab-stack memory purge 'rootstock-*' 'foundation-relax-cell-*'
+```
+
+```text
+foundation-relax-cell-ase329-exp-cell-factor: relax_cell crashes on ASE 3.29 for cells with more than 1 atom.
+rootstock-missing-grace-smax-checkpoint: The rootstock install does not declare a grace checkpoint.
+permanently delete these 2 of 3 memory(s)? [y/N]: y
+purged 2 memory(s) from /Users/you/.config/slab/memory
+```
+
+`forget` and `purge` are the only ways a memory leaves the machine.
+`slab-stack purge` (without `memory`) deletes project state that nobody
+promoted, and it does not touch memories, which are durable machine
+state that outlives every project.
 
 Read the store when a machine changes. A memory states what was true when
 it was written, so an upgraded engine, a new scheduler, or a rebuilt
