@@ -32,8 +32,8 @@ with ws.start_run(name="si-relax", intent="baseline lattice constant") as run:
 
 ## Three packages
 
-SLAB is three packages in one distribution, `slab-stack`. Each installs a
-command of the same name.
+SLAB is three packages in one distribution, `slab-stack`, behind one
+command, `slab`.
 
 | Package | What it gives you |
 |---|---|
@@ -155,7 +155,7 @@ side; the values come from those runs:
 
 <!-- no-verify -->
 ```text
-$ foundation show 01m0v7tefx          $ foundation show 01m0v7th31   # expired
+$ slab show 01m0v7tefx          $ slab show 01m0v7th31   # expired
   state:   promoted                           state:   expired
   checks:  3/3 passed                         checks:  3/3 passed
   artifacts:                                  artifacts:
@@ -168,16 +168,16 @@ $ foundation show 01m0v7tefx          $ foundation show 01m0v7th31   # expired
 
 | Verb | What it does |
 | --- | --- |
-| `foundation run script.py` | Execute a zero-ceremony workflow script inside a traced run (lands in quarantine). Scripts that manage their own runs are executed with plain `python`. |
-| `foundation list [--state S] [--status S] [--session S] [-q]` | List runs, newest first. |
-| `foundation show <id> [--json]` | One run: state, intent, checks, tasks, artifacts, history. Ids accept unique prefixes, git-style. |
-| `foundation promote <id>... [--reason ...] [--force]` | Make runs permanent. `--force` promotes an unverified run and is recorded as forced. |
-| `foundation promote --session <id> [--force]` | Promote every run one agent session created, reporting each outcome. Failed runs are never promoted this way. |
-| `foundation sessions` | List the sessions that created runs, with run counts and state breakdowns. |
-| `foundation expire [--older-than 30d] [--include-running]` | Expire unpromoted runs past their TTL (state change only). `0d` = everything unpromoted, now. Runs at status `running` are protected unless `--include-running` (for hard-killed processes that can never advance their own status; they are marked failed first). |
-| `foundation gc [--dry-run]` | Drop artifact bytes no retention rule demands. |
+| `slab run script.py` | Execute a zero-ceremony workflow script inside a traced run (lands in quarantine). Scripts that manage their own runs are executed with plain `python`. |
+| `slab list [--state S] [--status S] [--session S] [-q]` | List runs, newest first. |
+| `slab show <id> [--json]` | One run: state, intent, checks, tasks, artifacts, history. Ids accept unique prefixes, git-style. |
+| `slab promote <id>... [--reason ...] [--force]` | Make runs permanent. `--force` promotes an unverified run and is recorded as forced. |
+| `slab promote --session <id> [--force]` | Promote every run one agent session created, reporting each outcome. Failed runs are never promoted this way. |
+| `slab sessions` | List the sessions that created runs, with run counts and state breakdowns. |
+| `slab expire [--older-than 30d] [--include-running]` | Expire unpromoted runs past their TTL (state change only). `0d` = everything unpromoted, now. Runs at status `running` are protected unless `--include-running` (for hard-killed processes that can never advance their own status; they are marked failed first). |
+| `slab gc [--dry-run]` | Drop artifact bytes no retention rule demands. |
 | `slab engines list` / `slab engines verify` | Inspect / smoke-test the cluster engine registry. |
-| `foundation mcp` | Serve the workspace to agents over MCP (stdio). |
+| `slab mcp` | Serve the workspace to agents over MCP (stdio). |
 
 Workspace resolution: `-w/--workspace` flag > `$SLAB_WORKSPACE` > `./.slab`.
 Retention policy: `--policy file.json` > `<workspace>/policy.json` > defaults.
@@ -206,7 +206,7 @@ protocol:
   runs sit in quarantine with a TTL, so diagnostics self-clean instead of
   accumulating forever.
 - Checks store the `observed` and `expected` values their assertions
-  compared, and `foundation show --json` and the MCP `show_run` tool return them.
+  compared, and `slab show --json` and the MCP `show_run` tool return them.
   Those are the numbers a correction is computed from, so "fmax was 0.062
   against 0.05" leads to a rerun with more steps.
 
@@ -421,8 +421,8 @@ partitions. The partitions drive a deliberately thin scheduler layer:
 
 ```bash
 slab hpc partitions                                  # what the config declares
-slab hpc render "foundation run relax.py" --name si        # the exact sbatch script
-slab hpc submit "foundation run relax.py" --name si        # sbatch --parsable
+slab hpc render "slab run relax.py" --name si        # the exact sbatch script
+slab hpc submit "slab run relax.py" --name si        # sbatch --parsable
 slab hpc status 4242314                              # squeue, then sacct
 ```
 
@@ -460,10 +460,10 @@ software is worked out once. SLURM tools appear exactly when the config
 declares partitions.
 
 ```bash
-mason serve start --wait # start the model on a GPU node (a batch job)
-mason doctor                  # endpoint reachable? model served? tool calls parsed?
-mason chat                    # interactive session
-mason run "..." --auto   # one autonomous goal
+slab mason serve start --wait # start the model on a GPU node (a batch job)
+slab mason doctor                  # endpoint reachable? model served? tool calls parsed?
+slab mason chat                    # interactive session
+slab mason run "..." --auto   # one autonomous goal
 ```
 
 On a cluster the endpoint is **discovered, not configured**. The GPU node is
@@ -493,12 +493,12 @@ directories can add or replace both: `agents/` and `skills/` shadow the
 user layer, which shadows the built-ins.
 
 ```bash
-mason roster                  # the agents: card, layer, model, skills
-mason skills                  # the skills: layer, audience, scripts
-mason run --agent dft-expert "..."   # enter as a specialist
+slab mason roster                  # the agents: card, layer, model, skills
+slab mason skills                  # the skills: layer, audience, scripts
+slab mason run --agent dft-expert "..."   # enter as a specialist
 ```
 
-`mason roster` on a laptop serving `llama3.1:8b` through Ollama:
+`slab mason roster` on a laptop serving `llama3.1:8b` through Ollama:
 
 ```text
 pi                 built-in  llama3.1:8b                  5 skill(s)  [delegates]
@@ -551,7 +551,7 @@ MVP vertical slice, working end to end. It includes:
 - layered HPC configuration with a SLURM submission layer;
 - the Mason agent harness, for open models self-served on a GPU node or for
   Claude, with its model server as a batch job;
-- three commands (`slab`, `foundation`, `mason`) and an MCP server.
+- one command (`slab`) and an MCP server.
 
 Quality gates: 1000+ tests (including every docstring example, executed as
 doctests), ~95% coverage, mypy `--strict`, and adversarial multi-agent review

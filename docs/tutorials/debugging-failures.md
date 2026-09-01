@@ -17,7 +17,7 @@ improvise a niche correction, such as a smaller perturbation, a different
 engine, or a looser threshold, if it can see what actually happened. So the
 contract is evidence delivery. Failed runs and tasks carry a structured
 `failure` record, and delivery is tiered so that listings stay cheap:
-`foundation list` shows a one-line `error` per run, and `foundation show <id>`
+`slab list` shows a one-line `error` per run, and `slab show <id>`
 fetches the full record for the one run you are debugging.
 
 ## A failing task
@@ -259,14 +259,14 @@ with more steps or a tighter optimizer, without re-reading the workflow.
 
 ## The surfaces
 
-`foundation show` renders each traceback under its owner. The run's `failure`
+`slab show` renders each traceback under its owner. The run's `failure`
 prints at run level unless a failed task carries the same exception, which
 is the usual case because the exception propagated, and then it renders
 once, under that task. For the failed relax run above:
 
 <!-- no-verify -->
 ```text
-$ foundation show 01m0m5gz
+$ slab show 01m0m5gz
 run 01m0m5gza60x903wjk1dpkg1g4  cu-relax
   state:   quarantined    status: failed
   error:   RuntimeError: SCF diverged
@@ -292,7 +292,7 @@ run 01m0m5gza60x903wjk1dpkg1g4  cu-relax
     cu-failed.traj  intermediate  2851B  bytes  2234b81f42cf
 ```
 
-`foundation show <id> --json` emits the same details in machine-readable form,
+`slab show <id> --json` emits the same details in machine-readable form,
 with `failure` keys on the run and on each task, and `observed` and
 `expected` on each check. Agents get identical structures without the CLI,
 because the MCP `show_run` tool returns this JSON, and `launch_workflow`

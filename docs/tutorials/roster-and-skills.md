@@ -12,12 +12,12 @@ are exact captures from real executions against a local Ollama.
 
 ## The roster
 
-Four cards ship built in. `mason roster` lists what is visible from the
+Four cards ship built in. `slab mason roster` lists what is visible from the
 current project, with the layer each card came from and the model it
 would use:
 
 ```bash
-mason roster
+slab mason roster
 ```
 
 ```text
@@ -33,11 +33,11 @@ tool allowlist, and its own slice of the skill catalog. The
 allowlist omits `launch_workflow` and the SLURM tools, so the doctrine
 "work from recorded evidence" is enforced in code.
 
-`mason chat` and `mason run` start as the PI. Pick another entry agent
+`slab mason chat` and `mason run` start as the PI. Pick another entry agent
 with `--agent`:
 
 ```bash
-mason run --agent dft-expert "expand the balanced protocol for this cell and explain each cutoff"
+slab mason run --agent dft-expert "expand the balanced protocol for this cell and explain each cutoff"
 ```
 
 An unknown name fails and lists the roster.
@@ -65,7 +65,7 @@ A deliberately small errand, captured whole. The project directory holds
 `data.txt`, which says `the secret word is perovskite`:
 
 ```bash
-mason run --auto "Use the delegate tool to send analysis-expert this task: 'Use read_file on data.txt, then call finish reporting the secret word verbatim.' You may not call read_file yourself. After the specialist's report arrives, call finish reporting the word it returned."
+slab mason run --auto "Use the delegate tool to send analysis-expert this task: 'Use read_file on data.txt, then call finish reporting the secret word verbatim.' You may not call read_file yourself. After the specialist's report arrives, call finish reporting the word it returned."
 ```
 
 ```text
@@ -95,7 +95,7 @@ or an error streak, the PI reads `max_turns` or `error_streak` there,
 not a confident report. The PI card's doctrine is to read that line
 before trusting the text above it.
 
-`mason chat --resume` replays only conversation transcripts. A
+`slab mason chat --resume` replays only conversation transcripts. A
 delegation archive is never resumed as a conversation.
 
 Delegation quality is the served model's quality. The capture above is
@@ -112,7 +112,7 @@ no dialect, so skills written for other tools load unmodified. Sixteen
 skills ship built in:
 
 ```bash
-mason skills
+slab mason skills
 ```
 
 ```text
@@ -146,7 +146,7 @@ The PI sees every skill, because its card sets `skills: all`. A
 specialist sees its own slice:
 
 ```bash
-mason skills --agent md-expert
+slab mason skills --agent md-expert
 ```
 
 ```text
@@ -250,7 +250,7 @@ The rules come from the Agent Skills specification:
   agent.
 
 The spec's experimental `allowed-tools` field is accepted and ignored.
-The toolbox already gates approval per call, and `mason skills` reports
+The toolbox already gates approval per call, and `slab mason skills` reports
 the field as ignored so nothing is silent.
 
 ## Write an agent card
@@ -322,6 +322,6 @@ Three rules keep the merge predictable:
   endpoint, so the new provider's default applies. A vLLM URL must not
   survive a switch to the Anthropic API.
 
-`mason doctor` probes every distinct connection the roster produces. A
+`slab mason doctor` probes every distinct connection the roster produces. A
 specialist pinned to an unserved model fails the doctor, not the first
 delegation.

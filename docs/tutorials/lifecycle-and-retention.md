@@ -160,7 +160,7 @@ TTLs anchor to `state_entered_at`, so the clock restarts when a run changes stat
 
 ## Expire, then gc
 
-Housekeeping has two deliberate phases. `expire_due` is the TTL sweep, and it is a state change only. `gc` reclaims artifact bytes that no run's retention rule demands. Both `expire_due` and its CLI counterpart `foundation expire` take the sweep time as an argument (`now=` / `--older-than`), so the example can run a 40-day-later sweep without waiting:
+Housekeeping has two deliberate phases. `expire_due` is the TTL sweep, and it is a state change only. `gc` reclaims artifact bytes that no run's retention rule demands. Both `expire_due` and its CLI counterpart `slab expire` take the sweep time as an argument (`now=` / `--older-than`), so the example can run a 40-day-later sweep without waiting:
 
 ```python
 from datetime import timedelta
@@ -197,7 +197,7 @@ At day 40, only `probe` is past its 30-day quarantine TTL. `baseline` has 50 day
 !!! note
     The exact byte count is stable here, because seeds are fixed and EMT is deterministic. Run ids and timestamps differ every run.
 
-The two phases exist because they carry different risk. Expiry is cheap and reviewable, since it is a state change that you can list (`foundation list --state expired`) and inspect before any byte is touched, and `gc --dry-run` reports what would drop without dropping it. Byte deletion is the irreversible step, so it gets its own explicit command.
+The two phases exist because they carry different risk. Expiry is cheap and reviewable, since it is a state change that you can list (`slab list --state expired`) and inspect before any byte is touched, and `gc --dry-run` reports what would drop without dropping it. Byte deletion is the irreversible step, so it gets its own explicit command.
 
 Two safety valves follow the same logic:
 
@@ -208,7 +208,7 @@ Two safety valves follow the same logic:
 
 One conversation with the agent produces several runs. A convergence study is a smoke test and three ladders. Every run records the session that created it, so you can promote the whole conversation without collecting run ids.
 
-Mason stamps each run it launches with the chat's id, which is the name of that chat's transcript. Type `/status` in `mason chat` to read it. Foundation treats the value as an opaque string, so any client can stamp its own runs. Pass `--session` to `foundation run`, or export `$SLAB_SESSION` before it.
+Mason stamps each run it launches with the chat's id, which is the name of that chat's transcript. Type `/status` in `slab mason chat` to read it. Foundation treats the value as an opaque string, so any client can stamp its own runs. Pass `--session` to `slab run`, or export `$SLAB_SESSION` before it.
 
 The example creates four runs in one session. Three pass their checks, and the fourth has none:
 
@@ -250,7 +250,7 @@ nb-smoke          verified     session=20260828-013504-48123
 List the sessions in the workspace to find the id:
 
 ```bash
-foundation sessions
+slab sessions
 ```
 
 ```text
@@ -261,7 +261,7 @@ SESSION                    RUNS   AGE  STATES
 Then promote the session. A full id works, and so does a unique prefix:
 
 ```bash
-foundation promote --session 20260828 --reason "the Nb convergence study"
+slab promote --session 20260828 --reason "the Nb convergence study"
 ```
 
 ```text
@@ -277,7 +277,7 @@ The command reports every run it considered, and the reason lands in each promot
 Add `--force` to take the runs that were never verified:
 
 ```bash
-foundation promote --session 20260828 --force --reason "probe kept for the record"
+slab promote --session 20260828 --force --reason "probe kept for the record"
 ```
 
 ```text
@@ -302,27 +302,27 @@ The table states what a session promote does with each run:
 
 A failed run never becomes permanent this way. A bulk command must not sweep failures into permanence, so promote such a run by its own id, where you can read what failed first.
 
-Two limits are worth knowing. Runs created before session stamping carry no session, and `foundation sessions` counts them in a trailing line. Promote those by id, because `foundation promote` takes several ids at once:
+Two limits are worth knowing. Runs created before session stamping carry no session, and `slab sessions` counts them in a trailing line. Promote those by id, because `slab promote` takes several ids at once:
 
 ```bash
-foundation promote 01m13035ys 01m12zww7j 01m12ztp0f
+slab promote 01m13035ys 01m12zww7j 01m12ztp0f
 ```
 
-`mason chat --resume` opens a new session with a new id, so the runs of a resumed chat promote as their own session.
+`slab mason chat --resume` opens a new session with a new id, so the runs of a resumed chat promote as their own session.
 
 ## Fast-forward, then purge
 
-The two phases above respect the retention policy. The `slab-stack` command holds the two verbs that override it. Use them when a line of work is finished and you have promoted everything you intend to keep.
+The two phases above respect the retention policy. Two verbs override it: `slab fast-forward` and `slab purge`. Use them when a line of work is finished and you have promoted everything you intend to keep.
 
-`slab-stack fast-forward` moves every unpromoted run to `expired`, now. It is a state change only, like `expire`. Promoted and archived runs are not touched. Runs stuck at status `running` are skipped unless you pass `--include-running`.
+`slab fast-forward` moves every unpromoted run to `expired`, now. It is a state change only, like `expire`. Promoted and archived runs are not touched. Runs stuck at status `running` are skipped unless you pass `--include-running`.
 
-**Warning: `slab-stack purge` deletes data permanently. Run it with `--dry-run` first, and promote every run you want to keep before you run it.**
+**Warning: `slab purge` deletes data permanently. Run it with `--dry-run` first, and promote every run you want to keep before you run it.**
 
-`slab-stack purge` removes all expired data, metadata included:
+`slab purge` removes all expired data, metadata included:
 
-- The database rows of every expired run: the run, its transitions, its artifact references, its tasks, and its checks. `foundation show` can no longer answer for a purged run.
+- The database rows of every expired run: the run, its transitions, its artifact references, its tasks, and its checks. `slab show` can no longer answer for a purged run.
 - The artifact bytes those runs referenced, unless a surviving run references the same hash. Blobs that no run references at all stay, exactly as in `gc`.
-- Mason session transcripts, together with their delegation transcripts. The newest conversation stays, so `mason chat --resume` keeps working. Pass `--all-sessions` to remove it too.
+- Mason session transcripts, together with their delegation transcripts. The newest conversation stays, so `slab mason chat --resume` keeps working. Pass `--all-sessions` to remove it too.
 - The `.sbatch` scripts and SLURM `.out` files of finished jobs, from `<workspace>/jobs/` and from the serve directory. Jobs still in the queue keep their files, and the serve endpoint record is never touched.
 
 Only runs in the `expired` state can be deleted. The store refuses any other state, so promoted and archived runs cannot be purged. Promote a run to keep it; the two commands together remove everything you did not.

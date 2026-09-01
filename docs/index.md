@@ -50,7 +50,7 @@ SLAB does not require its own agent.
 
 - **Python.** Workflows are ordinary scripts. Any harness that can run
   Python can hold a workspace.
-- **MCP.** `foundation mcp` serves a workspace as a set of MCP tools, so
+- **MCP.** `slab mcp` serves a workspace as a set of MCP tools, so
   Claude Code, Cursor, or any MCP client can start, inspect, and promote
   runs. See [Agents over MCP](tutorials/agents-mcp.md).
 - **Mason.** The distribution includes a resident research agent for long
@@ -64,8 +64,8 @@ lifecycle under it. See [The roster & skills](tutorials/roster-and-skills.md).
 
 ## Three packages
 
-SLAB is three packages in one distribution, `slab-stack`. Each installs a
-command of the same name.
+SLAB is three packages in one distribution, `slab-stack`, behind one
+command, `slab`.
 
 - **`slab`** gives access to computational software: engines and
   calculators, the cluster engine registry, Quantum ESPRESSO protocols,
@@ -189,7 +189,7 @@ MVP vertical slice, working end to end. It includes:
 - layered HPC configuration with a SLURM submission layer;
 - the Mason agent harness, for open models self-served on a GPU node or for
   Claude, with its model server as a batch job;
-- three commands (`slab`, `foundation`, `mason`) and an MCP server.
+- one command (`slab`) and an MCP server.
 
 Quality gates: 1000+ tests (every docstring example runs as a doctest), ~95%
 coverage, mypy `--strict`, and adversarial multi-agent review passes whose

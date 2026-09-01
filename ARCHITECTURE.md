@@ -126,7 +126,7 @@ irreplaceable data, only the compute to regenerate it (see §4).
 **Curation must be the path of least resistance.** In a keep-everything
 system, hygiene requires ongoing effort, so entropy wins. In SLAB, hygiene is
 the automatic outcome and *keeping* is the deliberate one-command act
-(`foundation promote <id> --reason ...`), performed exactly when the user knows why.
+(`slab promote <id> --reason ...`), performed exactly when the user knows why.
 The archive converges toward being a set of things someone chose, each
 carrying the reason it was chosen.
 
@@ -340,15 +340,15 @@ failure surface delivers evidence and stops there:
 - **Checks report their numbers.** `CheckResult` always stored
   `observed`/`expected`; `run_details` now surfaces them over the CLI's
   `--json` and MCP, so "fmax 0.062 vs 0.05" is data, not prose.
-- **Tiered delivery.** `foundation list` shows one line per run; the full evidence
+- **Tiered delivery.** `slab list` shows one line per run; the full evidence
   is fetched per-run by `show`. Best-effort capture never masks the original
   exception: if keeping diagnostics itself fails, the failure record says so
   and the real error still propagates.
 
 ## 7. The layers
 
-Three packages ship as one distribution (`slab-stack`), each with a command
-of the same name. The boundary between them is a dependency rule, and the
+Three packages ship as one distribution (`slab-stack`), behind one
+command (`slab`). The boundary between them is a dependency rule, and the
 rule points one way only:
 
 ```
@@ -532,7 +532,7 @@ no silent resource defaults), submit with `--parsable`, poll `squeue` with
 an `sacct` fallback onto a seven-state enum (raw SLURM state preserved as
 evidence; the unanswerable reported `undetermined`, never guessed), cancel
 idempotently. There is no remote state machine — the payload is typically
-`foundation run workflow.py`, so runs, caching, and verification stay in the
+`slab run workflow.py`, so runs, caching, and verification stay in the
 workspace wherever the process executes.
 
 ### 7d. Mason: the harness above the layer
@@ -547,7 +547,7 @@ SLAB-shaped:
 
 - **Physics through `launch_workflow` only.** The agent writes workflow
   scripts and runs them as traced, check-gated runs; every reported number
-  carries a run id an auditor can `foundation show`. The harness does not grant
+  carries a run id an auditor can `slab show`. The harness does not grant
   the model a faster, unprovenanced path to a calculator.
 - **Memory is files in the project** — an append-only `NOTEBOOK.md`, a
   living `PLAN.md`, append-only JSONL transcripts. Compaction summaries

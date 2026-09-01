@@ -85,10 +85,10 @@ scheduler's choice, so the URL cannot be written down in advance. It is
 discovered.
 
 ```bash
-mason serve render     # read the batch script before trusting it
-mason serve start --wait
-mason doctor
-mason chat
+slab mason serve render     # read the batch script before trusting it
+slab mason serve start --wait
+slab mason doctor
+slab mason chat
 ```
 
 `serve start` submits the server as an ordinary batch job. Its first act on
@@ -101,7 +101,7 @@ before the package split; only the command names were updated:
 
 <!-- no-verify -->
 ```text
-$ mason serve start --wait
+$ slab mason serve start --wait
 submitted job 4242314 (mason-serve) to gpu
 script: /scratch/tom/slab-workspace/mason/mason-serve-4242314.sbatch
 waiting for the endpoint (up to 1800s)...
@@ -114,7 +114,7 @@ where it found it:
 
 <!-- no-verify -->
 ```text
-$ mason doctor
+$ slab mason doctor
 provider: openai
 endpoint: http://gpu-07.delta.internal:8000/v1  [job 4242314 on gpu-07.delta.internal]
 model:    meta-models/Muse-Glimmer-30B
@@ -132,8 +132,8 @@ set the parser, switch to the fenced text protocol, or give an explicit
 `command`. The doctor's probe is the empirical check that the name was
 right.
 
-`mason serve status` reports the record, the job's state, and a live
-probe, and `mason serve stop` cancels the job and clears the record.
+`slab mason serve status` reports the record, the job's state, and a live
+probe, and `slab mason serve stop` cancels the job and clears the record.
 When you want to point Mason at a server you started yourself,
 `[agent] endpoint` or `--endpoint` outranks any discovered record, so a
 written-down endpoint is never overridden by a background job.
@@ -146,7 +146,7 @@ Four sources, highest first:
 |---|---|
 | `--endpoint` | one command, overriding everything |
 | `[agent] endpoint` | you run your own server, or a persistent one exists |
-| the serve record | a `mason serve` job is running for this workspace |
+| the serve record | a `slab mason serve` job is running for this workspace |
 | the provider default | `http://localhost:11434/v1` (Ollama), or the Claude API |
 
 The record is the only coupling between the login node and the compute
@@ -159,7 +159,7 @@ A serve job is a job. It has a wall clock, and when the wall clock expires
 the agent's model disappears mid-session, so give it a generous
 `[agent.serve] time_limit`. Remember, too, that Mason's memory is files.
 `NOTEBOOK.md`, `PLAN.md`, and the transcript survive the server, so
-`mason chat --resume` after you restart the server picks the project
+`slab mason chat --resume` after you restart the server picks the project
 back up.
 
 ## A smaller loop, on a laptop
@@ -178,8 +178,8 @@ model = "llama3.1:8b"
 ```
 
 ```bash
-mason doctor
-mason run "..." --auto
+slab mason doctor
+slab mason run "..." --auto
 ```
 
 A real session, with Llama 3.1 8B, locally. The transcript is unedited
@@ -199,7 +199,7 @@ The claim survives auditing, which is the point:
 
 <!-- no-verify -->
 ```text
-$ foundation show 01m06tadrfzwg799ecqevcwff7
+$ slab show 01m06tadrfzwg799ecqevcwff7
 run 01m06tadrfzwg799ecqevcwff7  workflow
   state:   verified    status: completed
   intent:  relax bulk Cu with emt engine
@@ -313,18 +313,18 @@ included, because the default allowlist is empty. At the prompt, **Enter
 refuses**, because the default is "no", and five straight refusals abort
 the turn. Either answer `y` deliberately, run with `--auto`, or set
 `[agent] shell_allowlist` to your read-only probes so only the real
-mutations ask. `mason run` without `--auto` refuses every mutating
+mutations ask. `slab mason run` without `--auto` refuses every mutating
 tool, so batch use needs `--auto`.
 
 In chat, Mason prints the model's reasoning between tool calls, dimmed
 and prefixed `[reasoning]`, so each approval prompt arrives with its
 rationale above it. Interim assistant text prints the same way, and a
 delegated specialist's output carries its name. The reasoning stream
-needs a reasoning parser on the server, which the `mason serve` template
+needs a reasoning parser on the server, which the `slab mason serve` template
 names next to the tool-call parser. Set `[agent] show_reasoning = false`
 to hide the display. The transcript records every reasoning trace as its
 own event either way, and `--resume` never replays reasoning into the
-model's context. `mason run` prints only the final report.
+model's context. `slab mason run` prints only the final report.
 
 The file fence bounds where the file tools work. With the default
 `[agent] file_scope = "project"`, the reading tools (`read_file`,
@@ -347,9 +347,9 @@ Every run a chat launches carries the chat's session id, which is the name
 of that chat's transcript. `launch_workflow` stamps the run directly, and
 `submit_job` exports `$SLAB_SESSION` into the batch script so the runs of a
 queued job join the same chat. A delegated specialist stamps the id of the
-chat that asked for it, so one conversation is one session. `mason run`
+chat that asked for it, so one conversation is one session. `slab mason run`
 prints the id in its closing line, and `/status` prints it in chat. Promote
-a whole conversation's results with `foundation promote --session <id>`, and
+a whole conversation's results with `slab promote --session <id>`, and
 see [Lifecycle & retention](lifecycle-and-retention.md) for what that
 command does with each run.
 
@@ -357,7 +357,7 @@ Job scripts and SLURM output files from `submit_job` land in
 `<workspace>/jobs/`, not in the project directory. The job itself still
 runs in the project directory. The workspace sits inside the file fence,
 so the agent reads its own `.out` files with `read_file`. When a job is
-finished, `slab-stack purge` sweeps its files from there (see
+finished, `slab purge` sweeps its files from there (see
 [Lifecycle & retention](lifecycle-and-retention.md)).
 
 The session lock keeps one running loop per workspace. With the default
@@ -371,8 +371,8 @@ advisory lock, the lock degrades to a warning, and
 ## The sandbox: autonomous runs without a network
 
 `--auto` removes the approval gate, so the boundary for an unattended run
-must come from the operating system. `mason sandbox render` writes a batch
-job that provides that boundary. The job runs `mason run --auto` inside an
+must come from the operating system. `slab mason sandbox render` writes a batch
+job that provides that boundary. The job runs `slab mason run --auto` inside an
 Apptainer container with an empty network namespace, no home directory, a
 clean environment, and file access limited to explicit bind mounts. The
 shell tool then reaches only what the fence was always meant to bound.
@@ -385,8 +385,8 @@ it, so the agent does not spend its opening steps reading the submission
 script to learn these facts.
 
 The model stays reachable through exactly one path. On the host side of the
-job, `mason sandbox bridge` relays a unix socket to one fixed upstream.
-Inside the container, `mason sandbox forward` relays that socket to
+job, `slab mason sandbox bridge` relays a unix socket to one fixed upstream.
+Inside the container, `slab mason sandbox forward` relays that socket to
 `127.0.0.1:8000`, and the agent talks to it as a normal endpoint. The
 destination is fixed at job start, so the agent cannot redirect it. Both
 halves are plain Python from the installed package, so the host needs no
@@ -396,7 +396,7 @@ relay tool.
 
 The upstream follows the same precedence as everywhere else. A configured
 `[agent] endpoint` wins, and only without one does the job read the record
-a `mason serve` job wrote. The bridge takes both forms and picks by shape:
+a `slab mason serve` job wrote. The bridge takes both forms and picks by shape:
 
 | upstream | the bridge is | for |
 |---|---|---|
@@ -413,7 +413,7 @@ therefore neither read the key nor change where its requests go.
 The rendered job names the variable and never its value:
 
 ```bash
-mason sandbox render "measure a0 for bcc Nb" --partition cpu
+slab mason sandbox render "measure a0 for bcc Nb" --partition cpu
 ```
 
 ```text
@@ -426,7 +426,7 @@ BRIDGE="$(mktemp -d)/llm.sock"
 `sbatch` exports the submitting environment by default, so a key exported
 in your login shell reaches the job. The guard above is there for a cluster
 configured `--export=NONE`, where it fails the job at start naming the
-variable, rather than at the first request hours later. `mason sandbox
+variable, rather than at the first request hours later. `slab mason sandbox
 check` reports the same things before you submit:
 
 ```text
@@ -453,7 +453,7 @@ sees the sandboxed agent's traffic. Whether a compute node may reach it at
 all is your site's policy, which this arrangement neither assumes nor
 works around.
 
-The job fails closed. Before the agent starts, `mason sandbox verify` runs
+The job fails closed. Before the agent starts, `slab mason sandbox verify` runs
 inside the container and proves two things: a public URL is unreachable,
 and the bridged endpoint lists its models. Either proof failing aborts the
 job before the first turn.
@@ -468,12 +468,12 @@ binary to find them). Because everything specific to a machine comes from
 that machine's own config, nothing site-specific ever needs to enter a
 repository.
 
-Run `mason sandbox check` first. It reports whether the container runtime
+Run `slab mason sandbox check` first. It reports whether the container runtime
 and unprivileged network namespaces exist here, and whether the image and
 the serve record are in place. Then render, read both files, and submit:
 
 ```
-mason sandbox render "the goal" --partition cpu
+slab mason sandbox render "the goal" --partition cpu
 sbatch sandbox/mason-sandbox.sbatch
 ```
 
@@ -530,8 +530,8 @@ under version control, readable by humans:
   which is the "recitation" trick that holds long goals stable.
 * **`.slab/mason/sessions/*.jsonl`** are append-only transcripts of every
   message, tool result, reasoning trace, compaction, and token count, and
-  `mason chat --resume` replays the newest one. Read one with
-  `mason read <transcript>`: it renders the events in the chat display's
+  `slab mason chat --resume` replays the newest one. Read one with
+  `slab mason read <transcript>`: it renders the events in the chat display's
   visual language (dimmed reasoning, cyan tool calls), clips long content
   unless you pass `--full`, and ends with the token totals.
 * **`AGENTS.md`** is the cross-tool conventions standard, and if the project
@@ -552,7 +552,7 @@ Open-weight tool calling is uneven, and the harness plans for it:
 
 * **Native tool calls** are the default, which means
   `vllm serve ... --enable-auto-tool-choice --tool-call-parser <family>`,
-  the command that `mason serve` renders. Ollama parses natively.
+  the command that `slab mason serve` renders. Ollama parses natively.
 * **`tool_protocol = "fenced"`** switches to a plain-text protocol, with one
   fenced ````tool```` block per message, for servers with no tool-call parser
   at all. That is the mini-swe-agent lesson, that a text protocol is the
@@ -576,7 +576,7 @@ when a run whose recorded energy was `-0.0015020475862299598` eV was
 reported as "-0.15 eV". The run was genuinely `verified`, and its value
 matched an independent EMT evaluation exactly, so only the sentence was
 wrong. This is why traceability, not model accuracy, is what SLAB
-guarantees, because `foundation show <run id>` had the right number the whole
+guarantees, because `slab show <run id>` had the right number the whole
 time. The prompt now requires numbers to be copied from run output rather
 than retyped, which fixed it on the same model and goal, but the audit
 trail is the actual defense. Prefer the largest model your hardware serves
@@ -619,7 +619,7 @@ Two caveats, both load-bearing:
 **This path needs billed API access, which a Claude subscription does not
 include.** Claude.ai and Claude Code subscriptions are separate products from
 API credit, so `$ANTHROPIC_API_KEY` has to come from an API account with
-billing enabled. If `mason doctor --provider anthropic` reports an
+billing enabled. If `slab mason doctor --provider anthropic` reports an
 authentication failure on a valid-looking key, that is usually why.
 
 **Developing exclusively against Claude lets the open-model path rot
@@ -721,7 +721,7 @@ sandbox, so `--auto` means what it says — for every agent on the roster.
 The file fence and the session lock share that caveat: they shrink the
 blast radius of a confused agent, and the `shell` tool remains the honest
 escape, behind its own gate. When you want a real boundary, use the
-sandbox: `mason sandbox render` writes a batch job that runs the session
+sandbox: `slab mason sandbox render` writes a batch job that runs the session
 in a container with no network, no home, and only the configured
 directories bound — see
 [The sandbox](#the-sandbox-autonomous-runs-without-a-network).
@@ -740,7 +740,7 @@ What has and has not been exercised against reality, precisely:
   where a serve job would write one, after which `doctor`, `serve status`,
   and two autonomous Al relaxations reached `verified` with no `endpoint`
   configured anywhere. What no test here can cover is a real `sbatch` on a
-  real GPU node, so the first `mason serve start` on your cluster is
+  real GPU node, so the first `slab mason serve start` on your cluster is
   that test, which is why `serve render` exists.
 * **Not verified against the live API.** The Anthropic provider is tested
   against a mock that reproduces the documented Messages wire shape,

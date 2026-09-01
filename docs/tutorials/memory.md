@@ -31,7 +31,7 @@ agent cards. `$XDG_CONFIG_HOME` is honored, and `$SLAB_MEMORY_DIR`
 overrides both. The directory appears on the first write.
 
 ```bash
-slab-stack memory path
+slab memory path
 ```
 
 ```text
@@ -43,7 +43,7 @@ carries the description and the provenance, and the body carries the
 fact:
 
 ```bash
-slab-stack memory show vllm-mamba-cache
+slab memory show vllm-mamba-cache
 ```
 
 ```text
@@ -123,7 +123,7 @@ what it holds.
 ## Memory in the sandbox
 
 A sandbox job runs the container with `--containall --no-home`, so
-`~/.config` is not visible inside it. `mason sandbox render` therefore
+`~/.config` is not visible inside it. `slab mason sandbox render` therefore
 binds the memory directory read-write and names it in the environment:
 
 ```text
@@ -140,11 +140,11 @@ session rendered with `[agent] memory = false` binds nothing.
 
 ## Reading and pruning the store
 
-`slab-stack memory list` prints the catalog: the name, the date, the
+`slab memory list` prints the catalog: the name, the date, the
 agent that recorded it, and the description.
 
 ```bash
-slab-stack memory list
+slab memory list
 ```
 
 ```text
@@ -156,11 +156,11 @@ vllm-mamba-cache             2026-08-28  pi                vLLM refuses to start
 Add `--json` for the same catalog with the full provenance of each
 memory.
 
-`slab-stack memory forget <name>` deletes one memory. It prints what it
+`slab memory forget <name>` deletes one memory. It prints what it
 is about to delete and asks first, and `--yes` skips the question.
 
 ```bash
-slab-stack memory forget mace-model-inside-the-fence
+slab memory forget mace-model-inside-the-fence
 ```
 
 ```text
@@ -168,7 +168,7 @@ mace-model-inside-the-fence: The sandbox cannot reach ~/.cache, so a MACE model 
 permanently delete /Users/you/.config/slab/memory/mace-model-inside-the-fence.md? [y/N]:
 ```
 
-`slab-stack memory purge` deletes every memory that matches, in one
+`slab memory purge` deletes every memory that matches, in one
 confirmed step. Give it shell-style globs against the names, or no
 pattern to select everything. Add `--before YYYY-MM-DD` to keep recent
 memories, and `--yes` to skip the question. Use it after a change that
@@ -176,7 +176,7 @@ makes a family of memories stale, such as a SLAB fix that retires the
 workarounds agents recorded.
 
 ```bash
-slab-stack memory purge 'rootstock-*' 'foundation-relax-cell-*'
+slab memory purge 'rootstock-*' 'foundation-relax-cell-*'
 ```
 
 ```text
@@ -187,7 +187,7 @@ purged 2 memory(s) from /Users/you/.config/slab/memory
 ```
 
 `forget` and `purge` are the only ways a memory leaves the machine.
-`slab-stack purge` (without `memory`) deletes project state that nobody
+`slab purge` (without `memory`) deletes project state that nobody
 promoted, and it does not touch memories, which are durable machine
 state that outlives every project.
 

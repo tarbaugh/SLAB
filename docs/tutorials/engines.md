@@ -257,7 +257,7 @@ login-node smoke test stays serial. An `mpirun` bundled in the same bin
 directory wins over the one on `PATH`, because a custom install usually
 links against its own MPI. `bin` and `command` are exclusive, and the
 constructed line enters cache identity exactly as a hand-written command
-would. `mason sandbox render` also binds the whole install read-only
+would. `slab mason sandbox render` also binds the whole install read-only
 automatically, so the bin form needs no `[agent.sandbox]` entry.
 
 Sometimes an engine's install needs more than variables, such as a
