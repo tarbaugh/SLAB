@@ -93,6 +93,14 @@ def engines_list(registry_path: _RegistryOpt = None) -> None:
             typer.echo(
                 f"mp snapshot: {release}, {mp['materials']} materials ('slab mp info')"
             )
+    gracemaker = overview.get("gracemaker")
+    if gracemaker is not None:
+        version = (
+            f"tensorpotential {gracemaker['version']}"
+            if gracemaker["version"]
+            else "version unprobeable ('slab doctor')"
+        )
+        typer.echo(f"gracemaker trainer: {version} via {gracemaker['command']}")
     hpc = overview.get("hpc")
     if overview.get("hpc_error"):
         typer.echo(f"hpc partitions: error — {overview['hpc_error']}")

@@ -271,3 +271,25 @@ def test_engines_list_names_the_snapshot(
     result = runner.invoke(app, ["engines", "list"])
     assert result.exit_code == 0
     assert "mp snapshot: release 2025.11.1, 4 materials ('slab mp info')" in result.output
+
+
+def test_engines_list_names_the_gracemaker_trainer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("SLAB_ENGINES", raising=False)
+    bin_dir = tmp_path / "grace-bin"
+    bin_dir.mkdir()
+    for name, body in (("python", 'echo "0.5.1"'), ("gracemaker", 'echo training')):
+        script = bin_dir / name
+        script.write_text(f"#!/bin/sh\n{body}\n")
+        script.chmod(0o755)
+    (tmp_path / "slab.toml").write_text(
+        f'[builders.gracemaker]\ncommand = "{bin_dir / "gracemaker"}"\n'
+    )
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["engines", "list"])
+    assert result.exit_code == 0
+    assert (
+        f"gracemaker trainer: tensorpotential 0.5.1 via {bin_dir / 'gracemaker'}"
+        in result.output
+    )

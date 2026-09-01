@@ -86,6 +86,18 @@ schema_version = 1
 #                                      # fetch_structure task, 'slab mp', and
 #                                      # the agent's search_materials tools
 
+[builders.gracemaker]
+# command = "gracemaker"               # trains GRACE machine-learned potentials
+#                                      # (pip package tensorpotential). Produces
+#                                      # a potential, never energies, so it is a
+#                                      # builder, never an engine= name. Used by
+#                                      # foundation's train_potential task
+# setup = [                            # gracemaker lives in its OWN python env
+#   "module load cuda",                # (TensorFlow); never install it into
+#   "source ~/grace/bin/activate",     # SLAB's environment. Same per-tool setup
+#   "export TF_FORCE_GPU_ALLOW_GROWTH=true",  # rule as the engines
+# ]
+
 [engines.rootstock]
 # root = "/path/to/rootstock-install"  # a LOCAL rootstock install (the directory
 #                                      # holding envs/<name>/env_source.py); lets

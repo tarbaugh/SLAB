@@ -30,6 +30,8 @@ def engines_overview(registry_path: str | os.PathLike[str] | None = None) -> dic
         ['emt', 'lammps', 'lj', 'qe', 'rootstock']
         >>> overview["mp"] is None
         True
+        >>> overview["gracemaker"] is None
+        True
     """
     from slab.backends import available_engines
     from slab.engines import find_registry_path, load_registry
@@ -68,6 +70,7 @@ def engines_overview(registry_path: str | os.PathLike[str] | None = None) -> dic
         overview["pseudo_families"] = []
         overview["pseudo_families_error"] = str(e)
     overview["mp"] = _mp_overview()
+    overview["gracemaker"] = _gracemaker_overview()
     overview["hpc"] = _hpc_overview(overview)
     return overview
 
@@ -98,6 +101,32 @@ def _mp_overview() -> dict[str, Any] | None:
         "root": info["root"],
         "release": info["release"],
         "materials": info["materials"],
+    }
+
+
+def _gracemaker_overview() -> dict[str, Any] | None:
+    """The gracemaker trainer, or None when ``[builders.gracemaker]`` is unset.
+
+    Configured means the table sets a command or setup lines. The version is
+    probed through the configured environment; a probe that fails reports
+    ``version: None`` — the doctor row is where that becomes a diagnosis.
+    """
+    from slab.config import ConfigError, config_value
+
+    try:
+        command = config_value("builders.gracemaker.command")
+        setup = config_value("builders.gracemaker.setup")
+    except ConfigError:
+        # A malformed slab.toml is reported once, by the [hpc] section
+        # (hpc_error); do not repeat it here.
+        return None
+    if not command and not setup:
+        return None
+    from slab.gracemaker import gracemaker_command, gracemaker_version
+
+    return {
+        "command": gracemaker_command(),
+        "version": gracemaker_version(),
     }
 
 

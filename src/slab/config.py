@@ -240,14 +240,37 @@ class MpBuilderConfig(BaseModel):
     root: ExpandedPath | None = None
 
 
+class GracemakerBuilderConfig(BaseModel):
+    """How to invoke gracemaker on this machine (``[builders.gracemaker]``).
+
+    Gracemaker (pip package ``tensorpotential``) trains GRACE machine-learned
+    interatomic potentials. It produces a potential, never energies for a
+    traced task, so it is a *builder*, not an engine — it never appears as an
+    ``engine=`` name. It runs in its own python environment (TensorFlow),
+    reached through the ``setup`` lines; never install it into SLAB's own
+    environment. ``command`` is the invocation (default ``gracemaker``);
+    ``setup`` lines run in a private fail-fast login shell around the
+    gracemaker subprocess only, the same per-tool rule as
+    ``[engines.qe] setup``. Nothing is expanded at load. Used by foundation's
+    ``train_potential`` task.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    command: str | None = None
+    setup: tuple[str, ...] = ()
+
+
 class BuildersConfig(BaseModel):
-    """Per-builder defaults (``[builders]``): tools that make structures,
-    not energies."""
+    """Per-builder defaults (``[builders]``): tools that produce inputs for
+    calculations — structures, data snapshots, potentials — never energies
+    for a traced task."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     atomsk: AtomskBuilderConfig = AtomskBuilderConfig()
     mp: MpBuilderConfig = MpBuilderConfig()
+    gracemaker: GracemakerBuilderConfig = GracemakerBuilderConfig()
 
 
 class PathsConfig(BaseModel):
@@ -734,6 +757,18 @@ schema_version = 1
 #                                      # name. Used by foundation's
 #                                      # fetch_structure task, 'slab mp', and
 #                                      # the agent's search_materials tools
+
+[builders.gracemaker]
+# command = "gracemaker"               # trains GRACE machine-learned potentials
+#                                      # (pip package tensorpotential). Produces
+#                                      # a potential, never energies, so it is a
+#                                      # builder, never an engine= name. Used by
+#                                      # foundation's train_potential task
+# setup = [                            # gracemaker lives in its OWN python env
+#   "module load cuda",                # (TensorFlow); never install it into
+#   "source ~/grace/bin/activate",     # SLAB's environment. Same per-tool setup
+#   "export TF_FORCE_GPU_ALLOW_GROWTH=true",  # rule as the engines
+# ]
 
 [engines.rootstock]
 # root = "/path/to/rootstock-install"  # a LOCAL rootstock install (the directory
