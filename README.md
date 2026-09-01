@@ -24,7 +24,45 @@ daemon, no database server, and no required configuration. A workspace is
 a directory (`.slab/` by default) that holds a SQLite file and a
 content-addressed store, and one command, `slab`, drives everything.
 
-## Five minutes
+## What it can do
+
+- **Engines.** EMT and Lennard-Jones built in, Quantum ESPRESSO and LAMMPS
+  as built-ins that drive the real executables, rootstock-served MLIP
+  checkpoint ids usable directly as engine names, and a cluster engine
+  registry for everything else.
+  [Engines](https://tarbaugh.github.io/SLAB/tutorials/engines/)
+- **Protocols.** AiiDA's named Quantum ESPRESSO input protocols and SSSP
+  pseudopotential families, applied by name and traced by value.
+  [Protocols & pseudopotentials](https://tarbaugh.github.io/SLAB/tutorials/protocols-and-pseudos/)
+- **Builders.** Structures from atomsk, structures and metadata from an
+  offline Materials Project snapshot, and machine-learned potentials
+  trained with gracemaker, each as a traced task.
+  [Engines § Builders](https://tarbaugh.github.io/SLAB/tutorials/engines/#builders-atomsk)
+- **Runs, checks, retention, caching.** Runs earn `verified` from
+  machine-checkable hooks, retention is tiered by artifact role, and a
+  rerun of an unchanged script is a cache hit.
+  [Lifecycle](https://tarbaugh.github.io/SLAB/tutorials/lifecycle-and-retention/),
+  [Verification](https://tarbaugh.github.io/SLAB/tutorials/verification/),
+  [Caching & resume](https://tarbaugh.github.io/SLAB/tutorials/caching-and-resume/)
+- **Failure is evidence.** A failed run carries a structured failure record,
+  the engine's own error lines, and the scratch files that explain it.
+  [Debugging failures](https://tarbaugh.github.io/SLAB/tutorials/debugging-failures/)
+- **HPC.** One layered TOML file per cluster declares paths, engines, and
+  SLURM partitions, and `slab hpc` renders, submits, and polls jobs.
+  [HPC configuration & SLURM](https://tarbaugh.github.io/SLAB/tutorials/hpc-config/)
+- **Agents.** `slab mcp` serves a workspace to any MCP client as tools.
+  [Agents over MCP](https://tarbaugh.github.io/SLAB/tutorials/agents-mcp/)
+- **Mason.** The resident research agent for long campaigns, with a roster
+  of specialists, Agent Skills, machine memory, and its model served as a
+  batch job.
+  [Mason](https://tarbaugh.github.io/SLAB/tutorials/mason/),
+  [The roster & skills](https://tarbaugh.github.io/SLAB/tutorials/roster-and-skills/),
+  [Machine memory](https://tarbaugh.github.io/SLAB/tutorials/memory/)
+
+The design argument, and why existing workflow engines do not fit agentic
+use, is in [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Demo
 
 The demo relaxes five perturbed variants of a Cu supercell under EMT, each
 in its own run with a stated intent. It needs no extras and runs in
@@ -119,43 +157,19 @@ Swap `engine="emt"` for `"qe"`, `"lammps"`, or a served MLIP checkpoint id
 such as `"mace-mp-0-medium"`, and the engine's version and options enter
 the cache key and the recipe with it.
 
-## What it can do
+## Benchmark
 
-- **Engines.** EMT and Lennard-Jones built in, Quantum ESPRESSO and LAMMPS
-  as built-ins that drive the real executables, rootstock-served MLIP
-  checkpoint ids usable directly as engine names, and a cluster engine
-  registry for everything else.
-  [Engines](https://tarbaugh.github.io/SLAB/tutorials/engines/)
-- **Protocols.** AiiDA's named Quantum ESPRESSO input protocols and SSSP
-  pseudopotential families, applied by name and traced by value.
-  [Protocols & pseudopotentials](https://tarbaugh.github.io/SLAB/tutorials/protocols-and-pseudos/)
-- **Builders.** Structures from atomsk, structures and metadata from an
-  offline Materials Project snapshot, and machine-learned potentials
-  trained with gracemaker, each as a traced task.
-  [Engines § Builders](https://tarbaugh.github.io/SLAB/tutorials/engines/#builders-atomsk)
-- **Runs, checks, retention, caching.** Runs earn `verified` from
-  machine-checkable hooks, retention is tiered by artifact role, and a
-  rerun of an unchanged script is a cache hit.
-  [Lifecycle](https://tarbaugh.github.io/SLAB/tutorials/lifecycle-and-retention/),
-  [Verification](https://tarbaugh.github.io/SLAB/tutorials/verification/),
-  [Caching & resume](https://tarbaugh.github.io/SLAB/tutorials/caching-and-resume/)
-- **Failure is evidence.** A failed run carries a structured failure record,
-  the engine's own error lines, and the scratch files that explain it.
-  [Debugging failures](https://tarbaugh.github.io/SLAB/tutorials/debugging-failures/)
-- **HPC.** One layered TOML file per cluster declares paths, engines, and
-  SLURM partitions, and `slab hpc` renders, submits, and polls jobs.
-  [HPC configuration & SLURM](https://tarbaugh.github.io/SLAB/tutorials/hpc-config/)
-- **Agents.** `slab mcp` serves a workspace to any MCP client as tools.
-  [Agents over MCP](https://tarbaugh.github.io/SLAB/tutorials/agents-mcp/)
-- **Mason.** The resident research agent for long campaigns, with a roster
-  of specialists, Agent Skills, machine memory, and its model served as a
-  batch job.
-  [Mason](https://tarbaugh.github.io/SLAB/tutorials/mason/),
-  [The roster & skills](https://tarbaugh.github.io/SLAB/tutorials/roster-and-skills/),
-  [Machine memory](https://tarbaugh.github.io/SLAB/tutorials/memory/)
+Five copper questions with known answers, run as autonomous campaigns per
+model and scored on one criterion: did the agent compute a correct
+answer, backed by verified runs?
 
-The design argument, and why existing workflow engines do not fit agentic
-use, is in [ARCHITECTURE.md](ARCHITECTURE.md).
+<!-- benchmark:summary:start -->
+| Model | Machine | Passed |
+| --- | --- | --- |
+| llama3.1:8b | laptop | 0/5 |
+
+Five copper questions with known answers; [the benchmark](https://tarbaugh.github.io/SLAB/benchmark/) has the rule.
+<!-- benchmark:summary:end -->
 
 ## Development
 

@@ -3,6 +3,18 @@
 All notable changes to SLAB, newest first. Dates are commit dates on
 `main`.
 
+## Unreleased
+
+- `slab benchmark`: five fixed copper campaigns with DFT-PBE references and
+  per-engine-class tolerance bands; `run`, `launch`, `score`, and `render`.
+  A campaign passes when the agent's structured `finish` result lies in
+  band and every run it cites reached `verified`. Records live in
+  `benchmarks/results.jsonl`; the docs page and the README tables are
+  rendered from them.
+- Mason's `finish` tool takes structured `results` and `run_ids`; every
+  transcript opens with a header naming the model, provider, endpoint,
+  and compute profile; `slab mason report --session` finds a session by id.
+
 ## 0.1.0 — 2026-09-01
 
 The first tagged version. Three weeks of work, from an empty repository

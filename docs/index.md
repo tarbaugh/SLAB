@@ -179,6 +179,9 @@ one optional layered TOML file. See
   cards and the Agent Skills format, including skills from external packs.
 - **[Machine memory](tutorials/memory.md)** keeps what one session learns
   for the next.
+- **[Benchmark campaigns](benchmark.md)** fixes five questions with known
+  answers and scores each model's campaigns on whether it computed a
+  correct answer.
 
 ## Non-goals
 
