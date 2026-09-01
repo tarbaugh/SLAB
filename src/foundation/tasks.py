@@ -1,11 +1,13 @@
-"""Ready-made traced tasks: structure building, relaxation, single-point evaluation.
+"""Ready-made traced tasks: structures, relaxation, single points, MLIP training.
 
 These are ordinary ``@task`` functions — call them like functions, inside or
 outside a run context. They demonstrate the pattern for wrapping any ASE
 calculator as a SLAB task; no physics lives here. Together they cover the
 canonical workflow: ``build_structure`` makes the geometry (atomsk), ``relax``
 optimizes it under a cheap engine, then ``single_point`` evaluates the result
-under an expensive one.
+under an expensive one. The training pair extends it:
+``collect_training_data`` assembles the labels those tasks recorded, and
+``train_potential`` fits a GRACE potential with gracemaker.
 
 Importing this module pulls in ASE (and numpy) through :mod:`slab.backends`;
 both ``foundation`` and ``slab`` stay import-light, which is why these tasks
@@ -15,10 +17,15 @@ are not re-exported from either package root — use
 
 from __future__ import annotations
 
+import gzip
+import hashlib
+import re
 import shlex
 import shutil
+import tarfile
 import tempfile
-from contextlib import suppress
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any, Literal
 
@@ -30,9 +37,11 @@ from ase.io import read as ase_read
 from ase.io import write as ase_write
 from ase.optimize import BFGS, CellAwareBFGS
 
-from foundation.errors import ArtifactExistsError
+from foundation.errors import ArtifactExistsError, FoundationError
+from foundation.lifecycle import ExecutionStatus
 from foundation.models import ArtifactRole
 from foundation.runtime import current_run
+from foundation.serialize import loads as foundation_loads
 from foundation.tracing import task
 from slab.atomsk import build_scratch_dir, describe_atomsk, run_atomsk
 from slab.backends import (
@@ -43,6 +52,7 @@ from slab.backends import (
     get_calculator,
 )
 from slab.errors import BuilderError
+from slab.gracemaker import describe_gracemaker, run_gracemaker, train_scratch_dir
 from slab.mp import describe_mp, mp_root, structure_path
 
 
@@ -637,6 +647,322 @@ def fetch_structure(
     return structure, info
 
 
+# cache_extra resolves every source to its content hash: a new task in a
+# source run honestly misses, while identical content collected again hits.
+@task(
+    engines=("ase",),
+    cache_extra=lambda arguments: {
+        "sources": [
+            [s["run_id"], s["ref"], s["hash"]]
+            for s in _training_sources(
+                arguments["run_ids"],
+                engine=arguments.get("engine"),
+                frames=arguments.get("frames", "final"),
+                allow_mixed=arguments.get("allow_mixed", False),
+            )
+        ]
+    },
+)
+def collect_training_data(
+    run_ids: Sequence[str],
+    *,
+    engine: str | None = None,
+    frames: Literal["final", "all"] = "final",
+    allow_mixed: bool = False,
+    output: str = "training.extxyz",
+    label: str | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Assemble a labeled training dataset from completed runs, traced.
+
+    Reads the recorded results of completed ``relax``, ``relax_cell``, and
+    ``single_point`` tasks in the named runs — the exact energies and
+    forces those engines computed, engine-agnostic and parse-free — and
+    writes one extended-XYZ file ready for :func:`train_potential`.
+    ``frames="all"`` additionally includes every labeled frame of the kept
+    relaxation trajectories (cheap labels along the optimization path, the
+    standard dataset-bootstrapping move; the endpoint frame then appears
+    twice, once from the trajectory and once as the task result).
+
+    Labels from different engines in one dataset are this task's
+    silent-wrong-answer mode, so mixed sources are refused: pass
+    ``engine=`` to select one, or ``allow_mixed=True`` to state that
+    mixing is intended. Every other gap is refused loudly too — a run
+    contributing no labeled structure, or source bytes the retention
+    policy has discarded — never silently thinned.
+
+    The written file lands in the working directory on a cold execution
+    only; on a cache hit the recorded dataset artifact is the result.
+    ``info["dataset_hash"]`` is the authoritative handle either way —
+    re-materialize with ``slab show`` and the artifact store when the file
+    is gone.
+
+    Returns ``(path, info)``: the dataset path, and an ``info`` dict with
+    ``n_structures``, ``n_duplicates`` (identical task results deduplicated
+    across runs), ``n_unlabeled_frames`` (trajectory frames without
+    energy+forces, skipped), ``elements``, ``engines``, per-run ``sources``
+    counts, ``free_energy_structures`` (sources carrying the
+    force-consistent energy, which the extxyz keeps alongside ``energy``),
+    ``output``, and ``dataset_hash``.
+
+    Args:
+        run_ids: Runs to collect from (full ids or unique prefixes).
+        engine: Keep only labels computed by this engine.
+        frames: ``"final"`` (task results only) or ``"all"`` (also every
+            labeled trajectory frame).
+        allow_mixed: Accept labels from more than one engine.
+        output: Path of the extended-XYZ file to write.
+        label: Names the kept dataset artifact (default: the output name).
+    """
+    sources = _training_sources(
+        run_ids, engine=engine, frames=frames, allow_mixed=allow_mixed
+    )
+    structures: list[Atoms] = []
+    seen_hashes: set[str] = set()
+    per_run: dict[str, int] = {}
+    engines_used: set[str] = set()
+    n_duplicates = 0
+    n_unlabeled = 0
+    n_free_energy = 0
+    with _training_stores() as (_runs, artifacts):
+        for source in sources:
+            stored = artifacts.get(source["hash"])
+            if source["kind"] == "task":
+                if source["hash"] in seen_hashes:
+                    n_duplicates += 1
+                    continue
+                seen_hashes.add(source["hash"])
+                value = foundation_loads(stored.read_bytes())
+                frames_in = [value] if isinstance(value, Atoms) else []
+            else:
+                read = ase_read(stored, index=":", format="traj")
+                frames_in = list(read) if isinstance(read, list) else [read]
+            for frame in frames_in:
+                calc = getattr(frame, "calc", None)
+                results = getattr(calc, "results", {})
+                if "energy" not in results or "forces" not in results:
+                    n_unlabeled += 1
+                    continue
+                if "free_energy" in results:
+                    n_free_energy += 1
+                structures.append(frame)
+                per_run[source["run_id"]] = per_run.get(source["run_id"], 0) + 1
+            if source["engine"]:
+                engines_used.add(source["engine"])
+    if not structures:
+        raise FoundationError(
+            "no labeled structures survived collection: every candidate "
+            "frame lacked energy+forces"
+        )
+    out_path = Path(output)
+    ase_write(out_path, structures, format="extxyz")
+    dataset_hash: str | None = None
+    active = current_run()
+    if active is not None:
+        kept = _keep_unique(active, label or out_path.name, out_path)
+        dataset_hash = active.runs.get_artifact(active.id, kept).hash
+    elements = sorted({symbol for atoms in structures for symbol in atoms.symbols})
+    info: dict[str, Any] = {
+        "n_structures": len(structures),
+        "n_duplicates": n_duplicates,
+        "n_unlabeled_frames": n_unlabeled,
+        "elements": elements,
+        "engines": sorted(engines_used),
+        "sources": per_run,
+        "free_energy_structures": n_free_energy,
+        "output": str(out_path),
+        "dataset_hash": dataset_hash,
+    }
+    return str(out_path), info
+
+
+# cache_extra folds the trainer's identity AND the dataset file's content
+# hash into the cache key: the serializer would otherwise hash the dataset
+# by its path string, and changed bytes at the same path must miss.
+@task(
+    engines=("ase",),
+    cache_extra=lambda arguments: {
+        **describe_gracemaker(command=arguments.get("command")),
+        **(
+            {"dataset_sha256": _file_sha256(arguments["dataset"])}
+            if arguments.get("dataset") is not None
+            else {}
+        ),
+    },
+)
+def train_potential(
+    input_yaml: str,
+    *,
+    dataset: str | None = None,
+    label: str | None = None,
+    export_fs: bool = False,
+    command: str | None = None,
+    timeout_s: float = 86400.0,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Train a GRACE machine-learned potential with gracemaker, traced.
+
+    Gracemaker (``[builders.gracemaker]`` in ``slab.toml``) is the only
+    MLIP-training route SLAB has. It runs as a subprocess in its own
+    python environment, in slab-managed scratch — on a cluster, submit
+    the workflow that calls this task to a GPU partition through the
+    scheduler; do not run a real fit on a login node.
+
+    *input_yaml* is the **text** of gracemaker's own input file, verbatim
+    — write the YAML yourself (sections ``cutoff``, ``seed``, ``data``,
+    ``potential``, ``fit``, ``backend``) and pass the text, never a path:
+    the text is what enters the cache identity. The *dataset* file is
+    staged next to it, and its ``data: filename:`` entry must reference
+    the dataset by bare basename. (That reference is checked textually,
+    not by parsing the YAML, so a commented-out ``filename:`` line can
+    satisfy it — the fit then fails loudly inside gracemaker.) With
+    ``dataset=None`` the YAML must name data by a path readable from the
+    compute node; that file is then outside the cache identity, like a
+    foundation-model preset named under ``potential:`` (preset names are
+    treated as stable identities, the checkpoint-id rule).
+
+    The fit's evidence is kept with the run: the training log, the model
+    architecture, the final train/test metrics, and the exported
+    ``saved_model`` as one tar.gz (plus ``FS_model.yaml`` when
+    ``export_fs=True``). The exports are also copied into a
+    ``{label}/`` directory in the working directory — on a cold
+    execution only. On a cache hit nothing is re-copied: the artifact
+    hashes in the returned record are the authoritative handles;
+    re-materialize from them with ``slab show`` and the artifact store.
+    A converged-but-bad fit is not a failure here — judge the returned
+    metrics with a ``@check``.
+
+    Returns ``(model, info)``: *model* holds the handles (``seed_dir``,
+    ``output_dir``, ``saved_model``, ``fs_model``, artifact name→hash
+    map); *info* holds the trainer identity and the final
+    ``train_metrics``/``test_metrics``.
+
+    Args:
+        input_yaml: The full input.yaml text, agent-authored.
+        dataset: Path to the training data (extxyz or ``.pkl.gz``) to
+            stage beside the input file.
+        label: Names the kept artifacts and the output directory
+            (default ``potential``).
+        export_fs: Also export the GRACE/FS ``FS_model.yaml`` (only
+            meaningful for FS-preset fits).
+        command: Override the configured gracemaker command.
+        timeout_s: Hard kill for one gracemaker invocation (default 24 h;
+            the batch job's own time limit is the outer guard).
+    """
+    name = label or "potential"
+    described = describe_gracemaker(command=command)
+    if "\n" not in input_yaml and Path(input_yaml).exists():
+        raise BuilderError(
+            f"input_yaml looks like a path ({input_yaml!r}); pass the YAML "
+            "text itself — the text is what enters the cache identity"
+        )
+    dataset_path: Path | None = None
+    if dataset is not None:
+        dataset_path = Path(dataset)
+        if not dataset_path.is_file():
+            raise BuilderError(f"dataset {dataset!r} does not exist or is not a file")
+        if dataset_path.name not in input_yaml:
+            raise BuilderError(
+                f"the input.yaml text never mentions the dataset's basename "
+                f"{dataset_path.name!r}; reference it under data: filename: "
+                "(the dataset is staged beside input.yaml under that name)"
+            )
+    out_dir = Path(name)
+    if out_dir.exists() and any(out_dir.iterdir()):
+        raise BuilderError(
+            f"output directory {out_dir} exists and is not empty; move it "
+            "aside or pass a different label= (checked before the fit so a "
+            "day of training is not spent to hit this)"
+        )
+    active = current_run()
+    scratch = train_scratch_dir()
+    try:
+        (scratch / "input.yaml").write_text(input_yaml, encoding="utf-8")
+        if dataset_path is not None:
+            shutil.copy2(dataset_path, scratch / dataset_path.name)
+        try:
+            run_gracemaker(
+                ["input.yaml"], cwd=scratch, command=command, timeout_s=timeout_s
+            )
+        except BuilderError as e:
+            if active is not None:
+                _keep_training_failure(active, scratch, name, e)
+            raise
+        seed_dir = _the_seed_dir(scratch)
+        artifact_hashes: dict[str, str] = {}
+        if active is not None:
+            for fname, kept_as in (
+                ("log.txt", f"{name}.log"),
+                ("model.yaml", f"{name}-model.yaml"),
+                ("train_metrics.yaml", f"{name}-train-metrics.yaml"),
+                ("test_metrics.yaml", f"{name}-test-metrics.yaml"),
+            ):
+                source = seed_dir / fname
+                if source.is_file():
+                    kept = _keep_unique(active, kept_as, source)
+                    artifact_hashes[kept] = active.runs.get_artifact(active.id, kept).hash
+        export_args = ["-r", "-s", *(["-sf"] if export_fs else []), "input.yaml"]
+        try:
+            run_gracemaker(
+                export_args, cwd=scratch, command=command, timeout_s=timeout_s
+            )
+        except BuilderError as e:
+            e.add_note(
+                "the fit itself completed; only the export invocation "
+                f"({' '.join(export_args)}) failed, and the fit's log and "
+                "metrics are already kept as artifacts"
+            )
+            raise
+        saved_model = seed_dir / "saved_model"
+        if not saved_model.is_dir():
+            raise BuilderError(
+                f"gracemaker's export reported success but {seed_dir.name}/"
+                "saved_model/ does not exist; read the kept training log"
+            )
+        fs_model = seed_dir / "FS_model.yaml"
+        if export_fs and not fs_model.is_file():
+            raise BuilderError(
+                "export_fs=True but gracemaker wrote no FS_model.yaml — the "
+                "-sf export applies to FS-preset fits only"
+            )
+        if active is not None:
+            tarball = scratch / f"{name}-saved-model.tar.gz"
+            _deterministic_tar(saved_model, tarball, arcroot="saved_model")
+            kept = _keep_unique(active, tarball.name, tarball)
+            artifact_hashes[kept] = active.runs.get_artifact(active.id, kept).hash
+            if export_fs:
+                kept = _keep_unique(active, f"{name}-FS-model.yaml", fs_model)
+                artifact_hashes[kept] = active.runs.get_artifact(active.id, kept).hash
+        out_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(saved_model, out_dir / "saved_model")
+        for fname in ("model.yaml", "train_metrics.yaml", "test_metrics.yaml"):
+            source = seed_dir / fname
+            if source.is_file():
+                shutil.copy2(source, out_dir / fname)
+        if export_fs:
+            shutil.copy2(fs_model, out_dir / "FS_model.yaml")
+        train_metrics = _final_metrics(seed_dir / "train_metrics.yaml")
+        test_metrics = _final_metrics(seed_dir / "test_metrics.yaml")
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    model: dict[str, Any] = {
+        "builder": "gracemaker",
+        "seed_dir": f"seed/{seed_dir.name}",
+        "output_dir": str(out_dir),
+        "saved_model": str(out_dir / "saved_model"),
+        "fs_model": str(out_dir / "FS_model.yaml") if export_fs else None,
+        "artifacts": artifact_hashes,
+    }
+    info: dict[str, Any] = {
+        "builder": "gracemaker",
+        "command": described["command"],
+        "version": described["version"],
+        "train_metrics": train_metrics,
+        "test_metrics": test_metrics,
+        "artifacts": artifact_hashes,
+        "output_dir": str(out_dir),
+    }
+    return model, info
+
+
 # Extensions atomsk writes that ASE reads only under an explicit format name.
 _BUILDER_FORMATS = {
     ".lmp": "lammps-data",
@@ -696,6 +1022,262 @@ def _qe_shaped(engine: str, options: dict[str, Any] | None) -> bool:
     if engine.strip().lower() == "qe":
         return True
     return describe_engine(engine, options).get("calculator") == "slab.backends.qe_calculator"
+
+
+#: Tasks whose recorded return[0] is a labeled structure (an Atoms carrying a
+#: SinglePointCalculator with the engine's exact energy and forces).
+_LABEL_SOURCES = frozenset({"relax", "relax_cell", "single_point"})
+
+
+@contextmanager
+def _training_stores() -> Iterator[tuple[Any, Any]]:
+    """``(runs, artifacts)`` for the active run, else the resolved workspace.
+
+    Outside a run the task is just a function; it then reads the same
+    workspace the CLI would (flag > ``$SLAB_WORKSPACE`` > config >
+    ``.slab``), opened for this call and closed after it.
+    """
+    active = current_run()
+    if active is not None:
+        yield active.runs, active.artifacts
+        return
+    from foundation._ops import resolve_root
+    from foundation.runtime import Workspace
+
+    workspace = Workspace(resolve_root(None))
+    try:
+        yield workspace.runs, workspace.artifacts
+    finally:
+        workspace.close()
+
+
+def _training_sources(
+    run_ids: Sequence[str],
+    *,
+    engine: str | None,
+    frames: str,
+    allow_mixed: bool,
+) -> list[dict[str, Any]]:
+    """Resolve every labeled source to its content hash, refusing gaps loudly.
+
+    Shared by ``collect_training_data``'s cache identity and its body, so
+    the cache key and the work read exactly the same selection.
+    """
+    with _training_stores() as (runs, artifacts):
+        return _resolve_training_sources(
+            runs, artifacts, run_ids, engine=engine, frames=frames, allow_mixed=allow_mixed
+        )
+
+
+def _resolve_training_sources(
+    runs: Any,
+    artifacts: Any,
+    run_ids: Sequence[str],
+    *,
+    engine: str | None,
+    frames: str,
+    allow_mixed: bool,
+) -> list[dict[str, Any]]:
+    sources: list[dict[str, Any]] = []
+    engines_seen: set[str] = set()
+    for raw_id in run_ids:
+        run_id = runs.get(raw_id).id
+        records = runs.list_tasks(run_id)
+        eligible = [
+            record
+            for record in records
+            if record.name in _LABEL_SOURCES
+            and record.status == ExecutionStatus.COMPLETED
+            and record.outputs.get("return[0]") is not None
+        ]
+        run_engines = {
+            str(record.recipe.get("params", {}).get("engine"))
+            for record in eligible
+            if record.recipe.get("params", {}).get("engine") is not None
+        }
+        if engine is not None:
+            eligible = [
+                record
+                for record in eligible
+                if record.recipe.get("params", {}).get("engine") == engine
+            ]
+        run_sources: list[dict[str, Any]] = [
+            {
+                "run_id": run_id,
+                "kind": "task",
+                "ref": f"{record.name}#{record.seq}",
+                "hash": record.outputs["return[0]"],
+                "engine": record.recipe.get("params", {}).get("engine"),
+            }
+            for record in eligible
+        ]
+        if frames == "all":
+            if len(run_engines) > 1 and (engine is not None or not allow_mixed):
+                raise FoundationError(
+                    f"run {run_id} holds tasks under more than one engine "
+                    f"({', '.join(sorted(run_engines))}), so its trajectory "
+                    "frames cannot be attributed to one; collect it with "
+                    'frames="final", or allow_mixed=True without engine='
+                )
+            if engine is None or run_engines == {engine}:
+                run_engine = next(iter(run_engines)) if len(run_engines) == 1 else None
+                run_sources.extend(
+                    {
+                        "run_id": run_id,
+                        "kind": "traj",
+                        "ref": ref.name,
+                        "hash": ref.hash,
+                        "engine": run_engine,
+                    }
+                    for ref in runs.list_artifacts(run_id)
+                    if ref.name.endswith(".traj")
+                    and not ref.name.endswith("-failed.traj")
+                )
+        if not run_sources:
+            recorded = sorted({record.name for record in records}) or ["no tasks"]
+            constraint = f" under engine {engine!r}" if engine is not None else ""
+            raise FoundationError(
+                f"run {run_id} contributes no labeled structures{constraint}: "
+                f"it recorded {', '.join(recorded)}; eligible sources are "
+                "completed relax, relax_cell, and single_point tasks"
+            )
+        for source in run_sources:
+            if not artifacts.has(source["hash"]):
+                raise FoundationError(
+                    f"the bytes of {source['ref']} in run {run_id} "
+                    f"({source['hash'][:12]}…) were discarded by retention; "
+                    "re-run the source or collect from runs whose bytes are "
+                    "still held"
+                )
+            if source["engine"]:
+                engines_seen.add(str(source["engine"]))
+        sources.extend(run_sources)
+    if engine is None and len(engines_seen) > 1 and not allow_mixed:
+        raise FoundationError(
+            "the selected runs mix labels from engines "
+            f"{', '.join(sorted(engines_seen))}; a training set under mixed "
+            "engines is usually an error — pass engine= to pick one, or "
+            "allow_mixed=True to state that mixing is intended"
+        )
+    return sources
+
+
+def _file_sha256(path: str | Path) -> str:
+    """Streamed sha256 of a file; a missing dataset refuses before any work."""
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as e:
+        raise BuilderError(f"cannot read dataset {str(path)!r}: {e}") from e
+    return digest.hexdigest()
+
+
+def _the_seed_dir(scratch: Path) -> Path:
+    """The one ``seed/<N>/`` tree gracemaker worked in, or a refusal."""
+    seed_root = scratch / "seed"
+    candidates = sorted(p for p in seed_root.glob("*") if p.is_dir()) if seed_root.is_dir() else []
+    if not candidates:
+        raise BuilderError(
+            "gracemaker reported success but wrote no seed/<N>/ working "
+            "tree; read its console log for what actually happened"
+        )
+    if len(candidates) > 1:
+        names = ", ".join(p.name for p in candidates)
+        raise BuilderError(
+            f"gracemaker left more than one seed directory (seed/{{{names}}}); "
+            "one fit per task call — train each seed in its own call"
+        )
+    return candidates[0]
+
+
+def _deterministic_tar(source: Path, dest: Path, *, arcroot: str) -> None:
+    """Tar a directory reproducibly: sorted members, zeroed times and owners.
+
+    Determinism is dedup hygiene for the artifact store, not cache
+    identity — task outputs never enter cache keys.
+    """
+    with (
+        open(dest, "wb") as raw,
+        # filename="" keeps the destination's name out of the gzip header;
+        # GzipFile would otherwise embed fileobj.name, breaking determinism.
+        gzip.GzipFile(filename="", fileobj=raw, mode="wb", mtime=0) as gz,
+        tarfile.open(fileobj=gz, mode="w") as tar,
+    ):
+        for path in sorted(source.rglob("*")):
+            info = tar.gettarinfo(path, arcname=f"{arcroot}/{path.relative_to(source)}")
+            info.mtime = 0
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            if path.is_file():
+                with open(path, "rb") as handle:
+                    tar.addfile(info, handle)
+            else:
+                tar.addfile(info)
+
+
+_METRIC_LINE = re.compile(
+    r"^\s*([A-Za-z_][\w/.-]*)\s*:\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*,?\s*$"
+)
+
+
+def _final_metrics(path: Path, tail_lines: int = 20) -> dict[str, Any]:
+    """The last reported value of each numeric metric in a flat YAML file.
+
+    A minimal text scan, not a YAML parse (PyYAML is not a dependency).
+    When nothing scans as ``key: number``, the file's tail is returned raw
+    so the evidence still reaches the run record.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        return {"unreadable": str(e)}
+    metrics: dict[str, Any] = {}
+    for line in text.splitlines():
+        match = _METRIC_LINE.match(line)
+        if match:
+            metrics[match.group(1)] = float(match.group(2))
+    if metrics:
+        return metrics
+    tail = [line for line in text.splitlines() if line.strip()][-tail_lines:]
+    return {"raw_tail": tail}
+
+
+def _keep_training_failure(active: Any, scratch: Path, name: str, e: BuilderError) -> None:
+    """Keep a failed fit's bounded evidence with the run. Never raises.
+
+    The seed tree's log and partial metrics, up to 20 checkpoint files
+    (MB-scale weights — the multi-GB bulk is TensorFlow temp data, which
+    dies with scratch), and the captured console output.
+    """
+    kept: list[str] = []
+    with suppress(Exception):
+        for seed_dir in sorted((scratch / "seed").glob("*")):
+            for fname, kept_as in (
+                ("log.txt", f"{name}-failed.log"),
+                ("train_metrics.yaml", f"{name}-failed-train-metrics.yaml"),
+                ("test_metrics.yaml", f"{name}-failed-test-metrics.yaml"),
+            ):
+                source = seed_dir / fname
+                if source.is_file():
+                    kept.append(_keep_unique(active, kept_as, source))
+            checkpoints = seed_dir / "checkpoints"
+            if checkpoints.is_dir():
+                files = sorted(p for p in checkpoints.rglob("*") if p.is_file())
+                for ckpt in files[:20]:
+                    kept.append(
+                        _keep_unique(active, f"{name}-failed-checkpoint-{ckpt.name}", ckpt)
+                    )
+        if e.log:
+            console = scratch / "slab-gracemaker-console.log"
+            console.write_text(e.log, encoding="utf-8")
+            kept.append(_keep_unique(active, f"{name}-failed-console.log", console))
+    if kept:
+        e.add_note(
+            "training evidence kept as artifacts: "
+            + ", ".join(repr(k) for k in kept)
+        )
 
 
 def _guard_qe_kpoints(atoms: Atoms, options: dict[str, Any] | None, *, task: str) -> None:
