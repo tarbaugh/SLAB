@@ -58,3 +58,4 @@ nav:
       - The roster & skills: tutorials/roster-and-skills.md
       - Machine memory: tutorials/memory.md
   - Architecture: architecture.md
+  - Benchmark campaigns: benchmark.md

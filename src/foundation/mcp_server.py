@@ -10,7 +10,7 @@ Start it with ``slab mcp`` (or configure your agent to do so):
 
 .. code-block:: json
 
-    {"mcpServers": {"foundation": {"command": "foundation", "args": ["mcp"]}}}
+    {"mcpServers": {"slab": {"command": "slab", "args": ["mcp"]}}}
 
 Requires the ``mcp`` extra: ``pip install 'slab-stack[mcp]'``.
 """

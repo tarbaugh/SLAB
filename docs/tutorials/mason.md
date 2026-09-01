@@ -187,7 +187,7 @@ apart from the tool and command names, which the package split changed:
 
 <!-- no-verify -->
 ```text
-$ mason run "Relax bulk Cu (fcc, a=3.6) with the emt engine: write a SLAB
+$ slab mason run "Relax bulk Cu (fcc, a=3.6) with the emt engine: write a SLAB
   workflow script with a @check that fmax converged below 0.05, run it with
   launch_workflow, then finish with the verified total energy in eV and the run id." --auto
 
@@ -422,7 +422,7 @@ slab mason sandbox render "measure a0 for bcc Nb" --partition cpu
 UPSTREAM=https://gateway.example/v1
 [ -n "$GATEWAY_API_KEY" ] || { echo "\$GATEWAY_API_KEY is not set in this job's environment, and the gateway at $UPSTREAM needs it" >&2; exit 1; }
 BRIDGE="$(mktemp -d)/llm.sock"
-/home/you/SLAB/.venv/bin/mason sandbox bridge "$BRIDGE" "$UPSTREAM" --key-env GATEWAY_API_KEY &
+/tmp/you/SLAB/.venv/bin/slab mason sandbox bridge "$BRIDGE" "$UPSTREAM" --key-env GATEWAY_API_KEY &
 ```
 
 `sbatch` exports the submitting environment by default, so a key exported
