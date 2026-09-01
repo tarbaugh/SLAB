@@ -1269,3 +1269,159 @@ def test_a_memory_blind_session_binds_nothing(
     assert str(memories) not in script
     assert "SLAB_MEMORY_DIR" not in script
     assert not memories.exists()
+
+
+# -- render.json and launch ---------------------------------------------------
+
+
+def _minimal_project(tmp_path: Path) -> None:
+    (tmp_path / "slab.toml").write_text(
+        '[agent]\nmodel = "m"\n[agent.sandbox]\nimage = "/i.sif"\n'
+        '[hpc]\ndefault_partition = "cpu"\n[hpc.partitions.cpu]\n'
+    )
+
+
+def test_render_records_its_arguments_and_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _minimal_project(tmp_path)
+    result = runner.invoke(
+        app,
+        [
+            "sandbox", "render", "measure a0", "-w", str(tmp_path / "ws"),
+            "--partition", "cpu", "--engine-tasks", "4",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    record = json.loads((tmp_path / "sandbox" / "render.json").read_text())
+    assert record["goal"] == "measure a0"
+    assert record["partition"] == "cpu"
+    assert record["engine_tasks"] == 4
+    assert record["time_limit"] is None
+    assert record["out"] == str(tmp_path / "sandbox")
+    assert record["version"]
+    assert record["rendered_at"]
+    assert "wrote" in result.output and "render.json" in result.output
+
+
+def _fake_launch_plumbing(
+    monkeypatch: pytest.MonkeyPatch, submitted: list[dict[str, object]]
+) -> None:
+    """Preflight passes; submit records its call instead of running sbatch."""
+    import mason.sandbox
+    import slab.hpc
+
+    monkeypatch.setattr(
+        mason.sandbox, "preflight", lambda agent, root: [("+", "all clear")]
+    )
+
+    def fake_submit(
+        script: str, *, job_name: str, partition: str | None, directory: Path | None = None
+    ) -> slab.hpc.SubmittedJob:
+        submitted.append(
+            {"script": script, "job_name": job_name, "partition": partition,
+             "directory": directory}
+        )
+        return slab.hpc.SubmittedJob(
+            job_id="777", job_name=job_name, partition=partition or "",
+            script_path=str((directory or Path(".")) / f"{job_name}-777.sbatch"),
+        )
+
+    monkeypatch.setattr(slab.hpc, "submit", fake_submit)
+
+
+def test_launch_renders_fresh_and_submits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _minimal_project(tmp_path)
+    submitted: list[dict[str, object]] = []
+    _fake_launch_plumbing(monkeypatch, submitted)
+    result = runner.invoke(
+        app, ["sandbox", "launch", "measure a0", "-w", str(tmp_path / "ws")]
+    )
+    assert result.exit_code == 0, result.output
+    assert "[+] all clear" in result.output
+    assert "submitted job 777 (mason-sandbox) to cpu" in result.output
+    assert len(submitted) == 1
+    assert "measure a0" in str(submitted[0]["script"])
+    assert submitted[0]["directory"] == tmp_path / "sandbox"
+    # The launch rendered fresh: all four files exist and the record matches.
+    record = json.loads((tmp_path / "sandbox" / "render.json").read_text())
+    assert record["goal"] == "measure a0"
+
+
+def test_launch_without_a_goal_reuses_the_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _minimal_project(tmp_path)
+    render = runner.invoke(
+        app,
+        ["sandbox", "render", "the recorded goal", "-w", str(tmp_path / "ws"),
+         "--engine-tasks", "2"],
+    )
+    assert render.exit_code == 0, render.output
+    submitted: list[dict[str, object]] = []
+    _fake_launch_plumbing(monkeypatch, submitted)
+    result = runner.invoke(app, ["sandbox", "launch", "-w", str(tmp_path / "ws")])
+    assert result.exit_code == 0, result.output
+    script = str(submitted[0]["script"])
+    assert "the recorded goal" in script
+    assert "SLURM_NTASKS=2" in script  # the recorded engine_tasks came along
+
+
+def test_launch_flag_overrides_a_recorded_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _minimal_project(tmp_path)
+    render = runner.invoke(
+        app,
+        ["sandbox", "render", "the recorded goal", "-w", str(tmp_path / "ws"),
+         "--engine-tasks", "2"],
+    )
+    assert render.exit_code == 0, render.output
+    submitted: list[dict[str, object]] = []
+    _fake_launch_plumbing(monkeypatch, submitted)
+    result = runner.invoke(
+        app, ["sandbox", "launch", "-w", str(tmp_path / "ws"), "--engine-tasks", "8"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "SLURM_NTASKS=8" in str(submitted[0]["script"])
+
+
+def test_launch_with_nothing_recorded_says_what_to_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _minimal_project(tmp_path)
+    result = runner.invoke(app, ["sandbox", "launch", "-w", str(tmp_path / "ws")])
+    assert result.exit_code == 1
+    assert "no goal given and no usable render.json" in result.output
+
+
+def test_launch_aborts_on_preflight_failure_before_any_submit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _minimal_project(tmp_path)
+    import mason.sandbox
+    import slab.hpc
+
+    monkeypatch.setattr(
+        mason.sandbox, "preflight", lambda agent, root: [("-", "no image")]
+    )
+
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise AssertionError("submit must not be reached")
+
+    monkeypatch.setattr(slab.hpc, "submit", refuse)
+    result = runner.invoke(
+        app, ["sandbox", "launch", "measure a0", "-w", str(tmp_path / "ws")]
+    )
+    assert result.exit_code == 1
+    assert "[-] no image" in result.output
+    assert "preflight failed" in result.output
+    assert not (tmp_path / "sandbox").exists()  # aborted before rendering

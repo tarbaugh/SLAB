@@ -470,11 +470,26 @@ repository.
 
 Run `slab mason sandbox check` first. It reports whether the container runtime
 and unprivileged network namespaces exist here, and whether the image and
-the serve record are in place. Then render, read both files, and submit:
+the serve record are in place. For the first campaign, render, read the
+files, and submit:
 
 ```
 slab mason sandbox render "the goal" --partition cpu
 sbatch sandbox/mason-sandbox.sbatch
+```
+
+After you have read a render of this campaign once, `launch` is the one
+motion: it runs the preflight, renders fresh, and submits. Because every
+launch re-renders, the submitted job always matches the installed code
+and the current config — a stale `mason-sandbox.sbatch` cannot happen on
+this path. The render also writes `render.json`, the arguments it was
+given, so a bare `launch` repeats the last campaign and a flag overrides
+one recorded value:
+
+```
+slab mason sandbox launch "the goal" --partition cpu
+slab mason sandbox launch                  # the same campaign again
+slab mason sandbox launch --engine-tasks 8 # same goal, one change
 ```
 
 The partition also decides GPU visibility. When the target partition

@@ -1446,6 +1446,63 @@ def _sandbox_context(
     return "\n".join(lines)
 
 
+def _source_commit() -> str | None:
+    """The checkout's HEAD when this install is an editable checkout, else None."""
+    repo = Path(__file__).resolve().parents[2]
+    if not (repo / ".git").exists():
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def render_record(
+    goal: str,
+    *,
+    partition: str | None,
+    time_limit: str | None,
+    engine_tasks: int | None,
+    out_dir: Path,
+) -> dict[str, Any]:
+    """The arguments and provenance of one render, for ``render.json``.
+
+    The arguments half makes the render reproducible: ``launch`` without a
+    goal reuses them, and the doctor's freshness check re-renders with them
+    and diffs. The provenance half (when, which version, which commit) is
+    informational.
+    """
+    from datetime import UTC, datetime
+    from importlib.metadata import version
+
+    return {
+        "goal": goal,
+        "partition": partition,
+        "time_limit": time_limit,
+        "engine_tasks": engine_tasks,
+        "out": str(out_dir),
+        "rendered_at": datetime.now(UTC).isoformat(),
+        "version": version("slab-stack"),
+        "source_commit": _source_commit(),
+    }
+
+
+def read_render_record(out_dir: Path) -> dict[str, Any] | None:
+    """The recorded render arguments at *out_dir*, or None when unusable."""
+    path = out_dir / "render.json"
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return record if isinstance(record, dict) and isinstance(record.get("goal"), str) else None
+
+
 def render_sandbox_script(
     agent: AgentConfig,
     hpc: HpcConfig,

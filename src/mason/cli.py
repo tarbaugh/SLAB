@@ -736,7 +736,7 @@ def mason_sandbox_render(
     time_limit: _TimeOpt = None,
     out: Annotated[
         Path | None,
-        typer.Option("--out", help="Directory for the two files (default: ./sandbox)."),
+        typer.Option("--out", help="Directory for the rendered files (default: ./sandbox)."),
     ] = None,
     engine_tasks: Annotated[
         int | None,
@@ -748,8 +748,44 @@ def mason_sandbox_render(
         ),
     ] = None,
 ) -> None:
-    """Write the batch script, its slab.toml, and context.md — read them, then sbatch."""
-    from mason.sandbox import render_sandbox_script, sandbox_toml, snapshot_engines
+    """Write the batch script, slab.toml, context.md, and render.json.
+
+    Read them, then submit with sbatch — or use 'slab mason sandbox
+    launch', which renders fresh and submits in one motion.
+    """
+    script_path, _script = _render_sandbox_files(
+        goal,
+        workspace=workspace,
+        partition=partition,
+        time_limit=time_limit,
+        out=out,
+        engine_tasks=engine_tasks,
+    )
+    typer.echo(
+        "read these files, then submit with: "
+        f"sbatch {script_path} — the job aborts unless the container "
+        "proves it is offline and the bridged endpoint answers"
+    )
+
+
+def _render_sandbox_files(
+    goal: str,
+    *,
+    workspace: Path | None,
+    partition: str | None,
+    time_limit: str | None,
+    out: Path | None,
+    engine_tasks: int | None,
+) -> tuple[Path, str]:
+    """Render and write the four sandbox files; echo warnings and paths."""
+    import json
+
+    from mason.sandbox import (
+        render_record,
+        render_sandbox_script,
+        sandbox_toml,
+        snapshot_engines,
+    )
     from slab.config import load_config as load_slab_config
 
     project = Path.cwd()
@@ -784,6 +820,15 @@ def mason_sandbox_render(
     toml_path.write_text(toml_text, encoding="utf-8")
     context_path = out_dir / "context.md"
     context_path.write_text(sandbox_context.rstrip("\n") + "\n", encoding="utf-8")
+    record = render_record(
+        goal,
+        partition=partition,
+        time_limit=time_limit,
+        engine_tasks=engine_tasks,
+        out_dir=out_dir,
+    )
+    record_path = out_dir / "render.json"
+    record_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     for note in (*toml_warnings, *bind_warnings):
         if "snapshotted from the host" in note:
             typer.echo(f"[=] {note}")
@@ -792,11 +837,83 @@ def mason_sandbox_render(
     typer.echo(f"wrote {script_path}")
     typer.echo(f"wrote {toml_path}")
     typer.echo(f"wrote {context_path}")
-    typer.echo(
-        "read these files, then submit with: "
-        f"sbatch {script_path} — the job aborts unless the container "
-        "proves it is offline and the bridged endpoint answers"
+    typer.echo(f"wrote {record_path}")
+    return script_path, script
+
+
+@sandbox_app.command("launch")
+def mason_sandbox_launch(
+    goal: Annotated[
+        str | None,
+        typer.Argument(
+            help="The goal; omit to reuse the last render's recorded arguments."
+        ),
+    ] = None,
+    workspace: _WorkspaceOpt = None,
+    partition: Annotated[
+        str | None, typer.Option("--partition", "-p", help="Partition for the engine legs.")
+    ] = None,
+    time_limit: _TimeOpt = None,
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", help="Directory for the rendered files (default: ./sandbox)."),
+    ] = None,
+    engine_tasks: Annotated[
+        int | None,
+        typer.Option("--engine-tasks", min=1, help="Pin the MPI rank count for in-job engines."),
+    ] = None,
+) -> None:
+    """Preflight, render fresh, and submit — one motion, never a stale render.
+
+    Every launch re-renders, so the submitted job always matches the
+    installed code and the current config. Without a goal, the arguments
+    recorded in render.json are reused (a flag still overrides a recorded
+    value); with a goal, only the flags given here apply.
+    """
+    from mason.sandbox import preflight, read_render_record
+    from slab.hpc import submit
+
+    project = Path.cwd()
+    out_dir = (out if out is not None else project / "sandbox").resolve()
+    if goal is None:
+        record = read_render_record(out_dir)
+        if record is None:
+            _fail(
+                f"no goal given and no usable render.json in {out_dir}; "
+                f"pass the goal (later launches can then omit it)"
+            )
+        goal = str(record["goal"])
+        if partition is None and record.get("partition") is not None:
+            partition = str(record["partition"])
+        if time_limit is None and record.get("time_limit") is not None:
+            time_limit = str(record["time_limit"])
+        if engine_tasks is None and record.get("engine_tasks") is not None:
+            engine_tasks = int(str(record["engine_tasks"]))
+    try:
+        agent, hpc, root = _serve_inputs(workspace)
+        rows = preflight(agent, root)
+    except (MasonError, FoundationError, SlabError) as e:
+        _fail(str(e))
+    for mark, message in rows:
+        typer.echo(f"[{mark}] {message}")
+    if any(mark == "-" for mark, _ in rows):
+        _fail("preflight failed; fix the [-] rows, then launch again")
+    _script_path, script = _render_sandbox_files(
+        goal,
+        workspace=workspace,
+        partition=partition,
+        time_limit=time_limit,
+        out=out_dir,
+        engine_tasks=engine_tasks,
     )
+    try:
+        resolved, _spec = hpc.resolve_partition(partition)
+        job = submit(script, job_name="mason-sandbox", partition=resolved, directory=out_dir)
+    except (MasonError, FoundationError, SlabError) as e:
+        _fail(str(e))
+    typer.echo(f"submitted job {job.job_id} ({job.job_name}) to {job.partition}")
+    typer.echo(f"script: {job.script_path}")
+    typer.echo(f"watch it with 'slab hpc status {job.job_id}'; the .out lands in {out_dir}")
 
 
 @sandbox_app.command("forward")
