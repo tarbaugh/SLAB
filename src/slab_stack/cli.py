@@ -8,7 +8,7 @@ agent mounts whole as ``slab mason`` from :mod:`mason.cli`. This module
 composes them, because ``slab_stack`` is the one package allowed to import
 all three layers.
 
-Two families are implemented here rather than mounted. ``fast-forward``
+Three families are implemented here rather than mounted. ``fast-forward``
 and ``purge`` together are the "I am done with everything I did not
 promote" gesture: the lifecycle verbs each honor the retention policy, and
 these two exist to override it. Deletion only ever reaches the ``expired``
@@ -16,7 +16,9 @@ state, so the promoted record survives any invocation. ``memory`` is here
 for the layering reason: the store (:mod:`foundation.memory`) holds what
 agents learned about this *machine*, so it belongs to no single project
 and to no single package — mason writes it, foundation owns it, and the
-human reads and prunes it from here.
+human reads and prunes it from here. ``benchmark`` runs the fixed research
+campaigns through mason and scores them against foundation's run record
+(:mod:`slab_stack.benchmark`), which is every layer at once.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ import json
 import re
 from datetime import date
 from pathlib import Path
-from typing import Annotated, NoReturn
+from typing import Annotated, Any, NoReturn
 
 import typer
 
@@ -36,12 +38,14 @@ from foundation import memory as memory_store
 from foundation.errors import FoundationError
 from foundation.runtime import Workspace
 from mason.cli import app as mason_app
+from mason.errors import MasonError
 from mason.serve import mason_dir, read_record
 from mason.session import transcript_groups
 from slab._version import __version__
 from slab.cli import config_app, engines_app, hpc_app, mp_app, protocols_app, pseudos_app
 from slab.errors import SlabError
 from slab.hpc import SchedulerNotAvailableError, active_job_ids
+from slab_stack import benchmark
 
 _PANEL_LIFECYCLE = "Runs and lifecycle"
 _PANEL_HOUSEKEEPING = "Housekeeping"
@@ -431,6 +435,225 @@ def memory_purge(
 def memory_path() -> None:
     """Print the memory directory, for reading or editing the files by hand."""
     typer.echo(memory_store.memory_dir())
+
+
+# -- the benchmark ------------------------------------------------------------
+
+benchmark_app = typer.Typer(
+    help="Run the fixed research campaigns per model and score the answers.",
+    no_args_is_help=True,
+)
+app.add_typer(benchmark_app, name="benchmark", rich_help_panel=_PANEL_AGENT)
+
+_BENCH_ERRORS = (benchmark.BenchmarkError, MasonError, FoundationError, SlabError, OSError)
+_MachineOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--machine",
+        help="A label you choose for this machine (default: the compute profile). "
+        "Never a hostname.",
+    ),
+]
+_RecordsOpt = Annotated[
+    Path | None,
+    typer.Option("--records", help="The records file (default benchmarks/results.jsonl)."),
+]
+
+
+def _record_line(record: dict[str, Any]) -> str:
+    verdict = "pass" if record["passed"] else f"fail: {record['reason']}"
+    return (
+        f"Q{record['question']} {record['key']:<9} {record['model']:<24} "
+        f"{record['machine']:<12} {verdict}"
+    )
+
+
+@benchmark_app.command("list")
+def benchmark_list() -> None:
+    """The questions, their result keys, and what passes."""
+    for question in benchmark.QUESTIONS:
+        typer.echo(f"{question.number}. [{question.key}] {question.instruction}")
+        keys = ", ".join(f"{name} ({unit})" for name, unit in question.results.items())
+        typer.echo(f"   results: {keys}")
+        for cls in (benchmark.DFT, benchmark.MLIP):
+            band = question.tolerance[cls]
+            if question.kind == "threshold":
+                rule = ", ".join(f"{k} ≤ {v:g}" for k, v in band.items())
+            else:
+                rule = ", ".join(
+                    f"{k} = {question.reference[cls][k]:g} ± {v:g}" for k, v in band.items()
+                )
+            typer.echo(f"   {cls}: {rule}")
+        if question.experiment:
+            typer.echo(f"   experiment: {question.experiment}")
+
+
+@benchmark_app.command("run")
+def benchmark_run(
+    question: Annotated[str, typer.Argument(help="Question number or key (see list).")],
+    workspace: _WorkspaceOpt = None,
+    model: Annotated[str | None, typer.Option("--model", help="Model to run under.")] = None,
+    provider: Annotated[str | None, typer.Option("--provider")] = None,
+    endpoint: Annotated[str | None, typer.Option("--endpoint")] = None,
+    max_turns: Annotated[int | None, typer.Option("--max-turns", min=1)] = None,
+    agent: Annotated[str | None, typer.Option("--agent", help="Entry card (default pi).")] = None,
+    machine: _MachineOpt = None,
+    records: _RecordsOpt = None,
+) -> None:
+    """Run one campaign here, autonomously, then score and record it.
+
+    For a laptop or an interactive node. On a cluster, prefer 'launch',
+    which runs the campaign as a sandbox job, then 'score' after it ends.
+    """
+    try:
+        asked = benchmark.find_question(question)
+        session_id, result = benchmark.run_campaign(
+            asked,
+            workspace=workspace,
+            model=model,
+            provider=provider,
+            endpoint=endpoint,
+            max_turns=max_turns,
+            agent=agent,
+        )
+        typer.echo(
+            f"session {session_id}: stopped by {result.stop_reason} "
+            f"after {result.steps} step(s)"
+        )
+        root = _ops.resolve_root(workspace)
+        record = benchmark.score_session(root, session_id, question=asked, machine=machine)
+        path = records or benchmark.records_path()
+        benchmark.append_record(path, record)
+    except _BENCH_ERRORS as e:
+        _fail(str(e))
+    typer.echo(_record_line(record))
+    typer.echo(f"recorded in {path}")
+
+
+@benchmark_app.command("launch")
+def benchmark_launch(
+    question: Annotated[str, typer.Argument(help="Question number or key (see list).")],
+    workspace: _WorkspaceOpt = None,
+    partition: Annotated[
+        str | None, typer.Option("--partition", "-p", help="Partition for the engine legs.")
+    ] = None,
+    time_limit: Annotated[str | None, typer.Option("--time-limit")] = None,
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", help="Directory for the rendered files (default: ./sandbox)."),
+    ] = None,
+) -> None:
+    """Submit one campaign as a sandbox job; score it with 'score' after it ends."""
+    from mason.cli import launch_sandbox
+
+    out_dir = (out if out is not None else Path.cwd() / "sandbox").resolve()
+    try:
+        asked = benchmark.find_question(question)
+        job = launch_sandbox(
+            asked.instruction,
+            workspace=workspace,
+            partition=partition,
+            time_limit=time_limit,
+            out_dir=out_dir,
+            engine_tasks=None,
+            emit=typer.echo,
+        )
+    except _BENCH_ERRORS as e:
+        _fail(str(e))
+    typer.echo(
+        f"submitted job {job.job_id} ({job.job_name}) to {job.partition} for Q{asked.number}"
+    )
+    typer.echo(f"watch it with 'slab hpc status {job.job_id}'; when it ends: slab benchmark score")
+
+
+@benchmark_app.command("score")
+def benchmark_score(
+    workspace: _WorkspaceOpt = None,
+    session: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--session",
+            help="Session id or prefix; repeatable. Default: every unscored campaign.",
+        ),
+    ] = None,
+    question: Annotated[
+        str | None,
+        typer.Option("--question", help="Score the named sessions as this question."),
+    ] = None,
+    machine: _MachineOpt = None,
+    model: Annotated[
+        str | None, typer.Option("--model", help="Override the model the transcript names.")
+    ] = None,
+    rescore: Annotated[
+        bool, typer.Option("--rescore", help="Score sessions already recorded.")
+    ] = False,
+    records: _RecordsOpt = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Emit the records as JSON.")] = False,
+) -> None:
+    """Score campaigns from their transcripts and the run record, and append the records."""
+    from mason.session import transcript_groups
+
+    path = records or benchmark.records_path()
+    try:
+        root = _ops.resolve_root(workspace)
+        asked = benchmark.find_question(question) if question is not None else None
+        known = benchmark.recorded_sessions(benchmark.load_records(path))
+        if session:
+            targets = list(session)
+        else:
+            targets = [
+                conversation.stem
+                for conversation, _ in transcript_groups(root)
+                if benchmark.question_for(conversation) is not None
+            ]
+        scored: list[dict[str, Any]] = []
+        skipped = 0
+        for target in targets:
+            record = benchmark.score_session(
+                root, target, question=asked, machine=machine, model=model
+            )
+            if record["session"] in known and not rescore:
+                skipped += 1
+                continue
+            benchmark.append_record(path, record)
+            scored.append(record)
+    except _BENCH_ERRORS as e:
+        _fail(str(e))
+    if as_json:
+        typer.echo(json.dumps(scored, indent=2, ensure_ascii=False))
+        return
+    for record in scored:
+        typer.echo(_record_line(record))
+    if not scored:
+        typer.echo("nothing new to score" + (f" ({skipped} already recorded)" if skipped else ""))
+    elif skipped:
+        typer.echo(f"{skipped} already recorded (pass --rescore to score again)")
+
+
+@benchmark_app.command("render")
+def benchmark_render(
+    docs: Annotated[
+        Path | None, typer.Option("--docs", help="The docs page (default docs/benchmark.md).")
+    ] = None,
+    readme: Annotated[
+        Path | None, typer.Option("--readme", help="The README (default README.md).")
+    ] = None,
+    records: _RecordsOpt = None,
+) -> None:
+    """Rewrite the benchmark tables inside their marker regions in the docs and the README."""
+    path = records or benchmark.records_path()
+    docs_path = docs if docs is not None else Path("docs") / "benchmark.md"
+    readme_path = readme if readme is not None else Path("README.md")
+    try:
+        changed = benchmark.render(
+            benchmark.load_records(path), docs=docs_path, readme=readme_path
+        )
+    except _BENCH_ERRORS as e:
+        _fail(str(e))
+    for touched in changed:
+        typer.echo(f"rewrote {touched}")
+    if not changed:
+        typer.echo("tables already current")
 
 
 # -- the front door -----------------------------------------------------------

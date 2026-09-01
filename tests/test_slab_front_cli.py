@@ -22,7 +22,9 @@ runner = CliRunner()
 
 LIFECYCLE = {"run", "list", "show", "promote", "sessions"}
 HOUSEKEEPING_COMMANDS = {"expire", "gc", "fast-forward", "purge"}
-GROUPS = {"memory", "mason", "engines", "pseudos", "protocols", "mp", "hpc", "config"}
+GROUPS = {
+    "memory", "mason", "benchmark", "engines", "pseudos", "protocols", "mp", "hpc", "config",
+}
 DOCTOR = {"doctor"}
 
 
@@ -50,6 +52,7 @@ def test_help_panels_group_by_intent() -> None:
     assert panels["doctor"] == "Doctor"
     group_panels = {info.name: info.rich_help_panel for info in app.registered_groups}
     assert group_panels["mason"] == "The resident agent"
+    assert group_panels["benchmark"] == "The resident agent"
     assert group_panels["memory"] == "Housekeeping"
     for name in ("engines", "pseudos", "protocols", "hpc", "config"):
         assert group_panels[name] == "This machine"

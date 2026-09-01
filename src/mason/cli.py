@@ -161,6 +161,11 @@ def _mason_session(
     return session
 
 
+# The composition behind `slab mason run`, offered by name to the benchmark
+# command so a campaign is exactly what a person would have started by hand.
+open_session = _mason_session
+
+
 def _resolve_spec(agent_name: str | None) -> tuple[AgentSpec, dict[str, AgentSpec]]:
     """The entry agent's card and the roster, refusing unknown names loudly."""
     from mason.roster import discover_roster
@@ -171,6 +176,9 @@ def _resolve_spec(agent_name: str | None) -> tuple[AgentSpec, dict[str, AgentSpe
     if spec is None:
         _fail(f"no agent named {chosen!r}; the roster: {', '.join(sorted(roster))}")
     return spec, roster
+
+
+resolve_spec = _resolve_spec
 
 
 _ModelOpt = Annotated[str | None, typer.Option("--model", help="Override [agent] model.")]
