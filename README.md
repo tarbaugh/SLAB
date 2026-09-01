@@ -1,5 +1,7 @@
 # SLAB — Simplest Layer for Atomistic Backends
 
+[![tests](https://github.com/tarbaugh/SLAB/actions/workflows/tests.yml/badge.svg)](https://github.com/tarbaugh/SLAB/actions/workflows/tests.yml)
+
 An agent-native state layer for atomistic materials modeling. Every run
 starts as temporary and becomes permanent only when you promote it.
 Workflows are plain Python, and SLAB traces the task graph as the script
