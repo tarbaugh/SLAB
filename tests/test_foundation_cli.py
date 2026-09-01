@@ -53,12 +53,6 @@ def _seed_failed_run(root: Path, *, name: str = "boom", session: str | None = No
         raise RuntimeError("nope")
     return run.id
 
-def test_version() -> None:
-    result = runner.invoke(app, ["--version"])
-    assert result.exit_code == 0
-    assert result.output.startswith("foundation ")
-
-
 # -- run -------------------------------------------------------------------------------
 
 

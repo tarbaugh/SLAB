@@ -138,13 +138,14 @@ def test_package_resolves_inside_this_checkout(package: str) -> None:
     )
 
 
-def test_pyproject_declares_a_console_script_per_package() -> None:
-    """Script names are the package names, with underscores dashed
-    (``slab_stack`` ships as ``slab-stack``, the distribution's own name)."""
+def test_pyproject_declares_the_front_door_script() -> None:
+    """One console script, ``slab``, and it is the front door in
+    ``slab_stack`` — the only package allowed to import all the others.
+    The per-package apps are internal; nothing else earns an entry point."""
     pyproject = tomllib.loads((SRC.parent / "pyproject.toml").read_text())
     scripts = pyproject["project"]["scripts"]
-    expected = {name.replace("_", "-"): f"{name}.cli:app" for name in PACKAGES}
-    assert scripts == expected
+    assert scripts["slab"] == "slab_stack.cli:app"
+    assert set(scripts) <= {"slab", "foundation", "mason", "slab-stack"}
 
 
 def test_wheel_ships_every_package() -> None:

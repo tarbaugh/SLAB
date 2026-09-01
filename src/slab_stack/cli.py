@@ -1,21 +1,27 @@
-"""The ``slab-stack`` command-line interface: the destructive pair, and memory.
+"""The ``slab`` command-line interface: the front door to the whole stack.
 
-``fast-forward`` and ``purge`` together are the "I am done with everything
-I did not promote" gesture. They stay out of the per-package CLIs on
-purpose: ``foundation``'s verbs each honor the retention policy, and
-these two exist to override it — the command name should say whose rules
-apply. Deletion only ever reaches the ``expired`` state, so the promoted
-record survives any invocation.
+One command, grouped by intent. The lifecycle verbs (``run``, ``list``,
+``show``, ``promote``, ``sessions``, ``expire``, ``gc``, ``mcp``) come from
+:mod:`foundation.cli`; the machine groups (``engines``, ``pseudos``,
+``protocols``, ``hpc``, ``config``) come from :mod:`slab.cli`; the resident
+agent mounts whole as ``slab mason`` from :mod:`mason.cli`. This module
+composes them, because ``slab_stack`` is the one package allowed to import
+all three layers.
 
-``memory`` is here for the same layering reason rather than the same
-destructive one. The store (:mod:`foundation.memory`) holds what agents
-learned about this *machine*, so it belongs to no single project and to no
-single package: mason writes it, foundation owns it, and the human reads
-and prunes it from here.
+Two families are implemented here rather than mounted. ``fast-forward``
+and ``purge`` together are the "I am done with everything I did not
+promote" gesture: the lifecycle verbs each honor the retention policy, and
+these two exist to override it. Deletion only ever reaches the ``expired``
+state, so the promoted record survives any invocation. ``memory`` is here
+for the layering reason: the store (:mod:`foundation.memory`) holds what
+agents learned about this *machine*, so it belongs to no single project
+and to no single package — mason writes it, foundation owns it, and the
+human reads and prunes it from here.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from datetime import date
@@ -25,17 +31,26 @@ from typing import Annotated, NoReturn
 import typer
 
 from foundation import _ops
+from foundation import cli as foundation_cli
 from foundation import memory as memory_store
 from foundation.errors import FoundationError
 from foundation.runtime import Workspace
+from mason.cli import app as mason_app
 from mason.serve import mason_dir, read_record
 from mason.session import transcript_groups
 from slab._version import __version__
+from slab.cli import config_app, engines_app, hpc_app, protocols_app, pseudos_app
 from slab.errors import SlabError
 from slab.hpc import SchedulerNotAvailableError, active_job_ids
 
+_PANEL_LIFECYCLE = "Runs and lifecycle"
+_PANEL_HOUSEKEEPING = "Housekeeping"
+_PANEL_MACHINE = "This machine"
+_PANEL_AGENT = "The resident agent"
+_PANEL_INTEGRATION = "Integration"
+
 app = typer.Typer(
-    help="slab-stack — housekeeping across the whole SLAB workspace.",
+    help="SLAB — runs, engines, the resident agent, and the housekeeping.",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -61,7 +76,7 @@ def _fail(message: str) -> NoReturn:
 
 def _print_version(value: bool) -> None:
     if value:
-        typer.echo(f"slab-stack {__version__}")
+        typer.echo(f"slab {__version__}")
         raise typer.Exit()
 
 
@@ -77,10 +92,10 @@ def _main(
         ),
     ] = False,
 ) -> None:
-    """slab-stack — housekeeping across the whole SLAB workspace."""
+    """SLAB — runs, engines, the resident agent, and the housekeeping."""
 
 
-@app.command("fast-forward")
+@app.command("fast-forward", rich_help_panel=_PANEL_HOUSEKEEPING)
 def fast_forward(
     workspace: _WorkspaceOpt = None,
     include_running: Annotated[
@@ -134,7 +149,7 @@ def _job_file_sweep(root: Path, active: frozenset[str]) -> list[Path]:
     return victims
 
 
-@app.command()
+@app.command(rich_help_panel=_PANEL_HOUSEKEEPING)
 def purge(
     workspace: _WorkspaceOpt = None,
     dry_run: Annotated[
@@ -232,7 +247,7 @@ memory_app = typer.Typer(
     help="Read and prune what agents learned about this machine.",
     no_args_is_help=True,
 )
-app.add_typer(memory_app, name="memory")
+app.add_typer(memory_app, name="memory", rich_help_panel=_PANEL_HOUSEKEEPING)
 
 
 @memory_app.command("list")
@@ -382,6 +397,44 @@ def memory_purge(
 def memory_path() -> None:
     """Print the memory directory, for reading or editing the files by hand."""
     typer.echo(memory_store.memory_dir())
+
+
+# -- the front door -----------------------------------------------------------
+#
+# The machine groups mount as they are; the agent mounts whole; the lifecycle
+# verbs re-register one by one. Iterating registered_commands means a verb
+# added to foundation.cli later can never be forgotten here —
+# tests/test_slab_front_cli.py pins the resulting tree exactly.
+
+for _group, _name in (
+    (engines_app, "engines"),
+    (pseudos_app, "pseudos"),
+    (protocols_app, "protocols"),
+    (hpc_app, "hpc"),
+    (config_app, "config"),
+):
+    app.add_typer(_group, name=_name, rich_help_panel=_PANEL_MACHINE)
+
+app.add_typer(mason_app, name="mason", rich_help_panel=_PANEL_AGENT)
+
+
+def _command_name(info: typer.models.CommandInfo) -> str:
+    """The name typer will give this command (explicit, or from the function)."""
+    return info.name or info.callback.__name__.replace("_", "-")  # type: ignore[union-attr]
+
+
+for _info in foundation_cli.app.registered_commands:
+    # CommandInfo is a plain class in typer, so a shallow copy carries every
+    # setting and only the help panel is ours to choose.
+    _mounted = copy.copy(_info)
+    _mounted.rich_help_panel = (
+        _PANEL_HOUSEKEEPING
+        if _command_name(_info) in ("expire", "gc")
+        else _PANEL_INTEGRATION
+        if _command_name(_info) == "mcp"
+        else _PANEL_LIFECYCLE
+    )
+    app.registered_commands.append(_mounted)
 
 
 if __name__ == "__main__":  # pragma: no cover - module execution convenience

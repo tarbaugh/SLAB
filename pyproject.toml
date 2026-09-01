@@ -43,7 +43,7 @@ Documentation = "https://tarbaugh.github.io/SLAB/"
 Source = "https://github.com/tarbaugh/SLAB"
 
 [project.scripts]
-slab = "slab.cli:app"
+slab = "slab_stack.cli:app"
 foundation = "foundation.cli:app"
 mason = "mason.cli:app"
 slab-stack = "slab_stack.cli:app"

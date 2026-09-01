@@ -1,12 +1,14 @@
-"""The ``foundation`` command-line interface.
+"""The run-lifecycle verbs of the ``slab`` command.
 
 Verbs mirror the lifecycle: ``run`` lands work in quarantine, ``list``/``show``
 inspect it, ``promote`` makes it permanent, ``expire`` and ``gc`` are the
 two-phase housekeeping. Every verb goes through :mod:`foundation._ops`, the
 same code paths the MCP server exposes to agents.
 
-Engines, protocols, pseudopotentials, and the scheduler are the ``slab``
-command; the resident agent is the ``mason`` command.
+The front door that mounts them is :mod:`slab_stack.cli`; there they sit at
+the top level (``slab run``, ``slab list``, ``slab promote``). Engines,
+protocols, pseudopotentials, and the scheduler are the machine groups; the
+resident agent is ``slab mason``.
 """
 
 from __future__ import annotations
@@ -23,7 +25,6 @@ from foundation.errors import FoundationError
 from foundation.lifecycle import LifecycleState
 from foundation.models import utcnow
 from foundation.runtime import Workspace
-from slab._version import __version__
 from slab.errors import SlabError
 
 app = typer.Typer(
@@ -73,27 +74,6 @@ def _open(workspace: Path | None) -> Workspace:
         return Workspace(_ops.resolve_root(workspace))
     except (FoundationError, SlabError, OSError) as e:
         _fail(str(e))
-
-
-def _print_version(value: bool) -> None:
-    if value:
-        typer.echo(f"foundation {__version__}")
-        raise typer.Exit()
-
-
-@app.callback()
-def _main(
-    version: Annotated[
-        bool,
-        typer.Option(
-            "--version",
-            help="Print the version and exit.",
-            callback=_print_version,
-            is_eager=True,
-        ),
-    ] = False,
-) -> None:
-    """Foundation — runs are born ephemeral and promoted to permanent."""
 
 
 @app.command()
@@ -472,9 +452,5 @@ def mcp(
     serve(root)  # pragma: no cover - blocks on stdio
 
 
-def main() -> None:  # pragma: no cover - console-script shim
+if __name__ == "__main__":  # pragma: no cover - module execution convenience
     app()
-
-
-if __name__ == "__main__":  # pragma: no cover
-    main()

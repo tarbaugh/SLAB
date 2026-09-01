@@ -1,12 +1,14 @@
-"""The ``slab`` command-line interface.
+"""The machine groups of the ``slab`` command.
 
-Verbs describe what can be computed here and how to reach it: ``engines``
-inspects and verifies the cluster registry, ``pseudos`` installs and checks
-pseudopotential families, ``protocols`` shows the named Quantum ESPRESSO
-input protocols, ``hpc`` renders and submits SLURM jobs, and ``config``
-explains where every setting came from.
+These groups describe what can be computed here and how to reach it:
+``engines`` inspects and verifies the cluster registry, ``pseudos``
+installs and checks pseudopotential families, ``protocols`` shows the
+named Quantum ESPRESSO input protocols, ``hpc`` renders and submits SLURM
+jobs, and ``config`` explains where every setting came from.
 
-Runs, artifacts, and verification are the ``foundation`` command.
+The front door that mounts them is :mod:`slab_stack.cli`. Runs, artifacts,
+and verification are ``slab run`` and its siblings; the resident agent is
+``slab mason``.
 """
 
 from __future__ import annotations
@@ -18,7 +20,6 @@ from typing import Annotated, NoReturn
 import typer
 
 from slab._ops import engines_overview
-from slab._version import __version__
 from slab.errors import SlabError
 
 app = typer.Typer(
@@ -32,27 +33,6 @@ app = typer.Typer(
 def _fail(message: str) -> NoReturn:
     typer.echo(f"error: {message}", err=True)
     raise typer.Exit(code=1)
-
-
-def _print_version(value: bool) -> None:
-    if value:
-        typer.echo(f"slab {__version__}")
-        raise typer.Exit()
-
-
-@app.callback()
-def _main(
-    version: Annotated[
-        bool,
-        typer.Option(
-            "--version",
-            help="Print the slab version and exit.",
-            callback=_print_version,
-            is_eager=True,
-        ),
-    ] = False,
-) -> None:
-    """SLAB — the simplest layer for atomistic backends."""
 
 
 engines_app = typer.Typer(
@@ -485,11 +465,5 @@ def protocols_show(
         typer.echo(f"{key}: {details[key]}")
 
 
-
-
-def main() -> None:  # pragma: no cover - console-script shim
+if __name__ == "__main__":  # pragma: no cover - module execution convenience
     app()
-
-
-if __name__ == "__main__":  # pragma: no cover
-    main()

@@ -1,13 +1,14 @@
-"""The ``mason`` command-line interface.
+"""The ``slab mason`` command group: the resident research agent.
 
-``chat`` and ``run`` drive the resident research agent, interactively and
-autonomously. ``doctor`` is the empirical check that the configured endpoint
-answers and calls tools. ``serve`` starts, locates, and stops the model server
-as an ordinary batch job, because on a cluster the GPU node is the scheduler's
+``chat`` and ``run`` drive the agent, interactively and autonomously.
+``doctor`` is the empirical check that the configured endpoint answers and
+calls tools. ``serve`` starts, locates, and stops the model server as an
+ordinary batch job, because on a cluster the GPU node is the scheduler's
 choice and the endpoint is discovered rather than configured.
 
-Runs and artifacts are the ``foundation`` command; engines, protocols, and the
-scheduler are the ``slab`` command.
+The front door that mounts this group is :mod:`slab_stack.cli`. Runs and
+artifacts are ``slab run`` and its siblings; engines, protocols, and the
+scheduler are the machine groups.
 """
 
 from __future__ import annotations
@@ -27,7 +28,6 @@ if TYPE_CHECKING:
 from foundation import _ops
 from foundation.errors import FoundationError
 from mason.errors import MasonError
-from slab._version import __version__
 from slab.errors import SlabError
 
 app = typer.Typer(
@@ -50,27 +50,6 @@ _WorkspaceOpt = Annotated[
 def _fail(message: str) -> NoReturn:
     typer.echo(f"error: {message}", err=True)
     raise typer.Exit(code=1)
-
-
-def _print_version(value: bool) -> None:
-    if value:
-        typer.echo(f"mason {__version__}")
-        raise typer.Exit()
-
-
-@app.callback()
-def _main(
-    version: Annotated[
-        bool,
-        typer.Option(
-            "--version",
-            help="Print the version and exit.",
-            callback=_print_version,
-            is_eager=True,
-        ),
-    ] = False,
-) -> None:
-    """Mason — the resident research agent."""
 
 
 _STEP_PREVIEW_CHARS = 2_000
@@ -994,9 +973,5 @@ def _doctor_roster(
     return failures
 
 
-def main() -> None:  # pragma: no cover - console-script shim
+if __name__ == "__main__":  # pragma: no cover - module execution convenience
     app()
-
-
-if __name__ == "__main__":  # pragma: no cover
-    main()

@@ -154,12 +154,6 @@ def test_purge_never_touches_the_serve_record_or_its_job(tmp_path: Path) -> None
     assert remaining == ["endpoint.json", "serve-777.out", "serve-777.sbatch"]
 
 
-def test_version_flag(tmp_path: Path) -> None:
-    result = runner.invoke(app, ["--version"])
-    assert result.exit_code == 0
-    assert "slab-stack" in result.output
-
-
 # -- machine memory ----------------------------------------------------------
 
 
