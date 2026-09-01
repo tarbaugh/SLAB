@@ -23,11 +23,12 @@ runner = CliRunner()
 LIFECYCLE = {"run", "list", "show", "promote", "sessions"}
 HOUSEKEEPING_COMMANDS = {"expire", "gc", "fast-forward", "purge"}
 GROUPS = {"memory", "mason", "engines", "pseudos", "protocols", "hpc", "config"}
+DOCTOR = {"doctor"}
 
 
 def test_the_command_tree_is_exactly_the_planned_one() -> None:
     commands = [_command_name(info) for info in app.registered_commands]
-    assert sorted(commands) == sorted(LIFECYCLE | HOUSEKEEPING_COMMANDS | {"mcp"})
+    assert sorted(commands) == sorted(LIFECYCLE | HOUSEKEEPING_COMMANDS | DOCTOR | {"mcp"})
     assert len(set(commands)) == len(commands)
     groups = [info.name for info in app.registered_groups]
     assert sorted(groups) == sorted(GROUPS)  # type: ignore[type-var]
@@ -46,6 +47,7 @@ def test_help_panels_group_by_intent() -> None:
     for name in HOUSEKEEPING_COMMANDS:
         assert panels[name] == "Housekeeping"
     assert panels["mcp"] == "Integration"
+    assert panels["doctor"] == "Doctor"
     group_panels = {info.name: info.rich_help_panel for info in app.registered_groups}
     assert group_panels["mason"] == "The resident agent"
     assert group_panels["memory"] == "Housekeeping"

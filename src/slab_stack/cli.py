@@ -48,6 +48,7 @@ _PANEL_HOUSEKEEPING = "Housekeeping"
 _PANEL_MACHINE = "This machine"
 _PANEL_AGENT = "The resident agent"
 _PANEL_INTEGRATION = "Integration"
+_PANEL_DOCTOR = "Doctor"
 
 app = typer.Typer(
     help="SLAB — runs, engines, the resident agent, and the housekeeping.",
@@ -241,6 +242,39 @@ def purge(
         f"{verb} {removed_transcripts} transcript file(s) and "
         f"{len(job_files)} job file(s)"
     )
+
+
+@app.command(rich_help_panel=_PANEL_DOCTOR)
+def doctor(
+    workspace: _WorkspaceOpt = None,
+    offline: Annotated[
+        bool, typer.Option("--offline", help="Skip the endpoint and roster probes.")
+    ] = False,
+    deep: Annotated[
+        bool,
+        typer.Option(
+            "--deep",
+            help="Also run one real single-point per declared rootstock "
+            "checkpoint — slow, possibly GPU-bound; meant for the cluster, "
+            "before a campaign.",
+        ),
+    ] = False,
+) -> None:
+    """The whole-stack preflight: is this machine ready to launch a campaign?
+
+    Probes the real campaign path in order: configuration, workspace,
+    memory store, engines, scheduler, model endpoint, sandbox, and the
+    freshness of the rendered job. Exits nonzero only on an [x] row; an
+    [=] row is a fact about this machine, not a failure. The focused
+    endpoint check remains 'slab mason doctor'.
+    """
+    from slab_stack import doctor as stack_doctor
+
+    failures = stack_doctor.run(
+        workspace, offline=offline, deep=deep, emit=typer.echo
+    )
+    if failures:
+        raise typer.Exit(code=1)
 
 
 memory_app = typer.Typer(

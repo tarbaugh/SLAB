@@ -87,7 +87,7 @@ discovered.
 ```bash
 slab mason serve render     # read the batch script before trusting it
 slab mason serve start --wait
-slab mason doctor
+slab doctor                 # the whole-stack preflight, endpoint included
 slab mason chat
 ```
 

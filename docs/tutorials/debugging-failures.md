@@ -5,6 +5,46 @@ It captures structured evidence and stops. The evidence is the exception, a
 trimmed traceback, diagnostic notes, and the scratch data that explains what
 happened.
 
+## Before a campaign: `slab doctor`
+
+The cheapest failure is the one found before the job queues. `slab doctor`
+probes the real campaign path in order: the configuration parses under each
+owner, the workspace opens, the memory store is writable, the engines and
+registry resolve, the scheduler is present, the model endpoint answers and
+parses tool calls, the sandbox preflight passes, and the rendered job in
+`sandbox/` still matches a fresh render. The command exits nonzero only on
+an `[x]` row. An `[=]` row is a fact about this machine, not a failure:
+
+```console
+$ slab doctor --offline
+[+] config: project /private/tmp/you/demo/slab.toml
+[+] config [agent]: validates
+[=] workspace: none yet at .slab (created on first use)
+[+] memory: /tmp/you/.config/slab/memory is writable
+[+] engines built-in: emt, lammps, lj, qe, rootstock
+[=] engine registry: none configured
+[=] rootstock: no install root configured — set root or cluster under [engines.rootstock] in slab.toml, or export ROOTSTOCK_ROOT
+[=] pseudo families: 0 installed
+[=] scheduler: no sbatch on PATH (fine off-cluster)
+[=] endpoint: skipped (--offline)
+[=] sandbox: not configured ([agent.sandbox] has no image)
+[=] rendered job: none here (render or launch writes sandbox/)
+```
+
+`--offline` skips the endpoint and roster probes for work away from the
+server. The freshness row re-renders the sandbox job in memory with the
+arguments recorded in `render.json` and diffs the result against the files
+on disk, so any code or config drift since the last render is caught
+exactly, before SLURM ever sees the stale script.
+
+`--deep` goes one step further on a machine with declared rootstock
+checkpoints: one real single-point per checkpoint, each in its own
+killable subprocess under a timeout. This is the only probe that catches a
+checkpoint whose weights were never cached on the machine, and it is slow
+and possibly GPU-bound on purpose. Run it on the cluster, before a
+campaign that leans on a new checkpoint. The focused endpoint check
+remains `slab mason doctor`.
+
 ## Evidence, not protocol
 
 AiiDA-style engines treat failure as a dispatch problem. A calculation exits
