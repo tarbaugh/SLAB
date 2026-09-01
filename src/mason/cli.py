@@ -20,10 +20,13 @@ from typing import TYPE_CHECKING, Annotated, Any, NoReturn
 import typer
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mason.config import AgentConfig
     from mason.roster import AgentSpec
     from mason.session import MasonSession
     from slab.config import HpcConfig
+    from slab.hpc import SubmittedJob
 
 from foundation import _ops
 from foundation.errors import FoundationError
@@ -598,6 +601,10 @@ def mason_report(
         ),
     ] = None,
     workspace: _WorkspaceOpt = None,
+    session: Annotated[
+        str | None,
+        typer.Option("--session", help="A session id (or unique prefix) instead of a path."),
+    ] = None,
     as_json: Annotated[
         bool, typer.Option("--json", help="Emit the digest as JSON.")
     ] = False,
@@ -612,11 +619,15 @@ def mason_report(
 
     from foundation.runtime import Workspace
     from mason.report import session_runs, summarize
-    from mason.session import transcript_groups
+    from mason.session import transcript_for, transcript_groups
 
     try:
         root = _ops.resolve_root(workspace)
-    except (FoundationError, SlabError) as e:
+        if session is not None:
+            if transcript is not None:
+                _fail("give a transcript path or --session, not both")
+            transcript = transcript_for(root, session)
+    except (MasonError, FoundationError, SlabError) as e:
         _fail(str(e))
     groups = transcript_groups(root)
     if transcript is None:
@@ -870,8 +881,7 @@ def mason_sandbox_launch(
     recorded in render.json are reused (a flag still overrides a recorded
     value); with a goal, only the flags given here apply.
     """
-    from mason.sandbox import preflight, read_render_record
-    from slab.hpc import submit
+    from mason.sandbox import read_render_record
 
     project = Path.cwd()
     out_dir = (out if out is not None else project / "sandbox").resolve()
@@ -890,14 +900,48 @@ def mason_sandbox_launch(
         if engine_tasks is None and record.get("engine_tasks") is not None:
             engine_tasks = int(str(record["engine_tasks"]))
     try:
-        agent, hpc, root = _serve_inputs(workspace)
-        rows = preflight(agent, root)
+        job = launch_sandbox(
+            goal,
+            workspace=workspace,
+            partition=partition,
+            time_limit=time_limit,
+            out_dir=out_dir,
+            engine_tasks=engine_tasks,
+            emit=typer.echo,
+        )
     except (MasonError, FoundationError, SlabError) as e:
         _fail(str(e))
+    typer.echo(f"submitted job {job.job_id} ({job.job_name}) to {job.partition}")
+    typer.echo(f"script: {job.script_path}")
+    typer.echo(f"watch it with 'slab hpc status {job.job_id}'; the .out lands in {out_dir}")
+
+
+def launch_sandbox(
+    goal: str,
+    *,
+    workspace: Path | None,
+    partition: str | None,
+    time_limit: str | None,
+    out_dir: Path,
+    engine_tasks: int | None,
+    emit: Callable[[str], None],
+) -> SubmittedJob:
+    """Preflight, render fresh into *out_dir*, and submit one sandbox job.
+
+    The library half of ``slab mason sandbox launch``, shared with
+    ``slab benchmark launch``. Preflight rows go to *emit*; a failing row
+    raises :class:`MasonError` naming the fix, and the scheduler's own
+    refusals propagate as they are.
+    """
+    from mason.sandbox import preflight
+    from slab.hpc import submit
+
+    agent, hpc, root = _serve_inputs(workspace)
+    rows = preflight(agent, root)
     for mark, message in rows:
-        typer.echo(f"[{mark}] {message}")
+        emit(f"[{mark}] {message}")
     if any(mark == "-" for mark, _ in rows):
-        _fail("preflight failed; fix the [-] rows, then launch again")
+        raise MasonError("preflight failed; fix the [-] rows, then launch again")
     _script_path, script = _render_sandbox_files(
         goal,
         workspace=workspace,
@@ -906,14 +950,8 @@ def mason_sandbox_launch(
         out=out_dir,
         engine_tasks=engine_tasks,
     )
-    try:
-        resolved, _spec = hpc.resolve_partition(partition)
-        job = submit(script, job_name="mason-sandbox", partition=resolved, directory=out_dir)
-    except (MasonError, FoundationError, SlabError) as e:
-        _fail(str(e))
-    typer.echo(f"submitted job {job.job_id} ({job.job_name}) to {job.partition}")
-    typer.echo(f"script: {job.script_path}")
-    typer.echo(f"watch it with 'slab hpc status {job.job_id}'; the .out lands in {out_dir}")
+    resolved, _spec = hpc.resolve_partition(partition)
+    return submit(script, job_name="mason-sandbox", partition=resolved, directory=out_dir)
 
 
 @sandbox_app.command("forward")

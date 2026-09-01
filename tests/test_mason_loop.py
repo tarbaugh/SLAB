@@ -87,6 +87,57 @@ def test_finish_tool_closes_the_turn(tmp_path: Path) -> None:
     assert result.text == "a0 = 3.615 A (run ab12)"
 
 
+def test_finish_hands_back_structured_results_and_run_ids(tmp_path: Path) -> None:
+    """The scorer's contract: results and run ids travel as given, into the
+    TurnResult and the transcript's finish event alike."""
+    client = FakeClient(
+        [
+            _tool_reply(
+                "finish",
+                report="a0 = 3.615 A (run ab12)",
+                results={"a0": {"value": 3.615, "unit": "A"}},
+                run_ids=["ab12"],
+            )
+        ]
+    )
+    session = _session(tmp_path)
+    result = Mason(session, client=client).run_turn("measure a0")
+    assert result.finished
+    assert result.results == {"a0": {"value": 3.615, "unit": "A"}}
+    assert result.run_ids == ("ab12",)
+    events = [
+        json.loads(line) for line in session.transcript_path.read_text().splitlines()
+    ]
+    finish = next(e for e in events if e["type"] == "finish")
+    assert finish["results"] == {"a0": {"value": 3.615, "unit": "A"}}
+    assert finish["run_ids"] == ["ab12"]
+    # A finish without the optional fields still closes the turn, empty-handed.
+    plain = FakeClient([_tool_reply("finish", report="done")])
+    session.release_session_lock()
+    bare = Mason(_session(tmp_path), client=plain).run_turn("go")
+    assert bare.results == {} and bare.run_ids == ()
+
+
+def test_the_transcript_opens_with_a_session_header(tmp_path: Path) -> None:
+    """The record names the model that answered, so a report or a benchmark
+    score trusts the transcript rather than a config that may have changed."""
+    client = FakeClient([_text_reply("ok")])
+    session = _session(tmp_path, max_turns=7)
+    Mason(session, client=client).run_turn("hi")
+    events = [
+        json.loads(line) for line in session.transcript_path.read_text().splitlines()
+    ]
+    assert events[0]["type"] == "session"
+    header = events[0]
+    assert header["model"] == "fake"
+    assert header["provider"] == "openai"
+    assert header["agent"] == "pi"
+    assert header["max_turns"] == 7
+    assert header["compute_profile"] == "laptop"
+    assert "endpoint" in header and "endpoint_origin" in header
+    assert sum(1 for e in events if e["type"] == "session") == 1
+
+
 def test_max_turns_stops_loudly(tmp_path: Path) -> None:
     client = FakeClient([_tool_reply("list_dir") for _ in range(3)])
     mason = Mason(_session(tmp_path, max_turns=3), client=client)

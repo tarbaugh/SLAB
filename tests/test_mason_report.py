@@ -104,7 +104,11 @@ def test_the_digest_counts_every_dimension(tmp_path: Path) -> None:
     # The launch call was made by the second model call.
     assert summary["first_launch_step"] == 2
     assert summary["finish"] == {
-        "reported": True, "head": "a0 = 3.30 A for bcc Nb, MLIP-level"
+        "reported": True,
+        "head": "a0 = 3.30 A for bcc Nb, MLIP-level",
+        "report": "a0 = 3.30 A for bcc Nb, MLIP-level",
+        "results": {},
+        "run_ids": [],
     }
 
 
@@ -135,7 +139,72 @@ def test_an_empty_transcript_is_a_zero_report(tmp_path: Path) -> None:
     assert summary["steps"] == 0
     assert summary["span_s"] is None
     assert summary["first_launch_step"] is None
-    assert summary["finish"] == {"reported": False, "head": None}
+    assert summary["finish"] == {
+        "reported": False,
+        "head": None,
+        "report": None,
+        "results": {},
+        "run_ids": [],
+    }
+    assert summary["model"] is None  # no header: an older transcript
+
+
+def test_the_header_and_the_structured_finish_are_surfaced(tmp_path: Path) -> None:
+    transcript = _write(
+        tmp_path / "20260831-100000-11.jsonl",
+        [
+            {
+                "at": "2026-08-31T10:00:00+00:00",
+                "type": "session",
+                "agent": "pi",
+                "model": "muse-glimmer-30b",
+                "provider": "openai",
+                "endpoint": "http://node:8000/v1",
+                "endpoint_origin": "job 42 on node",
+                "compute_profile": "cluster",
+                "max_turns": 60,
+            },
+            _usage("2026-08-31T10:00:01+00:00"),
+            {
+                "at": "2026-08-31T10:00:02+00:00",
+                "type": "finish",
+                "report": "a0 = 3.63 A " + "x" * 300,
+                "results": {"a0": {"value": 3.63, "unit": "A"}},
+                "run_ids": ["01m1"],
+            },
+        ],
+    )
+    summary = summarize(transcript)
+    assert summary["model"] == "muse-glimmer-30b"
+    assert summary["provider"] == "openai"
+    assert summary["endpoint_origin"] == "job 42 on node"
+    assert summary["compute_profile"] == "cluster"
+    assert summary["agent"] == "pi"
+    assert len(summary["finish"]["head"]) == 200
+    assert summary["finish"]["report"].startswith("a0 = 3.63 A")
+    assert len(summary["finish"]["report"]) > 200
+    assert summary["finish"]["results"] == {"a0": {"value": 3.63, "unit": "A"}}
+    assert summary["finish"]["run_ids"] == ["01m1"]
+
+
+def test_cli_finds_a_session_by_id_or_unique_prefix(tmp_path: Path) -> None:
+    root = tmp_path / "ws"
+    sessions = root / "mason" / "sessions"
+    _write(sessions / "20260830-090000-7.jsonl", [_usage("2026-08-30T09:00:00+00:00")])
+    _campaign(sessions / "20260831-100000-11.jsonl")
+    Workspace(root).close()
+    by_id = runner.invoke(app, ["report", "-w", str(root), "--session", "20260830-090000-7"])
+    assert by_id.exit_code == 0, by_id.output
+    assert "session 20260830-090000-7 — 1 step(s)" in by_id.output
+    by_prefix = runner.invoke(app, ["report", "-w", str(root), "--session", "20260831"])
+    assert by_prefix.exit_code == 0, by_prefix.output
+    assert "20260831-100000-11" in by_prefix.output
+    ambiguous = runner.invoke(app, ["report", "-w", str(root), "--session", "2026"])
+    assert ambiguous.exit_code == 1
+    assert "ambiguous" in ambiguous.output
+    missing = runner.invoke(app, ["report", "-w", str(root), "--session", "1999"])
+    assert missing.exit_code == 1
+    assert "no session transcript matches" in missing.output
 
 
 def test_cli_reports_the_newest_conversation_and_its_runs(tmp_path: Path) -> None:

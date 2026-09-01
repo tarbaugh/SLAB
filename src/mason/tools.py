@@ -324,14 +324,35 @@ def build_toolbox(
             name="finish",
             description=(
                 "End the current task with a final report. Cite run ids for every "
-                "number; list what was verified and what remains open. Before "
-                "calling it: a machine fact this session learned the hard way (a "
-                "workaround, a missing utility, a device limit) belongs in "
+                "number; list what was verified and what remains open. When the "
+                "task names a result key, also pass the quantity in `results` "
+                "under that name with its unit, and list the run ids that "
+                "produced it in `run_ids` — that is how a campaign is scored. "
+                "Before calling it: a machine fact this session learned the hard "
+                "way (a workaround, a missing utility, a device limit) belongs in "
                 "`remember` first, or the next session pays for it again. Call "
                 "finish alone, as the only tool call of its message, after the "
                 "evidence it cites has been read."
             ),
-            parameters=_schema({"report": {"type": "string"}}, ["report"]),
+            parameters=_schema(
+                {
+                    "report": {"type": "string"},
+                    "results": {
+                        "type": "object",
+                        "description": "result name -> {value, unit}",
+                        "additionalProperties": {
+                            "type": "object",
+                            "properties": {
+                                "value": {"type": "number"},
+                                "unit": {"type": "string"},
+                            },
+                            "required": ["value", "unit"],
+                        },
+                    },
+                    "run_ids": {"type": "array", "items": {"type": "string"}},
+                },
+                ["report"],
+            ),
             handler=lambda arguments: str(arguments.get("report", "")),
         )
     )

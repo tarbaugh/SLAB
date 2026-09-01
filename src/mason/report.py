@@ -8,7 +8,8 @@ transcript that is still being appended to simply describes what has
 happened so far.
 
 The event vocabulary is the one :meth:`mason.session.MasonSession.record`
-writes: ``message``, ``reasoning``, ``skill``, ``compaction``, ``finish``,
+writes: ``session`` (the header naming the model that answered),
+``message``, ``reasoning``, ``skill``, ``compaction``, ``finish``,
 ``resume``, and ``usage``. A malformed line is counted and skipped — a
 report must describe a damaged transcript, not refuse it.
 """
@@ -65,7 +66,11 @@ def _tally(transcript: Path) -> dict[str, Any]:
     skills: list[str] = []
     first_launch_step: int | None = None
     finish_head: str | None = None
+    finish_report: str | None = None
+    finish_results: dict[str, Any] = {}
+    finish_run_ids: list[str] = []
     finished = False
+    header: dict[str, Any] = {}
     # Tool results carry no name, but they answer the most recent
     # assistant message's calls in order.
     pending: deque[str] = deque()
@@ -83,7 +88,9 @@ def _tally(transcript: Path) -> dict[str, Any]:
             started = started or at
             ended = at
         kind = event.get("type")
-        if kind == "usage":
+        if kind == "session" and not header:
+            header = event
+        elif kind == "usage":
             steps += 1
             prompt_tokens += int(event.get("prompt_tokens") or 0)
             completion_tokens += int(event.get("completion_tokens") or 0)
@@ -116,8 +123,18 @@ def _tally(transcript: Path) -> dict[str, Any]:
             finished = True
             report_text = str(event.get("report") or "").strip()
             finish_head = report_text[:_FINISH_HEAD_CHARS] or None
+            finish_report = report_text or None
+            raw_results = event.get("results")
+            finish_results = dict(raw_results) if isinstance(raw_results, dict) else {}
+            raw_ids = event.get("run_ids")
+            finish_run_ids = [str(r) for r in raw_ids] if isinstance(raw_ids, list) else []
 
     return {
+        "model": header.get("model"),
+        "provider": header.get("provider"),
+        "endpoint_origin": header.get("endpoint_origin"),
+        "compute_profile": header.get("compute_profile"),
+        "agent": header.get("agent"),
         "steps": steps,
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
@@ -136,7 +153,13 @@ def _tally(transcript: Path) -> dict[str, Any]:
         "resumes": resumes,
         "malformed_lines": malformed,
         "first_launch_step": first_launch_step,
-        "finish": {"reported": finished, "head": finish_head},
+        "finish": {
+            "reported": finished,
+            "head": finish_head,
+            "report": finish_report,
+            "results": finish_results,
+            "run_ids": finish_run_ids,
+        },
     }
 
 

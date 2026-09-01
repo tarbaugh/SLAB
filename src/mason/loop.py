@@ -27,7 +27,7 @@ import json
 import os
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from mason.client import (
     ChatClient,
@@ -97,6 +97,10 @@ class TurnResult(BaseModel):
     text: str
     stop_reason: StopReason
     steps: int
+    #: The structured hand-back of a finish call: result name -> {value, unit},
+    #: and the run ids the model cited for them. Empty for every other stop.
+    results: dict[str, Any] = Field(default_factory=dict)
+    run_ids: tuple[str, ...] = ()
 
     @property
     def finished(self) -> bool:
@@ -243,6 +247,22 @@ class Mason:
         # and how many consecutive times it has recurred unchanged.
         self._last_identical: tuple[str, str, str] | None = None
         self._repeat_streak = 0
+        if depth == 0 and not resume_from:
+            # The transcript says which model answered it, so a later reader
+            # (a report, a benchmark score) trusts the record, not the config
+            # that may have changed since.
+            self.session.record(
+                {
+                    "type": "session",
+                    "agent": spec.name,
+                    "model": session.agent.model,
+                    "provider": session.agent.provider,
+                    "endpoint": session.endpoint,
+                    "endpoint_origin": session.endpoint_origin,
+                    "compute_profile": session.compute_profile,
+                    "max_turns": session.agent.max_turns,
+                }
+            )
         if resume_from:
             # Re-record the replayed history into THIS session's transcript so
             # each transcript stays self-contained: resuming a resumed session
@@ -335,8 +355,29 @@ class Mason:
                         continue
                     self._append_tool_result(call, "task closed", as_text=from_text)
                     self._answer_unrun(calls[position + 1 :], from_text=from_text)
-                    self.session.record({"type": "finish", "report": report})
-                    return TurnResult(text=report, stop_reason="finish", steps=step)
+                    # The structured hand-back travels as given: the loop never
+                    # re-shapes a report, and a scorer refuses what it cannot read.
+                    raw_results = call.arguments.get("results")
+                    results = dict(raw_results) if isinstance(raw_results, dict) else {}
+                    raw_ids = call.arguments.get("run_ids")
+                    run_ids = (
+                        tuple(str(r) for r in raw_ids) if isinstance(raw_ids, list) else ()
+                    )
+                    self.session.record(
+                        {
+                            "type": "finish",
+                            "report": report,
+                            "results": results,
+                            "run_ids": list(run_ids),
+                        }
+                    )
+                    return TurnResult(
+                        text=report,
+                        stop_reason="finish",
+                        steps=step,
+                        results=results,
+                        run_ids=run_ids,
+                    )
                 result, ok = self._dispatch(call)
                 result = self._note_repetition(call, result)
                 self._append_tool_result(call, result, as_text=from_text)

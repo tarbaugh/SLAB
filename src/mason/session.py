@@ -96,6 +96,26 @@ def transcript_groups(
     ]
 
 
+def transcript_for(workspace_root: str | os.PathLike[str], session: str) -> Path:
+    """The conversation transcript for a session id, or a unique prefix of one.
+
+    The session id is the transcript's stem, so this is the lookup behind
+    ``slab mason report --session`` and the benchmark scorer. An id no
+    transcript matches, or a prefix several match, raises naming them.
+    """
+    conversations = [conversation for conversation, _ in transcript_groups(workspace_root)]
+    exact = [c for c in conversations if c.stem == session]
+    if exact:
+        return exact[0]
+    matches = [c for c in conversations if c.stem.startswith(session)]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise SessionError(f"no session transcript matches {session!r} under {workspace_root}")
+    names = ", ".join(c.stem for c in matches)
+    raise SessionError(f"session prefix {session!r} is ambiguous: {names}")
+
+
 class MasonSession:
     """One agent session in one project directory.
 
