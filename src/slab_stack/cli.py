@@ -39,7 +39,7 @@ from mason.cli import app as mason_app
 from mason.serve import mason_dir, read_record
 from mason.session import transcript_groups
 from slab._version import __version__
-from slab.cli import config_app, engines_app, hpc_app, protocols_app, pseudos_app
+from slab.cli import config_app, engines_app, hpc_app, mp_app, protocols_app, pseudos_app
 from slab.errors import SlabError
 from slab.hpc import SchedulerNotAvailableError, active_job_ids
 
@@ -444,6 +444,7 @@ for _group, _name in (
     (engines_app, "engines"),
     (pseudos_app, "pseudos"),
     (protocols_app, "protocols"),
+    (mp_app, "mp"),
     (hpc_app, "hpc"),
     (config_app, "config"),
 ):

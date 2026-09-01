@@ -224,6 +224,22 @@ class AtomskBuilderConfig(BaseModel):
     setup: tuple[str, ...] = ()
 
 
+class MpBuilderConfig(BaseModel):
+    """Where the offline Materials Project snapshot lives (``[builders.mp]``).
+
+    The snapshot is a read-only local directory holding ``metadata.sqlite``,
+    ``manifest.json``, and the sharded ``cifs/`` tree. It supplies structures
+    and metadata, never energies, so it is a *builder*, not an engine — it
+    never appears as an ``engine=`` name. ``root`` is a path, so ``~`` and
+    ``$VAR`` expand at load. Used by :mod:`slab.mp`, the ``slab mp`` command
+    group, and foundation's ``fetch_structure`` task.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    root: ExpandedPath | None = None
+
+
 class BuildersConfig(BaseModel):
     """Per-builder defaults (``[builders]``): tools that make structures,
     not energies."""
@@ -231,6 +247,7 @@ class BuildersConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     atomsk: AtomskBuilderConfig = AtomskBuilderConfig()
+    mp: MpBuilderConfig = MpBuilderConfig()
 
 
 class PathsConfig(BaseModel):
@@ -708,6 +725,15 @@ schema_version = 1
 #                                      # builder, never an engine= name. Used by
 #                                      # foundation's build_structure task
 # setup = ["module load atomsk/0.13"]  # same per-tool setup rule as the engines
+
+[builders.mp]
+# root = "/data/mp-snapshot"           # an offline Materials Project snapshot:
+#                                      # the directory holding metadata.sqlite,
+#                                      # manifest.json, and the cifs/ tree. A
+#                                      # read-only data source, never an engine=
+#                                      # name. Used by foundation's
+#                                      # fetch_structure task, 'slab mp', and
+#                                      # the agent's search_materials tools
 
 [engines.rootstock]
 # root = "/path/to/rootstock-install"  # a LOCAL rootstock install (the directory

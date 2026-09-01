@@ -77,6 +77,15 @@ schema_version = 1
 #                                      # foundation's build_structure task
 # setup = ["module load atomsk/0.13"]  # same per-tool setup rule as the engines
 
+[builders.mp]
+# root = "/data/mp-snapshot"           # an offline Materials Project snapshot:
+#                                      # the directory holding metadata.sqlite,
+#                                      # manifest.json, and the cifs/ tree. A
+#                                      # read-only data source, never an engine=
+#                                      # name. Used by foundation's
+#                                      # fetch_structure task, 'slab mp', and
+#                                      # the agent's search_materials tools
+
 [engines.rootstock]
 # root = "/path/to/rootstock-install"  # a LOCAL rootstock install (the directory
 #                                      # holding envs/<name>/env_source.py); lets

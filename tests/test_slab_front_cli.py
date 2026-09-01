@@ -22,7 +22,7 @@ runner = CliRunner()
 
 LIFECYCLE = {"run", "list", "show", "promote", "sessions"}
 HOUSEKEEPING_COMMANDS = {"expire", "gc", "fast-forward", "purge"}
-GROUPS = {"memory", "mason", "engines", "pseudos", "protocols", "hpc", "config"}
+GROUPS = {"memory", "mason", "engines", "pseudos", "protocols", "mp", "hpc", "config"}
 DOCTOR = {"doctor"}
 
 

@@ -84,6 +84,15 @@ def engines_list(registry_path: _RegistryOpt = None) -> None:
         typer.echo(f"pseudo families: {', '.join(families)}")
     else:
         typer.echo("pseudo families: none installed ('slab pseudos install sssp' fetches one)")
+    mp = overview.get("mp")
+    if mp is not None:
+        if mp.get("error"):
+            typer.echo(f"mp snapshot: error — {mp['error']}")
+        else:
+            release = f"release {mp['release']}" if mp["release"] else "release unknown"
+            typer.echo(
+                f"mp snapshot: {release}, {mp['materials']} materials ('slab mp info')"
+            )
     hpc = overview.get("hpc")
     if overview.get("hpc_error"):
         typer.echo(f"hpc partitions: error — {overview['hpc_error']}")
@@ -464,6 +473,157 @@ def protocols_show(
         return
     for key in sorted(details):
         typer.echo(f"{key}: {details[key]}")
+
+
+mp_app = typer.Typer(
+    help="Query the offline Materials Project snapshot (a local, read-only data source).",
+    no_args_is_help=True,
+)
+app.add_typer(mp_app, name="mp")
+
+#: Columns 'slab mp search' shows when the caller names none. Filtered to
+#: what the installed snapshot actually has — schemas vary by build.
+_PREFERRED_SEARCH_COLUMNS = (
+    "material_id",
+    "formula_pretty",
+    "energy_above_hull",
+    "band_gap",
+    "is_stable",
+)
+
+
+@mp_app.command("info")
+def mp_info(
+    as_json: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    """Show the installed snapshot's provenance: root, release, scale."""
+    from slab.mp import snapshot_info
+
+    try:
+        info = snapshot_info()
+    except SlabError as e:
+        _fail(str(e))
+    if as_json:
+        typer.echo(json.dumps(info, indent=1, sort_keys=True, default=str))
+        return
+    typer.echo(f"root: {info['root']}")
+    typer.echo(f"release: {info['release'] or 'not recorded'}")
+    typer.echo(f"materials: {info['materials']}")
+    manifest = info.get("manifest")
+    if isinstance(manifest, dict):
+        typer.echo(f"manifest: {len(manifest)} keys ('slab mp info --json' shows all)")
+    elif info.get("manifest_error"):
+        typer.echo(f"manifest: {info['manifest_error']}")
+    else:
+        typer.echo("manifest: none")
+
+
+@mp_app.command("search")
+def mp_search(
+    element: Annotated[
+        list[str] | None,
+        typer.Option("--element", "-e", help="Require this element (repeatable)."),
+    ] = None,
+    exclude_element: Annotated[
+        list[str] | None,
+        typer.Option("--exclude-element", help="Refuse this element (repeatable)."),
+    ] = None,
+    filters: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--filter",
+            "-f",
+            help="key=value filter (repeatable). Bare keys test equality; "
+            "suffixes __lte/__gte/__lt/__gt/__ne compare; value 'null' means "
+            "SQL NULL. Example: -f energy_above_hull__lte=0.025",
+        ),
+    ] = None,
+    columns: Annotated[
+        str | None,
+        typer.Option("--columns", help="Comma-separated columns to return."),
+    ] = None,
+    order_by: Annotated[
+        str | None,
+        typer.Option("--order-by", help="Column to sort by; prefix - for descending."),
+    ] = None,
+    limit: Annotated[int, typer.Option("--limit", help="Max rows (1-500).")] = 20,
+    as_json: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    """Search the snapshot's materials table with indexed, parameterized SQL."""
+    from slab.mp import search_materials
+
+    mapping: dict[str, object] = {}
+    if element:
+        mapping["elements"] = list(element)
+    if exclude_element:
+        mapping["exclude_elements"] = list(exclude_element)
+    for pair in filters or []:
+        key, separator, raw = pair.partition("=")
+        if not separator or not key:
+            _fail(f"--filter takes key=value, got {pair!r}")
+        mapping[key] = _filter_value(raw)
+    requested = [name.strip() for name in columns.split(",")] if columns else None
+    try:
+        rows = search_materials(
+            mapping, columns=requested, limit=limit, order_by=order_by
+        )
+    except SlabError as e:
+        _fail(str(e))
+    if as_json:
+        typer.echo(json.dumps(rows, indent=1, default=str))
+        return
+    if not rows:
+        typer.echo("no materials match")
+        return
+    shown = requested or [
+        name for name in _PREFERRED_SEARCH_COLUMNS if name in rows[0]
+    ] or list(rows[0])
+    for row in rows:
+        typer.echo("  ".join(f"{name}={row.get(name)}" for name in shown))
+    typer.echo(f"{len(rows)} row{'s' if len(rows) != 1 else ''} ('slab mp show <id>')")
+
+
+@mp_app.command("show")
+def mp_show(
+    material_id: Annotated[str, typer.Argument(help="One material id, e.g. mp-149.")],
+    as_json: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    """Show one material's full metadata record and its CIF path."""
+    from slab.mp import get_material
+
+    try:
+        record = get_material(material_id)
+    except SlabError as e:
+        _fail(str(e))
+    if as_json:
+        typer.echo(json.dumps(record, indent=1, sort_keys=True, default=str))
+        return
+    for key in sorted(record):
+        value = record[key]
+        if key == "elements":
+            value = ", ".join(value)
+        typer.echo(f"{key}: {value}")
+
+
+def _filter_value(raw: str) -> object:
+    """One --filter value: 'null' is SQL NULL, numbers are numbers.
+
+    Examples:
+        >>> _filter_value("0.025")
+        0.025
+        >>> _filter_value("Fe2O3")
+        'Fe2O3'
+    """
+    if raw.lower() in {"null", "none"}:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+    try:
+        return float(raw)
+    except ValueError:
+        return raw
 
 
 if __name__ == "__main__":  # pragma: no cover - module execution convenience

@@ -28,6 +28,8 @@ def engines_overview(registry_path: str | os.PathLike[str] | None = None) -> dic
         >>> overview = engines_overview()
         >>> overview["builtin"]
         ['emt', 'lammps', 'lj', 'qe', 'rootstock']
+        >>> overview["mp"] is None
+        True
     """
     from slab.backends import available_engines
     from slab.engines import find_registry_path, load_registry
@@ -65,8 +67,38 @@ def engines_overview(registry_path: str | os.PathLike[str] | None = None) -> dic
     except SlabError as e:  # corrupt family: report, don't hide the engines
         overview["pseudo_families"] = []
         overview["pseudo_families_error"] = str(e)
+    overview["mp"] = _mp_overview()
     overview["hpc"] = _hpc_overview(overview)
     return overview
+
+
+def _mp_overview() -> dict[str, Any] | None:
+    """The offline Materials Project snapshot, or None when not configured.
+
+    A configured-but-broken snapshot returns a dict carrying ``error`` —
+    the overview must say the machine claims this data and cannot serve it,
+    not silently look like a machine that never had it.
+    """
+    from slab.config import ConfigError, config_value
+    from slab.errors import BuilderNotAvailableError
+    from slab.mp import snapshot_info
+
+    try:
+        info = snapshot_info()
+    except BuilderNotAvailableError:
+        return None
+    except ConfigError:
+        # A malformed slab.toml is reported once, by the [hpc] section
+        # (hpc_error); do not repeat it here.
+        return None
+    except SlabError as e:
+        root = config_value("builders.mp.root")
+        return {"root": None if root is None else str(root), "error": str(e)}
+    return {
+        "root": info["root"],
+        "release": info["release"],
+        "materials": info["materials"],
+    }
 
 
 def _hpc_overview(overview: dict[str, Any]) -> dict[str, Any] | None:

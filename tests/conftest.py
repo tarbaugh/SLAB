@@ -1,5 +1,6 @@
 import hashlib
 import json
+import sqlite3
 import threading
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -102,6 +103,167 @@ def make_family(
     family = PseudoFamily.model_validate({"name": name, "elements": elements})
     (directory / "family.json").write_text(json.dumps(family.model_dump(mode="json")))
     return family, directory
+
+
+#: The four bulk structures the miniature snapshot archives, with the metadata
+#: a real snapshot's materials table would carry for them. mp-22862 carries
+#: NULL band_gap / total_magnetization / ordering so tests can pin that NULL
+#: means "not populated", never zero.
+_MP_ROWS: tuple[tuple[Any, ...], ...] = (
+    ("mp-149", "Si", 1, 2, 0.0, 0.61, 1, 0, 0.0, "NM", "CC-BY-4.0", "cifs/00/mp-149.cif"),
+    ("mp-13", "Fe", 1, 1, 0.0, 0.0, 1, 1, 2.2, "FM", "CC-BY-4.0", "cifs/01/mp-13.cif"),
+    (
+        "mp-1271068",
+        "Fe",
+        1,
+        1,
+        0.081,
+        0.0,
+        0,
+        1,
+        2.6,
+        "FM",
+        "CC-BY-4.0",
+        "cifs/01/mp-1271068.cif",
+    ),
+    (
+        "mp-22862",
+        "NaCl",
+        2,
+        2,
+        0.0,
+        None,
+        1,
+        0,
+        None,
+        None,
+        "CC-BY-4.0",
+        "cifs/02/mp-22862.cif",
+    ),
+)
+
+_MP_COLUMNS = (
+    "material_id",
+    "formula_pretty",
+    "nelements",
+    "nsites",
+    "energy_above_hull",
+    "band_gap",
+    "is_stable",
+    "is_magnetic",
+    "total_magnetization",
+    "ordering",
+    "source_license",
+    "cif_path",
+)
+
+
+def _mp_atoms() -> dict[str, Any]:
+    from ase.build import bulk
+
+    return {
+        "mp-149": bulk("Si", "diamond", a=5.43),
+        "mp-13": bulk("Fe", "bcc", a=2.87),
+        "mp-1271068": bulk("Fe", "fcc", a=3.45),
+        "mp-22862": bulk("NaCl", "rocksalt", a=5.64),
+    }
+
+
+def build_mp_snapshot(
+    dest: Path,
+    *,
+    release: str | None = "2025.11.1",
+    manifest: bool = True,
+    extra_materials: tuple[dict[str, Any], ...] = (),
+) -> Path:
+    """Build a miniature but structurally real Materials Project snapshot.
+
+    Real CIFs written by ASE, the ``materials`` table with the columns
+    workflows filter on, the ``material_elements`` membership table, a
+    key/value ``dataset_info``, a ``units`` table, and ``manifest.json``.
+    *release* ``None`` omits the release everywhere (the fingerprint
+    fallback); *extra_materials* rows are inserted as given, with no CIF
+    written — how tests plant corrupt or incomplete records.
+    """
+    from ase.io import write as ase_write
+
+    dest.mkdir(parents=True, exist_ok=True)
+    atoms_by_id = _mp_atoms()
+    connection = sqlite3.connect(dest / "metadata.sqlite")
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE materials (
+                material_id TEXT PRIMARY KEY,
+                formula_pretty TEXT,
+                nelements INTEGER,
+                nsites INTEGER,
+                energy_above_hull REAL,
+                band_gap REAL,
+                is_stable INTEGER,
+                is_magnetic INTEGER,
+                total_magnetization REAL,
+                ordering TEXT,
+                source_license TEXT,
+                cif_path TEXT
+            );
+            CREATE TABLE material_elements (material_id TEXT, element TEXT);
+            CREATE INDEX ix_material_elements ON material_elements(element);
+            CREATE TABLE dataset_info (key TEXT, value TEXT);
+            CREATE TABLE units (field TEXT, unit TEXT, description TEXT);
+            """
+        )
+        placeholders = ", ".join("?" for _ in _MP_COLUMNS)
+        for row in _MP_ROWS:
+            connection.execute(f"INSERT INTO materials VALUES ({placeholders})", row)
+            record = dict(zip(_MP_COLUMNS, row, strict=True))
+            atoms = atoms_by_id[str(record["material_id"])]
+            cif = dest / str(record["cif_path"])
+            cif.parent.mkdir(parents=True, exist_ok=True)
+            ase_write(cif, atoms, format="cif")
+            for element in sorted(set(atoms.get_chemical_symbols())):
+                connection.execute(
+                    "INSERT INTO material_elements VALUES (?, ?)",
+                    (record["material_id"], element),
+                )
+        for extra in extra_materials:
+            values = [extra.get(column) for column in _MP_COLUMNS]
+            connection.execute(f"INSERT INTO materials VALUES ({placeholders})", values)
+        if release is not None:
+            connection.execute(
+                "INSERT INTO dataset_info VALUES (?, ?)", ("database_release", release)
+            )
+        connection.execute(
+            "INSERT INTO dataset_info VALUES (?, ?)",
+            ("build_timestamp", "2026-08-30T12:00:00Z"),
+        )
+        connection.executemany(
+            "INSERT INTO units VALUES (?, ?, ?)",
+            [
+                ("energy_above_hull", "eV/atom", "Energy above the convex hull"),
+                ("band_gap", "eV", "Band gap; NULL means not populated"),
+                ("total_magnetization", "muB", "Total magnetization per cell"),
+            ],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    if manifest:
+        payload: dict[str, Any] = {
+            "material_count": len(_MP_ROWS) + len(extra_materials),
+            "build_timestamp": "2026-08-30T12:00:00Z",
+            "license_labels": ["CC-BY-4.0"],
+        }
+        if release is not None:
+            payload["database_release"] = release
+        (dest / "manifest.json").write_text(json.dumps(payload, indent=1))
+    return dest
+
+
+@pytest.fixture()
+def mp_snapshot(tmp_path: Path) -> Path:
+    """A miniature real snapshot at ``<tmp>/mp-snapshot``."""
+    return build_mp_snapshot(tmp_path / "mp-snapshot")
 
 
 @pytest.fixture()

@@ -190,3 +190,84 @@ def test_engines_list_includes_protocols_and_families(
     make_family(tmp_path / "pseudos")
     populated = runner.invoke(app, ["engines", "list"])
     assert "pseudo families: SSSP/1.3.0/PBEsol/efficiency" in populated.output
+
+
+# -- the mp snapshot group ---------------------------------------------------------------
+
+
+def _configure_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    from conftest import build_mp_snapshot
+
+    root = build_mp_snapshot(tmp_path / "mp-snapshot")
+    (tmp_path / "slab.toml").write_text(f'[builders.mp]\nroot = "{root}"\n')
+    monkeypatch.chdir(tmp_path)
+    return root
+
+
+def test_mp_info_unconfigured_fails_with_the_fix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["mp", "info"])
+    assert result.exit_code == 1
+    assert "[builders.mp] root" in result.output
+
+
+def test_mp_info_reports_the_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _configure_snapshot(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["mp", "info"])
+    assert result.exit_code == 0
+    assert f"root: {root}" in result.output
+    assert "release: 2025.11.1" in result.output
+    assert "materials: 4" in result.output
+
+
+def test_mp_search_filters_and_shows_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure_snapshot(tmp_path, monkeypatch)
+    result = runner.invoke(
+        app,
+        ["mp", "search", "-e", "Fe", "-f", "energy_above_hull__lte=0.05"],
+    )
+    assert result.exit_code == 0
+    assert "material_id=mp-13" in result.output
+    assert "mp-1271068" not in result.output
+    as_json = runner.invoke(app, ["mp", "search", "-e", "Fe", "--json"])
+    ids = {row["material_id"] for row in json.loads(as_json.output)}
+    assert ids == {"mp-13", "mp-1271068"}
+
+
+def test_mp_search_refuses_a_malformed_filter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure_snapshot(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["mp", "search", "-f", "no-equals-sign"])
+    assert result.exit_code == 1
+    assert "key=value" in result.output
+
+
+def test_mp_show_renders_the_record_and_absence_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure_snapshot(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["mp", "show", "mp-22862"])
+    assert result.exit_code == 0
+    assert "formula_pretty: NaCl" in result.output
+    assert "elements: Cl, Na" in result.output
+    assert "cif_file: " in result.output
+    missing = runner.invoke(app, ["mp", "show", "mp-404"])
+    assert missing.exit_code == 1
+    assert "no online fallback" in missing.output
+
+
+def test_engines_list_names_the_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("SLAB_ENGINES", raising=False)
+    _configure_snapshot(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["engines", "list"])
+    assert result.exit_code == 0
+    assert "mp snapshot: release 2025.11.1, 4 materials ('slab mp info')" in result.output
