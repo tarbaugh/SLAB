@@ -575,6 +575,129 @@ def mason_read(
     )
 
 
+def _format_span(seconds: float | None) -> str:
+    if seconds is None:
+        return "unknown span"
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m{int(seconds % 60):02d}s"
+    return f"{int(seconds // 3600)}h{int(seconds % 3600 // 60):02d}m"
+
+
+def _offenders(counts: dict[str, int]) -> str:
+    return ", ".join(f"{name} x{n}" for name, n in list(counts.items())[:4])
+
+
+@app.command("report")
+def mason_report(
+    transcript: Annotated[
+        Path | None,
+        typer.Argument(
+            help="A session transcript (.jsonl); default: the newest conversation."
+        ),
+    ] = None,
+    workspace: _WorkspaceOpt = None,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit the digest as JSON.")
+    ] = False,
+) -> None:
+    """Digest one session: steps, tokens, tools, runs, friction, outcome.
+
+    The digest is arithmetic over the transcript; 'slab mason read' remains
+    the event-by-event viewer. Delegation transcripts roll into the totals,
+    and the runs the session created come from the workspace record.
+    """
+    import json
+
+    from foundation.runtime import Workspace
+    from mason.report import session_runs, summarize
+    from mason.session import transcript_groups
+
+    try:
+        root = _ops.resolve_root(workspace)
+    except (FoundationError, SlabError) as e:
+        _fail(str(e))
+    groups = transcript_groups(root)
+    if transcript is None:
+        if not groups:
+            _fail(f"no session transcripts under {root}")
+        transcript, siblings = groups[-1]
+    else:
+        if not transcript.is_file():
+            _fail(f"no transcript at {transcript}")
+        resolved = transcript.resolve()
+        siblings = next(
+            (group for conversation, group in groups if conversation.resolve() == resolved),
+            [],
+        )
+    summary = summarize(transcript, siblings)
+    try:
+        with Workspace(root) as ws:
+            summary["runs"] = session_runs(ws, str(summary["session"]))
+    except (FoundationError, SlabError, OSError):
+        summary["runs"] = None  # no workspace record is not a report failure
+
+    if as_json:
+        typer.echo(json.dumps(summary, indent=2))
+        return
+
+    tokens = f"{summary['total_prompt_tokens']}+{summary['total_completion_tokens']}"
+    typer.echo(
+        f"session {summary['session']} — {summary['total_steps']} step(s), "
+        f"tokens {tokens}, {_format_span(summary['span_s'])}"
+    )
+    typer.echo(f"  transcript {summary['transcript']}")
+    for child in summary["delegations"]:
+        typer.echo(
+            f"  delegation {child['agent']}: {child['steps']} step(s), "
+            f"tokens {child['prompt_tokens']}+{child['completion_tokens']}"
+        )
+    runs = summary["runs"]
+    if runs is None:
+        typer.echo("runs: workspace record unavailable")
+    elif runs:
+        typer.echo("runs this session created:")
+        for run in runs:
+            typer.echo(
+                f"  {run['id'][:10]:<12} {run['name'][:24]:<24} "
+                f"{run['state']:<12} {run['status']}"
+            )
+    else:
+        typer.echo("runs this session created: none")
+    tools = summary["tools"]
+    if tools:
+        typer.echo(f"tool calls ({sum(tools.values())}):")
+        for name, count in tools.items():
+            typer.echo(f"  {name:<22} {count}")
+    if summary["refusals"]:
+        typer.echo(
+            f"refusals: {summary['refusals']} ({_offenders(summary['refused_tools'])})"
+        )
+    if summary["errored_calls"]:
+        typer.echo(
+            f"errored calls: {summary['errored_calls']} "
+            f"({_offenders(summary['errored_tools'])})"
+        )
+    typer.echo(f"memory: {summary['recall']} recall, {summary['remember']} remember")
+    if summary["skills"]:
+        typer.echo(f"skills loaded: {', '.join(summary['skills'])}")
+    if summary["compactions"] or summary["resumes"]:
+        typer.echo(
+            f"compactions: {summary['compactions']}; resumes: {summary['resumes']}"
+        )
+    if summary["malformed_lines"]:
+        typer.echo(f"malformed lines skipped: {summary['malformed_lines']}")
+    if summary["first_launch_step"] is not None:
+        typer.echo(f"first launch at step {summary['first_launch_step']}")
+    finish = summary["finish"]
+    if finish["reported"]:
+        head = f": {finish['head']}" if finish["head"] else ""
+        typer.echo(f"finish reported{head}")
+    else:
+        typer.echo("no finish report (halted, interrupted, or still running)")
+
+
 sandbox_app = typer.Typer(
     help=(
         "The no-network container for autonomous runs: preflight the host, "

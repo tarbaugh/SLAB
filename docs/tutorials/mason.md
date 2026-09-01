@@ -515,6 +515,44 @@ install automatically; the render warns when a hand-written command uses
 profile, the rendered config pins `compute_profile = "workstation"` — the
 honest size for one owned node — unless your own config sets a profile.
 
+## Reading a campaign afterwards
+
+A finished campaign leaves a transcript with more steps than you want to
+read. `slab mason report` digests it: steps and tokens (delegations
+included), the runs the session created, a tool-call histogram, the
+friction (refused and errored calls), memory use, and the outcome. No
+model is involved. The digest is arithmetic over the event stream, and it
+works on a transcript a job is still writing.
+
+Without an argument, the command reports the newest conversation in the
+workspace. `--json` emits the same digest for scripts or for pasting into
+an analysis chat instead of the raw transcript.
+
+```console
+$ slab mason report -w .slab
+session 20260831-091200-41 — 6 step(s), tokens 72600+1730, 3m03s
+  transcript .slab/mason/sessions/20260831-091200-41.jsonl
+runs this session created:
+  01m1day70n   eos-nb                   quarantined  completed
+tool calls (5):
+  list_engines           1
+  recall                 1
+  read_file              1
+  launch_workflow        1
+  remember               1
+refusals: 1 (read_file x1)
+memory: 1 recall, 1 remember
+skills loaded: equation-of-state
+first launch at step 4
+finish reported: a0 = 3.31 A for bcc Nb (birch fit over 7 volumes, MLIP-level)
+```
+
+Two lines carry most of the signal. `first launch at step N` is how long
+the session prepared before it computed. The refusal and error counts say
+where the harness pushed back; a tool that shows up there repeatedly is a
+friction report addressed to you. For the event-by-event view, use
+`slab mason read`; the report says where to look, the viewer shows it.
+
 ## Memory that outlives the context window
 
 Long projects die of context, not of model quality. Models degrade well
