@@ -40,32 +40,38 @@ chemistry.
 | # | Instruction to the agent | Reference (DFT-PBE) | Experiment | Tolerance | Skill exercised |
 | --- | --- | --- | --- | --- | --- |
 | 1 | "Determine the equilibrium lattice constant of fcc Cu from an equation of state." | 3.63 Å | 3.615 Å | ±0.03 Å (DFT), ±0.05 Å (MLIP or EMT) | equation-of-state |
-| 2 | "Compute the Cu(111) surface energy." | 1.3 J/m² | 1.79 J/m² (polycrystalline average) | ±0.2 J/m² (DFT), ±0.4 J/m² (MLIP or EMT) | surface-energy |
-| 3 | "Compute the monovacancy formation energy in fcc Cu." | 1.1 eV | 1.28 eV | ±0.15 eV (DFT), ±0.3 eV (MLIP or EMT) | atomsk-defects, convergence-study |
+| 2 | "Compute the Cu(111) surface energy." | 1.33 J/m² | 1.83 J/m² (polycrystalline average) | ±0.2 J/m² (DFT), ±0.4 J/m² (MLIP or EMT) | surface-energy |
+| 3 | "Compute the monovacancy formation energy in fcc Cu." | 1.07 eV | 1.29 ± 0.02 eV | ±0.15 eV (DFT), ±0.3 eV (MLIP or EMT) | atomsk-defects, convergence-study |
 | 4 | "Estimate the melting point of Cu with the two-phase method under the served MLIP." | none: the reference is the engine's own two-phase result | 1358 K | ±100 K against experiment for an MLIP, reported with the caveat that classical potentials and EMT miss by more | two-phase-melting, melt-quench |
 | 5 | "Fine-tune a GRACE potential on DFT labels for strained fcc Cu and validate it against held-out DFT single points." | none: the validation set is the reference | none | energy RMSE ≤ 5 meV/atom and force RMSE ≤ 0.1 eV/Å on the held-out set | mlip-training |
 
 Reference values and their sources:
 
 - Lattice constant. Experiment 3.615 Å at room temperature (Kittel,
-  *Introduction to Solid State Physics*, 8th ed., Table 4). PBE 3.63 Å
-  (Haas, Tran, and Blaha, *Phys. Rev. B* 79, 085104 (2009), Table I).
-- Surface energy. Experiment 1.79 J/m² for the polycrystalline average
-  (Tyson and Miller, *Surf. Sci.* 62, 267 (1977)). PBE Cu(111) 1.3 J/m²
-  (Tran et al., *Sci. Data* 3, 160080 (2016), the Materials Project
-  surface-energy set).
-- Vacancy formation energy. Experiment 1.28 eV from positron annihilation
-  (Landolt-Börnstein, Group III, Vol. 25, "Atomic defects in metals").
-  PBE 1.1 eV with relaxation (Mattsson and Mattsson, *Phys. Rev. B* 66,
-  214110 (2002), Table II).
-- Melting point. Experiment 1357.77 K (*CRC Handbook of Chemistry and
-  Physics*, "Properties of the elements").
+  *Introduction to Solid State Physics*, 8th ed., Table 4, lists 3.61 Å;
+  the zero-point-corrected value is 3.603 Å). PBE 3.632 Å (Haas, Tran,
+  and Blaha, *Phys. Rev. B* 79, 085104 (2009), Table I).
+- Surface energy. Experiment 1.83 J/m² for the polycrystalline average
+  (de Boer et al., *Cohesion in Metals* (1988), as tabulated in Patra et
+  al., *Proc. Natl. Acad. Sci.* 114, E9188 (2017), Table I; Tyson and
+  Miller, *Surf. Sci.* 62, 267 (1977) is the other standard
+  compilation). PBE Cu(111) 1.33 J/m² (Patra et al. 2017, Table II).
+  Facet-resolved experimental values do not exist, so the reference is
+  the PBE facet value and experiment is the average.
+- Vacancy formation energy. Experiment 1.29 ± 0.02 eV from positron
+  annihilation (Triftshäuser and McGervey, *Appl. Phys.* 6, 177 (1975)).
+  PBE 1.07 eV with relaxation (Angsten et al., *New J. Phys.* 16, 015018
+  (2014), Table A.1).
+- Melting point. Experiment 1357.77 K, 1084.62 °C (NIST Chemistry
+  WebBook; *CRC Handbook of Chemistry and Physics*, "Properties of the
+  elements").
 - Fine-tuned potential. The held-out DFT set is generated in the
   campaign itself, so the reference is internal to the run record.
 
-Confirm each value against the cited source before the first scored
-campaign, and record the confirmation in this page. A reference nobody
-has checked is not a reference.
+Confirmation record: every value above was checked against its cited
+source on 2026-09-01 (the PNAS values from the arXiv 1702.08515 text;
+the NJP value from the published Table A.1). A reference nobody has
+checked is not a reference, so re-check before changing a value.
 
 ## What a campaign must leave behind
 
