@@ -38,6 +38,10 @@ def test_selection_follows_the_config_tables() -> None:
     assert "rootstock" in enabled_notes(served)
     snapshot = SlabConfig.model_validate({"builders": {"mp": {"root": "/data/mp"}}})
     assert enabled_notes(snapshot) == ("rootstock", "emt", "lj", "mp")
+    trainer = SlabConfig.model_validate(
+        {"builders": {"gracemaker": {"setup": ["module load cuda"]}}}
+    )
+    assert enabled_notes(trainer) == ("rootstock", "emt", "lj", "gracemaker")
 
 
 def test_a_user_note_replaces_the_packaged_one(

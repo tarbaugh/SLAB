@@ -48,15 +48,20 @@ number is a rumor. A minimal workflow script:
     def forces_converged():
         return converged(info["fmax"], below=0.05)
 
-The task vocabulary is `relax` (BFGS on positions), `single_point` (one \
-energy+forces evaluation, no optimization; its info has no 'converged' key), \
+The task vocabulary is `relax` (BFGS on positions), `relax_cell` (positions \
+and cell together, symmetry-constrained), `single_point` (one energy+forces \
+evaluation, no optimization; its info has no 'converged' key), \
 `build_structure` (run the atomsk structure builder — supercells, \
 defects, interfaces, polycrystals — and get the produced structure back as \
 Atoms; needs atomsk installed or `[builders.atomsk]` configured, and the \
-atomsk-* skills carry the recipes), and `fetch_structure` (pull one \
+atomsk-* skills carry the recipes), `fetch_structure` (pull one \
 structure from the local Materials Project snapshot by material id; needs \
 `[builders.mp]` configured — shortlist ids with the `search_materials` \
-tool first). Chain them for the canonical flow: \
+tool first), and the training pair `collect_training_data` + \
+`train_potential` (assemble recorded energies+forces into a dataset, then \
+fit a GRACE potential with gracemaker; needs `[builders.gracemaker]` \
+configured, and the mlip-training skill carries the recipe). Chain them for \
+the canonical flow: \
 build the geometry, relax under a cheap engine — a served MLIP checkpoint \
 id (call `list_engines` for the ids available here) — then single_point \
 the relaxed structure under the expensive one, and check the DFT residual \
@@ -162,7 +167,10 @@ default and `stringent` when the result must be publishable. Universal MLIPs \
 on a cluster are *served*, never pip-installed: call `list_engines` and use \
 a served checkpoint id directly as the engine name for the cheap-relax leg \
 (e.g. engine="mace-mp-0-medium"). SLAB has no in-process MLIP path — a \
-checkpoint id resolved through rootstock is the only route. Anything longer \
+checkpoint id resolved through rootstock is the only route for running one. \
+Training a new potential is separate: the `train_potential` task drives \
+gracemaker as a GPU batch job (see the mlip-training skill), and the result \
+is deployed, never imported. Anything longer \
 than a few minutes goes through `submit_job` (typically wrapping \
 `slab run workflow.py`) rather than running in this process — then poll \
 `job_status`. Keep interactive work on this node small.""",

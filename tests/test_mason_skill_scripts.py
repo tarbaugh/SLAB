@@ -264,11 +264,13 @@ def test_every_builtin_skill_validates_and_maps_to_its_specialists(tmp_path: Pat
     assert skills["interface-adhesion"].agents == frozenset({"dft-expert", "analysis-expert"})
     assert skills["melt-quench"].agents == frozenset({"md-expert"})
     assert skills["two-phase-melting"].agents == frozenset({"md-expert"})
+    assert skills["mlip-training"].agents == frozenset({"dft-expert", "md-expert"})
     for analysis in ("thermal-response", "kinetic-fits", "nemd-transport", "nucleation-cnt"):
         assert skills[analysis].agents == frozenset({"md-expert", "analysis-expert"})
     # The scriptless skills are deliberate: scripts are optional in the format.
     assert not (skills["surface-energy"].root / "scripts").exists()
     assert not (skills["two-phase-melting"].root / "scripts").exists()
+    assert not (skills["mlip-training"].root / "scripts").exists()
 
 
 # -- fit_rates ----------------------------------------------------------------

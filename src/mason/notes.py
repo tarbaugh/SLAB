@@ -7,13 +7,14 @@ mistakes each one invites. These notes put that knowledge in the system
 prompt up front, so the reasoning starts from the answer instead of the
 search.
 
-Selection follows the configuration. A note ships for each built-in engine
-and for the ``mp`` data snapshot; the always-available ones (``emt``, ``lj``,
-``rootstock``) load unconditionally, and ``qe``, ``lammps``, and ``mp`` load
-when ``slab.toml`` configures their table (``[engines.<name>]``, or
-``[builders.mp]`` for the snapshot) — configuring the table is what enables
-the resource on a machine, so it is also what enables its note. ``[agent]
-software_notes = false`` turns the whole block off.
+Selection follows the configuration. A note ships for each built-in engine,
+for the ``mp`` data snapshot, and for the ``gracemaker`` trainer; the
+always-available ones (``emt``, ``lj``, ``rootstock``) load unconditionally,
+and ``qe``, ``lammps``, ``mp``, and ``gracemaker`` load when ``slab.toml``
+configures their table (``[engines.<name>]``, or ``[builders.<name>]``) —
+configuring the table is what enables the resource on a machine, so it is
+also what enables its note. ``[agent] software_notes = false`` turns the
+whole block off.
 
 A user with local tweaks to their software can replace any note: a file at
 ``~/.config/slab/notes/<name>.md`` (``$XDG_CONFIG_HOME`` honored) wins over
@@ -30,8 +31,9 @@ from pathlib import Path
 from slab.config import SlabConfig, user_config_path
 
 #: Prompt order: the engines the agent reaches for first come first; the
-#: mp data snapshot follows the engines because it feeds them structures.
-_CANONICAL = ("rootstock", "qe", "lammps", "emt", "lj", "mp")
+#: mp data snapshot follows the engines because it feeds them structures,
+#: and the gracemaker trainer comes last because training is the rarest move.
+_CANONICAL = ("rootstock", "qe", "lammps", "emt", "lj", "mp", "gracemaker")
 
 #: Notes that load regardless of configuration. ``emt`` and ``lj`` are ASE
 #: built-ins that need no table. ``rootstock`` is here because it is the only
@@ -60,6 +62,11 @@ def enabled_notes(config: SlabConfig) -> tuple[str, ...]:
         >>> cfg = SlabConfig.model_validate({"builders": {"mp": {"root": "/data/mp"}}})
         >>> enabled_notes(cfg)
         ('rootstock', 'emt', 'lj', 'mp')
+        >>> cfg = SlabConfig.model_validate(
+        ...     {"builders": {"gracemaker": {"command": "gracemaker"}}}
+        ... )
+        >>> enabled_notes(cfg)
+        ('rootstock', 'emt', 'lj', 'gracemaker')
     """
     names = []
     for name in _CANONICAL:
@@ -76,6 +83,8 @@ def _sub_model(config: SlabConfig, name: str) -> object:
     """The config sub-model whose non-default state enables note *name*."""
     if name == "mp":
         return config.builders.mp
+    if name == "gracemaker":
+        return config.builders.gracemaker
     return getattr(config.engines, name)
 
 

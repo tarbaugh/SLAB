@@ -1073,7 +1073,8 @@ def _add_engine_tools(box: Toolbox, session: MasonSession) -> None:
                 "What can be computed here: engines, QE protocols, pseudopotential "
                 "families, HPC partitions. Call this BEFORE choosing an engine — "
                 "there is no in-process MLIP fallback, so the available checkpoint "
-                "ids are the entire MLIP surface on this machine."
+                "ids are the entire runnable-MLIP surface on this machine "
+                "(training a new one is the train_potential task, not an engine)."
             ),
             parameters=_schema({}, []),
             handler=list_engines,

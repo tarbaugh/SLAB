@@ -216,6 +216,7 @@ def test_builtin_cards_and_skills_ship_inside_the_package() -> None:
         "interface-adhesion",
         "kinetic-fits",
         "melt-quench",
+        "mlip-training",
         "mp-screening",
         "msd-diffusion",
         "nemd-transport",
