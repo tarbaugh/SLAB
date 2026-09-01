@@ -565,7 +565,7 @@ def test_resolve_session_exact_prefix_and_failures(store: SQLiteRunStore) -> Non
     assert store.resolve_session("20260828") == "20260828-013504-48123"
     with pytest.raises(AmbiguousSessionError, match="ambiguous"):
         store.resolve_session("2026")
-    with pytest.raises(SessionNotFoundError, match="foundation sessions"):
+    with pytest.raises(SessionNotFoundError, match="slab sessions"):
         store.resolve_session("nope")
     with pytest.raises(ValueError, match="non-empty"):
         store.resolve_session("")

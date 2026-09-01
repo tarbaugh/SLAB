@@ -202,7 +202,8 @@ def pseudos_verify(
 
 
 hpc_app = typer.Typer(
-    help="SLURM plumbing driven by the [hpc] section of the slab config.",
+    # Plain 'hpc', not '[hpc]': rich would swallow the brackets as markup.
+    help="SLURM plumbing driven by the hpc section of the slab config.",
     no_args_is_help=True,
 )
 app.add_typer(hpc_app, name="hpc")
@@ -242,7 +243,7 @@ def hpc_partitions() -> None:
 @hpc_app.command("render")
 def hpc_render(
     command: Annotated[
-        str, typer.Argument(help="Command the job runs, e.g. 'foundation run relax.py'.")
+        str, typer.Argument(help="Command the job runs, e.g. 'slab run relax.py'.")
     ],
     name: Annotated[str, typer.Option("--name", "-n", help="Job name.")] = "slab-job",
     partition: Annotated[
@@ -265,7 +266,7 @@ def hpc_render(
 @hpc_app.command("submit")
 def hpc_submit(
     command: Annotated[
-        str, typer.Argument(help="Command the job runs, e.g. 'foundation run relax.py'.")
+        str, typer.Argument(help="Command the job runs, e.g. 'slab run relax.py'.")
     ],
     name: Annotated[str, typer.Option("--name", "-n", help="Job name.")] = "slab-job",
     partition: Annotated[

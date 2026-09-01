@@ -44,9 +44,6 @@ Source = "https://github.com/tarbaugh/SLAB"
 
 [project.scripts]
 slab = "slab_stack.cli:app"
-foundation = "foundation.cli:app"
-mason = "mason.cli:app"
-slab-stack = "slab_stack.cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/slab", "src/foundation", "src/mason", "src/slab_stack"]

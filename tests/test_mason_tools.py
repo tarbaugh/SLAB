@@ -322,7 +322,7 @@ def test_list_runs_filters_by_session_id(tmp_path: Path) -> None:
     # An unknown id raises loudly through the tool — the store's
     # SessionNotFoundError surfaces with the recovery hint intact.
     missing = box.dispatch(_call("list_runs", session="unknown-session-id"))
-    assert "unknown-session-id" in missing and "foundation sessions" in missing
+    assert "unknown-session-id" in missing and "slab sessions" in missing
 
 
 def test_launch_workflow_failure_carries_the_record(box: Toolbox, tmp_path: Path) -> None:

@@ -2,14 +2,14 @@
 
 ``--auto`` removes the approval gate, so the boundary for an unattended run
 must come from the operating system, not from the harness. The shape this
-module renders: one batch job that runs ``mason run --auto`` inside an
+module renders: one batch job that runs ``slab mason run --auto`` inside an
 Apptainer container with an empty network namespace (``--net --network
 none``), no home directory, a clean environment, and file access limited to
 explicit bind mounts. The model stays reachable through exactly one path — a
 unix socket, bridged on the host side to the recorded serve endpoint by
 :func:`bridge` with a fixed destination — so the agent's shell can reach
 the model and nothing else. Both halves of the bridge are stdlib Python
-run by the ``mason`` script itself, so the host needs no relay tool.
+run by the ``slab`` script itself, so the host needs no relay tool.
 
 Everything machine-specific derives from the loaded configuration: the
 workspace from ``[workspace]``, the pseudopotential and scratch roots from
@@ -752,7 +752,7 @@ def verify(
     raise SandboxError(
         f"the bridged endpoint at 127.0.0.1:{port} did not answer within "
         f"{ready_timeout_s:.0f}s (last error: {last}). Did the host-side "
-        f"'mason sandbox bridge' start, and is its upstream answering?"
+        f"'slab mason sandbox bridge' start, and is its upstream answering?"
     )
 
 
@@ -832,7 +832,7 @@ def preflight(agent: AgentConfig, workspace_root: str | os.PathLike[str]) -> lis
                 "?",
                 f"no serve record at {record_path(workspace_root)}; the rendered "
                 f"job reads the endpoint from it at start, so the server must be "
-                f"up by then ('mason serve start')",
+                f"up by then ('slab mason serve start')",
             )
         )
     else:
@@ -1168,12 +1168,12 @@ def _python() -> str:
     return sys.executable
 
 
-def _mason_bin() -> Path:
-    """The mason console script next to the running interpreter."""
-    candidate = Path(sys.executable).parent / "mason"
+def _slab_bin() -> Path:
+    """The slab console script next to the running interpreter."""
+    candidate = Path(sys.executable).parent / "slab"
     if not candidate.is_file():
         raise SandboxError(
-            f"no mason console script next to {sys.executable}; render from the "
+            f"no slab console script next to {sys.executable}; render from the "
             f"environment SLAB is installed in, since the job binds and reuses it"
         )
     return candidate
@@ -1330,7 +1330,7 @@ def sandbox_toml(
     # The sandbox owns one real node: workstation is the honest size.
     agent_table.setdefault("compute_profile", "workstation")
     out = [
-        "# Rendered by 'mason sandbox render'. The scheduler table is deliberately",
+        "# Rendered by 'slab mason sandbox render'. The scheduler table is deliberately",
         "# absent: the sandbox has no route to the controller, so the scheduler",
         "# tools must not exist. Review before submitting.",
         "",
@@ -1374,7 +1374,7 @@ def _upstream_lines(agent: AgentConfig, workspace_root: Path) -> list[str]:
     return [
         f"RECORD={shlex.quote(str(record))}",
         '[ -f "$RECORD" ] || { echo "no serve record at $RECORD;'
-        " start the model server first ('mason serve start')\" >&2; exit 1; }",
+        " start the model server first ('slab mason serve start')\" >&2; exit 1; }",
         f'UPSTREAM=$({shlex.quote(_python())} -c {shlex.quote(_UPSTREAM_SNIPPET)} "$RECORD")',
     ]
 
@@ -1471,8 +1471,8 @@ def render_sandbox_script(
     Host side: settle the upstream (a configured ``[agent] endpoint``, else
     the serve record's), and bridge it onto a unix socket with one fixed
     destination. Container side: forward the socket to loopback, prove
-    darkness and reachability with ``mason sandbox verify`` (either failing
-    aborts the job), then run the goal with ``mason run --auto``.
+    darkness and reachability with ``slab mason sandbox verify`` (either failing
+    aborts the job), then run the goal with ``slab mason run --auto``.
 
     A gateway upstream authenticates with the key named by ``[agent]
     api_key_env``, read on the host at job start. The container is launched
@@ -1499,7 +1499,7 @@ def render_sandbox_script(
         memories.mkdir(parents=True, exist_ok=True)
         binds.append(f"{memories}:{memories}:rw")
     binds = _collapse_binds(binds)
-    mason = _mason_bin()
+    slab = _slab_bin()
 
     # GPU passthrough derives from the target partition: a gres that names
     # gpus means the job will hold one, and --nv mounts the host's driver
@@ -1519,7 +1519,7 @@ def render_sandbox_script(
         'the compute nodes mount" >&2; exit 1; }',
         *_upstream_lines(agent, workspace_root),
         'BRIDGE="$(mktemp -d)/llm.sock"',
-        f'{mason} sandbox bridge "$BRIDGE" "$UPSTREAM"'
+        f'{slab} mason sandbox bridge "$BRIDGE" "$UPSTREAM"'
         f"{_key_flag(agent)}{_header_flags(agent)} &",
         "BRIDGE_PID=$!",
         "trap 'kill \"$BRIDGE_PID\" 2>/dev/null || true' EXIT",
@@ -1528,12 +1528,12 @@ def render_sandbox_script(
 
     inner = "\n".join(
         [
-            f"{mason} sandbox forward {_SOCKET_IN_CONTAINER} --port {BRIDGE_PORT} &",
+            f"{slab} mason sandbox forward {_SOCKET_IN_CONTAINER} --port {BRIDGE_PORT} &",
             "FORWARD_PID=$!",
             "trap 'kill \"$FORWARD_PID\" 2>/dev/null || true' EXIT",
-            f"{mason} sandbox verify --port {BRIDGE_PORT}",
+            f"{slab} mason sandbox verify --port {BRIDGE_PORT}",
             f"cd {shlex.quote(str(project))}",
-            f"{mason} run --auto --endpoint http://127.0.0.1:{BRIDGE_PORT}/v1 "
+            f"{slab} mason run --auto --endpoint http://127.0.0.1:{BRIDGE_PORT}/v1 "
             f"{shlex.quote(goal)}",
         ]
     )

@@ -6,7 +6,7 @@ the code the CLI runs — returning structured dicts instead of formatted text.
 The one exception is ``list_engines``, which reports what SLAB can compute and
 so wraps :func:`slab._ops.engines_overview`.
 
-Start it with ``foundation mcp`` (or configure your agent to do so):
+Start it with ``slab mcp`` (or configure your agent to do so):
 
 .. code-block:: json
 

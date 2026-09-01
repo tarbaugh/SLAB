@@ -45,7 +45,7 @@ from slab.hpc import SubmittedJob, job_state, render_sbatch, submit
 RECORD_NAME = "endpoint.json"
 _DEFAULT_POLL_S = 10.0
 # A model name reaches a shell command, a JSON heredoc, and the served-model
-# check in 'mason doctor' — so it must survive all three as *one* string,
+# check in 'slab mason doctor' — so it must survive all three as *one* string,
 # untransformed. Hugging Face ids and absolute paths fit; anything stranger is
 # refused rather than quoted-and-hoped-for (an explicit command is the escape).
 # '~' is excluded deliberately: expanding it would make the name the server
@@ -105,7 +105,7 @@ def read_record(workspace_root: str | os.PathLike[str]) -> ServeRecord | None:
     except (OSError, json.JSONDecodeError) as e:
         raise ServeError(
             f"{path} exists but is not readable JSON ({e}); the server job may be "
-            f"mid-write — retry, or remove it with 'mason serve stop'"
+            f"mid-write — retry, or remove it with 'slab mason serve stop'"
         ) from e
     try:
         return ServeRecord.model_validate(raw)
@@ -231,7 +231,7 @@ def start(
         raise ServeError(
             f"a server is already recorded at {record_path(workspace_root)} "
             f"({existing.model} on {existing.node or 'an unnamed node'}, "
-            f"job {existing.job_id or 'unknown'}); stop it with 'mason serve stop' "
+            f"job {existing.job_id or 'unknown'}); stop it with 'slab mason serve stop' "
             f"before starting another (two servers would overwrite each other's record)"
         )
     resolved, _spec = hpc.resolve_partition(partition or agent.serve.partition)
@@ -273,7 +273,7 @@ def stop(workspace_root: str | os.PathLike[str], *, cluster: str = "") -> str:
             f"the recorded server belongs to cluster {record.cluster!r}, but this "
             f"config names {named} — job ids are per-cluster, so cancelling job "
             f"{record.job_id} from here could kill an unrelated job. Run "
-            f"'mason serve stop' under a config with [hpc] cluster = "
+            f"'slab mason serve stop' under a config with [hpc] cluster = "
             f"{record.cluster!r} (on that cluster) to confirm"
         )
     # Cancel first: if cancellation fails, the record must survive, or the next
@@ -317,7 +317,7 @@ def wait_until_ready(
             raise ServeError(
                 f"{endpoint} did not answer within {timeout_s:.0f}s. A large model can "
                 f"take that long to load, but so can a job that never started: check "
-                f"'mason serve status' and the job's output file"
+                f"'slab mason serve status' and the job's output file"
             )
         sleep(min(poll_s, remaining))
 
@@ -354,7 +354,7 @@ def wait_for_record(
         if remaining <= 0:
             raise ServeError(
                 f"job {job_id} is {status.state.value} but has announced no endpoint "
-                f"after {timeout_s:.0f}s; check 'mason serve status'"
+                f"after {timeout_s:.0f}s; check 'slab mason serve status'"
             )
         sleep(min(poll_s, remaining))
 
@@ -487,7 +487,7 @@ def _server_preflight(serve: ServeConfig) -> list[str]:
         return []
     return [
         "command -v vllm >/dev/null 2>&1 || { "
-        "echo \"mason serve: 'vllm' not found after setup — do the "
+        "echo \"slab mason serve: 'vllm' not found after setup — do the "
         '[agent.serve] setup lines activate the vLLM venv?" >&2; exit 1; }',
     ]
 
@@ -495,7 +495,7 @@ def _server_preflight(serve: ServeConfig) -> list[str]:
 def _announce(model: str, record: Path, port: int, *, cluster: str = "") -> Iterable[str]:
     """Shell that writes this node's endpoint down, and cleans up after itself."""
     return [
-        "# --- mason serve: announce this node's endpoint, then run the server ---",
+        "# --- slab mason serve: announce this node's endpoint, then run the server ---",
         f'port={port}',
         f'model={shlex.quote(model)}',
         f'cluster={shlex.quote(cluster)}',
@@ -510,6 +510,6 @@ def _announce(model: str, record: Path, port: int, *, cluster: str = "") -> Iter
         "SLAB_ENDPOINT_RECORD",
         # A record outliving its server would point the agent at a dead node.
         "trap 'rm -f \"$record\"' EXIT",
-        'echo "mason serve: http://$host:$port/v1"',
+        'echo "slab mason serve: http://$host:$port/v1"',
         "",
     ]

@@ -112,7 +112,7 @@ def fast_forward(
     """Move every unpromoted run to expired, now.
 
     Promote what you intend to keep first; everything else becomes
-    eligible for 'slab-stack purge'. A state change only — nothing is
+    eligible for 'slab purge'. A state change only — nothing is
     deleted until purge.
     """
     try:
@@ -163,7 +163,7 @@ def purge(
         typer.Option(
             "--all-sessions",
             help="Also delete the newest conversation transcript (kept by "
-            "default so 'mason chat --resume' still works).",
+            "default so 'slab mason chat --resume' still works).",
         ),
     ] = False,
 ) -> None:
@@ -180,7 +180,7 @@ def purge(
     The machine's memory is not touched. This command clears project state
     that was never promoted; a memory is durable machine state that no
     project owns, so it is forgotten one at a time and on purpose, with
-    'slab-stack memory forget'.
+    'slab memory forget'.
     """
     try:
         root = _ops.resolve_root(workspace)

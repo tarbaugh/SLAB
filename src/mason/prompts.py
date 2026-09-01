@@ -77,7 +77,7 @@ change it. Never repeat a failed action unchanged. After two failed \
 corrections of the same step, stop and present the evidence to the user.
 
 Long jobs belong to the scheduler. Anything beyond a few minutes goes through \
-submit_job (typically wrapping 'foundation run workflow.py'), then poll job_status. \
+submit_job (typically wrapping 'slab run workflow.py'), then poll job_status. \
 Do not busy-wait: after submitting, tell the user what was submitted and \
 either poll at sensible moments or end your turn.
 
@@ -161,7 +161,7 @@ a served checkpoint id directly as the engine name for the cheap-relax leg \
 (e.g. engine="mace-mp-0-medium"). SLAB has no in-process MLIP path — a \
 checkpoint id resolved through rootstock is the only route. Anything longer \
 than a few minutes goes through `submit_job` (typically wrapping \
-`foundation run workflow.py`) rather than running in this process — then poll \
+`slab run workflow.py`) rather than running in this process — then poll \
 `job_status`. Keep interactive work on this node small.""",
 }
 

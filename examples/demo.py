@@ -8,15 +8,15 @@ decision happens *after* the results exist, from the CLI:
     python examples/demo.py                               # EMT + Cu, no extras, seconds
     python examples/demo.py --engine mace-mp-0-medium     # served MLIP via rootstock; add --cluster
 
-    foundation list
-    foundation show <best-run-id>
-    foundation promote <best-run-id> --reason "lowest energy of 5 variants"
+    slab list
+    slab show <best-run-id>
+    slab promote <best-run-id> --reason "lowest energy of 5 variants"
     foundation expire --older-than 0d
     foundation gc
-    foundation list --state expired               # hash-only skeletons remain queryable
+    slab list --state expired                     # hash-only skeletons remain queryable
 
 This script manages its own runs (five of them), so it is executed with plain
-``python``, not ``foundation run`` — SLAB is a library first.
+``python``, not ``slab run`` — SLAB is a library first.
 """
 
 from __future__ import annotations
@@ -113,7 +113,7 @@ def main() -> None:
     print()
     print(f"lowest energy: run {best_id[:10]}  (E = {best_info['energy']:.6f} eV)")
     print("decide what deserves permanence, then clean up:")
-    print(f"  foundation promote {best_id[:10]} --reason 'lowest energy of 5 variants'")
+    print(f"  slab promote {best_id[:10]} --reason 'lowest energy of 5 variants'")
     print("  foundation expire --older-than 0d")
     print("  foundation gc")
 

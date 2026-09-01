@@ -337,7 +337,7 @@ def _scope_root(session: MasonSession, root: Path) -> Path:
 
 
 def _installed_package_roots(session: MasonSession) -> tuple[Path, ...]:
-    """The four slab-stack package roots, resolved to their on-disk locations.
+    """The roots of the four packages in the slab-stack distribution.
 
     Adds read-only reach into the harness's own source so ``read_file`` can
     answer questions the vocabulary alone cannot — 'does foundation.tasks
@@ -782,7 +782,7 @@ def _add_workflow_tools(
             description=(
                 "List SLAB runs in this workspace, newest first. Pass "
                 "'session' (full id or a unique prefix) to see only runs "
-                "this chat's session created — the same filter 'foundation "
+                "this chat's session created — the same filter 'slab "
                 "list --session' takes."
             ),
             parameters=_schema(
@@ -1014,7 +1014,7 @@ def _add_hpc_tools(box: Toolbox, session: MasonSession) -> None:
         command = str(arguments["command"])
         partition, _spec = session.hpc.resolve_partition(arguments.get("partition"))
         # Scripts and SLURM .out files live under the workspace so
-        # 'slab-stack purge' can sweep them; the prologue cd keeps the
+        # 'slab purge' can sweep them; the prologue cd keeps the
         # payload running in the project directory as before (the .out is
         # opened before the cd, so it stays in jobs/).
         script = render_sbatch(
@@ -1043,7 +1043,7 @@ def _add_hpc_tools(box: Toolbox, session: MasonSession) -> None:
         Tool(
             name="submit_job",
             description=(
-                "Submit a command as a SLURM batch job (typically 'foundation run "
+                "Submit a command as a SLURM batch job (typically 'slab run "
                 "workflow.py' so the result is still a traced, verified run)."
             ),
             parameters=_schema(

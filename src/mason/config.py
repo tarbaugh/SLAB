@@ -63,7 +63,7 @@ class ServeConfig(BaseModel):
 class SandboxConfig(BaseModel):
     """The no-network container for autonomous runs (``[agent.sandbox]``).
 
-    ``mason sandbox render`` derives almost everything from tables the
+    ``slab mason sandbox render`` derives almost everything from tables the
     config already has (workspace, paths, engines); this table holds only
     what cannot be derived. ``image`` is the Apptainer image the job runs
     in. ``binds`` are extra bind specs (``src:dest:mode``, or a bare path
@@ -176,9 +176,9 @@ class AgentConfig(BaseModel):
     tool_protocol: Literal["native", "fenced"] = "native"
     approval: Literal["ask", "auto"] = "ask"
     shell_allowlist: tuple[str, ...] = ()
-    # Whether 'mason chat' prints the model's reasoning and interim text
+    # Whether 'slab mason chat' prints the model's reasoning and interim text
     # between tool calls. Display only: the transcript records reasoning
-    # regardless, and 'mason run' stays quiet either way.
+    # regardless, and 'slab mason run' stays quiet either way.
     show_reasoning: bool = True
     # Whether the system prompt carries the curated software notes for the
     # engines this machine's slab.toml enables (mason.notes). Context only:

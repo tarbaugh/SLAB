@@ -134,7 +134,7 @@ def run_summary(run: Run) -> dict[str, Any]:
 def run_details(ws: Workspace, run_id: str) -> dict[str, Any]:
     """Everything about one run: fields, checks, tasks, artifacts, history.
 
-    This is the evidence surface for agents (``foundation show`` and MCP
+    This is the evidence surface for agents (``slab show`` and MCP
     ``show_run``): failed runs and tasks carry their structured ``failure``
     record (:func:`foundation.errors.failure_record`), and checks carry the
     ``observed``/``expected`` values their assertions compared — the numbers a
@@ -215,7 +215,7 @@ PERMANENT_STATES = (LifecycleState.PROMOTED, LifecycleState.ARCHIVED)
 def sessions_summary(ws: Workspace, *, limit: int | None = None) -> dict[str, Any]:
     """The sessions that created runs, newest first, plus the unstamped count.
 
-    This is ``foundation sessions`` and the MCP ``list_sessions`` tool: it
+    This is ``slab sessions`` and the MCP ``list_sessions`` tool: it
     answers "which conversation produced which runs" so a user can promote a
     whole session without collecting run ids. Runs created before session
     stamping, or by a client that sets none, carry no session; they are
@@ -250,7 +250,7 @@ def promote_session(
 ) -> dict[str, Any]:
     """Promote every run one client session created; report each outcome.
 
-    This is ``foundation promote --session`` and the MCP ``promote_session``
+    This is ``slab promote --session`` and the MCP ``promote_session``
     tool. *session* is a full session id or a unique prefix. Every stamped run
     is considered and reported:
 
@@ -354,7 +354,7 @@ def launch_script(
 ) -> dict[str, Any]:
     """Execute a workflow script inside a fresh run context; return the outcome.
 
-    This is ``foundation run`` and the MCP ``launch_workflow`` tool: the script is
+    This is ``slab run`` and the MCP ``launch_workflow`` tool: the script is
     plain Python with ``@task`` calls and ``@check`` declarations — the runner
     supplies the workspace and the run context, so scripts carry zero
     ceremony. Scripts that manage their own ``Workspace.start_run`` should be
@@ -404,7 +404,7 @@ def launch_script(
             raise FoundationError(
                 f"{script_path.name} manages its own runs (it calls start_run); "
                 f"execute it with plain 'python {script_path.name}' instead of "
-                f"'foundation run'"
+                f"'slab run'"
             ) from None
         except Exception:
             error = traceback.format_exc(limit=8)

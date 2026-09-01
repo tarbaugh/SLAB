@@ -370,7 +370,7 @@ def test_cli_render_writes_both_files_and_next_steps(
     assert "--network none" in script
     assert str(tmp_path / "sandbox" / "slab.toml") in script  # SLAB_CONFIG points at it
     assert "[hpc]" not in toml_text
-    assert "read both files" in result.output
+    assert "read these files" in result.output
     context = (tmp_path / "sandbox" / "context.md").read_text()
     assert context.startswith("# Sandbox")
     assert str(tmp_path / "sandbox" / "context.md") in script  # SLAB_SANDBOX_CONTEXT

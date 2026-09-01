@@ -121,7 +121,7 @@ def _mason_session(
 ) -> MasonSession:
     from mason import MasonSession
 
-    # Non-interactive entry points (mason run) get the refuse-everything
+    # Non-interactive entry points (slab mason run) get the refuse-everything
     # gate instead of a terminal prompt, matching mason_run's docstring:
     # without --auto, mutating tools are refused — there is no one to ask.
     session = MasonSession(
@@ -152,7 +152,7 @@ def _mason_session(
     if updates:
         session.resolve_endpoint(endpoint)
     # Child processes stamp their runs with this chat's id: the agent's shell
-    # tool runs 'foundation run' directly, and only an exported variable
+    # tool runs 'slab run' directly, and only an exported variable
     # reaches it. In-process launches pass the id explicitly instead.
     os.environ["SLAB_SESSION"] = session.session_id
     return session
@@ -184,7 +184,9 @@ _ProviderOpt = Annotated[
 ]
 _AgentOpt = Annotated[
     str | None,
-    typer.Option("--agent", help="Agent card to run as (default pi); 'mason roster' lists them."),
+    typer.Option(
+        "--agent", help="Agent card to run as (default pi); 'slab mason roster' lists them."
+    ),
 ]
 
 
@@ -207,7 +209,7 @@ def mason_chat(
         session = _mason_session(
             workspace, auto=auto, model=model, endpoint=endpoint, provider=provider
         )
-        # Chat is where a person watches the loop; 'mason run' never
+        # Chat is where a person watches the loop; 'slab mason run' never
         # wires an observer, so batch output stays the final report alone.
         if session.agent.show_reasoning:
             session.observer = _echo_step
@@ -437,7 +439,7 @@ def mason_serve_start(
     if not wait:
         typer.echo(
             "the endpoint appears once the model finishes loading; "
-            "watch it with 'mason serve status'"
+            "watch it with 'slab mason serve status'"
         )
         return
     budget = agent.serve.ready_timeout_s
@@ -492,7 +494,7 @@ def _clip(text: str, full: bool) -> str:
 
 
 def _render_event(event: dict[str, Any], full: bool) -> None:
-    """One transcript event, in the same visual language as 'mason chat'."""
+    """One transcript event, in the same visual language as 'slab mason chat'."""
     stamp = str(event.get("at", ""))[11:19]
     kind = event.get("type")
     if kind == "message":
@@ -544,7 +546,7 @@ def mason_read(
 ) -> None:
     """Render a session transcript for human reading.
 
-    Same visual language as 'mason chat': dimmed reasoning, cyan tool
+    Same visual language as 'slab mason chat': dimmed reasoning, cyan tool
     calls, plain results. A malformed line is marked and skipped — a
     viewer must show the readable majority of a damaged file, unlike
     --resume, which must refuse it.
@@ -603,7 +605,7 @@ def mason_sandbox_check(
 
 @sandbox_app.command("render")
 def mason_sandbox_render(
-    goal: Annotated[str, typer.Argument(help="The goal 'mason run --auto' receives.")],
+    goal: Annotated[str, typer.Argument(help="The goal 'slab mason run --auto' receives.")],
     workspace: _WorkspaceOpt = None,
     partition: Annotated[
         str | None, typer.Option("--partition", "-p", help="Partition for the engine legs.")
@@ -668,7 +670,7 @@ def mason_sandbox_render(
     typer.echo(f"wrote {toml_path}")
     typer.echo(f"wrote {context_path}")
     typer.echo(
-        "read both files, then submit with: "
+        "read these files, then submit with: "
         f"sbatch {script_path} — the job aborts unless the container "
         "proves it is offline and the bridged endpoint answers"
     )
@@ -768,7 +770,7 @@ def _serve_hint(agent: AgentConfig, root: Path, origin: str, *, cluster: str = "
         if origin == "--endpoint":
             return []
         return [
-            "    no server is recorded here; start one with 'mason serve start' "
+            "    no server is recorded here; start one with 'slab mason serve start' "
             "(or point [agent] endpoint at a server you started yourself)"
         ]
     if not record.job_id:
@@ -787,7 +789,7 @@ def _serve_hint(agent: AgentConfig, root: Path, origin: str, *, cluster: str = "
     if status.state.is_terminal:
         return [
             f"    job {record.job_id} ended as {status.state.value}; the record is "
-            f"stale — 'mason serve stop' clears it"
+            f"stale — 'slab mason serve stop' clears it"
         ]
     return [f"    job {record.job_id} is {status.state.value}; the model may still be loading"]
 

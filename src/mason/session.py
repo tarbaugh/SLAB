@@ -72,7 +72,7 @@ def transcript_groups(
     transcripts its turns produced share its stem with an agent name and
     an ordinal appended. Grouping them keeps a sweep from deleting a
     conversation while stranding its specialists' archives, or the
-    reverse. This is the one layout fact ``slab-stack purge`` needs, so
+    reverse. This is the one layout fact ``slab purge`` needs, so
     it lives here with the layout's owner.
     """
     sessions = Path(workspace_root) / "mason" / "sessions"
@@ -302,7 +302,7 @@ class MasonSession:
 
         The value is the root transcript's stem, so one chat has one id and a
         delegated specialist's runs join the chat that asked for them. Foundation
-        stores it on each run, which is what makes ``foundation promote
+        stores it on each run, which is what makes ``slab promote
         --session <id>`` able to promote a whole conversation's results.
         """
         if self._parent is not None:

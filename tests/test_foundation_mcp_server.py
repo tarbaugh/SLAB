@@ -208,5 +208,5 @@ def test_promote_session_default_reason_names_the_session(root: Path) -> None:
 def test_promote_session_unknown_surfaces_helpfully(root: Path) -> None:
     _seed(root, session="chat-1")
     server = build_server(root)
-    with pytest.raises(Exception, match="foundation sessions"):
+    with pytest.raises(Exception, match="slab sessions"):
         _call(server, "promote_session", {"session": "nope"})

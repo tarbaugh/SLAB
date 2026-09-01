@@ -10,7 +10,7 @@ around it, driven entirely by the ``[hpc]`` section of the slab config
   complete batch script. Only fields the config *sets* become ``#SBATCH``
   directives (Parsl's convention) — SLAB adds no silent resource defaults,
   and the rendered script is plain text anyone can read before trusting.
-  The usual payload is ``foundation run workflow.py``: the scheduler moves the
+  The usual payload is ``slab run workflow.py``: the scheduler moves the
   process; provenance is unchanged.
 * :func:`submit` writes the script next to the job's outputs and calls
   ``sbatch --parsable``.
@@ -148,7 +148,7 @@ def render_sbatch(
     ``account`` and ``setup`` apply unless the partition sets its own. The
     partition's ``launcher`` (``srun``, ``mpirun -np 4`` ...) prefixes the
     command — except a command invoking one of the drivers
-    (``foundation run ...``), which is always emitted unlaunched with an
+    (``slab run ...``), which is always emitted unlaunched with an
     explanatory comment: launching the driver replicates the whole workflow
     once per task and deadlocks the engines' own nested ``srun``.
     *time_limit* overrides the partition's; *output* defaults to
@@ -235,22 +235,22 @@ def render_sbatch(
     return "\n".join(lines + body)
 
 
-_DRIVERS = frozenset({"slab", "foundation", "mason"})
+_DRIVERS = frozenset({"slab"})
 
 
 def _driver_payload_name(command: str) -> str | None:
-    """The driver *command* invokes (``foundation run ...``), or None.
+    """The driver *command* invokes (``slab run ...``), or None.
 
-    All three console scripts are single-process drivers.
-    ``srun``-launching one replicates the whole workflow once per task — N
+    The console script is a single-process driver.
+    ``srun``-launching it replicates the whole workflow once per task — N
     concurrent writers on one runs database — and each replica's own engine
     ``srun`` then deadlocks on the already-consumed allocation. The launcher
     belongs on engine commands *inside* the driver ([engines.qe]
     ``command = "srun pw.x"``), never on the driver.
     """
     # Env assignments legitimately prefix shell payloads
-    # (OMP_NUM_THREADS=4 foundation run ...), with or without the explicit
-    # 'env' wrapper (flags included: env -u VAR foundation run ...); the check
+    # (OMP_NUM_THREADS=4 slab run ...), with or without the explicit
+    # 'env' wrapper (flags included: env -u VAR slab run ...); the check
     # must see through them all with the SAME parser the engine guards use,
     # or the launcher sneaks back onto the driver for a form one parser
     # accepts and the other does not.

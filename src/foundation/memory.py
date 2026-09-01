@@ -15,7 +15,7 @@ Memory is the fourth knowledge surface, and each has one job:
 * memory (this module) — machine-scoped, written by agents, learned quirks
 
 The store lives in Foundation because three consumers need it and they sit
-in different layers: the agent (prompt and tools), the ``slab-stack`` CLI
+in different layers: the agent (prompt and tools), the ``slab`` CLI
 (human management), and, later, the MCP server. Foundation is the one layer
 all three may import.
 
@@ -318,7 +318,7 @@ def write(
         raise MemoryStoreError(
             f"this machine already holds {len(existing)} memories, the limit "
             f"({MAX_MEMORIES}); update an existing memory instead, or ask the user to "
-            f"prune with 'slab-stack memory forget <name>'"
+            f"prune with 'slab memory forget <name>'"
         )
     today = datetime.now(UTC).date()
     previous = existing.get(name)

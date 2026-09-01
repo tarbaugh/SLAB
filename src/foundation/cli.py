@@ -288,7 +288,7 @@ def promote(
     Name the runs, or name the session that created them with ``--session``.
     A session promote reports every run it considered: it promotes the
     verified ones, skips the unverified ones unless ``--force`` is given, and
-    never promotes a failed run. List the sessions with ``foundation sessions``.
+    never promotes a failed run. List the sessions with ``slab sessions``.
     """
     if (run_ids and session) or not (run_ids or session):
         _fail("give run ids or --session, not both (and not neither)")
@@ -339,7 +339,7 @@ def sessions(
     """List the client sessions that created runs, newest first.
 
     Each row is one conversation. Promote a whole row with
-    ``foundation promote --session <id>``.
+    ``slab promote --session <id>``.
     """
     with _open(workspace) as ws:
         try:

@@ -642,8 +642,8 @@ schema_version = 1
 # One file, three packages. Each table below is owned by exactly one of them:
 # [paths], [engines], [builders], and [hpc] by slab; [workspace] by foundation;
 # [agent] by mason. A table's owner validates it, so a typo inside [agent] is
-# refused by 'mason doctor' rather than by 'slab engines list'. A table name no
-# package owns is refused by every command that reads the file.
+# refused by 'slab mason doctor' rather than by 'slab engines list'. A table
+# name no package owns is refused by every command that reads the file.
 
 [workspace]
 # root = "/scratch/${USER}/slab-workspace"        # run database + artifacts
@@ -676,8 +676,8 @@ schema_version = 1
 #                                      # 'mpirun -np N <bin>/pw.x' with N from
 #                                      # $SLURM_NTASKS (1 outside a job), and a
 #                                      # bundled <bin>/mpirun wins over PATH's.
-#                                      # 'mason sandbox render' binds the whole
-#                                      # install read-only automatically
+#                                      # 'slab mason sandbox render' binds the
+#                                      # whole install read-only automatically
 # setup = ["module purge", "module load qe/7.4", "export OMP_NUM_THREADS=4"]
 #                                      # THIS engine's dependencies: run in a
 #                                      # private login-shell wrapper around the
@@ -746,20 +746,20 @@ schema_version = 1
 
 [agent]
 # provider = "openai"                       # "openai" = any OpenAI-compatible server; "anthropic"
-# model = "meta-models/Muse-Glimmer-30B"    # as the server names it ('mason doctor'
-#                                           # lists); an absolute path to a downloaded
-#                                           # model directory also works, and never
+# model = "meta-models/Muse-Glimmer-30B"    # as 'slab mason doctor' lists it; an
+#                                           # absolute path to a downloaded model
+#                                           # directory also works, and never
 #                                           # touches the network
-# endpoint = "http://gpu-node-01:8000/v1"   # leave unset on a cluster: 'mason serve'
-#                                           # records the URL of the node it landed on
+# endpoint = "http://gpu-node-01:8000/v1"   # leave unset on a cluster: 'slab mason
+#                                           # serve' records the node's URL
 # api_key_env = "SLAB_AGENT_API_KEY"        # NAME of the env var holding the key, never the key
 # context_window = 131072                   # tokens the endpoint actually serves
 # compact_at = 0.7                          # compact history at this fraction of the window
 # max_turns = 60                            # model calls per goal; the agent stops loudly
 # approval = "ask"                          # "ask" gates mutating tools; "auto" trusts them
 # shell_allowlist = ["git status", "ls"]    # command prefixes that never need approval
-# show_reasoning = true                     # 'mason chat' prints the model's reasoning
-#                                           # between tool calls (needs the server's
+# show_reasoning = true                     # 'slab mason chat' prints the model's
+#                                           # reasoning between tool calls (needs the server's
 #                                           # reasoning parser); false hides it. The
 #                                           # transcript records reasoning either way
 # software_notes = true                     # the system prompt carries curated notes on
@@ -789,7 +789,7 @@ schema_version = 1
 # effort = "medium"                         # low | medium | high | xhigh | max
 # max_reply_tokens = 16000                  # bounds thinking AND reply together
 
-# How 'mason serve' starts that server as a batch job. The GPU node is the
+# How 'slab mason serve' starts that server as a batch job. The GPU node is the
 # scheduler's choice, so the endpoint URL is discovered, never configured.
 # Compute nodes rarely have internet: download the model once, on the login node
 # ('HF_HOME=/path/to/hf-cache hf download meta-models/Muse-Glimmer-30B'), and let
@@ -819,8 +819,9 @@ schema_version = 1
 #                                           # global engine module loads fight the server's
 #                                           # venv; the partition's own setup still applies
 
-# The no-network container for autonomous runs. 'mason sandbox render' derives
-# the bind mounts from the tables above; this holds only what it cannot derive.
+# The no-network container for autonomous runs. 'slab mason sandbox render'
+# derives the bind mounts from the tables above; this holds only what it
+# cannot derive.
 # [agent.sandbox]
 # image = "/containers/slab-sandbox.sif"    # Apptainer image the job runs in
 # binds = [                                 # extra binds (src:dest:mode) for what

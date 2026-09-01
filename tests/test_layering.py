@@ -144,8 +144,7 @@ def test_pyproject_declares_the_front_door_script() -> None:
     The per-package apps are internal; nothing else earns an entry point."""
     pyproject = tomllib.loads((SRC.parent / "pyproject.toml").read_text())
     scripts = pyproject["project"]["scripts"]
-    assert scripts["slab"] == "slab_stack.cli:app"
-    assert set(scripts) <= {"slab", "foundation", "mason", "slab-stack"}
+    assert scripts == {"slab": "slab_stack.cli:app"}
 
 
 def test_wheel_ships_every_package() -> None:

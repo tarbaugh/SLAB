@@ -36,7 +36,7 @@ def failure_record(exc: BaseException) -> dict[str, Any]:
     """Structured, size-bounded evidence of a failure.
 
     Stored on failed runs and task records and surfaced verbatim by
-    ``foundation show`` and the MCP ``show_run`` tool. The consumer is an LLM agent
+    ``slab show`` and the MCP ``show_run`` tool. The consumer is an LLM agent
     deciding what to do next, so the record aims to be information-rich but
     token-bounded:
 
@@ -249,7 +249,7 @@ class SessionNotFoundError(FoundationError):
         self.session = session
         super().__init__(
             f"no run carries session {session!r}; list the known ones with "
-            f"'foundation sessions'"
+            f"'slab sessions'"
         )
 
 

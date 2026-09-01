@@ -302,7 +302,7 @@ def test_promote_session_unknown_or_ambiguous(root: Path) -> None:
     _seed_run(root, verified=True, session="chat-2")
     unknown = runner.invoke(app, ["promote", "--session", "nope", "-w", str(root)])
     assert unknown.exit_code == 1
-    assert "foundation sessions" in unknown.output
+    assert "slab sessions" in unknown.output
 
     ambiguous = runner.invoke(app, ["promote", "--session", "chat", "-w", str(root)])
     assert ambiguous.exit_code == 1
