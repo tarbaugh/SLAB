@@ -396,11 +396,12 @@ output hash.
 ## Builders: atomsk
 
 Some external codes make structures, not energies. SLAB names them
-*builders*, and ships one: [atomsk](https://atomsk.univ-lille.fr), which
-creates unit cells, supercells, defects, interfaces, and polycrystals, and
-converts between the file formats the engines read. A builder is not an
-engine. `engine="atomsk"` does not exist, and nothing about it passes
-through `get_calculator`.
+*builders*, and ships two. The first is
+[atomsk](https://atomsk.univ-lille.fr), which creates unit cells,
+supercells, defects, interfaces, and polycrystals, and converts between
+the file formats the engines read. A builder is not an engine.
+`engine="atomsk"` does not exist, and nothing about it passes through
+`get_calculator`.
 
 Point SLAB at the install in `slab.toml`:
 
@@ -443,6 +444,75 @@ ride on the exception as notes, and the full log is kept as
 `{label}-failed.log` — the same evidence contract as the engine tasks. The
 `atomsk-structures`, `atomsk-defects`, and `atomsk-interfaces` skills carry
 the recipes and a bundled structure checker.
+
+## The Materials Project snapshot
+
+A second builder is a dataset, not a program. An offline Materials Project
+snapshot is a read-only directory that a network-connected staging machine
+built and this machine mounts: `metadata.sqlite` for discovery,
+`manifest.json` for provenance, and a sharded `cifs/` tree of structure
+files. SLAB reads it with no network, no API key, and no `mp-api` client.
+There is no online fallback. A material the snapshot does not hold is
+reported as absent, never looked up.
+
+Point SLAB at the snapshot root in `slab.toml`:
+
+<!-- no-verify -->
+```toml
+[builders.mp]
+root = "/data/mp-snapshot"     # the directory holding metadata.sqlite and cifs/
+```
+
+Inspect and search it from the command line. Recorded from a real
+miniature snapshot:
+
+<!-- no-verify -->
+```text
+$ slab mp info
+root: /tmp/you/mp-snapshot
+release: 2025.11.1
+materials: 4
+manifest: 4 keys ('slab mp info --json' shows all)
+
+$ slab mp search -e Fe -f energy_above_hull__lte=0.05
+material_id=mp-13  formula_pretty=Fe  energy_above_hull=0.0  band_gap=0.0  is_stable=1
+1 row ('slab mp show <id>')
+```
+
+The search filters compile to parameterized SQL over the snapshot's own
+schema. `-e` requires an element, `--exclude-element` refuses one, and
+`-f key=value` compares a column, with `__lte`/`__gte`/`__lt`/`__gt`/`__ne`
+suffixes for ranges. A wrong column name is refused with the real column
+list. A SQL NULL means the property was not populated. It is never zero:
+a NULL band gap does not mean a metal, and a NULL energy-above-hull does
+not mean a stable material.
+
+The traced task is `foundation.tasks.fetch_structure`. It resolves the
+material's archived CIF below the snapshot root, reads it as ASE `Atoms`,
+and keeps the CIF with the run:
+
+<!-- no-verify -->
+```python
+from foundation.tasks import fetch_structure, relax
+
+atoms, meta = fetch_structure("mp-149")
+relaxed, opt = relax(atoms, engine="mace-mp-0-medium", fmax=0.05)
+```
+
+The snapshot release and the material count enter the cache key, so a
+newer snapshot honestly recomputes, and the same release mounted at a
+different path still hits. Report every derived result as the pair
+`(release, material_id)`, never a formula alone, because entries share
+compositions and releases revise records. `meta["release"]` carries the
+release, and `slab doctor` reports the snapshot's health (`--deep` adds a
+database integrity check and a sample of resolved CIFs).
+
+The snapshot also ships `metadata.parquet`, its canonical nested
+metadata. This install reads SQLite and CIF only, and says so when nested
+provenance is requested. The `mp-screening` skill carries the
+search-shortlist-fetch-compute recipe for the resident agent, whose
+`search_materials`, `get_material`, and `query_materials` tools appear
+when `[builders.mp]` is configured.
 
 ## The cluster engine registry
 

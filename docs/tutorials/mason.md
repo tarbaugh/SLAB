@@ -285,6 +285,7 @@ more than model choice.
 | `launch_workflow` | run a workflow script as a traced, check-gated run; this is how physics happens. `args` reach the script as argv; `background=true` detaches a long run so no tool timeout can touch it |
 | `wait_for_run` | block until a run (or every running run of this session) finishes, then report its state; one call replaces a chain of sleep-and-poll shell commands |
 | `list_runs`, `show_run`, `list_engines` | the workspace's evidence surface: runs, checks with observed/expected values, failure records, capabilities; `list_runs` takes `session="this"` |
+| `search_materials`, `get_material`, `query_materials` | the offline Materials Project snapshot, present only when `[builders.mp]` names one: filtered search, one record with its CIF path, and one read-only row-capped SELECT; the structure itself arrives traced via `fetch_structure` in a workflow |
 | `submit_job`, `job_status`, `cancel_job` | SLURM plumbing, present only when the config declares partitions |
 | `notebook`, `plan` | the memory instruments (below) |
 | `skill` | load a skill: its instructions, root path, and bundled files; the catalog is per-agent |

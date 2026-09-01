@@ -2,8 +2,9 @@
 
 One command that means "ready to launch a campaign". Each row probes the
 real campaign path — the configuration, the workspace, the memory store,
-the engines, the scheduler, the model endpoint, the sandbox, and the
-freshness of the rendered job — and the command exits nonzero only on an
+the engines, the scheduler, the mp snapshot, the model endpoint, the
+sandbox, and the freshness of the rendered job — and the command exits
+nonzero only on an
 ``x`` row. An ``=`` row is a fact, not a failure: a laptop with no
 scheduler is healthy, and the doctor must say so rather than fail it.
 
@@ -134,6 +135,79 @@ def _hpc_row(slab_cfg: SlabConfig | None) -> tuple[str, str]:
     if hpc is None or not hpc.partitions:
         return ("=", "scheduler: sbatch found, but no [hpc] partitions declared")
     return ("+", f"scheduler: sbatch found; partitions {', '.join(sorted(hpc.partitions))}")
+
+
+def _mp_rows(slab_cfg: SlabConfig | None) -> tuple[list[tuple[str, str]], Path | None]:
+    """The mp snapshot as rows, plus its root for ``--deep``.
+
+    Opening the database and counting materials IS the health check: a
+    configured root whose sqlite is missing or unreadable is a failing
+    row, and a laptop with no snapshot is a healthy fact.
+    """
+    builders = getattr(slab_cfg, "builders", None)
+    root_value = getattr(getattr(builders, "mp", None), "root", None)
+    if not root_value:
+        return [("=", "mp snapshot: not configured ([builders.mp] has no root)")], None
+    from slab.mp import snapshot_info
+
+    try:
+        info = snapshot_info(root_value)
+    except _ERRORS as e:
+        return [("x", f"mp snapshot: {e}")], None
+    release = f"release {info['release']}" if info["release"] else "release unknown"
+    return (
+        [("+", f"mp snapshot: {release}, {info['materials']} materials at {info['root']}")],
+        Path(str(info["root"])),
+    )
+
+
+def _mp_deep_rows(root: Path | None, sample: int = 10) -> list[tuple[str, str]]:
+    """``PRAGMA quick_check`` plus a sample of ``cif_path`` rows resolved and
+    stat'ed — the probe that catches a corrupt database or a truncated
+    transfer of the ``cifs/`` tree."""
+    if root is None:
+        return []
+    import contextlib
+    import sqlite3
+
+    from slab.mp import connect, structure_path
+
+    try:
+        with contextlib.closing(connect(root)) as connection:
+            verdict = connection.execute("PRAGMA quick_check").fetchone()[0]
+            ids = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT material_id FROM materials WHERE cif_path IS NOT NULL "
+                    "ORDER BY material_id LIMIT ?",
+                    (sample,),
+                )
+            ]
+    except (*_ERRORS, sqlite3.Error) as e:
+        return [("x", f"deep mp: {e}")]
+    rows: list[tuple[str, str]] = []
+    if verdict == "ok":
+        rows.append(("+", "deep mp: metadata.sqlite quick_check ok"))
+    else:
+        rows.append(("x", f"deep mp: quick_check says {verdict}"))
+    if not ids:
+        rows.append(("=", "deep mp: no CIF paths recorded to sample"))
+        return rows
+    missing = 0
+    first_error: str | None = None
+    for material_id in ids:
+        try:
+            structure_path(material_id, root=root)
+        except _ERRORS as e:
+            missing += 1
+            first_error = first_error or str(e)
+    if missing:
+        rows.append(
+            ("x", f"deep mp: {missing}/{len(ids)} sampled CIFs unresolvable — {first_error}")
+        )
+    else:
+        rows.append(("+", f"deep mp: {len(ids)} sampled CIFs resolve and exist"))
+    return rows
 
 
 def _endpoint_rows(
@@ -280,6 +354,8 @@ def run(
     engine_rows, checkpoint_ids = _engines_rows()
     rows.extend(engine_rows)
     rows.append(_hpc_row(slab_cfg))
+    mp_rows, mp_root_path = _mp_rows(slab_cfg)
+    rows.extend(mp_rows)
     failures = 0
     for mark, message in rows:
         emit(f"[{mark}] {message}")
@@ -292,6 +368,7 @@ def run(
         tail = [*_sandbox_rows(agent, workspace), _freshness_row(agent, workspace)]
         if deep:
             tail.extend(_deep_rows(checkpoint_ids, deep_timeout_s))
+            tail.extend(_mp_deep_rows(mp_root_path))
         for mark, message in tail:
             emit(f"[{mark}] {message}")
             failures += 1 if mark in ("x", "-") else 0

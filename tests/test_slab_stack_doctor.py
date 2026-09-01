@@ -134,3 +134,56 @@ def test_deep_without_checkpoints_says_so() -> None:
     assert doctor._deep_rows([], timeout_s=1.0) == [
         ("=", "deep: no declared checkpoints to probe")
     ]
+
+
+def test_the_mp_snapshot_row_covers_all_three_states(
+    project: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    from conftest import build_mp_snapshot
+
+    unconfigured = runner.invoke(app, ["doctor", "--offline"])
+    assert "[=] mp snapshot: not configured" in unconfigured.output
+
+    snapshot = build_mp_snapshot(tmp_path_factory.mktemp("data") / "mp-snapshot")
+    (project / "slab.toml").write_text(
+        f'[agent]\nmodel = "m"\n[builders.mp]\nroot = "{snapshot}"\n'
+    )
+    healthy = runner.invoke(app, ["doctor", "--offline"])
+    assert healthy.exit_code == 0, healthy.output
+    assert (
+        f"[+] mp snapshot: release 2025.11.1, 4 materials at {snapshot}"
+        in healthy.output
+    )
+
+    (snapshot / "metadata.sqlite").unlink()
+    broken = runner.invoke(app, ["doctor", "--offline"])
+    assert broken.exit_code == 1
+    assert "[x] mp snapshot:" in broken.output
+    assert "metadata.sqlite is missing" in broken.output
+
+
+def test_deep_probes_the_snapshot_and_names_a_truncated_transfer(
+    project: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    from conftest import build_mp_snapshot
+
+    snapshot = build_mp_snapshot(
+        tmp_path_factory.mktemp("data") / "mp-snapshot",
+        extra_materials=({"material_id": "mp-777", "cif_path": "cifs/zz/gone.cif"},),
+    )
+    (project / "slab.toml").write_text(
+        f'[agent]\nmodel = "m"\n[builders.mp]\nroot = "{snapshot}"\n'
+    )
+    result = runner.invoke(app, ["doctor", "--offline", "--deep"])
+    assert "[+] deep mp: metadata.sqlite quick_check ok" in result.output
+    assert "[x] deep mp: 1/5 sampled CIFs unresolvable" in result.output
+    assert "transferred completely" in result.output
+    assert result.exit_code == 1
+
+    (snapshot / "cifs" / "zz").mkdir(parents=True)
+    from ase.build import bulk
+    from ase.io import write as ase_write
+
+    ase_write(snapshot / "cifs" / "zz" / "gone.cif", bulk("Cu", "fcc", a=3.6))
+    healed = runner.invoke(app, ["doctor", "--offline", "--deep"])
+    assert "[+] deep mp: 5 sampled CIFs resolve and exist" in healed.output
