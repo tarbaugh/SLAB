@@ -395,8 +395,9 @@ output hash.
 
 ## Builders: atomsk
 
-Some external codes make structures, not energies. SLAB names them
-*builders*, and ships two. The first is
+Some external codes produce inputs for calculations, not energies. SLAB
+names them *builders*, and ships three: a structure builder, a data
+snapshot, and a potential trainer. The first is
 [atomsk](https://atomsk.univ-lille.fr), which creates unit cells,
 supercells, defects, interfaces, and polycrystals, and converts between
 the file formats the engines read. A builder is not an engine.
@@ -513,6 +514,129 @@ provenance is requested. The `mp-screening` skill carries the
 search-shortlist-fetch-compute recipe for the resident agent, whose
 `search_materials`, `get_material`, and `query_materials` tools appear
 when `[builders.mp]` is configured.
+
+## Training potentials: gracemaker
+
+The third builder makes potentials.
+[Gracemaker](https://gracemaker.readthedocs.io) (the pip package
+`tensorpotential`) trains GRACE machine-learned interatomic potentials
+and fine-tunes GRACE foundation models. It produces a potential, never
+energies for a traced task, so it is a builder. `engine="gracemaker"`
+does not exist. Gracemaker runs in its own python environment with
+TensorFlow. Do not install it into SLAB's environment.
+
+Point SLAB at that environment in `slab.toml`:
+
+<!-- no-verify -->
+```toml
+[builders.gracemaker]
+command = "gracemaker"
+setup = [
+  "module load cuda",
+  "source ~/grace/bin/activate",
+  "export TF_FORCE_GPU_ALLOW_GROWTH=true",
+]
+```
+
+`slab engines list` then reports the trainer, and `slab doctor` probes
+the environment end to end, because the version probe runs through the
+same setup shell a fit would. Recorded from a real install:
+
+<!-- no-verify -->
+```text
+gracemaker trainer: tensorpotential 0.6.0 via /tmp/you/grace/bin/gracemaker
+```
+
+Two traced tasks close the loop. `collect_training_data` assembles a
+labeled dataset from the results that completed `relax`, `relax_cell`,
+and `single_point` tasks recorded — the exact energies and forces those
+engines computed. `train_potential` stages the dataset beside an
+input.yaml you author in gracemaker's own schema, runs one fit in
+slab-managed scratch, and keeps the log, the metrics, and the exported
+model as artifacts.
+
+Label structures first. This run computes eight EMT single points on
+rattled Cu cells:
+
+<!-- no-verify -->
+```python
+from ase.build import bulk
+
+from foundation.tasks import single_point
+
+for step in range(8):
+    atoms = bulk("Cu", cubic=True)
+    atoms.rattle(0.02 * (step + 1), seed=step)
+    final, info = single_point(atoms, engine="emt", label=f"cu-{step}")
+    print(f"cu-{step}: E={info['energy']:.6f} eV  fmax={info['fmax']:.4f}")
+```
+
+Then collect the labels and fit a small GRACE/FS model. Executed for
+real, on a laptop CPU:
+
+<!-- no-verify -->
+```python
+from foundation.tasks import collect_training_data, train_potential
+
+dataset, data = collect_training_data(["01m1f810bmwnck7ggy91g84ds5"], engine="emt")
+print(f"dataset: {data['n_structures']} structures, elements={data['elements']}")
+
+input_yaml = """\
+seed: 1
+cutoff: 4.5
+data:
+  filename: training.extxyz
+  test_size: 0.25
+  reference_energy: 0
+potential:
+  preset: FS
+  kwargs: {n_rad_base: 8, embedding_size: 16}
+fit:
+  loss: {energy: {weight: 1.0}, forces: {weight: 5.0}}
+  optimizer: L-BFGS-B
+  opt_params: {"maxcor": 50, "maxls": 20, "gtol": 1.e-8, "iprint": -1}
+  maxiter: 50
+  batch_size: 4
+"""
+
+model, fit = train_potential(input_yaml, dataset=dataset, label="cu-emt-fs")
+test = fit["test_metrics"]
+print(f"model: {model['saved_model']}")
+print(f"final test rmse: {test['rmse/depa']:.4f} eV/atom, {test['rmse/f_comp']:.4f} eV/A")
+print(f"artifacts: {sorted(model['artifacts'])}")
+```
+
+<!-- no-verify -->
+```text
+dataset: 8 structures, elements=['Cu']
+model: cu-emt-fs/saved_model
+final test rmse: 0.0013 eV/atom, 0.0420 eV/A
+artifacts: ['cu-emt-fs-model.yaml', 'cu-emt-fs-saved-model.tar.gz', 'cu-emt-fs-test-metrics.yaml', 'cu-emt-fs-train-metrics.yaml', 'cu-emt-fs.log']
+run 01m1f818p9528sy3096b3e7gfz  train  state=quarantined status=completed checks=0/0 tasks=2
+```
+
+The rules the tasks enforce are the rules of honest training data. The
+collector refuses to mix labels from different engines unless you name
+one or declare the mix. It refuses a run that contributes nothing, and
+it refuses discarded bytes. Pass the input.yaml as text, never as a
+path: the text enters the cache identity. The dataset's content hash
+and the tensorpotential version enter it too, so changed data at the
+same path or an upgraded trainer honestly recomputes, and a repeated
+identical fit is a cache hit.
+
+A real fit belongs on a GPU partition. Submit the workflow through the
+scheduler (`slab hpc submit "slab run train.py"`), and give the
+`[builders.gracemaker]` setup lines the module loads and the
+environment activation the compute node needs. On a laptop, keep fits
+to FS-preset smoke tests like the one above.
+
+The trained model is deployed, not imported. Use it through LAMMPS
+(`pair_style grace`, or `grace/fs` with the `export_fs=True` export), a
+registry engine entry pointing at
+`tensorpotential.calculator.TPCalculator`, or ask the site to serve it
+through rootstock. The `mlip-training` skill carries the full recipe
+for the resident agent, and a gracemaker software note enters the
+agent's prompt on machines that configure the table.
 
 ## The cluster engine registry
 

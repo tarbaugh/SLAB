@@ -2,11 +2,11 @@
 
 One command that means "ready to launch a campaign". Each row probes the
 real campaign path — the configuration, the workspace, the memory store,
-the engines, the scheduler, the mp snapshot, the model endpoint, the
-sandbox, and the freshness of the rendered job — and the command exits
-nonzero only on an
-``x`` row. An ``=`` row is a fact, not a failure: a laptop with no
-scheduler is healthy, and the doctor must say so rather than fail it.
+the engines, the scheduler, the mp snapshot, the gracemaker trainer, the
+model endpoint, the sandbox, and the freshness of the rendered job — and
+the command exits nonzero only on an ``x`` row. An ``=`` row is a fact,
+not a failure: a laptop with no scheduler is healthy, and the doctor must
+say so rather than fail it.
 
 This lives in ``slab_stack`` because it is the one package allowed to
 import all three layers.
@@ -159,6 +159,36 @@ def _mp_rows(slab_cfg: SlabConfig | None) -> tuple[list[tuple[str, str]], Path |
         [("+", f"mp snapshot: {release}, {info['materials']} materials at {info['root']}")],
         Path(str(info["root"])),
     )
+
+
+def _gracemaker_row(slab_cfg: SlabConfig | None) -> tuple[str, str]:
+    """The gracemaker trainer as one row.
+
+    Probing the tensorpotential version through the configured setup shell
+    IS the health check: it exercises the module loads and the environment
+    activation end to end, and a configured trainer whose environment
+    cannot answer is a failing row. A laptop with no trainer is a healthy
+    fact.
+    """
+    builders = getattr(slab_cfg, "builders", None)
+    trainer = getattr(builders, "gracemaker", None)
+    if trainer is None or (not trainer.command and not trainer.setup):
+        return ("=", "gracemaker: not configured ([builders.gracemaker] is empty)")
+    from slab.gracemaker import gracemaker_command, gracemaker_version
+
+    try:
+        version = gracemaker_version()
+    except _ERRORS as e:  # the probe swallows its own errors; config can still refuse
+        return ("x", f"gracemaker: {e}")
+    command = gracemaker_command()
+    if version is None:
+        return (
+            "x",
+            f"gracemaker: configured, but the environment behind {command!r} "
+            "does not answer a tensorpotential version probe — check the "
+            "[builders.gracemaker] setup lines",
+        )
+    return ("+", f"gracemaker: tensorpotential {version} via {command}")
 
 
 def _mp_deep_rows(root: Path | None, sample: int = 10) -> list[tuple[str, str]]:
@@ -356,6 +386,7 @@ def run(
     rows.append(_hpc_row(slab_cfg))
     mp_rows, mp_root_path = _mp_rows(slab_cfg)
     rows.extend(mp_rows)
+    rows.append(_gracemaker_row(slab_cfg))
     failures = 0
     for mark, message in rows:
         emit(f"[{mark}] {message}")

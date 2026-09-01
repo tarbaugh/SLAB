@@ -108,7 +108,7 @@ experience, and nothing requires you to delegate.
 
 A skill is a directory with a `SKILL.md` file, in the
 [Agent Skills format](https://agentskills.io/specification). Mason adds
-no dialect, so skills written for other tools load unmodified. Seventeen
+no dialect, so skills written for other tools load unmodified. Eighteen
 skills ship built in:
 
 ```bash
@@ -125,6 +125,7 @@ equation-of-state          built-in  analysis-expert dft-expert   1 script(s)
 interface-adhesion         built-in  analysis-expert dft-expert   1 script(s)
 kinetic-fits               built-in  analysis-expert md-expert    1 script(s)
 melt-quench                built-in  md-expert                    1 script(s)
+mlip-training              built-in  dft-expert md-expert         0 script(s)
 mp-screening               built-in  dft-expert md-expert         0 script(s)
 msd-diffusion              built-in  analysis-expert md-expert    1 script(s)
 nemd-transport             built-in  analysis-expert md-expert    1 script(s)
@@ -137,7 +138,8 @@ two-phase-melting          built-in  md-expert                    0 script(s)
 
 The catalog covers structure building (the atomsk skills: crystals and
 supercells, defects and dislocations, interfaces and polycrystals),
-screening from the offline Materials Project snapshot (mp-screening), the
+screening from the offline Materials Project snapshot (mp-screening),
+potential training with gracemaker (mlip-training), the
 static side (equations of state, convergence, surfaces, elastic
 constants, interface adhesion), and the dynamic side (melt-quench
 glasses, thermal response, two-phase melting, NEMD transport, diffusion,
@@ -157,6 +159,7 @@ atomsk-interfaces          built-in  dft-expert md-expert         0 script(s)
 atomsk-structures          built-in  dft-expert md-expert         1 script(s)
 kinetic-fits               built-in  analysis-expert md-expert    1 script(s)
 melt-quench                built-in  md-expert                    1 script(s)
+mlip-training              built-in  dft-expert md-expert         0 script(s)
 mp-screening               built-in  dft-expert md-expert         0 script(s)
 msd-diffusion              built-in  analysis-expert md-expert    1 script(s)
 nemd-transport             built-in  analysis-expert md-expert    1 script(s)

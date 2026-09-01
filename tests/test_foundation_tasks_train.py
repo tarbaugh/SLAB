@@ -59,8 +59,13 @@ case "$*" in
     mkdir -p "$d/checkpoints"
     echo "epoch 1 loss 0.5" > "$d/log.txt"
     echo "preset: FS" > "$d/model.yaml"
-    printf 'rmse_epa: 0.0123\\nrmse_f_comp: 0.0450\\n' > "$d/train_metrics.yaml"
-    printf 'rmse_epa: 0.0210\\nrmse_f_comp: 0.0610\\n' > "$d/test_metrics.yaml"
+    {
+      printf -- '- {"rmse/depa": 0.0123, "rmse/f_comp": 0.0450, "epoch": 1}\\n'
+    } > "$d/train_metrics.yaml"
+    {
+      printf -- '- {"rmse/depa": 0.0199, "rmse/f_comp": 0.0700, "epoch": 1}\\n'
+      printf -- '- {"rmse/depa": 0.0210, "rmse/f_comp": 0.0610, "epoch": 2}\\n'
+    } > "$d/test_metrics.yaml"
     echo "ck" > "$d/checkpoints/checkpoint.best_test_loss.index"
     echo "training done"
     ;;
@@ -279,8 +284,10 @@ def test_train_success_keeps_evidence_and_exports_the_model(
     assert Path(model["saved_model"]).is_dir()
     assert (Path(model["saved_model"]) / "saved_model.pb").is_file()
     assert info["version"] == "0.5.1"
-    assert info["test_metrics"]["rmse_epa"] == pytest.approx(0.0210)
-    assert info["train_metrics"]["rmse_f_comp"] == pytest.approx(0.0450)
+    # The final epoch's row wins; the fake writes two test rows on purpose.
+    assert info["test_metrics"]["rmse/depa"] == pytest.approx(0.0210)
+    assert info["test_metrics"]["epoch"] == 2
+    assert info["train_metrics"]["rmse/f_comp"] == pytest.approx(0.0450)
     for kept_name, kept_hash in model["artifacts"].items():
         assert ws.runs.get_artifact(run.id, kept_name).hash == kept_hash
 
@@ -436,14 +443,16 @@ def test_real_gracemaker_fits_a_tiny_fs_model(
             "data:\n"
             f"  filename: {Path(dataset).name}\n"
             "  test_size: 0.2\n"
+            "  reference_energy: 0\n"
             "potential:\n"
             "  preset: FS\n"
             "  kwargs: {n_rad_base: 4, embedding_size: 8}\n"
             "fit:\n"
+            "  loss: {energy: {weight: 1.0}, forces: {weight: 5.0}}\n"
+            "  optimizer: L-BFGS-B\n"
+            '  opt_params: {"maxcor": 50, "maxls": 20, "gtol": 1.e-8, "iprint": -1}\n'
             "  maxiter: 5\n"
             "  batch_size: 2\n"
-            "backend:\n"
-            "  evaluation_strategy: tensorflow\n"
         )
         model, info = train_potential(
             input_yaml, dataset=dataset, command=command, timeout_s=1800.0

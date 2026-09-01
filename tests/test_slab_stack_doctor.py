@@ -8,6 +8,7 @@ what retires the stale-sbatch failure class.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -160,6 +161,37 @@ def test_the_mp_snapshot_row_covers_all_three_states(
     assert broken.exit_code == 1
     assert "[x] mp snapshot:" in broken.output
     assert "metadata.sqlite is missing" in broken.output
+
+
+def test_the_gracemaker_row_covers_all_three_states(
+    project: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    unconfigured = runner.invoke(app, ["doctor", "--offline"])
+    assert "[=] gracemaker: not configured" in unconfigured.output
+
+    bin_dir = tmp_path_factory.mktemp("grace") / "bin"
+    bin_dir.mkdir()
+    for name, body in (("python", 'echo "0.5.1"'), ("gracemaker", "echo training")):
+        script = bin_dir / name
+        script.write_text(f"#!/bin/sh\n{body}\n")
+        script.chmod(0o755)
+    (project / "slab.toml").write_text(
+        f'[agent]\nmodel = "m"\n[builders.gracemaker]\ncommand = "{bin_dir / "gracemaker"}"\n'
+    )
+    healthy = runner.invoke(app, ["doctor", "--offline"])
+    assert healthy.exit_code == 0, healthy.output
+    assert (
+        f"[+] gracemaker: tensorpotential 0.5.1 via {bin_dir / 'gracemaker'}"
+        in healthy.output
+    )
+
+    (bin_dir / "python").unlink()  # the environment stops answering the probe
+    grace = bin_dir / "gracemaker"
+    stat = grace.stat()
+    os.utime(grace, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))  # re-key the probe memo
+    broken = runner.invoke(app, ["doctor", "--offline"])
+    assert broken.exit_code == 1
+    assert "[x] gracemaker: configured, but the environment" in broken.output
 
 
 def test_deep_probes_the_snapshot_and_names_a_truncated_transfer(

@@ -1223,25 +1223,38 @@ _METRIC_LINE = re.compile(
 
 
 def _final_metrics(path: Path, tail_lines: int = 20) -> dict[str, Any]:
-    """The last reported value of each numeric metric in a flat YAML file.
+    """The final epoch's metrics from a gracemaker metrics file.
 
-    A minimal text scan, not a YAML parse (PyYAML is not a dependency).
-    When nothing scans as ``key: number``, the file's tail is returned raw
-    so the evidence still reaches the run record.
+    Gracemaker writes one YAML list item per epoch, each a flow mapping
+    that is also strict JSON (observed against tensorpotential 0.6.0):
+    ``- {"rmse/depa": ..., "epoch": N}``. The last parseable row is the
+    final state of the fit. A minimal parse, never PyYAML (not a
+    dependency): JSON rows first, a flat ``key: number`` scan second, and
+    the raw tail last, so the evidence always reaches the run record.
     """
+    import json
+
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as e:
         return {"unreadable": str(e)}
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for line in reversed(lines):
+        if line.startswith("- {") and line.endswith("}"):
+            try:
+                row = json.loads(line[2:])
+            except ValueError:
+                continue
+            if isinstance(row, dict):
+                return row
     metrics: dict[str, Any] = {}
-    for line in text.splitlines():
+    for line in lines:
         match = _METRIC_LINE.match(line)
         if match:
             metrics[match.group(1)] = float(match.group(2))
     if metrics:
         return metrics
-    tail = [line for line in text.splitlines() if line.strip()][-tail_lines:]
-    return {"raw_tail": tail}
+    return {"raw_tail": lines[-tail_lines:]}
 
 
 def _keep_training_failure(active: Any, scratch: Path, name: str, e: BuilderError) -> None:

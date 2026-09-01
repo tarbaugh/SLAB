@@ -39,21 +39,29 @@ available) from an engine you trust for the target chemistry.
 ## Author the input.yaml
 
 `train_potential` takes the input.yaml **text**, verbatim — write it
-yourself and reference the dataset by bare basename:
+yourself and reference the dataset by bare basename. This shape ran a
+real fit (tensorpotential 0.6.0):
 
     seed: 1
     cutoff: 5.0
     data:
       filename: training.extxyz
       test_size: 0.1
+      reference_energy: 0          # or auto (least-squares per-element E0)
     potential:
       preset: FS
+      kwargs: {n_rad_base: 8, embedding_size: 16}
     fit:
+      loss: {energy: {weight: 1.0}, forces: {weight: 5.0}}
+      optimizer: L-BFGS-B
+      opt_params: {"maxcor": 50, "maxls": 20, "gtol": 1.e-8, "iprint": -1}
       maxiter: 500
       batch_size: 8
-    backend:
-      evaluation_strategy: tensorflow
 
+- `fit: loss:` is required — a missing loss block dies with
+  `KeyError: 'loss'` before any training. The `Adam` optimizer
+  additionally requires `scheduler` and `scheduler_params`; the
+  quasi-Newton optimizers (`L-BFGS-B`, `BFGS`) need neither.
 - Presets: `FS` (fast, CPU-friendly, exports a C++-ready
   `FS_model.yaml`), `GRACE_1LAYER_latest` (GPU, local),
   `GRACE_2LAYER_latest` (GPU, semi-local, most accurate). Start small;
