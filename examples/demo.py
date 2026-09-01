@@ -11,8 +11,8 @@ decision happens *after* the results exist, from the CLI:
     slab list
     slab show <best-run-id>
     slab promote <best-run-id> --reason "lowest energy of 5 variants"
-    foundation expire --older-than 0d
-    foundation gc
+    slab expire --older-than 0d
+    slab gc
     slab list --state expired                     # hash-only skeletons remain queryable
 
 This script manages its own runs (five of them), so it is executed with plain
@@ -114,8 +114,8 @@ def main() -> None:
     print(f"lowest energy: run {best_id[:10]}  (E = {best_info['energy']:.6f} eV)")
     print("decide what deserves permanence, then clean up:")
     print(f"  slab promote {best_id[:10]} --reason 'lowest energy of 5 variants'")
-    print("  foundation expire --older-than 0d")
-    print("  foundation gc")
+    print("  slab expire --older-than 0d")
+    print("  slab gc")
 
 
 if __name__ == "__main__":

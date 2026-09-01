@@ -62,21 +62,25 @@ written for other consumers load unmodified from a project or user skills
 directory. So you can bring an external skill pack and keep the SLAB
 lifecycle under it. See [The roster & skills](tutorials/roster-and-skills.md).
 
-## Three packages
+## Four packages
 
-SLAB is three packages in one distribution, `slab-stack`, behind one
+SLAB is four packages in one distribution, `slab-stack`, behind one
 command, `slab`.
 
 - **`slab`** gives access to computational software: engines and
-  calculators, the cluster engine registry, Quantum ESPRESSO protocols,
-  pseudopotential families, and the SLURM layer.
+  calculators, the builders, the cluster engine registry, Quantum ESPRESSO
+  protocols, pseudopotential families, and the SLURM layer.
 - **`foundation`** keeps state and runs workflows: runs, artifacts, caching,
   verification, retention, and the MCP server.
 - **`mason`** is the resident research agent.
+- **`slab_stack`** is the front door and the distribution-level
+  housekeeping: the `slab` command, `slab doctor`, and the operations that
+  must cross the layers (`fast-forward`, `purge`).
 
 `mason` depends on `foundation` and `slab`, `foundation` depends on `slab`,
-and `slab` depends on neither. So you can drive an engine without a
-workspace, and keep a workspace without an agent.
+and `slab` depends on neither. `slab_stack` may import all three. So you
+can drive an engine without a workspace, and keep a workspace without an
+agent.
 
 ## Why not an existing workflow engine?
 
@@ -135,12 +139,13 @@ SLAB delivers evidence rather than running an error protocol. See the
 ## Install
 
 ```bash
-pip install -e .              # core: pydantic + typer + ase
-pip install -e ".[rootstock]" # + cluster-served MLIPs (thin client, no torch)
-pip install -e ".[mcp]"       # + MCP server for agents
+pip install "slab-stack @ git+https://github.com/tarbaugh/SLAB"
 ```
 
-One install brings all three packages and all three commands.
+Optional extras: `[rootstock]` adds the thin client for cluster-served
+MLIPs (no torch), and `[mcp]` adds the MCP server for agents. From a
+checkout, `pip install -e ".[dev,mcp]"`. One install brings all four
+packages and the one command, `slab`.
 
 Python ≥ 3.11. There is no daemon, no database server, and no required
 configuration. A workspace is a directory (`.slab/` by default) that holds a
@@ -175,6 +180,20 @@ one optional layered TOML file. See
 - **[Machine memory](tutorials/memory.md)** keeps what one session learns
   for the next.
 
+## Non-goals
+
+- **No physics engines** and no new file-format parsers beyond what ASE
+  provides. Backends are reached through the ASE `Calculator` contract.
+  LAMMPS, VASP, GROMACS, QE, and MLIPs are the BLAS, and SLAB is the NumPy
+  one layer up.
+- **No workflow-engine scheduler integration.** The SLURM layer is thin
+  submission plumbing (`slab hpc`): render, submit, poll, cancel. Runs,
+  caching, and verification stay in the workspace regardless of where the
+  process executes, and there is no remote state machine.
+- **No web UI.**
+- **No distributed daemon.** A workspace is a directory, and concurrency is
+  handled at the SQLite transaction level.
+
 ## Status
 
 MVP vertical slice, working end to end. It includes:
@@ -185,6 +204,8 @@ MVP vertical slice, working end to end. It includes:
 - verification hooks;
 - relaxation and single-point tasks for ASE, Quantum ESPRESSO, LAMMPS, and
   MLIPs served through rootstock;
+- builders as traced tasks: atomsk structures, the offline Materials
+  Project snapshot, and MLIP training with gracemaker;
 - AiiDA-style input protocols and SSSP pseudopotential families;
 - layered HPC configuration with a SLURM submission layer;
 - the Mason agent harness, for open models self-served on a GPU node or for

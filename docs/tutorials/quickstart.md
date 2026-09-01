@@ -142,6 +142,24 @@ slab expire --older-than 0d                 # everything unpromoted, now
 slab gc
 ```
 
+The verbs, in full:
+
+| Verb | What it does |
+| --- | --- |
+| `slab run script.py` | Execute a zero-ceremony workflow script inside a traced run (lands in quarantine). Scripts that manage their own runs are executed with plain `python`. |
+| `slab list [--state S] [--status S] [--session S] [-q]` | List runs, newest first. |
+| `slab show <id> [--json]` | One run: state, intent, checks, tasks, artifacts, history. Ids accept unique prefixes, git-style. |
+| `slab promote <id>... [--reason ...] [--force]` | Make runs permanent. `--force` promotes an unverified run and is recorded as forced. |
+| `slab promote --session <id> [--force]` | Promote every run one agent session created, reporting each outcome. Failed runs are never promoted this way. |
+| `slab sessions` | List the sessions that created runs, with run counts and state breakdowns. |
+| `slab expire [--older-than 30d] [--include-running]` | Expire unpromoted runs past their TTL (state change only). `0d` = everything unpromoted, now. Runs at status `running` are protected unless `--include-running` (for hard-killed processes that can never advance their own status; they are marked failed first). |
+| `slab gc [--dry-run]` | Drop artifact bytes no retention rule demands. |
+| `slab engines list` / `slab engines verify` | Inspect / smoke-test the cluster engine registry. |
+| `slab mcp` | Serve the workspace to agents over MCP (stdio). |
+
+Workspace resolution: `-w/--workspace` flag > `$SLAB_WORKSPACE` > `./.slab`.
+Retention policy: `--policy file.json` > `<workspace>/policy.json` > defaults.
+
 `slab show` prints the state, the intent, the checks with their compared
 values, the tasks, the artifacts (with `bytes` or `hash-only` presence), and
 the full transition history. Agents get the identical surface as MCP tools,

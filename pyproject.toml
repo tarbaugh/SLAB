@@ -50,7 +50,7 @@ packages = ["src/slab", "src/foundation", "src/mason", "src/slab_stack"]
 
 [tool.hatch.build.targets.sdist]
 # Plan files are working documents for the repository, not for the package.
-exclude = [".claude", "*-PLAN.md"]
+exclude = [".claude", "PLAN-*.md"]
 
 [tool.ruff]
 line-length = 100

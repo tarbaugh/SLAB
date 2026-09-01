@@ -37,7 +37,9 @@ Nine tools, each a thin wrapper over the operations layer:
 | `promote_session` | Promote every run one session created, reporting each outcome. |
 | `expire_runs` | Expire unpromoted runs past their TTL. `older_than="0d"` means everything, now. |
 | `gc` | Drop artifact bytes no retention rule demands. `dry_run=True` only reports. |
-| `list_engines` | Built-in engines, the cluster registry's declarations, rootstock checkpoint ids, QE protocols, installed pseudo families. |
+| `list_engines` | Built-in engines, the cluster registry's declarations, rootstock checkpoint ids, QE protocols, installed pseudo families, the configured builders. |
+| `search_materials` | Filtered search over the offline Materials Project snapshot (`[builders.mp]`): elements, ranges, ordering, a row cap. |
+| `get_material` | One snapshot record by material id, with its elements and the resolved CIF path. Absence is reported as absence; there is no online fallback. |
 
 **`launch_workflow(script_path, name=None, intent=None)`** runs a zero-ceremony script inside a fresh run that lands in quarantine. A zero-ceremony script has bare `@task` calls and `@check` declarations, with no `Workspace` or `start_run` of its own. The result carries the `run_id`, the final `state` (`verified` if all checks passed), the check counts, and the captured `output`. On failure, it includes the structured `failure` record, and if even recording the failure failed (storage died mid-crash), a raw `traceback` string appears instead. Always pass `intent`, which says why this run exists.
 

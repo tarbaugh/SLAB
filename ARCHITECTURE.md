@@ -347,9 +347,12 @@ failure surface delivers evidence and stops there:
 
 ## 7. The layers
 
-Three packages ship as one distribution (`slab-stack`), behind one
-command (`slab`). The boundary between them is a dependency rule, and the
-rule points one way only:
+Four packages ship as one distribution (`slab-stack`), behind one
+command (`slab`). Three carry the architecture below; the fourth,
+`slab_stack`, is the front door (the `slab` command, `slab doctor`) and
+the distribution-level housekeeping that must cross the layers, and it
+alone may import all three. The boundary between the three is a
+dependency rule, and the rule points one way only:
 
 ```
 ┌─ mason ─────────────────────────────────────────────────────────┐
