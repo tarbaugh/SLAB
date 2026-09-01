@@ -992,48 +992,6 @@ def mason_sandbox_verify(
     typer.echo(f"[+] 127.0.0.1:{port} answers; serving: {', '.join(names) or 'none'}")
 
 
-def _serve_hint(agent: AgentConfig, root: Path, origin: str, *, cluster: str = "") -> list[str]:
-    """Why an unreachable endpoint might be unreachable, when we can tell."""
-    from mason.serve import read_record
-    from slab.hpc import job_state
-
-    if agent.provider != "openai":
-        return []
-    try:
-        record = read_record(root)
-    except (MasonError, FoundationError, SlabError) as e:
-        return [f"    (the endpoint record is unreadable: {e})"]
-    if record is None:
-        # A one-shot --endpoint meant that server, so 'start your own' is noise.
-        # A *configured* endpoint that no longer answers is the opposite case:
-        # it is usually last allocation's node, and serve start is the fix.
-        if origin == "--endpoint":
-            return []
-        return [
-            "    no server is recorded here; start one with 'slab mason serve start' "
-            "(or point [agent] endpoint at a server you started yourself)"
-        ]
-    if not record.job_id:
-        return [f"    a record exists ({record.endpoint}) but names no job to ask about"]
-    if record.cluster and record.cluster != cluster:
-        # A job id is only meaningful on its own cluster; asking this one
-        # would describe an unrelated job that happens to share the number.
-        return [
-            f"    the record belongs to cluster {record.cluster!r}; job "
-            f"{record.job_id} is not queried from here (job ids are per-cluster)"
-        ]
-    try:
-        status = job_state(record.job_id)
-    except (MasonError, FoundationError, SlabError) as e:
-        return [f"    job {record.job_id}: state unknown — {e}"]
-    if status.state.is_terminal:
-        return [
-            f"    job {record.job_id} ended as {status.state.value}; the record is "
-            f"stale — 'slab mason serve stop' clears it"
-        ]
-    return [f"    job {record.job_id} is {status.state.value}; the model may still be loading"]
-
-
 @app.command("doctor")
 def mason_doctor(
     workspace: _WorkspaceOpt = None,
@@ -1042,14 +1000,12 @@ def mason_doctor(
     provider: _ProviderOpt = None,
 ) -> None:
     """Check the model endpoint: reachable, model served, tool calls parsed."""
-    from mason.client import ChatClient, LlmError
-    from mason.serve import discover_endpoint
+    from mason import doctor
 
     try:
         agent, hpc, root = _serve_inputs(workspace)
     except (MasonError, FoundationError, SlabError) as e:
         _fail(str(e))
-    cluster = hpc.cluster or ""
     overrides: dict[str, object] = {}
     if provider is not None:
         overrides["provider"] = provider
@@ -1057,162 +1013,18 @@ def mason_doctor(
         overrides["endpoint"] = endpoint
     agent = _override_agent(agent, overrides)
     try:
-        resolved_endpoint, origin = discover_endpoint(agent, root)
+        failed = doctor.run(
+            agent,
+            root,
+            cluster=hpc.cluster or "",
+            model=model,
+            endpoint_forced=endpoint is not None,
+            emit=typer.echo,
+        )
     except (MasonError, FoundationError, SlabError) as e:
         _fail(str(e))
-    if endpoint is not None:
-        origin = "--endpoint"
-    resolved_model = model or agent.model
-    typer.echo(f"provider: {agent.provider}")
-    typer.echo(f"endpoint: {resolved_endpoint}  [{origin}]")
-    typer.echo(f"model:    {resolved_model or '(not configured)'}")
-    client: Any
-    api_key = _probe_key(agent, label="")
-    if agent.provider == "anthropic":
-        from mason.anthropic import AnthropicClient
-
-        assert api_key is not None  # resolved_api_key_env always names one here
-        client = AnthropicClient(
-            resolved_model or "unconfigured", api_key, endpoint=resolved_endpoint, timeout_s=60.0
-        )
-    else:
-        client = ChatClient(
-            resolved_endpoint,
-            resolved_model or "unconfigured",
-            api_key=api_key,
-            timeout_s=60.0,
-        )
-    failed = 0
-    try:
-        names = client.model_names()
-        typer.echo(f"[+] endpoint answers; {len(names)} model(s) served")
-    except LlmError as e:
-        typer.echo(f"[x] endpoint: {e}")
-        for line in _serve_hint(agent, root, origin, cluster=cluster):
-            typer.echo(line)
-        raise typer.Exit(code=1) from None
-    if resolved_model is None:
-        typer.echo(f"[x] no model configured; served here: {', '.join(names) or 'none'}")
-        raise typer.Exit(code=1)
-    if resolved_model in names:
-        typer.echo(f"[+] model {resolved_model!r} is served")
-    else:
-        failed += 1
-        typer.echo(f"[x] model {resolved_model!r} not served; available: {', '.join(names)}")
-    ping = {
-        "type": "function",
-        "function": {
-            "name": "ping",
-            "description": "Reply with a pong.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    }
-    try:
-        reply = client.chat(
-            [{"role": "user", "content": "Call the ping tool now."}], tools=[ping]
-        )
-        if reply.tool_calls:
-            typer.echo("[+] native tool calls work")
-        else:
-            failed += 1
-            typer.echo(
-                "[x] the model answered without a tool call — the server may lack a "
-                "tool-call parser; try [agent] tool_protocol = \"fenced\""
-            )
-    except LlmError as e:
-        failed += 1
-        typer.echo(f"[x] tool-call probe: {e}")
-    primary = (agent.provider, resolved_endpoint, resolved_model)
-    failed += _doctor_roster(agent, root, seen={primary})
     if failed:
         raise typer.Exit(code=1)
-
-
-def _probe_key(agent: AgentConfig, *, label: str) -> str | None:
-    """The API key a doctor probe must send, or exit reporting the missing one.
-
-    The probe has to authenticate exactly as the session will. Sending
-    nothing where the config names a key turns a working connection into a
-    401 whose message tells you to configure what you already configured.
-    """
-    key_var = agent.resolved_api_key_env
-    if key_var is None:
-        return None
-    api_key = os.environ.get(key_var)
-    if not api_key:
-        typer.echo(f"[x] {label}${key_var} is not set — [agent] api_key_env names it")
-        raise typer.Exit(code=1)
-    return api_key
-
-
-def _doctor_roster(
-    agent: AgentConfig, root: Path, *, seen: set[tuple[str, str, str | None]]
-) -> int:
-    """Probe the roster's distinct model connections; return the failure count.
-
-    A specialist pinned to an unserved model should fail the doctor, not
-    the first delegation. Only ``[agent.roster.<name>]`` tables are probed —
-    an agent without a table shares the primary connection checked above.
-    """
-    if not agent.roster:
-        return 0
-    from mason.client import ChatClient, LlmError
-    from mason.config import roster_agent_config
-    from mason.roster import check_overrides, discover_roster
-    from mason.serve import discover_endpoint
-
-    try:
-        check_overrides(agent, discover_roster(Path.cwd()))
-    except (MasonError, FoundationError, SlabError) as e:
-        typer.echo(f"[x] roster: {e}")
-        return 1
-    failures = 0
-    for name in sorted(agent.roster):
-        effective = roster_agent_config(agent, name)
-        try:
-            endpoint, _origin = discover_endpoint(effective, root)
-        except (MasonError, FoundationError, SlabError) as e:
-            typer.echo(f"[x] {name}: {e}")
-            failures += 1
-            continue
-        key = (effective.provider, endpoint, effective.model)
-        if key in seen:
-            continue
-        seen.add(key)
-        if effective.model is None:
-            typer.echo(f"[x] {name}: no model configured for its connection")
-            failures += 1
-            continue
-        client: Any
-        try:
-            api_key = _probe_key(effective, label=f"{name}: ")
-        except typer.Exit:
-            failures += 1
-            continue
-        if effective.provider == "anthropic":
-            from mason.anthropic import AnthropicClient
-
-            assert api_key is not None  # resolved_api_key_env always names one here
-            client = AnthropicClient(
-                effective.model, api_key, endpoint=endpoint, timeout_s=60.0
-            )
-        else:
-            client = ChatClient(endpoint, effective.model, api_key=api_key, timeout_s=60.0)
-        try:
-            names = client.model_names()
-        except LlmError as e:
-            typer.echo(f"[x] {name}: endpoint {endpoint}: {e}")
-            failures += 1
-            continue
-        if effective.model in names:
-            typer.echo(f"[+] {name}: model {effective.model!r} is served at {endpoint}")
-        else:
-            typer.echo(
-                f"[x] {name}: model {effective.model!r} not served at {endpoint}; "
-                f"available: {', '.join(names) or 'none'}"
-            )
-            failures += 1
-    return failures
 
 
 if __name__ == "__main__":  # pragma: no cover - module execution convenience
