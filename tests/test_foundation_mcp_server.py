@@ -22,6 +22,8 @@ EXPECTED_TOOLS = {
     "gc",
     "launch_workflow",
     "list_engines",
+    "search_materials",
+    "get_material",
 }
 
 
@@ -210,3 +212,36 @@ def test_promote_session_unknown_surfaces_helpfully(root: Path) -> None:
     server = build_server(root)
     with pytest.raises(Exception, match="slab sessions"):
         _call(server, "promote_session", {"session": "nope"})
+
+
+def test_materials_tools_answer_from_the_snapshot(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from conftest import build_mp_snapshot
+
+    snapshot = build_mp_snapshot(tmp_path / "mp-snapshot")
+    (tmp_path / "slab.toml").write_text(f'[builders.mp]\nroot = "{snapshot}"\n')
+    monkeypatch.chdir(tmp_path)
+    server = build_server(root)
+    rows = _call(
+        server,
+        "search_materials",
+        {"filters": {"elements": ["Fe"], "energy_above_hull__lte": 0.05}},
+    )
+    assert [row["material_id"] for row in rows] == ["mp-13"]
+    record = _call(server, "get_material", {"material_id": "mp-13"})
+    assert record["formula_pretty"] == "Fe"
+    assert Path(record["cif_file"]).is_file()
+    overview = _call(server, "list_engines")
+    assert overview["mp"]["materials"] == 4
+
+
+def test_materials_tools_unconfigured_surface_the_fix(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    server = build_server(root)
+    with pytest.raises(Exception, match=r"\[builders.mp\] root"):
+        _call(server, "search_materials", {})
+    with pytest.raises(Exception, match=r"\[builders.mp\] root"):
+        _call(server, "get_material", {"material_id": "mp-149"})

@@ -205,8 +205,47 @@ def build_server(root: Path) -> MCPServer:
         workflow script), 'pseudo_families' (installed pseudopotential
         families, usable as calculator_options={'pseudo_family': ...}), and
         'hpc' (this machine's configured SLURM cluster and partitions, or
-        null off-cluster; jobs submit via 'slab hpc submit')."""
+        null off-cluster; jobs submit via 'slab hpc submit'). An 'mp' key
+        names the offline Materials Project snapshot when one is configured
+        (search it with search_materials / get_material)."""
         return engines_overview()
+
+    @server.tool()
+    @_surfaced
+    def search_materials(
+        filters: dict[str, Any] | None = None,
+        columns: list[str] | None = None,
+        limit: int = 20,
+        order_by: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Search the offline Materials Project snapshot's materials table
+        (parameterized SQL; needs [builders.mp] root in slab.toml). filters
+        maps keys to values: 'elements' (all must be present) and
+        'exclude_elements' take element-symbol lists; any other key is a
+        materials column, bare for equality (null matches SQL NULL) or
+        suffixed __lte/__gte/__lt/__gt/__ne for comparisons — e.g.
+        {"elements": ["Fe"], "energy_above_hull__lte": 0.025}. Unknown
+        columns are refused with the real column list. limit clamps to
+        1-500; order_by names a column, leading '-' for descending. NULL
+        means "not populated", never zero. Report results as
+        (snapshot release, material_id); absence from the snapshot is
+        absence — there is no online fallback."""
+        from slab.mp import search_materials as mp_search
+
+        return mp_search(filters, columns=columns, limit=limit, order_by=order_by)
+
+    @server.tool()
+    @_surfaced
+    def get_material(material_id: str) -> dict[str, Any]:
+        """One material's full metadata record from the offline Materials
+        Project snapshot: the materials row, its 'elements' list, and
+        'cif_file' — the absolute path of its archived CIF, readable by
+        ase.io.read (or fetched traced via foundation.tasks.fetch_structure
+        inside a workflow). Raises when the id is absent: the snapshot is
+        the only source, and there is no online fallback."""
+        from slab.mp import get_material as mp_get
+
+        return mp_get(material_id)
 
     return server
 

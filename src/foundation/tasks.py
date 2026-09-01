@@ -43,6 +43,7 @@ from slab.backends import (
     get_calculator,
 )
 from slab.errors import BuilderError
+from slab.mp import describe_mp, mp_root, structure_path
 
 
 # cache_extra folds the resolved engine's identity (source + the registry's
@@ -566,6 +567,69 @@ def build_structure(
         "args": argv,
         "output": result_name,
         "produced": produced,
+        "n_atoms": len(structure),
+        "formula": structure.get_chemical_formula(),
+        "pbc": [bool(flag) for flag in structure.pbc],
+    }
+    return structure, info
+
+
+# cache_extra folds the snapshot's identity (release, material count) into the
+# cache key: installing a newer snapshot honestly invalidates fetched
+# structures, while the same release mounted at a different path still hits.
+@task(engines=("ase",), cache_extra=lambda arguments: describe_mp())
+def fetch_structure(
+    material_id: str, *, label: str | None = None
+) -> tuple[Atoms, dict[str, Any]]:
+    """Fetch one structure from the offline Materials Project snapshot, traced.
+
+    The snapshot (``[builders.mp] root`` in ``slab.toml``) is a read-only
+    local data source, a *builder* like atomsk: it supplies structures,
+    never energies. This task resolves the material's archived CIF below
+    the snapshot root, reads it through ASE, keeps the CIF with the run,
+    and returns the structure ready for :func:`relax` or
+    :func:`single_point`.
+
+    Two rules from the snapshot's contract. A result's identity is the
+    pair ``(release, material_id)`` — report both, never a formula alone,
+    because entries share compositions and releases revise records. And
+    absence is absence: a material id the snapshot does not hold raises
+    with that statement, and nothing here falls back to an online lookup.
+
+    Search before fetching: reduce candidates against ``metadata.sqlite``
+    (``slab.mp.search_materials``, the ``slab mp search`` command, or the
+    agent's search tools), then fetch the shortlisted ids one by one.
+
+    Returns ``(atoms, info)``: the structure, and an ``info`` dict with
+    ``builder`` (``"mp"``), ``material_id``, ``release``, ``cif_path``
+    (relative to the snapshot root), ``source`` (``"cif"``), ``n_atoms``,
+    ``formula``, and ``pbc``.
+
+    Example::
+
+        atoms, info = fetch_structure("mp-149")
+        relaxed, opt = relax(atoms, engine="mace-mp-0-medium")
+
+    Args:
+        material_id: One Materials Project id, e.g. ``"mp-149"``.
+        label: Names the kept CIF artifact (default: the material id).
+    """
+    # Snapshot identity resolves BEFORE the read, mirroring the engine
+    # tasks: the tracer's cache_extra made the same resolution moments ago.
+    described = describe_mp()
+    cif = structure_path(material_id)
+    structure = ase_read(cif)
+    if not isinstance(structure, Atoms):  # a multi-frame file
+        structure = structure[-1]
+    active = current_run()
+    if active is not None:
+        _keep_unique(active, f"{label or material_id}.cif", cif)
+    info: dict[str, Any] = {
+        "builder": "mp",
+        "material_id": material_id,
+        "release": described.get("release"),
+        "cif_path": str(cif.relative_to(mp_root())),
+        "source": "cif",
         "n_atoms": len(structure),
         "formula": structure.get_chemical_formula(),
         "pbc": [bool(flag) for flag in structure.pbc],
