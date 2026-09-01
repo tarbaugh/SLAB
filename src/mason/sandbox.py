@@ -1433,6 +1433,9 @@ def _sandbox_context(
         "  legs run in this container, on this job's allocation.",
         "- The model endpoint is a local bridge to the outside; do not",
         "  reconfigure it.",
+        "- The SLAB command is `slab`, already on PATH with python. The",
+        "  image is otherwise minimal: common utilities (ps, which) may be",
+        "  missing — use python or /proc instead of probing for them.",
         "- $HOME is not mounted."
         + (f" Machine memories are at {memories} (rw)." if memories else ""),
         "- GPU: the host driver stack is mounted (--nv); the job holds a GPU."

@@ -99,6 +99,8 @@ def test_render_describes_the_cage_for_the_prompt(tmp_path: Path) -> None:
     assert "ro  /shared/pseudos" in context
     assert "GPU: none on this partition" in context
     assert "Machine memories are at" in context
+    assert "The SLAB command is `slab`" in context
+    assert "ps, which" in context  # the image is minimal; say so up front
     assert "--env SLAB_SANDBOX_CONTEXT=" in script
     assert str(tmp_path / "sandbox" / "context.md") in script
 

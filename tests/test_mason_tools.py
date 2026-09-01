@@ -679,3 +679,92 @@ def test_a_delegated_child_launches_into_the_parents_session(tmp_path: Path) -> 
     build_toolbox(child).dispatch(_call("launch_workflow", script="wf.py"))
     with Workspace(tmp_path / ".slab") as ws:
         assert ws.runs.list_runs()[0].session == parent.session_id
+
+
+# -- background runs and waiting ---------------------------------------------
+
+
+def test_launch_workflow_passes_script_args(box: Toolbox, tmp_path: Path) -> None:
+    """A parametrized workflow gets its argv — a real campaign duplicated a
+    whole script because the tool could not pass one argument."""
+    (tmp_path / "argv_wf.py").write_text(
+        "import sys\nprint('got:', sys.argv[1])\n"
+    )
+    answer = box.dispatch(
+        _call("launch_workflow", script="argv_wf.py", args=["quench-10Kps.traj"])
+    )
+    assert "status=completed" in answer
+    assert "got: quench-10Kps.traj" in answer
+
+
+def test_list_runs_session_this_means_the_current_session(
+    box: Toolbox, tmp_path: Path
+) -> None:
+    (tmp_path / "wf.py").write_text("print('ok')\n")
+    box.dispatch(_call("launch_workflow", script="wf.py"))
+    mine = box.dispatch(_call("list_runs", session="this"))
+    assert "wf" in mine
+    missing = box.dispatch(_call("list_runs", session="some-other-session"))
+    assert "failed" in missing or "no run" in missing
+
+
+def test_background_launch_detaches_and_wait_for_run_collects(
+    box: Toolbox, tmp_path: Path
+) -> None:
+    (tmp_path / "slow_wf.py").write_text(
+        "import time\ntime.sleep(1.0)\nprint('background done')\n"
+    )
+    arguments = {
+        "script": "slow_wf.py",
+        "name": "bg-test",
+        "intent": "background launch test",
+        "background": True,
+    }
+    answer = box.dispatch(
+        ToolCall(id="t1", name="launch_workflow", arguments=arguments, arguments_raw="{}")
+    )
+    assert "launched in the background: pid" in answer
+    assert "wait_for_run" in answer
+    waited = box.dispatch(_call("wait_for_run", timeout_s=60))
+    assert "bg-test" in waited
+    assert "running" not in waited.split("bg-test")[1].splitlines()[0]
+    log = (tmp_path / "slow_wf.launch.log").read_text()
+    assert "background done" in log
+
+
+def test_wait_for_run_reports_a_finished_run_by_id(box: Toolbox, tmp_path: Path) -> None:
+    (tmp_path / "wf.py").write_text("print('ok')\n")
+    launched = box.dispatch(_call("launch_workflow", script="wf.py"))
+    run_id = launched.split()[1].rstrip(":")
+    waited = box.dispatch(_call("wait_for_run", run_id=run_id, timeout_s=5))
+    assert f"run {run_id}" in waited
+    assert "status=completed" in waited
+
+
+def test_wait_for_run_with_nothing_launched_says_so(box: Toolbox) -> None:
+    answer = box.dispatch(_call("wait_for_run", timeout_s=0.2))
+    assert "no runs yet" in answer
+
+
+def test_wait_for_run_timeout_reports_still_running(
+    box: Toolbox, tmp_path: Path
+) -> None:
+    (tmp_path / "very_slow.py").write_text(
+        "import time\ntime.sleep(20)\nprint('done')\n"
+    )
+    arguments = {"script": "very_slow.py", "name": "slowpoke", "background": True}
+    answer = box.dispatch(
+        ToolCall(id="t1", name="launch_workflow", arguments=arguments, arguments_raw="{}")
+    )
+    assert "launched in the background" in answer
+    import time as _time
+
+    for _ in range(40):  # let the subprocess register its run
+        listed = box.dispatch(_call("list_runs", session="this"))
+        if "slowpoke" in listed:
+            break
+        _time.sleep(0.5)
+    waited = box.dispatch(_call("wait_for_run", timeout_s=1))
+    assert "still running after 1s" in waited
+    assert "slowpoke" in waited
+    assert "call wait_for_run again" in waited

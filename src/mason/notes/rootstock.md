@@ -13,6 +13,11 @@ A served calculator runs in a worker subprocess. The `foundation.tasks`
 functions close it automatically; only long-lived hand-rolled scripts
 need to care.
 
+One GPU comfortably serves one worker. A second concurrent MLIP run on
+the same device can out-of-memory both, so before launching MLIP work,
+confirm nothing else of yours is mid-calculation (`wait_for_run`, or
+`list_runs` for a run at status running) rather than starting a rival.
+
 A declared checkpoint id is a promise the install may not keep: if a
 worker dies while trying to download model weights, the checkpoint is
 declared but its weights are not cached in the install. The sandbox has

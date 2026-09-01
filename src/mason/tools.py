@@ -58,6 +58,7 @@ TOOL_VOCABULARY = frozenset(
         "list_runs",
         "show_run",
         "launch_workflow",
+        "wait_for_run",
         "list_engines",
         "list_tasks",
         "describe_task",
@@ -79,6 +80,12 @@ _MAX_LINE_CHARS = 500
 _MAX_DIR_ENTRIES = 200
 _MAX_SEARCH_MATCHES = 100
 _MAX_SHELL_TIMEOUT_S = 600.0
+# wait_for_run: one blocking call replaces a chain of sleep-and-poll shell
+# commands. The cap bounds a single tool call, not the wait — the tool says
+# to call again, and each re-issue costs one step instead of six.
+_MAX_WAIT_TIMEOUT_S = 1800.0
+_WAIT_POLL_S = 5.0
+_WAIT_GRACE_S = 10.0
 
 Handler = Callable[[dict[str, Any]], str]
 
@@ -310,9 +317,12 @@ def build_toolbox(
             name="finish",
             description=(
                 "End the current task with a final report. Cite run ids for every "
-                "number; list what was verified and what remains open. Call it "
-                "alone, as the only tool call of its message, after the evidence "
-                "it cites has been read."
+                "number; list what was verified and what remains open. Before "
+                "calling it: a machine fact this session learned the hard way (a "
+                "workaround, a missing utility, a device limit) belongs in "
+                "`remember` first, or the next session pays for it again. Call "
+                "finish alone, as the only tool call of its message, after the "
+                "evidence it cites has been read."
             ),
             parameters=_schema({"report": {"type": "string"}}, ["report"]),
             handler=lambda arguments: str(arguments.get("report", "")),
@@ -736,8 +746,10 @@ def _add_shell_tool(box: Toolbox, session: MasonSession) -> None:
             name="shell",
             description=(
                 "Run one shell command in the project directory (stdout+stderr, "
-                "with the exit code). Not for long calculations — use launch_workflow "
-                "or submit_job for those."
+                "with the exit code). A timeout kills the command's whole process "
+                "group — nohup and '&' do not survive it. Not for long "
+                "calculations — use launch_workflow (background=true for long "
+                "ones) or submit_job for those."
             ),
             parameters=_schema(
                 {"command": {"type": "string"}, "timeout_s": {"type": "number"}},
@@ -758,22 +770,30 @@ def _add_shell_tool(box: Toolbox, session: MasonSession) -> None:
 def _add_workflow_tools(
     box: Toolbox, session: MasonSession, read_roots: tuple[Path, ...]
 ) -> None:
+    def _run_line(run: Any) -> str:
+        return (
+            f"{run.id[:10]}  {run.state.value:<11} {run.status.value:<10} "
+            f"{run.name[:24]:<24} {run.intent or ''}"
+        )
+
+    def _session_filter(raw: object) -> str | None:
+        # 'this' names the current session, so the agent never has to know
+        # its own id — a real transcript showed the guess being made.
+        value = str(raw) if raw else None
+        return session.session_id if value == "this" else value
+
     def list_runs(arguments: dict[str, Any]) -> str:
         from foundation.runtime import Workspace
 
         state = arguments.get("state")
         limit = int(arguments.get("limit", 10))
-        session_filter = arguments.get("session") or None
+        session_filter = _session_filter(arguments.get("session"))
         with Workspace(session.workspace_root) as ws:
             runs = ws.runs.list_runs(state=state, session=session_filter, limit=limit)
             if not runs:
                 where = f" for session {session_filter!r}" if session_filter else ""
                 return f"no runs in this workspace yet{where}"
-            lines = [
-                f"{run.id[:10]}  {run.state.value:<11} {run.status.value:<10} "
-                f"{run.name[:24]:<24} {run.intent or ''}"
-                for run in runs
-            ]
+            lines = [_run_line(run) for run in runs]
         return "\n".join(lines)
 
     box.add(
@@ -781,9 +801,9 @@ def _add_workflow_tools(
             name="list_runs",
             description=(
                 "List SLAB runs in this workspace, newest first. Pass "
-                "'session' (full id or a unique prefix) to see only runs "
-                "this chat's session created — the same filter 'slab "
-                "list --session' takes."
+                "session='this' to see only runs this session created "
+                "(a full id or unique prefix also works — the same filter "
+                "'slab list --session' takes)."
             ),
             parameters=_schema(
                 {
@@ -794,7 +814,8 @@ def _add_workflow_tools(
                     "session": {
                         "type": "string",
                         "description": (
-                            "session id (or unique prefix) to filter by; omit for all runs"
+                            "'this' for the current session; or a session id "
+                            "(unique prefix ok); omit for all runs"
                         ),
                     },
                     "limit": {"type": "integer"},
@@ -826,6 +847,37 @@ def _add_workflow_tools(
         )
     )
 
+    def _launch_background(
+        script: Path, name: str | None, intent: str | None, args: list[str]
+    ) -> str:
+        """Detach the run as its own process so no shell timeout can kill it."""
+        import sys
+
+        log_path = Path(script).with_suffix(".launch.log")
+        command = [sys.executable, "-m", "foundation.cli", "run", str(script), *args]
+        if name:
+            command += ["--name", name]
+        if intent:
+            command += ["--intent", intent]
+        command += ["--session", session.session_id, "-w", str(session.workspace_root)]
+        try:
+            with open(log_path, "ab") as log:
+                process = subprocess.Popen(
+                    command,
+                    cwd=session.cwd,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+        except OSError as e:
+            return f"could not start the background run: {e}"
+        return (
+            f"launched in the background: pid {process.pid}, output -> {log_path}\n"
+            f"the run appears in list_runs (session='this') once it starts; "
+            f"block on it with wait_for_run instead of polling in shell."
+        )
+
     def launch_workflow(arguments: dict[str, Any]) -> str:
         from foundation._ops import launch_script
 
@@ -838,12 +890,18 @@ def _add_workflow_tools(
             script_text = ""  # launch_script reports the unreadable file itself
         if refused := _rank_overcommit(script_text):
             return refused
+        args = [str(a) for a in arguments.get("args") or []]
+        if arguments.get("background"):
+            return _launch_background(
+                Path(script), arguments.get("name"), arguments.get("intent"), args
+            )
         result = launch_script(
             session.workspace_root,
             script,
             name=arguments.get("name"),
             intent=arguments.get("intent"),
             session=session.session_id,
+            argv=tuple(args),
             capture_output=True,
         )
         lines = [
@@ -867,18 +925,107 @@ def _add_workflow_tools(
             description=(
                 "Execute a SLAB workflow script (plain Python with @task calls and "
                 "@check verification) as a traced run. This is how calculations "
-                "run: results get provenance, caching, and verification gates."
+                "run: results get provenance, caching, and verification gates. "
+                "For work longer than a few minutes, pass background=true: the "
+                "run detaches from this process (no tool timeout can kill it) "
+                "and wait_for_run blocks until it finishes."
             ),
             parameters=_schema(
                 {
                     "script": {"type": "string", "description": "path to the workflow script"},
                     "name": {"type": "string"},
                     "intent": {"type": "string", "description": "why this run exists"},
+                    "args": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "arguments passed to the script (sys.argv[1:])",
+                    },
+                    "background": {
+                        "type": "boolean",
+                        "description": (
+                            "detach and return immediately; follow with wait_for_run"
+                        ),
+                    },
                 },
                 ["script"],
             ),
             handler=launch_workflow,
             requires_approval=True,
+        )
+    )
+
+    def wait_for_run(arguments: dict[str, Any]) -> str:
+        import time
+
+        from foundation._ops import run_details
+        from foundation.errors import SessionNotFoundError
+        from foundation.runtime import Workspace
+
+        run_id = arguments.get("run_id")
+        timeout = min(float(arguments.get("timeout_s", 900.0)), _MAX_WAIT_TIMEOUT_S)
+        deadline = time.monotonic() + timeout
+        # A background launch takes a moment to register its run, so an
+        # empty workspace gets a grace window before "nothing is running"
+        # counts as an answer.
+        grace_until = time.monotonic() + min(_WAIT_GRACE_S, timeout)
+        while True:
+            with Workspace(session.workspace_root) as ws:
+                if run_id:
+                    details = run_details(ws, str(run_id))
+                    run = details["run"]
+                    if run["status"] != "running":
+                        return (
+                            f"run {run['id']}: state={run['state']} "
+                            f"status={run['status']}; read it with show_run"
+                        )
+                    still = [f"{run['id'][:10]}  {run['name']}  running"]
+                else:
+                    try:
+                        runs = ws.runs.list_runs(session=session.session_id, limit=50)
+                    except SessionNotFoundError:
+                        runs = []
+                    running = [r for r in runs if r.status.value == "running"]
+                    if not running and time.monotonic() >= grace_until:
+                        if not runs:
+                            return (
+                                "this session has no runs yet; launch one first "
+                                "(a fresh background launch needs a few seconds "
+                                "to register)"
+                            )
+                        finished = "\n".join(_run_line(r) for r in runs[:10])
+                        return f"no run of this session is running; the record:\n{finished}"
+                    still = [f"{r.id[:10]}  {r.name}  running" for r in running]
+            if time.monotonic() >= deadline:
+                lines = "\n".join(still) or "(none registered yet)"
+                return (
+                    f"still running after {timeout:.0f}s:\n{lines}\n"
+                    f"call wait_for_run again to keep waiting"
+                )
+            time.sleep(min(_WAIT_POLL_S, max(0.05, deadline - time.monotonic())))
+
+    box.add(
+        Tool(
+            name="wait_for_run",
+            description=(
+                "Block until a run finishes (or the timeout passes), then report "
+                "its state. Without run_id, waits for every running run this "
+                "session created — the partner of launch_workflow background=true. "
+                "One call replaces a chain of sleep-and-poll shell commands."
+            ),
+            parameters=_schema(
+                {
+                    "run_id": {
+                        "type": "string",
+                        "description": "run id or unique prefix; omit for this session's runs",
+                    },
+                    "timeout_s": {
+                        "type": "number",
+                        "description": "seconds to wait before reporting back (default 900)",
+                    },
+                },
+                [],
+            ),
+            handler=wait_for_run,
         )
     )
 

@@ -281,9 +281,10 @@ more than model choice.
 | `read_file` | line-numbered, windowed; refuses binary; a file must be read before it may be edited |
 | `write_file` / `edit_file` | edit is exact-string replacement, unique match or `replace_all`; Python files get an immediate syntax check after every write |
 | `list_dir`, `search` | listing and recursive regex search, output-capped |
-| `shell` | one command, merged output + exit code, timeout-capped; **not** for long calculations |
-| `launch_workflow` | run a workflow script as a traced, check-gated run; this is how physics happens |
-| `list_runs`, `show_run`, `list_engines` | the workspace's evidence surface: runs, checks with observed/expected values, failure records, capabilities |
+| `shell` | one command, merged output + exit code, timeout-capped; the timeout kills the whole process group, so nothing backgrounded survives it; **not** for long calculations |
+| `launch_workflow` | run a workflow script as a traced, check-gated run; this is how physics happens. `args` reach the script as argv; `background=true` detaches a long run so no tool timeout can touch it |
+| `wait_for_run` | block until a run (or every running run of this session) finishes, then report its state; one call replaces a chain of sleep-and-poll shell commands |
+| `list_runs`, `show_run`, `list_engines` | the workspace's evidence surface: runs, checks with observed/expected values, failure records, capabilities; `list_runs` takes `session="this"` |
 | `submit_job`, `job_status`, `cancel_job` | SLURM plumbing, present only when the config declares partitions |
 | `notebook`, `plan` | the memory instruments (below) |
 | `skill` | load a skill: its instructions, root path, and bundled files; the catalog is per-agent |
