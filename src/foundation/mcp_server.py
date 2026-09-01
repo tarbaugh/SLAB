@@ -26,8 +26,13 @@ try:  # mcp >= 2.0
     from mcp.server.mcpserver import MCPServer
     from mcp.server.mcpserver.exceptions import ToolError
 except ImportError:  # pragma: no cover - mcp 1.x fallback
-    from mcp.server.fastmcp import FastMCP as MCPServer  # type: ignore[no-redef]
-    from mcp.server.fastmcp.exceptions import ToolError  # type: ignore[no-redef]
+    # Resolved dynamically: newer 2.x releases keep a ``mcp.server.fastmcp``
+    # module without ``FastMCP``, and a static import there fails type
+    # checking under exactly the SDK versions that never take this branch.
+    from importlib import import_module
+
+    MCPServer = import_module("mcp.server.fastmcp").FastMCP  # type: ignore[misc]
+    ToolError = import_module("mcp.server.fastmcp.exceptions").ToolError  # type: ignore[misc]
 
 from foundation import _ops
 from foundation.errors import FoundationError
