@@ -8,7 +8,7 @@ from mason.config import AgentConfig
 from mason.notes import _CANONICAL, enabled_notes, note_text, notes_block
 from mason.prompts import system_messages
 from mason.session import MasonSession
-from slab.config import EnginesConfig, HpcConfig
+from slab.config import HpcConfig, SlabConfig
 
 
 def _session(tmp_path: Path, agent: AgentConfig | None = None) -> MasonSession:
@@ -28,14 +28,16 @@ def test_every_canonical_note_ships_and_is_substantive() -> None:
         assert len(note_text(name)) > 100, f"the {name} note is too thin to help"
 
 
-def test_selection_follows_the_engines_tables() -> None:
-    assert enabled_notes(EnginesConfig()) == ("rootstock", "emt", "lj")
-    cfg = EnginesConfig.model_validate(
-        {"qe": {"command": "srun pw.x"}, "lammps": {"command": "lmp"}}
+def test_selection_follows_the_config_tables() -> None:
+    assert enabled_notes(SlabConfig()) == ("rootstock", "emt", "lj")
+    cfg = SlabConfig.model_validate(
+        {"engines": {"qe": {"command": "srun pw.x"}, "lammps": {"command": "lmp"}}}
     )
     assert enabled_notes(cfg) == ("rootstock", "qe", "lammps", "emt", "lj")
-    served = EnginesConfig.model_validate({"rootstock": {"cluster": "delta"}})
+    served = SlabConfig.model_validate({"engines": {"rootstock": {"cluster": "delta"}}})
     assert "rootstock" in enabled_notes(served)
+    snapshot = SlabConfig.model_validate({"builders": {"mp": {"root": "/data/mp"}}})
+    assert enabled_notes(snapshot) == ("rootstock", "emt", "lj", "mp")
 
 
 def test_a_user_note_replaces_the_packaged_one(
@@ -48,7 +50,7 @@ def test_a_user_note_replaces_the_packaged_one(
     )
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
     assert note_text("rootstock") == "Our rootstock install serves mace-mp-0-medium only."
-    block = notes_block(EnginesConfig())
+    block = notes_block(SlabConfig())
     assert "mace-mp-0-medium only" in block
     # A sentence from the packaged note must not survive the override.
     assert "worker subprocess" not in block
@@ -69,6 +71,14 @@ def test_a_configured_engine_brings_its_note(tmp_path: Path) -> None:
     (content,) = [m["content"] for m in system_messages(_session(tmp_path))]
     assert "## qe" in content
     assert "qe_protocol_options" in content
+
+
+def test_a_configured_snapshot_brings_the_mp_note(tmp_path: Path) -> None:
+    (tmp_path / "slab.toml").write_text('[builders.mp]\nroot = "/data/mp"\n')
+    (content,) = [m["content"] for m in system_messages(_session(tmp_path))]
+    assert "## mp" in content
+    assert "Absence is absence" in content
+    assert "(snapshot release, material_id)" in content
 
 
 def test_software_notes_false_removes_the_block(tmp_path: Path) -> None:

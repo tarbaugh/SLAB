@@ -50,10 +50,13 @@ number is a rumor. A minimal workflow script:
 
 The task vocabulary is `relax` (BFGS on positions), `single_point` (one \
 energy+forces evaluation, no optimization; its info has no 'converged' key), \
-and `build_structure` (run the atomsk structure builder — supercells, \
+`build_structure` (run the atomsk structure builder — supercells, \
 defects, interfaces, polycrystals — and get the produced structure back as \
 Atoms; needs atomsk installed or `[builders.atomsk]` configured, and the \
-atomsk-* skills carry the recipes). Chain them for the canonical flow: \
+atomsk-* skills carry the recipes), and `fetch_structure` (pull one \
+structure from the local Materials Project snapshot by material id; needs \
+`[builders.mp]` configured — shortlist ids with the `search_materials` \
+tool first). Chain them for the canonical flow: \
 build the geometry, relax under a cheap engine — a served MLIP checkpoint \
 id (call `list_engines` for the ids available here) — then single_point \
 the relaxed structure under the expensive one, and check the DFT residual \
@@ -191,7 +194,9 @@ WORKING_BOUNDS = """\
 # Working bounds
 
 Stay inside the project directory and the workspace. The file tools are \
-fenced to them. Do not explore, list, or search other locations with the \
+fenced to them, plus any read-only data the machine declares (a configured \
+Materials Project snapshot, for example) — the fence's own refusal lists \
+the exact roots. Do not explore, list, or search other locations with the \
 shell, and do not read files the task does not need. When work seems to \
 need data or software outside these directories, name the path, say why, \
 and ask the user before you touch it."""
@@ -362,7 +367,7 @@ def system_messages(
     if session.agent.software_notes:
         # Machine-stable, so it sits with the static layers: the block only
         # changes when slab.toml (or a user note override) changes.
-        prompt += "\n" + notes_block(load_slab_config(session.cwd).engines) + "\n"
+        prompt += "\n" + notes_block(load_slab_config(session.cwd)) + "\n"
     if catalog is not None:
         prompt += FENCED_PROTOCOL.replace("{catalog}", catalog)
     environment = environment_block(session, skills, team)

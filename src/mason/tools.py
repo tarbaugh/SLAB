@@ -62,6 +62,9 @@ TOOL_VOCABULARY = frozenset(
         "list_engines",
         "list_tasks",
         "describe_task",
+        "search_materials",
+        "get_material",
+        "query_materials",
         "submit_job",
         "job_status",
         "cancel_job",
@@ -282,15 +285,19 @@ def build_toolbox(
         _scope_root(session, session.cwd),
         _scope_root(session, session.workspace_root),
     )
+    snapshot_root = _mp_snapshot_root(session)
     read_roots = (
         write_roots
         + tuple(_scope_root(session, s.root) for s in skills.values())
         + _installed_package_roots(session)
+        + ((snapshot_root,) if snapshot_root is not None else ())
     )
     _add_file_tools(box, session, read_roots, write_roots)
     _add_shell_tool(box, session)
     _add_workflow_tools(box, session, read_roots)
     _add_engine_tools(box, session)
+    if snapshot_root is not None:
+        _add_mp_tools(box, snapshot_root)
     if session.hpc.partitions:
         _add_hpc_tools(box, session)
     _add_memory_tools(box, session)
@@ -367,6 +374,26 @@ def _installed_package_roots(session: MasonSession) -> tuple[Path, ...]:
         if root.is_dir():
             roots.append(_scope_root(session, root))
     return tuple(roots)
+
+
+def _mp_snapshot_root(session: MasonSession) -> Path | None:
+    """The configured Materials Project snapshot root, or None.
+
+    A configured snapshot gains read-only reach (the agent opens archived
+    CIFs with ``read_file`` and hands their paths to scripts) and switches
+    on the search tools. A broken slab.toml answers None here — the config
+    error surfaces where config is read for real, not from fence assembly.
+    """
+    from slab.config import config_value
+    from slab.errors import SlabError
+
+    try:
+        root = config_value("builders.mp.root", session.cwd)
+    except SlabError:
+        return None
+    if root is None:
+        return None
+    return _scope_root(session, Path(str(root)))
 
 
 def _out_of_scope(session: MasonSession, path: Path, roots: tuple[Path, ...]) -> str | None:
@@ -1097,6 +1124,118 @@ def _add_engine_tools(box: Toolbox, session: MasonSession) -> None:
                 ["name"],
             ),
             handler=describe_task,
+        )
+    )
+
+
+def _add_mp_tools(box: Toolbox, snapshot_root: Path) -> None:
+    """The offline Materials Project snapshot ([builders.mp] is configured).
+
+    Search and lookup only: the traced route from a material id to a
+    structure is ``foundation.tasks.fetch_structure`` inside a workflow
+    script. All three tools are read-only by construction, and they bind
+    the root resolved from the session's own project config — the process
+    cwd may be elsewhere.
+    """
+
+    def search_materials(arguments: dict[str, Any]) -> str:
+        from slab.mp import search_materials as mp_search
+
+        rows = mp_search(
+            arguments.get("filters") or {},
+            columns=arguments.get("columns"),
+            limit=int(arguments.get("limit", 20)),
+            order_by=arguments.get("order_by"),
+            root=snapshot_root,
+        )
+        return json.dumps(rows, indent=1, ensure_ascii=False, default=str)
+
+    box.add(
+        Tool(
+            name="search_materials",
+            description=(
+                "Search the offline Materials Project snapshot's materials table "
+                "(local, read-only; there is no online fallback). filters maps "
+                "keys to values: 'elements' (all must be present) and "
+                "'exclude_elements' take element lists; other keys are columns, "
+                "bare for equality (null matches SQL NULL) or suffixed "
+                "__lte/__gte/__lt/__gt/__ne — e.g. {\"elements\": [\"Fe\"], "
+                "\"energy_above_hull__lte\": 0.025}. A wrong column name is "
+                "refused with the real column list. Search first and fetch one "
+                "structure second (fetch_structure in a workflow); never "
+                "enumerate the cifs/ tree. NULL means not populated, never "
+                "zero. Report results as (snapshot release, material_id)."
+            ),
+            parameters=_schema(
+                {
+                    "filters": {"type": "object"},
+                    "columns": {"type": "array", "items": {"type": "string"}},
+                    "limit": {"type": "integer", "description": "1-500, default 20"},
+                    "order_by": {
+                        "type": "string",
+                        "description": "column name; leading - for descending",
+                    },
+                },
+                [],
+            ),
+            handler=search_materials,
+        )
+    )
+
+    def get_material(arguments: dict[str, Any]) -> str:
+        from slab.mp import get_material as mp_get
+
+        record = mp_get(str(arguments["material_id"]), root=snapshot_root)
+        return json.dumps(record, indent=1, ensure_ascii=False, default=str)
+
+    box.add(
+        Tool(
+            name="get_material",
+            description=(
+                "One material's full metadata record from the snapshot: the "
+                "materials row, its elements, and cif_file — the absolute path "
+                "of its archived CIF, readable here or via "
+                "fetch_structure(material_id) in a workflow script. Absence is "
+                "absence: an id the snapshot lacks is an error, not a reason "
+                "to look elsewhere."
+            ),
+            parameters=_schema(
+                {"material_id": {"type": "string", "description": "e.g. 'mp-149'"}},
+                ["material_id"],
+            ),
+            handler=get_material,
+        )
+    )
+
+    def query_materials(arguments: dict[str, Any]) -> str:
+        from slab.mp import query_materials as mp_query
+
+        result = mp_query(
+            str(arguments["sql"]),
+            limit=int(arguments.get("limit", 200)),
+            root=snapshot_root,
+        )
+        return json.dumps(result, indent=1, ensure_ascii=False, default=str)
+
+    box.add(
+        Tool(
+            name="query_materials",
+            description=(
+                "One read-only SELECT (or WITH) over the snapshot's "
+                "metadata.sqlite, for queries the search_materials filters "
+                "cannot express. Tables: materials (keyed by material_id), "
+                "material_elements(material_id, element), dataset_info, units "
+                "(consult it instead of guessing units). Rows are capped and "
+                "the result says when it truncated — put LIMIT in the query."
+            ),
+            parameters=_schema(
+                {
+                    "sql": {"type": "string"},
+                    "limit": {"type": "integer", "description": "row cap, default 200"},
+                },
+                ["sql"],
+            ),
+            handler=query_materials,
         )
     )
 

@@ -455,9 +455,12 @@ def test_the_vocabulary_matches_an_all_features_toolbox(tmp_path: Path) -> None:
     """TOOL_VOCABULARY is what cards validate against, so it must equal what a
     session with everything enabled actually builds — no phantom names, no
     unlisted tools."""
+    from conftest import build_mp_snapshot
     from mason.roster import discover_roster
     from mason.tools import TOOL_VOCABULARY
 
+    snapshot = build_mp_snapshot(tmp_path / "mp-snapshot")
+    (tmp_path / "slab.toml").write_text(f'[builders.mp]\nroot = "{snapshot}"\n')
     hpc = HpcConfig.model_validate({"default_partition": "cpu", "partitions": {"cpu": {}}})
     session = MasonSession(tmp_path, workspace_root=tmp_path / ".slab", hpc=hpc)
     roster = discover_roster(tmp_path)
@@ -768,3 +771,77 @@ def test_wait_for_run_timeout_reports_still_running(
     assert "still running after 1s" in waited
     assert "slowpoke" in waited
     assert "call wait_for_run again" in waited
+
+
+# -- the mp snapshot tools ---------------------------------------------------
+
+
+def _snapshot_session(
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+) -> MasonSession:
+    """A session whose config names a snapshot OUTSIDE the project — the
+    deployment shape, and the case the fence carve-out exists for."""
+    from conftest import build_mp_snapshot
+
+    snapshot = build_mp_snapshot(tmp_path_factory.mktemp("data") / "mp-snapshot")
+    (tmp_path / "slab.toml").write_text(f'[builders.mp]\nroot = "{snapshot}"\n')
+    return _session(tmp_path)
+
+
+def test_mp_tools_exist_only_when_a_snapshot_is_configured(
+    box: Toolbox, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    for name in ("search_materials", "get_material", "query_materials"):
+        assert name not in box.tools
+    configured = build_toolbox(_snapshot_session(tmp_path, tmp_path_factory))
+    for name in ("search_materials", "get_material", "query_materials"):
+        assert name in configured.tools
+
+
+def test_mp_search_and_lookup_answer_from_the_snapshot(
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    import json
+
+    box = build_toolbox(_snapshot_session(tmp_path, tmp_path_factory))
+    rows = json.loads(
+        box.dispatch(
+            _call(
+                "search_materials",
+                filters={"elements": ["Fe"], "energy_above_hull__lte": 0.05},
+                columns=["material_id", "formula_pretty"],
+            )
+        )
+    )
+    assert rows == [{"material_id": "mp-13", "formula_pretty": "Fe"}]
+    record = json.loads(box.dispatch(_call("get_material", material_id="mp-13")))
+    assert record["elements"] == ["Fe"]
+    # The archived CIF is inside the file fence: readable, not writable.
+    cif = record["cif_file"]
+    assert "Fe" in box.dispatch(_call("read_file", path=cif))
+    answer = box.dispatch(
+        _call("edit_file", path=cif, old_string="Fe", new_string="Xx")
+    )
+    assert "outside this session's file scope" in answer
+    result = json.loads(
+        box.dispatch(
+            _call(
+                "query_materials",
+                sql="SELECT count(*) AS n FROM materials",
+            )
+        )
+    )
+    assert result["rows"] == [{"n": 4}]
+
+
+def test_mp_tool_errors_are_observations(
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    box = build_toolbox(_snapshot_session(tmp_path, tmp_path_factory))
+    answer = box.dispatch(_call("search_materials", filters={"bandgap__lte": 1}))
+    assert answer.startswith("tool search_materials failed:")
+    assert "band_gap" in answer  # the refusal teaches the real schema
+    answer = box.dispatch(_call("get_material", material_id="mp-404"))
+    assert "no online fallback" in answer
+    answer = box.dispatch(_call("query_materials", sql="DROP TABLE materials"))
+    assert "only read-only queries" in answer

@@ -1188,7 +1188,8 @@ def default_binds(
     """The bind mounts the configuration implies, plus warnings for the gaps.
 
     Read-write: the project, the workspace, and the scratch root. Read-only:
-    the pseudopotential roots, the rootstock install, the Python environment
+    the pseudopotential roots, the rootstock install, the mp snapshot when
+    ``[builders.mp]`` names one, the Python environment
     (with the repository checkout when the install is editable), and — for
     each engine in *snapshots* — the install and library directories its
     setup resolved to on the host. Everything else does not exist inside
@@ -1209,6 +1210,8 @@ def default_binds(
         )
     if slab_cfg.paths.engines:
         binds.append(f"{slab_cfg.paths.engines}:{slab_cfg.paths.engines}:ro")
+    if slab_cfg.builders.mp.root:
+        binds.append(f"{slab_cfg.builders.mp.root}:{slab_cfg.builders.mp.root}:ro")
     for snapshot in (snapshots or {}).values():
         binds.extend(_snapshot_binds(snapshot))
     if slab_cfg.engines.qe.bin:

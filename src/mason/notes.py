@@ -1,4 +1,4 @@
-"""Curated software notes: what the agent should know about each engine.
+"""Curated software notes: what the agent should know about each resource.
 
 The transcript of a session that lacks this context is easy to picture: the
 model spends its first ten steps grepping the filesystem to rediscover what
@@ -7,11 +7,12 @@ mistakes each one invites. These notes put that knowledge in the system
 prompt up front, so the reasoning starts from the answer instead of the
 search.
 
-Selection follows the configuration. A note ships for each built-in engine;
-the always-available ones (``emt``, ``lj``, ``mace``) load unconditionally,
-and ``qe``, ``lammps``, and ``rootstock`` load when ``slab.toml`` configures
-their ``[engines.<name>]`` table — configuring the table is what enables the
-software on a machine, so it is also what enables its note. ``[agent]
+Selection follows the configuration. A note ships for each built-in engine
+and for the ``mp`` data snapshot; the always-available ones (``emt``, ``lj``,
+``rootstock``) load unconditionally, and ``qe``, ``lammps``, and ``mp`` load
+when ``slab.toml`` configures their table (``[engines.<name>]``, or
+``[builders.mp]`` for the snapshot) — configuring the table is what enables
+the resource on a machine, so it is also what enables its note. ``[agent]
 software_notes = false`` turns the whole block off.
 
 A user with local tweaks to their software can replace any note: a file at
@@ -26,10 +27,11 @@ from __future__ import annotations
 import importlib.resources
 from pathlib import Path
 
-from slab.config import EnginesConfig, user_config_path
+from slab.config import SlabConfig, user_config_path
 
-#: Prompt order: the engines the agent reaches for first come first.
-_CANONICAL = ("rootstock", "qe", "lammps", "emt", "lj")
+#: Prompt order: the engines the agent reaches for first come first; the
+#: mp data snapshot follows the engines because it feeds them structures.
+_CANONICAL = ("rootstock", "qe", "lammps", "emt", "lj", "mp")
 
 #: Notes that load regardless of configuration. ``emt`` and ``lj`` are ASE
 #: built-ins that need no table. ``rootstock`` is here because it is the only
@@ -46,21 +48,35 @@ def _user_root() -> Path:
     return user_config_path().parent / "notes"
 
 
-def enabled_notes(engines: EnginesConfig) -> tuple[str, ...]:
-    """Which note names apply under this ``[engines]`` configuration.
+def enabled_notes(config: SlabConfig) -> tuple[str, ...]:
+    """Which note names apply under this configuration.
 
     Examples:
-        >>> enabled_notes(EnginesConfig())
+        >>> enabled_notes(SlabConfig())
         ('rootstock', 'emt', 'lj')
-        >>> cfg = EnginesConfig.model_validate({"qe": {"command": "pw.x"}})
+        >>> cfg = SlabConfig.model_validate({"engines": {"qe": {"command": "pw.x"}}})
         >>> enabled_notes(cfg)
         ('rootstock', 'qe', 'emt', 'lj')
+        >>> cfg = SlabConfig.model_validate({"builders": {"mp": {"root": "/data/mp"}}})
+        >>> enabled_notes(cfg)
+        ('rootstock', 'emt', 'lj', 'mp')
     """
     names = []
     for name in _CANONICAL:
-        if name in _ALWAYS or getattr(engines, name) != type(getattr(engines, name))():
+        if name in _ALWAYS:  # emt/lj have no config table to look at
+            names.append(name)
+            continue
+        sub = _sub_model(config, name)
+        if sub != type(sub)():
             names.append(name)
     return tuple(names)
+
+
+def _sub_model(config: SlabConfig, name: str) -> object:
+    """The config sub-model whose non-default state enables note *name*."""
+    if name == "mp":
+        return config.builders.mp
+    return getattr(config.engines, name)
 
 
 def note_text(name: str) -> str:
@@ -71,7 +87,7 @@ def note_text(name: str) -> str:
     return (_builtin_root() / f"{name}.md").read_text(encoding="utf-8").strip()
 
 
-def notes_block(engines: EnginesConfig) -> str:
+def notes_block(config: SlabConfig) -> str:
     """The ``# Software notes`` section of the system prompt.
 
     Stable for a given configuration, so a prefix-caching server reuses it
@@ -80,10 +96,10 @@ def notes_block(engines: EnginesConfig) -> str:
     lines = [
         "# Software notes",
         "",
-        "Curated notes on the computational software configured here. They are "
-        "starting context, not a live inventory: call list_engines for what "
-        "actually exists right now.",
+        "Curated notes on the computational software and data configured "
+        "here. They are starting context, not a live inventory: call "
+        "list_engines for what actually exists right now.",
     ]
-    for name in enabled_notes(engines):
+    for name in enabled_notes(config):
         lines.append(f"\n## {name}\n\n{note_text(name)}")
     return "\n".join(lines)

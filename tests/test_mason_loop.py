@@ -185,11 +185,11 @@ def test_compaction_folds_history_and_writes_the_per_session_file(tmp_path: Path
     # test targets a specific token budget, and the doctrine blocks (which
     # grow over time) would nudge the estimate across it at a different step.
     session = _session(
-        tmp_path, context_window=4_096, compact_at=0.5, memory=False, software_notes=False
+        tmp_path, context_window=6_000, compact_at=0.5, memory=False, software_notes=False
     )
     replies: list[ChatReply | Exception] = [
         _tool_reply("list_dir", prompt_tokens=tokens)
-        for tokens in (200, 400, 900, 1_500, 2_500)  # the fifth crosses 2048
+        for tokens in (200, 400, 900, 1_500, 3_500)  # the fifth crosses 3000
     ]
     # The compaction summarizer's answer, then a post-compaction (smaller) step:
     replies.append(_text_reply("STATE: listed the directory five times."))
