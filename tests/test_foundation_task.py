@@ -441,3 +441,20 @@ def test_provisional_row_visible_during_execution(ws: Workspace) -> None:
         probe(7)
     assert observed["status"] is ExecutionStatus.RUNNING
     assert observed["inputs"] == {"x": fingerprint(7)}
+
+
+def test_a_refusal_before_the_call_leaves_no_orphan_bytes(ws: Workspace) -> None:
+    """cache_extra (an unknown pseudo family, an unreadable dataset) runs
+    before any input lands in the store, so a refused call leaves nothing
+    that no row will ever name."""
+
+    def refuse(arguments: dict[str, object]) -> dict[str, object]:
+        raise ValueError("no such pseudo family")
+
+    @task(cache_extra=refuse)
+    def picky(x: float) -> float:
+        return x
+
+    with pytest.raises(ValueError, match="no such pseudo family"), ws.start_run(name="refused"):
+        picky(2.0)
+    assert list(ws.artifacts.hashes()) == []

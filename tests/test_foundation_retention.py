@@ -238,12 +238,37 @@ def test_gc_shared_hash_kept_if_any_reference_demands_it(
     assert cas.has(digest)
 
 
-def test_gc_orphans_reported_not_deleted(store: SQLiteRunStore, cas: ArtifactStore) -> None:
+def test_gc_keeps_a_young_orphan(store: SQLiteRunStore, cas: ArtifactStore) -> None:
+    """A blob nobody references yet may belong to a run about to record it."""
     orphan = cas.put_bytes(b"never referenced")
     report = gc(store, cas, DEFAULT_POLICY)
-    assert report.orphans == [orphan]
-    assert report.dropped == []
+    assert report.orphans == [orphan] and report.orphans_dropped == []
+    assert report.dropped == [] and report.freed_bytes == 0
     assert cas.has(orphan)
+
+
+def test_gc_drops_an_orphan_older_than_the_policy_ttl(
+    store: SQLiteRunStore, cas: ArtifactStore
+) -> None:
+    """Nothing will ever name a day-old unreferenced blob: a task that failed
+    before its row was written, or a process killed mid-put."""
+    from foundation import utcnow
+
+    orphan = cas.put_bytes(b"residue of a refused task")
+    later = utcnow() + timedelta(days=2)
+    dry = gc(store, cas, DEFAULT_POLICY, dry_run=True, now=later)
+    assert dry.orphans_dropped == [orphan] and dry.orphans == []
+    assert dry.freed_bytes == len(b"residue of a refused task")
+    assert cas.has(orphan)  # a dry run deletes nothing
+    report = gc(store, cas, DEFAULT_POLICY, now=later)
+    assert report.orphans_dropped == [orphan]
+    assert not cas.has(orphan)
+    # null keeps orphans forever, the pre-TTL behavior.
+    forever = RetentionPolicy.model_validate({"orphan_ttl_days": None})
+    kept = cas.put_bytes(b"kept forever")
+    report = gc(store, cas, forever, now=later)
+    assert report.orphans == [kept] and report.orphans_dropped == []
+    assert cas.has(kept)
 
 
 def test_gc_reports_missing_demanded_bytes(store: SQLiteRunStore, cas: ArtifactStore) -> None:

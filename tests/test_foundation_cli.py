@@ -614,7 +614,7 @@ def test_gc_reports_orphans(root: Path) -> None:
     with Workspace(root) as ws:
         ws.artifacts.put_bytes(b"unclaimed scratch data")
     result = runner.invoke(app, ["gc", "-w", str(root)])
-    assert "orphans (unreferenced, not deleted): 1" in result.output
+    assert "orphans kept (unreferenced, younger than 1 day(s)): 1" in result.output
 
 
 

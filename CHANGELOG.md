@@ -5,6 +5,13 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- Orphan artifact bytes are reclaimed. The tracer now serializes every
+  argument, probes the engines, and runs the task's `cache_extra` before
+  any byte lands in the store, so a refusal leaves nothing behind. For
+  orphans that exist anyway (a process killed mid-write), `gc` drops
+  those unreferenced for `orphan_ttl_days` (a new policy field, default
+  1 day) and reports them as `orphans_dropped`; younger ones stay listed
+  under `orphans`. `null` keeps orphans forever, as before.
 - A review of the last two weeks' revisions, six reviewers over the four
   packages, the docs, the tests, and the security surface; every finding
   confirmed by execution before it was fixed. The fixes:

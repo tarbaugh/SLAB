@@ -23,6 +23,7 @@ import os
 import re
 import tempfile
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 from foundation.errors import AmbiguousHashError, ArtifactNotFoundError
@@ -199,6 +200,28 @@ class ArtifactStore:
         if not path.exists():
             raise ArtifactNotFoundError.for_hash(normalized)
         return path.stat().st_size
+
+    def stored_at(self, digest: str) -> datetime:
+        """When the bytes landed in the store, as an aware UTC datetime.
+
+        The file's modification time: ``_ingest`` moves each blob into place
+        exactly once and never touches it again, so the mtime is the arrival
+        time. Retention uses it to age unreferenced blobs.
+
+        Raises:
+            ArtifactNotFoundError: No bytes stored under this hash.
+
+        Examples:
+            >>> import tempfile
+            >>> cas = ArtifactStore(tempfile.mkdtemp())
+            >>> cas.stored_at(cas.put_bytes(b"x")).tzinfo is not None
+            True
+        """
+        normalized = _validate_digest(digest)
+        path = self._path_for(normalized)
+        if not path.exists():
+            raise ArtifactNotFoundError.for_hash(normalized)
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
 
     def resolve(self, digest: str) -> str:
         """Resolve a full hash or unique prefix (>= 6 hex chars) to the full hash.

@@ -427,8 +427,15 @@ def gc(
         f"{verb} {len(report.dropped)} blob(s), freeing {report.freed_bytes} bytes; "
         f"{len(report.kept)} kept"
     )
+    ttl = policy.orphan_ttl_days
+    if report.orphans_dropped:
+        typer.echo(
+            f"{verb} {len(report.orphans_dropped)} orphan blob(s) unreferenced for "
+            f"{ttl:g} day(s) or more"
+        )
     if report.orphans:
-        typer.echo(f"orphans (unreferenced, not deleted): {len(report.orphans)}")
+        why = "orphan_ttl_days is null" if ttl is None else f"younger than {ttl:g} day(s)"
+        typer.echo(f"orphans kept (unreferenced, {why}): {len(report.orphans)}")
     if report.missing:
         typer.echo(
             f"WARNING: {len(report.missing)} demanded blob(s) missing from the store",

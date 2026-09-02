@@ -104,6 +104,11 @@ class RetentionPolicy(BaseModel):
     promoted: StateRule = StateRule(keep=frozenset({ArtifactRole.TERMINAL, ArtifactRole.INPUT}))
     archived: StateRule = StateRule(keep=frozenset({ArtifactRole.TERMINAL, ArtifactRole.INPUT}))
     expired: StateRule = StateRule(keep=frozenset())
+    # A blob no run references is an orphan: a task that failed before its
+    # provisional row was written, or a process killed mid-put. For the first
+    # day it may still belong to a run that is about to record it, so gc
+    # keeps it; older than this, gc drops it. ``null`` keeps orphans forever.
+    orphan_ttl_days: float | None = Field(default=1.0, ge=0)
 
     @model_validator(mode="after")
     def _no_ttl_on_permanent_states(self) -> RetentionPolicy:
@@ -135,12 +140,16 @@ class GcReport(BaseModel):
     Fields:
         dropped: Hashes whose bytes were removed (hash+recipe survive on runs).
         kept: Hashes whose bytes are retained because some reference demands them.
-        orphans: Stored hashes referenced by no run. Reported, never deleted —
-            they may belong to an in-flight run that has not recorded its
-            references yet.
+        orphans: Stored hashes referenced by no run and kept, because they
+            are younger than the policy's ``orphan_ttl_days`` — they may
+            belong to an in-flight run that has not recorded its references
+            yet.
+        orphans_dropped: Unreferenced hashes older than ``orphan_ttl_days``,
+            whose bytes were removed (nothing references them, so nothing
+            survives to name them).
         missing: Hashes some reference *demands* but whose bytes are absent —
             normally empty; nonempty means bytes were discarded outside policy.
-        freed_bytes: Total size of dropped blobs.
+        freed_bytes: Total size of dropped blobs, orphans included.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -148,6 +157,7 @@ class GcReport(BaseModel):
     dropped: list[str]
     kept: list[str]
     orphans: list[str]
+    orphans_dropped: list[str] = []
     missing: list[str]
     freed_bytes: int
     dry_run: bool
@@ -227,6 +237,7 @@ def gc(
     policy: RetentionPolicy = DEFAULT_POLICY,
     *,
     dry_run: bool = False,
+    now: datetime | None = None,
 ) -> GcReport:
     """Reclaim artifact bytes that no run's retention rule demands.
 
@@ -291,14 +302,28 @@ def gc(
 
     present = set(artifacts.hashes())
     to_drop = sorted((referenced - demanded) & present)
-    freed = sum(artifacts.size(digest) for digest in to_drop)
+    # Orphans age from the moment their bytes landed. A run stages its inputs
+    # seconds before it records them, so a day-old unreferenced blob is not
+    # in flight; it is the residue of a task that failed before its row was
+    # written, or of a process killed mid-put, and nothing will ever name it.
+    moment = now if now is not None else utcnow()
+    young: list[str] = []
+    stale: list[str] = []
+    for digest in sorted(present - referenced):
+        age_days = (moment - artifacts.stored_at(digest)).total_seconds() / 86_400
+        if policy.orphan_ttl_days is not None and age_days >= policy.orphan_ttl_days:
+            stale.append(digest)
+        else:
+            young.append(digest)
+    freed = sum(artifacts.size(digest) for digest in [*to_drop, *stale])
     if not dry_run:
-        for digest in to_drop:
+        for digest in [*to_drop, *stale]:
             artifacts.discard(digest)
     return GcReport(
         dropped=to_drop,
         kept=sorted(demanded & present),
-        orphans=sorted(present - referenced),
+        orphans=young,
+        orphans_dropped=stale,
         missing=sorted(demanded - present),
         freed_bytes=freed,
         dry_run=dry_run,

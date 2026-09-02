@@ -153,13 +153,17 @@ def _traced_call(
     bound = signature.bind(*args, **kwargs)
     bound.apply_defaults()
 
-    input_hashes: dict[str, str] = {}
-    for arg_name, value in bound.arguments.items():
-        payload = dumps(value)  # SerializationError here names a real problem: fix the input
-        input_hashes[arg_name] = active.artifacts.put_bytes(payload)
-
+    # Everything that can refuse the call runs before any byte lands in the
+    # store: serialization of every argument, the engine probes, and the
+    # task's cache_extra (an unknown pseudo family, an unreadable dataset).
+    # A refusal after a put would leave input bytes no row ever names.
+    payloads = {
+        name: dumps(value)  # SerializationError here names a real problem: fix the input
+        for name, value in bound.arguments.items()
+    }
     engine_versions = {engine: _dist_version(engine) for engine in engine_names}
     extra = dict(cache_extra(dict(bound.arguments))) if cache_extra is not None else {}
+    input_hashes = {name: active.artifacts.put_bytes(payload) for name, payload in payloads.items()}
     recipe: dict[str, Any] = {
         "task": task_name,
         "module": f.__module__,
