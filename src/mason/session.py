@@ -243,6 +243,21 @@ class MasonSession:
         stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         self.transcript_path = self.sessions_dir / f"{stamp}-{os.getpid()}.jsonl"
         self._lock_handle: Any | None = None
+        self._software_versions: dict[str, str] | None = None
+
+    def software_versions(self) -> dict[str, str]:
+        """The software present now, probed once per session and then reused.
+
+        Machine memory stamps a fact with these versions and flags a memory
+        whose software has changed since. The probe runs the engine and
+        builder version checks, so it happens on the first call only: the
+        prompt after a compaction and every ``remember`` reuse the result.
+        """
+        if self._software_versions is None:
+            from slab._ops import software_versions
+
+            self._software_versions = software_versions()
+        return self._software_versions
 
     # -- one running session per workspace ------------------------------------
 
@@ -355,6 +370,7 @@ class MasonSession:
         child.agent_name = agent_name
         child._parent = self
         child.api_keys = self.api_keys  # one key store per conversation
+        child._software_versions = self._software_versions  # probed once, if at all
         # A flag outranks config for everyone: the child's loop re-asserts
         # these over its own [agent.roster] table exactly as the parent did.
         child.flag_updates = dict(self.flag_updates)

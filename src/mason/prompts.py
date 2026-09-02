@@ -330,7 +330,11 @@ def environment_block(
         # Read here rather than passed in, so the block is current after
         # every compaction: a fact this session recorded an hour ago is in
         # the rebuilt prompt, and one another session recorded is too.
-        memories = memory_store.catalog_block(memory_store.discover())
+        # The version probe runs only when a memory carries a stamp to
+        # compare: a machine of unstamped memories pays nothing.
+        known = memory_store.discover()
+        live = session.software_versions() if any(m.against for m in known.values()) else None
+        memories = memory_store.catalog_block(known, live)
         if memories:
             lines.append("\n" + memories)
     if team:

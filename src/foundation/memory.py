@@ -31,8 +31,15 @@ need::
     updated: 2026-08-28
     agent: pi
     model: qwen3-30b
+    against:
+      gracemaker: 0.6.0
     ---
     The body: the fact itself, in full.
+
+``against`` is the version stamp: the software the memory names, at the
+versions present when it was written. A later session compares the stamp
+with the machine it runs on and flags the memories whose software changed,
+so the agent re-checks those and trusts the rest without probing.
 
 There is no index file. The catalog is a directory scan, which stays cheap at
 the enforced cap and, unlike an index, never becomes a write-contention point
@@ -44,7 +51,8 @@ from __future__ import annotations
 import os
 import re
 import tempfile
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -93,6 +101,9 @@ class Memory:
     updated: str | None = None
     agent: str | None = None
     model: str | None = None
+    #: The version stamp: software the memory names, at the versions present
+    #: when it was written. Empty for a memory nobody stamped.
+    against: dict[str, str] = field(default_factory=dict)
 
     def body(self) -> str:
         """The fact itself: everything in the file after the frontmatter."""
@@ -120,7 +131,37 @@ class Memory:
             parts.append(f"updated {self.updated}")
         if self.model:
             parts.append(f"model {self.model}")
+        if self.against:
+            stamped = ", ".join(f"{name} {version}" for name, version in self.against.items())
+            parts.append(f"against {stamped}")
         return ", ".join(parts) if parts else "no provenance recorded"
+
+    def drift(self, live: Mapping[str, str]) -> list[str]:
+        """What changed since the stamp: one phrase per software that differs.
+
+        Compares the stamp with *live*, the versions present now. Software
+        the stamp names but *live* lacks reads as "not found now": the
+        conservative reading, since a probe that failed and a tool that was
+        removed look the same, and either is reason to re-check the fact.
+        An unstamped memory never drifts, because it makes no claim.
+
+        Examples:
+            >>> m = Memory("x", "d", Path("x.md"), against={"gracemaker": "0.5.2"})
+            >>> m.drift({"gracemaker": "0.6.0", "atomsk": "0.13.1"})
+            ['gracemaker was 0.5.2, now 0.6.0']
+            >>> m.drift({"gracemaker": "0.5.2"})
+            []
+            >>> m.drift({})
+            ['gracemaker was 0.5.2, not found now']
+        """
+        changed = []
+        for name, was in self.against.items():
+            now = live.get(name)
+            if now is None:
+                changed.append(f"{name} was {was}, not found now")
+            elif now != was:
+                changed.append(f"{name} was {was}, now {now}")
+        return changed
 
 
 def valid_name(name: str) -> bool:
@@ -195,6 +236,25 @@ def _provenance(meta: dict[str, Any], key: str) -> str | None:
     raise MemoryStoreError(f"frontmatter {key!r} must be a date or a non-empty string")
 
 
+def _against(meta: dict[str, Any]) -> dict[str, str]:
+    """Read the version stamp: a mapping of software name to version string."""
+    value = meta.get("against")
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise MemoryStoreError("frontmatter 'against' must be a mapping of software to version")
+    stamp: dict[str, str] = {}
+    for name, version in value.items():
+        if not isinstance(name, str) or not name.strip():
+            raise MemoryStoreError("frontmatter 'against' keys must be software names")
+        if version is None or isinstance(version, dict | list):
+            raise MemoryStoreError(f"frontmatter 'against' {name!r} must be a version string")
+        # A version a person typed unquoted may have loaded as a number
+        # (2024, 1.5); keep the text, since only equality matters.
+        stamp[name.strip()] = str(version).strip()
+    return stamp
+
+
 def _as_date(value: str) -> date | str:
     """A stored date back as a ``date``, or unchanged when a human wrote prose."""
     try:
@@ -243,6 +303,7 @@ def parse_memory(path: Path) -> Memory:
             updated=_provenance(meta, "updated"),
             agent=_provenance(meta, "agent"),
             model=_provenance(meta, "model"),
+            against=_against(meta),
         )
     except MemoryStoreError as e:
         raise MemoryStoreError(f"{path}: {e}") from None
@@ -275,12 +336,16 @@ def write(
     *,
     agent: str | None = None,
     model: str | None = None,
+    against: Mapping[str, str] | None = None,
     directory: Path | None = None,
 ) -> Memory:
     """Record a fact, creating the memory or replacing it whole.
 
     Replacing is how an agent consolidates: the ``created`` date survives,
     ``updated`` moves to today, and the writer's attribution is refreshed.
+    *against* is the version stamp (see :func:`stamp`); it is written as
+    given, so a replacement carries the stamp of its own writing and not
+    the one it replaced.
     The write is atomic (a temporary file in the same directory, then
     ``os.replace``), so a concurrent reader sees either the old file or the
     new one, never a half-written one. Two writers racing on one name is
@@ -333,6 +398,10 @@ def write(
         frontmatter["agent"] = agent
     if model:
         frontmatter["model"] = model
+    if against:
+        # Versions are written as strings whatever they look like, so a
+        # stamp of "1.10" survives the round trip as text.
+        frontmatter["against"] = {name: str(version) for name, version in sorted(against.items())}
     rendered = yaml.dump(
         frontmatter, Dumper=_PlainDumper, sort_keys=False, allow_unicode=True, width=88
     )
@@ -365,7 +434,45 @@ def delete(name: str, directory: Path | None = None) -> Path:
     return path
 
 
-def catalog_block(memories: dict[str, Memory]) -> str:
+#: Other names a memory may use for stamped software. The key is the name
+#: :func:`slab._ops.software_versions` reports; the values are matched as
+#: whole words, case-insensitively, like the key itself.
+SOFTWARE_ALIASES: dict[str, tuple[str, ...]] = {
+    "qe": ("pw.x", "quantum espresso", "espresso"),
+    "lammps": ("lmp",),
+    "gracemaker": ("tensorpotential", "grace"),
+    "slab-stack": ("slab", "foundation", "mason"),
+}
+
+
+def _mentions(text: str, name: str) -> bool:
+    words = (name, *SOFTWARE_ALIASES.get(name, ()))
+    pattern = "|".join(re.escape(word) for word in words)
+    return re.search(rf"(?<![A-Za-z0-9_])(?:{pattern})(?![A-Za-z0-9_])", text, re.I) is not None
+
+
+def stamp(text: str, live: Mapping[str, str]) -> dict[str, str]:
+    """The version stamp for a memory: the software its text names, from *live*.
+
+    *live* maps software names to the versions present now, as
+    :func:`slab._ops.software_versions` reports them. A memory is stamped
+    only with what it mentions, so a gracemaker upgrade flags the memories
+    about gracemaker and leaves the one about vLLM alone. Names are matched
+    as whole words, with the aliases in :data:`SOFTWARE_ALIASES`.
+
+    Examples:
+        >>> live = {"gracemaker": "0.6.0", "atomsk": "0.13.1", "slab-stack": "0.1.0"}
+        >>> stamp("gracemaker needs TF_FORCE_GPU_ALLOW_GROWTH set.", live)
+        {'gracemaker': '0.6.0'}
+        >>> stamp("Set it in slab.toml before a GRACE fit.", live)
+        {'gracemaker': '0.6.0', 'slab-stack': '0.1.0'}
+        >>> stamp("vLLM refuses a big batch.", live)
+        {}
+    """
+    return {name: live[name] for name in sorted(live) if _mentions(text, name)}
+
+
+def catalog_block(memories: dict[str, Memory], live: Mapping[str, str] | None = None) -> str:
     """The ``# Memory`` section of the system prompt.
 
     One line per memory when the store is populated; a shorter form when it
@@ -373,6 +480,10 @@ def catalog_block(memories: dict[str, Memory]) -> str:
     and when to write to it. The body stays on disk until ``recall``, so the
     always-loaded cost is the trigger lines — the same progressive
     disclosure the skill catalog uses.
+
+    *live* is the software present now. A memory whose stamp differs from
+    it gets a note on its line naming what changed, so the agent re-checks
+    that memory and relies on the others without probing.
 
     Examples:
         >>> block = catalog_block(
@@ -384,6 +495,11 @@ def catalog_block(memories: dict[str, Memory]) -> str:
         '- vllm-cache: vLLM refuses a big batch.'
         >>> catalog_block({}).splitlines()[0]
         '# Memory'
+        >>> stamped = Memory(
+        ...     "grace-gpu", "gracemaker needs X.", Path("y"), against={"gracemaker": "0.5.2"}
+        ... )
+        >>> catalog_block({"grace-gpu": stamped}, live={"gracemaker": "0.6.0"}).splitlines()[-1]
+        '- grace-gpu: gracemaker needs X. [changed since: gracemaker was 0.5.2, now 0.6.0]'
     """
     listed = [memory for _, memory in sorted(memories.items())]
     if not listed:
@@ -405,13 +521,18 @@ def catalog_block(memories: dict[str, Memory]) -> str:
         "Facts earlier sessions recorded about this machine and its software. "
         "Call the recall tool with a name before you rely on one: the line "
         "below is a summary, and the memory itself holds the detail. Each "
-        "reflects the machine when it was written, so when one names a flag, "
-        "a path, or a version, confirm it still holds before you build on it. "
-        "When you find a quirk of this machine or its software worth keeping, "
-        "record it with remember once you have confirmed it. Machine facts "
-        "only: results belong in runs, project decisions in the notebook, and "
-        "credentials nowhere.",
+        "memory is stamped with the versions of the software it names. A "
+        "line that reports a change since, a newer version or a tool not "
+        "found now, is a memory you must confirm before you build on it. A "
+        "line that reports none names software that is unchanged, so rely "
+        "on that memory without probing. When you find a quirk of this "
+        "machine or its software worth keeping, record it with remember once "
+        "you have confirmed it. Machine facts only: results belong in runs, "
+        "project decisions in the notebook, and credentials nowhere.",
         "",
     ]
-    lines.extend(f"- {m.name}: {m.description}" for m in listed)
+    for m in listed:
+        changed = m.drift(live) if live is not None else []
+        note = f" [changed since: {'; '.join(changed)}]" if changed else ""
+        lines.append(f"- {m.name}: {m.description}{note}")
     return "\n".join(lines)

@@ -1628,7 +1628,14 @@ def _add_machine_memory_tools(box: Toolbox, session: MasonSession) -> None:
             known = ", ".join(sorted(memories)) or "none recorded yet"
             return f"no memory named {name!r}; memories on this machine: {known}"
         session.record({"type": "recall", "name": name})
-        return f"{found.body().rstrip()}\n\n[{found.provenance()}]"
+        answer = f"{found.body().rstrip()}\n\n[{found.provenance()}]"
+        changed = found.drift(session.software_versions()) if found.against else []
+        if changed:
+            answer += (
+                f"\n[changed since: {'; '.join(changed)}. Confirm the fact before "
+                f"you build on it; remember it again once you have.]"
+            )
+        return answer
 
     box.add(
         Tool(
@@ -1645,23 +1652,32 @@ def _add_machine_memory_tools(box: Toolbox, session: MasonSession) -> None:
 
     def remember(arguments: dict[str, Any]) -> str:
         name = str(arguments["name"])
+        description = str(arguments["description"])
+        body = str(arguments["body"])
         try:
             written = memory_store.write(
                 name,
-                str(arguments["description"]),
-                str(arguments["body"]),
+                description,
+                body,
                 agent=session.agent_name,
                 model=session.agent.model,
+                # Stamped with the software the text names, at today's
+                # versions, so a later session can tell whether it still holds.
+                against=memory_store.stamp(f"{description}\n{body}", session.software_versions()),
             )
         except MemoryStoreError as e:
             # A refusal is an observation the model can act on, not a crash:
             # the message says which rule stopped the write.
             return f"not recorded: {e}"
         session.record({"type": "remember", "name": name, "path": str(written.path)})
-        return (
+        answer = (
             f"recorded as memory {written.name!r} in {written.path}; "
             f"every later session on this machine reads it"
         )
+        if written.against:
+            stamped = ", ".join(f"{n} {v}" for n, v in written.against.items())
+            answer += f" (stamped against {stamped})"
+        return answer
 
     box.add(
         Tool(

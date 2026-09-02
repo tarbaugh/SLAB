@@ -73,6 +73,9 @@ The rules the store enforces:
 - `created`, `updated`, `agent`, and `model` are provenance the store
   writes. You may edit any file by hand, and a file you write yourself
   needs only the description and the body.
+- `against` is the version stamp: the software the memory names, at the
+  versions present when it was written. The `remember` tool writes it.
+  See [Version stamps](#version-stamps).
 
 A malformed file is an error that names the file and the rule. It is
 never skipped, because a memory that vanished from the catalog would be
@@ -86,7 +89,7 @@ description. The fact itself stays on disk until the agent asks for it:
 ```text
 # Memory
 
-Facts earlier sessions recorded about this machine and its software. Call the recall tool with a name before you rely on one: the line below is a summary, and the memory itself holds the detail. Each reflects the machine when it was written, so when one names a flag, a path, or a version, confirm it still holds before you build on it. When you find a quirk of this machine or its software worth keeping, record it with remember once you have confirmed it. Machine facts only: results belong in runs, project decisions in the notebook, and credentials nowhere.
+Facts earlier sessions recorded about this machine and its software. Call the recall tool with a name before you rely on one: the line below is a summary, and the memory itself holds the detail. Each memory is stamped with the versions of the software it names. A line that reports a change since, a newer version or a tool not found now, is a memory you must confirm before you build on it. A line that reports none names software that is unchanged, so rely on that memory without probing. When you find a quirk of this machine or its software worth keeping, record it with remember once you have confirmed it. Machine facts only: results belong in runs, project decisions in the notebook, and credentials nowhere.
 
 - vllm-mamba-cache: vLLM refuses to start a hybrid-Mamba model at the default max_num_seqs on one 80 GB GPU. Read before serving one.
 ```
@@ -113,8 +116,9 @@ other one. The preview shows the whole text and names the agent that
 asks, because what it writes enters every later session's prompt.
 
 Re-using a name replaces that memory. The creation date survives, the
-update date moves, and the new writer is recorded. This is how an agent
-consolidates two related facts into one. An agent cannot delete a memory.
+update date moves, and the new writer and a new version stamp are
+recorded. This is how an agent consolidates two related facts into one.
+An agent cannot delete a memory.
 
 Set `[agent] memory = false` to run a session that neither reads nor
 writes memories. The block and both tools disappear, and the store keeps
@@ -137,6 +141,70 @@ whose source is missing.
 This is what memory is for on a cluster. An overnight job hits a quirk at
 03:00, records it, and finishes. The next job starts knowing it. A
 session rendered with `[agent] memory = false` binds nothing.
+
+## Version stamps
+
+A memory states what was true when it was written. Software changes
+between one session and the next, and the fact can stop holding without
+anyone noticing. Version stamps let a later session tell which memories
+to re-check, and trust the rest without probing.
+
+When `remember` writes a memory, it stamps it with the software the
+text names and the versions present at that moment. The software it
+knows is `slab-stack` itself, every engine whose version can be told,
+the `mp` snapshot by its release, and a configured `atomsk` or
+`gracemaker`. Names are matched as whole words, with a few aliases:
+`pw.x` counts as `qe`, `lmp` as `lammps`, `grace` and `tensorpotential`
+as `gracemaker`, and `slab`, `foundation`, and `mason` as `slab-stack`.
+A memory about vLLM gets no stamp, so a gracemaker upgrade never flags
+it.
+
+```bash
+slab memory show grace-gpu-growth
+```
+
+```text
+---
+description: gracemaker fits on the GPU nodes need TF_FORCE_GPU_ALLOW_GROWTH=true. Set it
+  before a second fit on one node.
+created: 2026-09-02
+updated: 2026-09-02
+agent: pi
+model: qwen3-30b
+against:
+  gracemaker: 0.6.0
+  slab-stack: 0.1.0
+---
+Without it TensorFlow reserves the whole card at startup, and a second fit on the same node fails to allocate. Put the export in [builders.gracemaker] setup in slab.toml so every fit gets it.
+```
+
+At the start of every session the catalog compares each stamp with the
+machine. The versions are probed once per session, and only when some
+memory carries a stamp. A memory whose software changed since gets a
+note on its catalog line:
+
+```text
+- grace-gpu-growth: gracemaker fits on the GPU nodes need TF_FORCE_GPU_ALLOW_GROWTH=true. Set it before a second fit on one node. [changed since: gracemaker was 0.6.0, now 0.7.0]
+```
+
+`recall` repeats the note after the provenance, and asks the agent to
+confirm the fact and record it again once it has:
+
+```text
+Without it TensorFlow reserves the whole card at startup, and a second fit on the same node fails to allocate. Put the export in [builders.gracemaker] setup in slab.toml so every fit gets it.
+
+[recorded by pi on 2026-09-02, model qwen3-30b, against gracemaker 0.6.0, slab-stack 0.1.0]
+[changed since: gracemaker was 0.6.0, now 0.7.0. Confirm the fact before you build on it; remember it again once you have.]
+```
+
+A stamp that names software the machine no longer reports reads as
+"not found now". A failed probe and a removed tool look the same from
+the stamp, and either is a reason to re-check.
+
+`slab memory list` prints the same note, so you can see which memories
+an upgrade has put in question before you prune. A memory you write by
+hand carries no stamp unless you add one. Without a stamp the catalog
+makes no claim about it either way.
 
 ## Reading and pruning the store
 
@@ -193,4 +261,6 @@ state that outlives every project.
 
 Read the store when a machine changes. A memory states what was true when
 it was written, so an upgraded engine, a new scheduler, or a rebuilt
-container can leave one stale. Prune what no longer holds.
+container can leave one stale. The version stamps flag the memories
+whose software changed, and `slab memory list` shows the flags. Prune
+what no longer holds.

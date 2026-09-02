@@ -907,3 +907,44 @@ def test_installed_rootstock_with_nothing_configured_explains_itself(
     assert section["root_source"] == "rootstock defaults"
     assert "[engines.rootstock]" in section["error"]
     assert section["checkpoints"] == {}
+
+
+def test_software_versions_names_what_can_be_told(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The map memory stamps against: slab-stack, the registry's declared
+    versions, and a configured builder's probed one; nothing for engines
+    whose version cannot be told."""
+    from slab._ops import software_versions
+    from slab._version import __version__
+
+    registry = _write_registry(
+        tmp_path / "engines.json",
+        {
+            "cluster": "delta",
+            "engines": {
+                "qe-delta": {
+                    "calculator": "ase.calculators.espresso.Espresso",
+                    "version": "7.3.1",
+                },
+                "emt-delta": {"calculator": "ase.calculators.emt.EMT"},
+            },
+        },
+    )
+    monkeypatch.setenv("SLAB_ENGINES", str(registry))
+    bin_dir = tmp_path / "grace-bin"
+    bin_dir.mkdir()
+    for name, body in (("python", 'echo "0.6.0"\n'), ("gracemaker", 'echo "training"\n')):
+        (bin_dir / name).write_text("#!/bin/sh\n" + body)
+        (bin_dir / name).chmod(0o755)
+    (tmp_path / "slab.toml").write_text(
+        f'[builders.gracemaker]\ncommand = "{bin_dir / "gracemaker"}"\n'
+    )
+    monkeypatch.chdir(tmp_path)
+
+    versions = software_versions()
+    assert versions["slab-stack"] == __version__
+    assert versions["qe-delta"] == "7.3.1"
+    assert versions["gracemaker"] == "0.6.0"
+    assert "emt-delta" not in versions and "emt" not in versions and "lj" not in versions
+    assert list(versions) == sorted(versions)

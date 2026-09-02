@@ -5,6 +5,14 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- Machine memories carry a version stamp. `remember` records the software
+  the fact names, at the versions present when it was written, under
+  `against` in the frontmatter; the catalog compares each stamp with the
+  machine at session start and marks the memories whose software changed
+  since, so the agent re-checks those and relies on the rest without
+  probing. `recall` and `slab memory list` show the same note. The
+  versions are probed once per session, and only when a memory carries a
+  stamp.
 - Orphan artifact bytes are reclaimed. The tracer now serializes every
   argument, probes the engines, and runs the task's `cache_extra` before
   any byte lands in the store, so a refusal leaves nothing behind. For

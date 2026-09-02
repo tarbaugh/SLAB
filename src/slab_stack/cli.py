@@ -297,11 +297,21 @@ def memory_list(
         bool, typer.Option("--json", help="Emit the catalog as JSON.")
     ] = False,
 ) -> None:
-    """List every memory on this machine: name, date, writer, description."""
+    """List every memory on this machine: name, date, writer, description.
+
+    A memory stamped with software that has changed since it was written
+    carries a note saying what changed. The versions are probed only when
+    some memory carries a stamp.
+    """
     try:
         memories = memory_store.discover()
     except FoundationError as e:
         _fail(str(e))
+    live: dict[str, str] = {}
+    if any(m.against for m in memories.values()):
+        from slab._ops import software_versions
+
+        live = software_versions()
     if as_json:
         typer.echo(
             json.dumps(
@@ -314,6 +324,8 @@ def memory_list(
                         "updated": m.updated,
                         "agent": m.agent,
                         "model": m.model,
+                        "against": m.against,
+                        "changed": m.drift(live),
                     }
                     for m in memories.values()
                 ],
@@ -327,8 +339,10 @@ def memory_list(
     width = max(len(name) for name in memories)
     for memory in memories.values():
         stamp = memory.updated or memory.created or "-"
+        changed = memory.drift(live)
+        note = f" [changed since: {'; '.join(changed)}]" if changed else ""
         typer.echo(f"{memory.name:<{width}}  {stamp}  {memory.agent or '-':<16}  "
-                   f"{memory.description}")
+                   f"{memory.description}{note}")
     typer.echo(f"{len(memories)} memory(s) in {memory_store.memory_dir()}")
 
 

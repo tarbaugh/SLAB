@@ -82,6 +82,70 @@ def engines_overview(registry_path: str | os.PathLike[str] | None = None) -> dic
     return overview
 
 
+def software_versions() -> dict[str, str]:
+    """The software this machine can run, by name, at the versions present now.
+
+    The map machine memory stamps a fact with and later compares against
+    (:func:`foundation.memory.stamp`). It names ``slab-stack`` itself, every
+    engine whose version can be told (built-ins by probing the binary, the
+    registry by its declared version), the ``mp`` snapshot by its release,
+    and a configured ``atomsk`` or ``gracemaker`` by the version it reports.
+    Software that is absent, unconfigured, or unprobeable is left out rather
+    than guessed at, and nothing here raises: a broken config or a failed
+    probe makes the map smaller, never the caller louder.
+
+    Examples:
+        >>> import os
+        >>> os.environ.pop("SLAB_ENGINES", None) and None
+        >>> versions = software_versions()
+        >>> "slab-stack" in versions
+        True
+    """
+    from slab._version import __version__
+    from slab.backends import available_engines, describe_engine
+    from slab.config import ConfigError
+    from slab.engines import load_registry
+
+    versions: dict[str, str] = {"slab-stack": __version__}
+    try:
+        registry = load_registry(None)
+    except ConfigError:
+        registry = None
+    for name in available_engines(registry):
+        try:
+            found = describe_engine(name).get("version")
+        except (SlabError, OSError):
+            continue
+        if found:
+            versions[name] = str(found)
+    snapshot = _mp_overview()
+    if snapshot and snapshot.get("release"):
+        versions["mp"] = str(snapshot["release"])
+    trainer = _gracemaker_overview()
+    if trainer and trainer.get("version"):
+        versions["gracemaker"] = str(trainer["version"])
+    builder = _atomsk_version()
+    if builder:
+        versions["atomsk"] = builder
+    return dict(sorted(versions.items()))
+
+
+def _atomsk_version() -> str | None:
+    """The configured atomsk's version, or None when unset or unprobeable."""
+    from slab.config import ConfigError, config_value
+
+    try:
+        command = config_value("builders.atomsk.command")
+        setup = config_value("builders.atomsk.setup")
+    except ConfigError:
+        return None
+    if not command and not setup:
+        return None
+    from slab.atomsk import atomsk_version
+
+    return atomsk_version()
+
+
 def _mp_overview() -> dict[str, Any] | None:
     """The offline Materials Project snapshot, or None when not configured.
 

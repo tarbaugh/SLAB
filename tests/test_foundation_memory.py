@@ -240,3 +240,93 @@ def test_bodies_with_frontmatter_markers_survive_the_round_trip(memory_root: Pat
     body = "The fix:\n\n---\n\nRun it twice: once for 'x: y' and once for \"z\".\n"
     memory_store.write("tricky", "Quotes and rules.", body, directory=memory_root)
     assert memory_store.discover(memory_root)["tricky"].body() == body
+
+
+# -- version stamps ----------------------------------------------------------
+
+
+def test_a_stamp_survives_the_round_trip_as_text(memory_root: Path) -> None:
+    written = memory_store.write(
+        "grace-gpu-growth",
+        "gracemaker needs TF_FORCE_GPU_ALLOW_GROWTH on the GPU nodes.",
+        "Without it TensorFlow grabs the whole card and the second fit fails.",
+        against={"gracemaker": "1.10", "slab-stack": "0.1.0"},
+        directory=memory_root,
+    )
+    text = written.path.read_text(encoding="utf-8")
+    assert "against:\n  gracemaker: '1.10'\n  slab-stack: 0.1.0\n" in text
+    again = memory_store.discover(memory_root)["grace-gpu-growth"]
+    assert again.against == {"gracemaker": "1.10", "slab-stack": "0.1.0"}
+    assert again.provenance().endswith(", against gracemaker 1.10, slab-stack 0.1.0")
+
+
+def test_a_replacement_carries_its_own_stamp(memory_root: Path) -> None:
+    memory_store.write(
+        "a-fact", "About gracemaker.", "Body.", against={"gracemaker": "0.5.2"},
+        directory=memory_root,
+    )
+    memory_store.write("a-fact", "About nothing stamped.", "Body.", directory=memory_root)
+    again = memory_store.discover(memory_root)["a-fact"]
+    assert again.against == {}
+    assert "against:" not in again.path.read_text(encoding="utf-8")
+
+
+def test_a_hand_typed_stamp_reads_as_text(memory_root: Path) -> None:
+    (memory_root / "mp-release.md").write_text(
+        "---\ndescription: The mp snapshot lacks alloys.\nagainst:\n  mp: 2024.11\n"
+        "  slab-stack: 1\n---\nOnly elements and binaries.\n",
+        encoding="utf-8",
+    )
+    memory = memory_store.discover(memory_root)["mp-release"]
+    assert memory.against == {"mp": "2024.11", "slab-stack": "1"}
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    ["against: 0.6.0\n", "against:\n  - gracemaker\n", "against:\n  gracemaker: [0, 6]\n"],
+)
+def test_a_malformed_stamp_is_refused(memory_root: Path, stamp: str) -> None:
+    (memory_root / "bad-stamp.md").write_text(
+        f"---\ndescription: d\n{stamp}---\nBody.\n", encoding="utf-8"
+    )
+    with pytest.raises(MemoryStoreError, match="'against'"):
+        memory_store.discover(memory_root)
+
+
+def test_stamp_names_only_the_software_the_text_mentions() -> None:
+    live = {"atomsk": "0.13.1", "gracemaker": "0.6.0", "qe": "7.3", "slab-stack": "0.1.0"}
+    assert memory_store.stamp("pw.x hangs on the login node.", live) == {"qe": "7.3"}
+    assert memory_store.stamp("Set it in slab.toml.", live) == {"slab-stack": "0.1.0"}
+    assert memory_store.stamp("A GRACE fit needs a GPU.", live) == {"gracemaker": "0.6.0"}
+    # Whole words only: 'atomskit' is not atomsk, and nothing here names slab.
+    assert memory_store.stamp("atomskit and the vLLM cache.", live) == {}
+
+
+def test_drift_is_the_catalog_note_and_nothing_else(memory_root: Path) -> None:
+    memory_store.write(
+        "grace-gpu", "gracemaker needs X.", "Body.", against={"gracemaker": "0.5.2"},
+        directory=memory_root,
+    )
+    memory_store.write(
+        "atomsk-path", "atomsk wants an absolute path.", "Body.", against={"atomsk": "0.13.1"},
+        directory=memory_root,
+    )
+    memory_store.write("vllm-cache", "vLLM refuses a big batch.", "Body.", directory=memory_root)
+    memories = memory_store.discover(memory_root)
+
+    same = {"gracemaker": "0.5.2", "atomsk": "0.13.1"}
+    unchanged = memory_store.catalog_block(memories, live=same)
+    assert "changed since" not in unchanged
+
+    block = memory_store.catalog_block(memories, live={"gracemaker": "0.6.0"})
+    lines = block.splitlines()
+    assert (
+        "- atomsk-path: atomsk wants an absolute path. "
+        "[changed since: atomsk was 0.13.1, not found now]"
+    ) in lines
+    assert (
+        "- grace-gpu: gracemaker needs X. [changed since: gracemaker was 0.5.2, now 0.6.0]"
+    ) in lines
+    assert "- vllm-cache: vLLM refuses a big batch." in lines
+    # Without a live map nothing is judged, so nothing is flagged.
+    assert "changed since" not in memory_store.catalog_block(memories)

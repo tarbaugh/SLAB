@@ -325,3 +325,40 @@ def test_purge_leaves_the_machine_memory_alone(tmp_path: Path, memories: Path) -
     result = runner.invoke(app, ["purge", "--workspace", str(root), "--yes"])
     assert result.exit_code == 0, result.output
     assert len(list(memories.glob("*.md"))) == 2
+
+
+def test_memory_list_flags_what_changed_since(
+    memories: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import slab._ops
+    from foundation import memory as memory_store
+
+    memory_store.write(
+        "grace-gpu-growth", "gracemaker needs X.", "Body.", agent="pi",
+        against={"gracemaker": "0.5.2"}, directory=memories,
+    )
+    monkeypatch.setattr(slab._ops, "software_versions", lambda: {"gracemaker": "0.6.0"})
+    result = runner.invoke(app, ["memory", "list"])
+    assert result.exit_code == 0, result.output
+    assert "gracemaker needs X. [changed since: gracemaker was 0.5.2, now 0.6.0]" in result.output
+    assert "vLLM refuses hybrid-Mamba models at the default batch size.\n" in result.output
+
+    result = runner.invoke(app, ["memory", "list", "--json"])
+    rows = {row["name"]: row for row in json.loads(result.output)}
+    assert rows["grace-gpu-growth"]["against"] == {"gracemaker": "0.5.2"}
+    assert rows["grace-gpu-growth"]["changed"] == ["gracemaker was 0.5.2, now 0.6.0"]
+    assert rows["vllm-mamba-cache"]["against"] == {} and rows["vllm-mamba-cache"]["changed"] == []
+
+
+def test_memory_list_of_unstamped_memories_probes_nothing(
+    memories: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import slab._ops
+
+    def refuse() -> dict[str, str]:
+        raise AssertionError("no stamp, so no probe")
+
+    monkeypatch.setattr(slab._ops, "software_versions", refuse)
+    result = runner.invoke(app, ["memory", "list"])
+    assert result.exit_code == 0, result.output
+    assert "changed since" not in result.output

@@ -203,3 +203,98 @@ def test_remember_then_recall_round_trips_through_the_transcript(
     ]
     assert [e["type"] for e in events] == ["remember", "recall"]
     assert events[0]["path"].endswith("a-fact.md")
+
+
+# -- version stamps ----------------------------------------------------------
+
+
+def _versions(monkeypatch: pytest.MonkeyPatch, live: dict[str, str] | None) -> list[int]:
+    """Make the machine report *live*; None makes the probe an error."""
+    import slab._ops
+
+    calls: list[int] = []
+
+    def probe() -> dict[str, str]:
+        calls.append(1)
+        if live is None:
+            raise AssertionError("the probe must not run")
+        return dict(live)
+
+    monkeypatch.setattr(slab._ops, "software_versions", probe)
+    return calls
+
+
+def test_remember_stamps_the_software_the_fact_names(
+    tmp_path: Path, memory_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _versions(monkeypatch, {"gracemaker": "0.6.0", "atomsk": "0.13.1"})
+    session = _session(tmp_path, auto_approve=True)
+    box = build_toolbox(session)
+    answer = box.dispatch(
+        _call(
+            "remember",
+            name="grace-gpu-growth",
+            description="gracemaker needs TF_FORCE_GPU_ALLOW_GROWTH on the GPU nodes.",
+            body="Without it the second fit on a node fails to allocate.",
+        )
+    )
+    assert answer.endswith("(stamped against gracemaker 0.6.0)")
+    memory = memory_store.discover(memory_root)["grace-gpu-growth"]
+    assert memory.against == {"gracemaker": "0.6.0"}
+    # A second write in the same session reuses the probe.
+    box.dispatch(_call("remember", name="b", description="An atomsk fact.", body="Body."))
+    assert memory_store.discover(memory_root)["b"].against == {"atomsk": "0.13.1"}
+    assert calls == [1]
+
+
+def test_the_prompt_flags_a_memory_whose_software_changed(
+    tmp_path: Path, memory_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    memory_store.write(
+        "grace-gpu-growth", "gracemaker needs X.", "Body.", against={"gracemaker": "0.5.2"},
+        directory=memory_root,
+    )
+    memory_store.write("vllm-cache", "vLLM refuses a big batch.", "Body.", directory=memory_root)
+    _versions(monkeypatch, {"gracemaker": "0.6.0"})
+    (content,) = [m["content"] for m in system_messages(_session(tmp_path))]
+    assert (
+        "- grace-gpu-growth: gracemaker needs X. "
+        "[changed since: gracemaker was 0.5.2, now 0.6.0]"
+    ) in content
+    assert "- vllm-cache: vLLM refuses a big batch.\n" in content + "\n"
+
+
+def test_unstamped_memories_cost_no_probe(
+    tmp_path: Path, memory_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    memory_store.write("vllm-cache", "vLLM refuses a big batch.", "Body.", directory=memory_root)
+    _versions(monkeypatch, None)
+    (content,) = [m["content"] for m in system_messages(_session(tmp_path))]
+    assert "- vllm-cache: vLLM refuses a big batch." in content
+    box = build_toolbox(_session(tmp_path))
+    assert "[recorded" in box.dispatch(_call("recall", name="vllm-cache"))
+
+
+def test_recall_says_what_changed_since(
+    tmp_path: Path, memory_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    memory_store.write(
+        "grace-gpu-growth", "gracemaker needs X.", "The whole fact.",
+        agent="pi", against={"gracemaker": "0.5.2"}, directory=memory_root,
+    )
+    _versions(monkeypatch, {"gracemaker": "0.6.0"})
+    box = build_toolbox(_session(tmp_path))
+    answer = box.dispatch(_call("recall", name="grace-gpu-growth"))
+    assert "[recorded by pi on " in answer and "against gracemaker 0.5.2]" in answer
+    assert "[changed since: gracemaker was 0.5.2, now 0.6.0. Confirm the fact" in answer
+
+
+def test_a_delegate_shares_the_parent_probe(
+    tmp_path: Path, memory_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _versions(monkeypatch, {"gracemaker": "0.6.0"})
+    parent = _session(tmp_path)
+    assert parent.software_versions() == {"gracemaker": "0.6.0"}
+    child = parent.spawn("dft-expert", AgentConfig())
+    assert child.software_versions() == {"gracemaker": "0.6.0"}
+    assert calls == [1]
