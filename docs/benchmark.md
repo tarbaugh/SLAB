@@ -39,7 +39,7 @@ distance between the two.
 
 ## The questions
 
-The table is rendered from the code (`slab benchmark render`), so the
+The table is rendered from the code (`slab benchmark tables`), so the
 instruction the agent receives and the band it is judged by cannot
 drift from this page.
 
@@ -85,6 +85,15 @@ slab hpc status <job id>
 slab benchmark score --machine <label>
 ```
 
+`launch` always renders fresh, so a hand edit to the job script does not
+survive it. For a tweak the config cannot express, render the job files
+without submitting, edit the script, and submit it yourself:
+
+```bash
+slab benchmark render 1 --partition gpu
+sbatch sandbox/mason-sandbox.sbatch
+```
+
 Rules for the record:
 
 - `--machine` is a label you choose for the machine, such as `laptop` or
@@ -101,10 +110,10 @@ Rules for the record:
   again; the renderer keeps the latest record per model, machine, and
   question.
 
-Then render the tables on this page and the summary in the README:
+Then rewrite the tables on this page and the summary in the README:
 
 ```bash
-slab benchmark render
+slab benchmark tables
 ```
 
 ## Results

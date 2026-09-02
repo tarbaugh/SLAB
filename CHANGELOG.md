@@ -6,7 +6,8 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 ## Unreleased
 
 - `slab benchmark`: five fixed copper campaigns with DFT-PBE references and
-  per-engine-class tolerance bands; `run`, `launch`, `score`, and `render`.
+  per-engine-class tolerance bands; `run`, `launch`, `render` (the job
+  files, for hand edits before `sbatch`), `score`, and `tables`.
   A campaign passes when the agent's structured `finish` result lies in
   band and every run it cites reached `verified`. Records live in
   `benchmarks/results.jsonl`; the docs page and the README tables are

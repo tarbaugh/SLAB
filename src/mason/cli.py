@@ -181,6 +181,30 @@ def _resolve_spec(agent_name: str | None) -> tuple[AgentSpec, dict[str, AgentSpe
 resolve_spec = _resolve_spec
 
 
+def render_sandbox_files(
+    goal: str,
+    *,
+    workspace: Path | None,
+    partition: str | None,
+    time_limit: str | None,
+    out: Path | None,
+    engine_tasks: int | None,
+) -> tuple[Path, str]:
+    """Render the sandbox job files for *goal* without submitting (public form).
+
+    Shared with ``slab benchmark render``: the files land in *out* (default
+    ``./sandbox``) for reading and tweaking before an explicit ``sbatch``.
+    """
+    return _render_sandbox_files(
+        goal,
+        workspace=workspace,
+        partition=partition,
+        time_limit=time_limit,
+        out=out,
+        engine_tasks=engine_tasks,
+    )
+
+
 _ModelOpt = Annotated[str | None, typer.Option("--model", help="Override [agent] model.")]
 _EndpointOpt = Annotated[
     str | None,

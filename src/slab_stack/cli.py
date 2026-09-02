@@ -632,6 +632,45 @@ def benchmark_score(
 
 @benchmark_app.command("render")
 def benchmark_render(
+    question: Annotated[str, typer.Argument(help="Question number or key (see list).")],
+    workspace: _WorkspaceOpt = None,
+    partition: Annotated[
+        str | None, typer.Option("--partition", "-p", help="Partition for the engine legs.")
+    ] = None,
+    time_limit: Annotated[str | None, typer.Option("--time-limit")] = None,
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", help="Directory for the rendered files (default: ./sandbox)."),
+    ] = None,
+) -> None:
+    """Write the campaign's sandbox job files without submitting them.
+
+    For tweaks the config cannot express: read and edit the rendered
+    .sbatch, then submit it with sbatch yourself. 'launch' always
+    re-renders, so hand edits only survive a manual sbatch.
+    """
+    from mason.cli import render_sandbox_files
+
+    try:
+        asked = benchmark.find_question(question)
+        script_path, _script = render_sandbox_files(
+            asked.instruction,
+            workspace=workspace,
+            partition=partition,
+            time_limit=time_limit,
+            out=out,
+            engine_tasks=None,
+        )
+    except _BENCH_ERRORS as e:
+        _fail(str(e))
+    typer.echo(
+        f"rendered Q{asked.number} ({asked.key}); edit if needed, then: sbatch {script_path}"
+    )
+    typer.echo("after the job ends: slab benchmark score")
+
+
+@benchmark_app.command("tables")
+def benchmark_tables(
     docs: Annotated[
         Path | None, typer.Option("--docs", help="The docs page (default docs/benchmark.md).")
     ] = None,

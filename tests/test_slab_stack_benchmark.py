@@ -361,10 +361,31 @@ def test_cli_list_score_and_render(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     (tmp_path / "README.md").write_text(
         "<!-- benchmark:summary:start -->\n<!-- benchmark:summary:end -->\n"
     )
-    rendered = runner.invoke(app, ["benchmark", "render"])
+    rendered = runner.invoke(app, ["benchmark", "tables"])
     assert rendered.exit_code == 0, rendered.output
     assert "rewrote docs/benchmark.md" in rendered.output and "rewrote README.md" in rendered.output
     assert "| big-70b | hpc-a | 1/5 |" in (tmp_path / "README.md").read_text()
 
     unknown = runner.invoke(app, ["benchmark", "score", "--session", "1999"])
     assert unknown.exit_code == 1 and "no session transcript matches" in unknown.output
+
+
+def test_cli_render_writes_the_job_files_without_submitting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """render is for tweaks the config cannot express: the files land, nothing runs."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "slab.toml").write_text(
+        "[agent]\nmodel = \"m\"\nendpoint = \"http://gateway.example/v1\"\n"
+        "api_key_env = \"GATEWAY_API_KEY\"\n"
+        "[agent.sandbox]\nimage = \"/shared/sw/slab-sandbox.sif\"\n"
+        "[hpc]\ndefault_partition = \"cpu\"\n[hpc.partitions.cpu]\ntime_limit = \"04:00:00\"\n"
+    )
+    monkeypatch.setenv("GATEWAY_API_KEY", "not-a-real-key")
+    result = runner.invoke(app, ["benchmark", "render", "vacancy", "--partition", "cpu"])
+    assert result.exit_code == 0, result.output
+    script = tmp_path / "sandbox" / "mason-sandbox.sbatch"
+    assert script.is_file()
+    assert benchmark.find_question("vacancy").instruction.split(".")[0] in script.read_text()
+    assert f"then: sbatch {script}" in result.output
+    assert not (tmp_path / "benchmarks").exists()  # nothing scored, nothing recorded
