@@ -33,7 +33,18 @@ def _isolated_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # outlives the CLI call inside one pytest process, so clear it for every
     # test; a test that wants a session stamp sets the variable itself.
     monkeypatch.delenv("SLAB_SESSION", raising=False)
+    # A developer's registry or pseudopotential root must not enter either.
+    monkeypatch.delenv("SLAB_ENGINES", raising=False)
+    monkeypatch.delenv("SLAB_PSEUDOS", raising=False)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config-isolated"))
+    # ASE reads ~/.config/ase/config.ini once at import; a developer's
+    # [espresso] section would otherwise resolve pw.x for every qe test.
+    from ase.calculators.genericfileio import GenericFileIOCalculator
+    from ase.config import Config
+
+    blank = Config()
+    monkeypatch.setattr("ase.config.cfg", blank)
+    monkeypatch.setattr(GenericFileIOCalculator, "cfg", blank)
     # Rootstock discovers installs on its own: $ROOTSTOCK_ROOT, then a user
     # config at a literal ~/.config/rootstock/config.toml that ignores
     # $XDG_CONFIG_HOME. On a machine with a real install configured (an HPC

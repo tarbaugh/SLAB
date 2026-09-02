@@ -34,14 +34,21 @@ def engines_overview(registry_path: str | os.PathLike[str] | None = None) -> dic
         True
     """
     from slab.backends import available_engines
+    from slab.config import ConfigError
     from slab.engines import find_registry_path, load_registry
 
-    registry = load_registry(registry_path)
     overview: dict[str, Any] = {
         "builtin": list(available_engines(None)),
         "registry": None,
         "rootstock": None,
     }
+    try:
+        registry = load_registry(registry_path)
+    except ConfigError:
+        # Locating the registry reads [paths] engines from the config. A
+        # malformed config must not hide the built-in engines; the [hpc]
+        # section below reports the config error once, as hpc_error.
+        registry = None
     if registry is not None:
         located = find_registry_path(registry_path)
         overview["registry"] = {

@@ -215,7 +215,7 @@ MVP vertical slice, working end to end. It includes:
   Claude, with its model server as a batch job;
 - one command (`slab`) and an MCP server.
 
-Quality gates: 1000+ tests (every docstring example runs as a doctest), ~95%
+Quality gates: 1600+ tests (every docstring example runs as a doctest), ~94%
 coverage, mypy `--strict`, and adversarial multi-agent review passes whose
 confirmed findings became regression tests. A test reads the AST of every
 module and fails on an import that crosses the package layering the wrong

@@ -1763,7 +1763,7 @@ def _qe_locator(options: dict[str, Any]) -> tuple[str, str | None]:
         # treats it — key presence must not fork the two resolutions (a
         # stamped command of the literal string 'None' would cache under an
         # identity no binary matches).
-        if options.get("command") is not None:
+        if options.get("command"):  # None and "" are both absent, as in the factory
             command = str(options["command"])
         else:
             command = _qe_config_command() or "pw.x"

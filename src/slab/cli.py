@@ -71,7 +71,8 @@ def engines_list(registry_path: _RegistryOpt = None) -> None:
             typer.echo(f"  {name:<14} {version:<14} {spec['calculator']}  ({probe}){description}")
     rootstock = overview["rootstock"]
     if rootstock is not None:
-        typer.echo(f"rootstock checkpoints (usable directly as engine=): {rootstock['root']}")
+        where = rootstock["root"] or "(no root configured)"
+        typer.echo(f"rootstock checkpoints (usable directly as engine=): {where}")
         if rootstock.get("error"):
             typer.echo(f"  error reading install: {rootstock['error']}")
         for env_name, ids in rootstock["checkpoints"].items():
@@ -164,7 +165,10 @@ def pseudos_install(
             f"only 'sssp' families install today, not {kind!r} (PseudoDojo is served over "
             f"unverified HTTP upstream; point pseudo_dir= at your own files instead)"
         )
-    root, origin = pseudos_root_origin()
+    try:
+        root, origin = pseudos_root_origin()
+    except SlabError as e:  # a broken config is a plain error here too
+        _fail(str(e))
     typer.echo(f"installing into {root} ({origin})")
     typer.echo(f"downloading SSSP {version} {functional} {precision} from Materials Cloud ...")
     try:
@@ -614,16 +618,23 @@ def mp_show(
 
 
 def _filter_value(raw: str) -> object:
-    """One --filter value: 'null' is SQL NULL, numbers are numbers.
+    """One --filter value: 'null' is SQL NULL, true/false are 1/0, numbers are numbers.
+
+    The snapshot stores booleans as integers, so ``is_stable=true`` must
+    compare against 1, not the string.
 
     Examples:
         >>> _filter_value("0.025")
         0.025
         >>> _filter_value("Fe2O3")
         'Fe2O3'
+        >>> _filter_value("true")
+        1
     """
     if raw.lower() in {"null", "none"}:
         return None
+    if raw.lower() in {"true", "false"}:
+        return 1 if raw.lower() == "true" else 0
     try:
         return int(raw)
     except ValueError:

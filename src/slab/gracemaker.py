@@ -222,8 +222,9 @@ def run_gracemaker(
     try:
         log, _ = process.communicate(timeout=timeout_s)
     except subprocess.TimeoutExpired as e:
-        _kill_process_group(process)
-        partial = e.stdout if isinstance(e.stdout, str) else ""
+        # TimeoutExpired carries the output read so far as bytes, even
+        # under text=True; decoding it is what keeps the evidence.
+        partial = _partial_output(e.stdout) or _kill_process_group(process)
         raise BuilderError(
             f"gracemaker did not finish within {timeout_s:.0f}s; its process "
             f"group was killed (command: {resolved})",
@@ -302,14 +303,36 @@ def _run_argv(command: str, setup: tuple[str, ...], args: list[str]) -> list[str
     return ["/bin/bash", "-l", "-c", script]
 
 
-def _kill_process_group(process: subprocess.Popen[str]) -> None:
-    """Kill the subprocess's whole group, then reap. Never raises."""
+def _kill_process_group(process: subprocess.Popen[str]) -> str:
+    """Kill the subprocess's whole group, then reap. Never raises.
+
+    Returns whatever output the reap still collected (often empty: the
+    pipe was drained by the communicate that timed out).
+    """
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError, OSError):
         process.kill()
     with contextlib.suppress(Exception):
-        process.communicate(timeout=10)
+        remainder, _ = process.communicate(timeout=10)
+        return _partial_output(remainder)
+    return ""
+
+
+def _partial_output(raw: object) -> str:
+    """The text of a subprocess's partial output, whatever type it arrived as.
+
+    Examples:
+        >>> _partial_output(b"epoch 1\\n")
+        'epoch 1\\n'
+        >>> _partial_output("epoch 1\\n")
+        'epoch 1\\n'
+        >>> _partial_output(None)
+        ''
+    """
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8", errors="replace")
+    return raw if isinstance(raw, str) else ""
 
 
 def _require_available(command: str) -> None:
@@ -376,7 +399,9 @@ def _sibling_python(command: str) -> str | None:
         return None
     if first.startswith("#!"):
         shebang = first[2:].split()
-        if shebang and Path(shebang[-1]).name.startswith("python"):
+        # Only an absolute interpreter names the script's own environment;
+        # ``#!/usr/bin/env python3`` would resolve to whatever PATH holds.
+        if shebang and shebang[-1].startswith("/") and Path(shebang[-1]).name.startswith("python"):
             return shebang[-1]
     return None
 

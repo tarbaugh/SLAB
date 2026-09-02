@@ -155,13 +155,15 @@ def test_relax_closes_calculator_even_on_failure(monkeypatch: pytest.MonkeyPatch
         def close(self) -> None:
             closed.append(True)
 
-        def get_potential_energy(self, *a: object, **k: object) -> float:
+        def get_forces(self, *a: object, **k: object) -> object:  # BFGS asks for forces first
             raise RuntimeError("SCF diverged")
+
+        get_potential_energy = get_forces
 
     monkeypatch.setattr(
         "foundation.tasks.get_calculator", lambda engine, **kw: ExplodingCalculator()
     )
-    with pytest.raises(Exception):  # noqa: B017 - any failure path must still close
+    with pytest.raises(RuntimeError, match="SCF diverged"):
         relax(_rattled_cu(), engine="emt")
     assert closed == [True]
 
@@ -450,3 +452,20 @@ def test_relax_cell_records_the_task_and_trajectory(ws: Workspace) -> None:
     (traj,) = ws.runs.list_artifacts(run.id)
     assert traj.name == "cu-cell.traj"
     assert traj.role is ArtifactRole.INTERMEDIATE
+
+
+def test_relax_cell_isotropic_converges_on_a_hexagonal_cell() -> None:
+    """Under the isotropic mask only the volume moves, so the residual to
+    judge is the hydrostatic pressure, not each normal component: an hcp
+    cell at its isotropic equilibrium keeps anisotropic normal stress and
+    ASE's own test would never call it converged."""
+    from ase.build import bulk
+
+    from foundation.tasks import relax_cell
+
+    _final, info = relax_cell(
+        bulk("Cu", "hcp", a=2.45, c=4.1), engine="emt", symmetry="isotropic", steps=60
+    )
+    assert info["converged"] is True
+    assert info["smax"] < 0.005
+    assert info["steps"] < 60

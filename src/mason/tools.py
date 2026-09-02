@@ -26,6 +26,7 @@ Contracts the primitives enforce in code, not prompt text:
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -417,6 +418,31 @@ def _mp_snapshot_root(session: MasonSession) -> Path | None:
     return _scope_root(session, Path(str(root)))
 
 
+#: Variables that hold model credentials whatever the config names: a
+#: subprocess the model drives must never see them, or `env` in a shell
+#: call puts the key into the tool result, the context, and the transcript.
+_CREDENTIAL_VARS = frozenset({"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "PORTKEY_API_KEY"})
+
+
+def _subprocess_env(session: MasonSession) -> dict[str, str]:
+    """The process environment minus the model's credentials.
+
+    Examples:
+        >>> import os, types
+        >>> os.environ["SLAB_DOCTEST_SECRET"] = "sk-x"
+        >>> fake = types.SimpleNamespace(agent=types.SimpleNamespace(
+        ...     resolved_api_key_env="SLAB_DOCTEST_SECRET"))
+        >>> "SLAB_DOCTEST_SECRET" in _subprocess_env(fake)
+        False
+        >>> del os.environ["SLAB_DOCTEST_SECRET"]
+    """
+    hidden = set(_CREDENTIAL_VARS)
+    named = getattr(session.agent, "resolved_api_key_env", None)
+    if named:
+        hidden.add(str(named))
+    return {key: value for key, value in os.environ.items() if key not in hidden}
+
+
 def _out_of_scope(session: MasonSession, path: Path, roots: tuple[Path, ...]) -> str | None:
     """The refusal observation when *path* leaves the file fence, else None.
 
@@ -437,7 +463,10 @@ def _out_of_scope(session: MasonSession, path: Path, roots: tuple[Path, ...]) ->
     # huge, it records what *seemed* true mid-investigation, and it may
     # describe a different campaign entirely. Everything a past session
     # kept on purpose arrives through the project files and the memories.
-    if resolved.is_relative_to(session.sessions_dir):
+    # Resolved against resolved: a relative workspace root (the default
+    # .slab) or a symlinked one would otherwise never match, and the fence
+    # would silently open.
+    if resolved.is_relative_to(session.sessions_dir.expanduser().resolve()):
         return (
             f"refused: {path} is a session transcript, and past sessions are "
             f"not context. What earlier sessions kept for you arrives three "
@@ -655,6 +684,10 @@ def _add_file_tools(
             relative_parts = candidate.relative_to(root).parts
             if any(part.startswith(".") or part == "__pycache__" for part in relative_parts):
                 continue
+            # A symlink inside the project can point anywhere; the fence
+            # that guards read_file guards what search prints too.
+            if _out_of_scope(session, candidate, read_roots):
+                continue
             try:
                 text = candidate.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError):
@@ -743,6 +776,7 @@ def _add_shell_tool(box: Toolbox, session: MasonSession) -> None:
                 text=True,
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,
+                env=_subprocess_env(session),
             )
         except OSError as e:
             return f"could not start the command: {e}"
@@ -917,6 +951,7 @@ def _add_workflow_tools(
                     stderr=subprocess.STDOUT,
                     stdin=subprocess.DEVNULL,
                     start_new_session=True,
+                    env=_subprocess_env(session),
                 )
         except OSError as e:
             return f"could not start the background run: {e}"
@@ -1442,7 +1477,11 @@ def _add_delegate_tool(
         reuse = parent_client is not None and connection_profile(
             child_session.agent
         ) == connection_profile(session.agent)
-        client = parent_client if reuse else client_from_config(child_session.agent)
+        client = (
+            parent_client
+            if reuse
+            else client_from_config(child_session.agent, child_session.api_keys)
+        )
         child = Mason(
             child_session, client=client, skills=skills, spec=target, roster=roster, depth=1
         )

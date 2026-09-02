@@ -26,6 +26,8 @@ $ slab doctor --offline
 [=] rootstock: no install root configured — set root or cluster under [engines.rootstock] in slab.toml, or export ROOTSTOCK_ROOT
 [=] pseudo families: 0 installed
 [=] scheduler: no sbatch on PATH (fine off-cluster)
+[=] mp snapshot: not configured ([builders.mp] has no root)
+[=] gracemaker: not configured ([builders.gracemaker] is empty)
 [=] endpoint: skipped (--offline)
 [=] sandbox: not configured ([agent.sandbox] has no image)
 [=] rendered job: none here (render or launch writes sandbox/)

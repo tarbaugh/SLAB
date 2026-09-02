@@ -32,7 +32,12 @@ _PICKLE = b"P\n"
 
 
 def _json_faithful(obj: object) -> bool:
-    """True if *obj* round-trips through JSON with identity of type and value."""
+    """True if *obj* round-trips through JSON as the same value.
+
+    Plain ``str``/``int``/``float``/``bool`` (and their subclasses, which
+    come back as the plain type: a ``StrEnum`` member returns as ``str``)
+    take the JSON path; everything else is pickled.
+    """
     if obj is None or isinstance(obj, (bool, int, float, str)):
         return True
     if isinstance(obj, list):

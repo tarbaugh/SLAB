@@ -201,7 +201,10 @@ def purge(
         active = frozenset()  # no scheduler here, so nothing can be running
     except SlabError as e:
         _fail(str(e))
-    record = read_record(root)
+    try:
+        record = read_record(root)
+    except MasonError as e:  # an unreadable endpoint record is a plain error here
+        _fail(str(e))
     if record is not None and record.job_id:
         active = active | {str(record.job_id)}
     job_files = _job_file_sweep(root, active)
@@ -268,8 +271,8 @@ def doctor(
 
     Probes the real campaign path in order: configuration, workspace,
     memory store, engines, scheduler, model endpoint, sandbox, and the
-    freshness of the rendered job. Exits nonzero only on an [x] row; an
-    [=] row is a fact about this machine, not a failure. The focused
+    freshness of the rendered job. Exits nonzero only on an \\[x] row; an
+    \\[=] row is a fact about this machine, not a failure. The focused
     endpoint check remains 'slab mason doctor'.
     """
     from slab_stack import doctor as stack_doctor
@@ -610,9 +613,19 @@ def benchmark_score(
         scored: list[dict[str, Any]] = []
         skipped = 0
         for target in targets:
-            record = benchmark.score_session(
-                root, target, question=asked, machine=machine, model=model
-            )
+            if target in known and not rescore:
+                skipped += 1
+                continue
+            try:
+                record = benchmark.score_session(
+                    root, target, question=asked, machine=machine, model=model
+                )
+            except benchmark.BenchmarkError as e:
+                # A session that cannot be judged (no checked reference for
+                # its class, a non-campaign named by --session) must not
+                # stop the sweep for the ones that can.
+                typer.secho(f"skipped {target}: {e}", err=True, fg=typer.colors.YELLOW)
+                continue
             if record["session"] in known and not rescore:
                 skipped += 1
                 continue

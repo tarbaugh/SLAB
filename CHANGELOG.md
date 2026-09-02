@@ -5,6 +5,51 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- A review of the last two weeks' revisions, six reviewers over the four
+  packages, the docs, the tests, and the security surface; every finding
+  confirmed by execution before it was fixed. The fixes:
+  - `relax_cell(symmetry="isotropic")` can converge on a non-cubic cell.
+    ASE's own test demanded every normal stress component vanish while
+    the mask moved only the volume, so hexagonal and tetragonal cells
+    burned every step; the optimizer now judges the filter's projected
+    stress, and `info["smax"]` reports the same quantity.
+  - A Ctrl-C during a slow tool no longer leaves the assistant's tool
+    calls unanswered (a protocol-invalid history that `--resume` replayed).
+  - The sessions-directory fence compared a resolved path against an
+    unresolved one, so the default relative workspace and any symlinked
+    workspace left it open; `search` followed symlinks out of the fence.
+  - The model's API key was inherited by every shell command and workflow
+    the model ran; it is now read once, withdrawn from the environment,
+    and kept on the session for delegates.
+  - The sandbox `verify` step took an HTTP error page for a dark network.
+  - The sandbox render quotes the `slab` path, keeps a bind whose
+    destination differs from its source, binds a distro-packaged tool as
+    a file rather than its `/usr` prefix, keeps launchers and arguments
+    when it makes a bare command absolute, escapes control characters in
+    the rendered config, and refuses a non-OpenAI provider up front.
+  - `slab mason serve stop` clears an unreadable endpoint record; `slab
+    purge` reports one as an error instead of a traceback and creates no
+    workspace on `--dry-run`.
+  - `slab benchmark score` skips a session it cannot judge and scores the
+    rest, instead of aborting the sweep.
+  - `promote --session --force` no longer sweeps running or pending runs
+    into `promoted`; a run whose failure could not be recorded keeps its
+    real exception; run timestamps must be timezone-aware; a gracemaker or
+    atomsk timeout keeps the partial log; a relative `[builders.mp] root`
+    resolves; `atomsk_version` never raises; the shebang fallback only
+    trusts an absolute interpreter; a broken config no longer hides the
+    built-in engines from `slab engines list` or tracebacks in `slab
+    pseudos install`; `--filter is_stable=true` matches the snapshot's
+    integer booleans; `api_key_env` must be a shell variable name.
+  - Compaction cannot refire every step; the compaction summarizer's own
+    call is recorded as usage; the prompt-size estimate counts the tool
+    schemas; a delegate's report is never cleared; a resumed session gets
+    its own header; the shared prompt names the tools a session lacks.
+  - Docs: eleven MCP tools (not nine or seven), five `slab hpc` verbs,
+    `remember` asks for approval, the tool table lists every tool, the
+    roster and offline doctor captures are re-recorded, and the sandbox
+    tests use ephemeral ports so two test runs on one machine no longer
+    collide.
 - A truncated context is named, not endured. Ollama silently truncates
   every prompt to its `num_ctx` (2048 or 4096 by default), below Mason's
   fixed prefix, so every local llama session so far ran without its

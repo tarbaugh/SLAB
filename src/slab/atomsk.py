@@ -193,7 +193,10 @@ def run_atomsk(
             check=False,
         )
     except subprocess.TimeoutExpired as e:
-        partial = e.stdout if isinstance(e.stdout, str) else ""
+        # TimeoutExpired carries the output read so far as bytes, even
+        # under text=True; decoding it is what keeps the evidence.
+        raw = e.stdout
+        partial = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw or ""
         raise BuilderError(
             f"atomsk did not finish within {timeout_s:.0f}s and was killed "
             f"(command: {resolved})",
@@ -294,7 +297,11 @@ def _require_available(command: str) -> None:
 
 
 def _probe_version_in_shell(command: str, setup: tuple[str, ...]) -> str | None:
-    quoted = " ".join(shlex.quote(token) for token in [*shlex.split(command), "--version"])
+    try:
+        tokens = shlex.split(command)
+    except ValueError:  # an unbalanced quote in the configured command
+        return None
+    quoted = " ".join(shlex.quote(token) for token in [*tokens, "--version"])
     script = "\n".join(["set -e", *setup, f"exec {quoted}"])
     return _spawn_version_probe(["/bin/bash", "-l", "-c", script])
 

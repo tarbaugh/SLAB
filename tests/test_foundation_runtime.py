@@ -45,7 +45,7 @@ def test_run_lifecycle_around_context(ws: Workspace) -> None:
         snapshot = run.run
         assert snapshot.status is ExecutionStatus.RUNNING
         assert snapshot.intent == "why"
-        assert "demo" not in repr(run) or True  # repr carries the id
+        assert run.id in repr(run)  # repr carries the id
     assert current_run() is None
     final = ws.runs.get(run.id)
     assert final.status is ExecutionStatus.COMPLETED

@@ -139,13 +139,19 @@ def _relay(server: socket.socket, connect: Callable[[], socket.socket]) -> None:
         threading.Thread(target=serve, args=(client, upstream), daemon=True).start()
 
 
-def forward(socket_path: str, port: int = BRIDGE_PORT) -> None:
+def forward(
+    socket_path: str,
+    port: int = BRIDGE_PORT,
+    *,
+    on_bound: Callable[[int], None] | None = None,
+) -> None:
     """Serve ``127.0.0.1:port`` by relaying every connection to a unix socket.
 
     This is the container half of the bridge. The namespace has no network,
     so the only route out is the bound socket file, whose other end is the
     host-side :func:`bridge` pointed at one fixed destination. Runs until
-    killed.
+    killed. *on_bound* is called with the port once the listener is up,
+    which is how a caller that passed port 0 learns the port it got.
     """
 
     def connect() -> socket.socket:
@@ -156,6 +162,8 @@ def forward(socket_path: str, port: int = BRIDGE_PORT) -> None:
     server = socket.socket()
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("127.0.0.1", port))
+    if on_bound is not None:
+        on_bound(int(server.getsockname()[1]))
     _relay(server, connect)
 
 
@@ -596,15 +604,18 @@ def _forwarder(
                 headers["Content-Length"] = str(len(body))
             try:
                 status, reason, answer, payload = self._issue(method, path, headers, body)
-            except OSError as e:
-                # A transport failure has no status of its own. Say so as one
+            except (OSError, http.client.HTTPException) as e:
+                # A transport failure (or a reply that is not HTTP at all: a
+                # front end's outage banner) has no status of its own. Say so as one
                 # the agent's client can read, rather than dropping the
                 # connection and leaving it to guess — and say what to check,
                 # keyed on how the trip failed.
-                self._answer_error(
-                    f"the bridge could not reach the gateway: "
-                    f"{e}{_unreachable_hint(e)}"
+                hint = (
+                    _unreachable_hint(e)
+                    if isinstance(e, OSError)
+                    else " (the upstream answered something that is not HTTP)"
                 )
+                self._answer_error(f"the bridge could not reach the gateway: {e}{hint}")
                 return
             self.send_response(status, reason)
             for name, value in answer:
@@ -734,6 +745,15 @@ def verify(
             )
         except SandboxError:
             raise
+        except urllib.error.HTTPError as e:
+            # An HTTP error is still an answer: a captive proxy or a
+            # filtering front end that says 403 proves a route exists.
+            # HTTPError subclasses URLError, so it must be caught first.
+            raise SandboxError(
+                f"the sandbox can reach {probe} (it answered HTTP {e.code}) — the "
+                f"network namespace is not isolated. Refusing to start an autonomous "
+                f"run. Check that the container was launched with --net --network none."
+            ) from e
         except (urllib.error.URLError, OSError, TimeoutError):
             continue  # dark, as required
 
@@ -1054,7 +1074,9 @@ def snapshot_setup(
                 engine, "", {}, (), error=f"setup did not finish within {timeout_s:.0f}s"
             )
         resolved = [p.read_text().strip() if p.exists() else "" for p in probes]
-        missing = [t for t, r in zip(targets, resolved, strict=True) if not r]
+        # A shell builtin or alias resolves to a bare name, which is nothing
+        # the container could be handed; only an absolute path counts.
+        missing = [t for t, r in zip(targets, resolved, strict=True) if not r.startswith("/")]
         if result.returncode != 0 or missing:
             # Module systems chatter on stderr while succeeding, so name the
             # actual failure first and quote stderr only as supporting detail.
@@ -1223,6 +1245,11 @@ def _snapshot_binds(snapshot: SetupSnapshot) -> list[str]:
         return []
     prefixes = []
     for binary in (snapshot.payload, *snapshot.extra_binaries):
+        if _system_binary(Path(binary)):
+            # A distro-packaged tool: bind the file, never its prefix, or
+            # the host's whole /usr would shadow the image's userland.
+            prefixes.append(binary)
+            continue
         bin_dir = Path(binary).parent
         prefixes.append(str(bin_dir.parent if bin_dir.name == "bin" else bin_dir))
     return [
@@ -1232,10 +1259,26 @@ def _snapshot_binds(snapshot: SetupSnapshot) -> list[str]:
 
 
 def _collapse_binds(binds: list[str]) -> list[str]:
-    """Drop exact duplicates and read-only binds nested inside another bind."""
+    """Drop exact duplicates and read-only binds nested inside another bind.
 
-    def src(spec: str) -> str:
-        return spec.split(":", 1)[0]
+    A bind is nested only when its source AND its destination sit under the
+    other bind's source and destination the same way: a source under a
+    wider bind that is mounted somewhere else in the container is a
+    different mount, and dropping it would make that destination vanish.
+
+    Examples:
+        >>> _collapse_binds(["/scratch/u:/scratch/u:rw", "/scratch/u/x:/scratch/u/x:ro"])
+        ['/scratch/u:/scratch/u:rw']
+        >>> _collapse_binds(["/scratch/u:/scratch/u:rw", "/scratch/u/x:/opt/x:ro"])
+        ['/scratch/u:/scratch/u:rw', '/scratch/u/x:/opt/x:ro']
+    """
+
+    def parts(spec: str) -> tuple[str, str]:
+        pieces = spec.split(":")
+        return pieces[0], (pieces[1] if len(pieces) > 1 else pieces[0])
+
+    def under(path: str, base: str) -> bool:
+        return path == base or path.startswith(base + "/")
 
     kept: list[str] = []
     for spec in binds:
@@ -1243,7 +1286,9 @@ def _collapse_binds(binds: list[str]) -> list[str]:
         for other in binds:
             if other == spec:
                 continue
-            inside = src(spec) == src(other) or src(spec).startswith(src(other) + "/")
+            src, dst = parts(spec)
+            other_src, other_dst = parts(other)
+            inside = under(src, other_src) and under(dst, other_dst)
             wider = spec.endswith(":ro") or other.endswith(":rw")
             if inside and wider and (other in kept or binds.index(other) < binds.index(spec)):
                 redundant = True
@@ -1341,8 +1386,9 @@ def _toml_value(value: Any) -> str:
         return repr(value)
     if isinstance(value, list | tuple):
         return "[" + ", ".join(_toml_value(v) for v in value) + "]"
-    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
+    # A JSON string is a valid TOML basic string, and json escapes the
+    # control characters a snapshotted multi-line export can carry.
+    return json.dumps(str(value), ensure_ascii=False)
 
 
 def _emit_table(name: str, mapping: dict[str, Any], out: list[str]) -> None:
@@ -1403,9 +1449,14 @@ def sandbox_toml(
             snapshot = (snapshots or {}).get(name)
             if snapshot is not None and snapshot.error is None and not table.get("setup"):
                 # No setup to freeze, but the command must still resolve in
-                # a container whose PATH never saw the host's.
+                # a container whose PATH never saw the host's: replace the
+                # payload token only, keeping launchers and arguments.
                 if table.get("command") and not str(table["command"]).startswith("/"):
-                    table["command"] = snapshot.payload
+                    token = payload_name(name, str(table["command"]))
+                    table["command"] = shlex.join(
+                        snapshot.payload if t == token else t
+                        for t in shlex.split(str(table["command"]))
+                    )
                 continue
             if not table.get("setup"):
                 continue
@@ -1694,6 +1745,15 @@ def render_sandbox_script(
             "sandbox job should run in (build one with e.g. "
             "'apptainer build slab-sandbox.sif docker://rockylinux:9')"
         )
+    if agent.provider != "openai":
+        # The bridge forwards OpenAI-shaped requests with a bearer key; the
+        # Anthropic headers would be dropped at the forwarder, so the job
+        # could only fail hours in.
+        raise SandboxError(
+            f"the sandbox bridge speaks the OpenAI-compatible protocol only; "
+            f"[agent] provider = {agent.provider!r} cannot be sandboxed. Point the "
+            f"session at an OpenAI-compatible gateway or a served model instead."
+        )
     binds, warnings = default_binds(project, workspace_root, slab_cfg, snapshots)
     binds.extend(agent.sandbox.binds)
     # The machine's memory, read-write. --no-home hides ~/.config, so without
@@ -1706,7 +1766,7 @@ def render_sandbox_script(
         memories.mkdir(parents=True, exist_ok=True)
         binds.append(f"{memories}:{memories}:rw")
     binds = _collapse_binds(binds)
-    slab = _slab_bin()
+    slab = shlex.quote(str(_slab_bin()))  # a venv under a path with a space is legal
 
     # GPU passthrough derives from the target partition: a gres that names
     # gpus means the job will hold one, and --nv mounts the host's driver

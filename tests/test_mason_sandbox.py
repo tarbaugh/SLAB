@@ -3,7 +3,6 @@
 import http.server
 import json
 import shutil
-import socket
 import socketserver
 import subprocess
 import threading
@@ -213,11 +212,15 @@ def test_render_prefers_the_configured_endpoint(tmp_path: Path) -> None:
     assert 'sandbox bridge "$BRIDGE" "$UPSTREAM" --key-env GATEWAY_KEY &' in script
 
 
-def test_render_guards_the_key_by_name_never_by_value(tmp_path: Path) -> None:
+def test_render_guards_the_key_by_name_never_by_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The guard fails the job at start on an --export=NONE cluster, and the
     escaped name keeps the value out of the job's output either way."""
+    monkeypatch.setenv("GATEWAY_KEY", "sk-FAKE-never-in-a-script")
     agent = _agent(endpoint="https://gw.example/v1", api_key_env="GATEWAY_KEY")
-    script, _, _ = _render(tmp_path, agent, _slab_cfg())
+    script, _, context = _render(tmp_path, agent, _slab_cfg())
+    assert "sk-FAKE-never-in-a-script" not in script and "sk-FAKE" not in context
     assert '[ -n "$GATEWAY_KEY" ]' in script
     assert 'echo "\\$GATEWAY_KEY is not set' in script  # escaped: never expands
 
@@ -293,7 +296,34 @@ class _UnixHTTPServer(socketserver.ThreadingUnixStreamServer):
         return request, ("127.0.0.1", 0)
 
 
-_PORTS = iter(range(8907, 8957))
+def _short_sock() -> str:
+    """A unix-socket path short enough for AF_UNIX (pytest's tmp_path is not),
+    cleaned up at interpreter exit."""
+    import atexit
+    import shutil
+    import tempfile
+
+    directory = tempfile.mkdtemp(prefix="slab-sock-")
+    atexit.register(shutil.rmtree, directory, ignore_errors=True)
+    return str(Path(directory) / "llm.sock")
+
+
+def _start_forward(sock: str) -> int:
+    """Start forward() on an ephemeral port and return that port once it is
+    bound, so tests neither collide on fixed ports across processes nor
+    race the listener's bind."""
+    bound: list[int] = []
+    ready = threading.Event()
+
+    def note(port: int) -> None:
+        bound.append(port)
+        ready.set()
+
+    threading.Thread(
+        target=forward, args=(sock, 0), kwargs={"on_bound": note}, daemon=True
+    ).start()
+    assert ready.wait(5), "forward never bound its port"
+    return bound[0]
 
 
 @pytest.fixture()
@@ -302,17 +332,13 @@ def bridged_stub() -> int:
 
     Not under pytest's tmp_path: AF_UNIX paths cap at ~104 characters, and
     tmp_path routinely exceeds that. mkdtemp() under $TMPDIR stays short.
-    Each test gets its own port, because forward() runs until its daemon
-    thread dies with the process — a stale forwarder still owns its port.
+    Each test gets its own ephemeral port, because forward() runs until its
+    daemon thread dies with the process.
     """
-    import tempfile
-
-    sock = str(Path(tempfile.mkdtemp()) / "llm.sock")
+    sock = _short_sock()
     server = _UnixHTTPServer(sock, _Stub)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    port = next(_PORTS)
-    threading.Thread(target=forward, args=(sock, port), daemon=True).start()
-    yield port
+    yield _start_forward(sock)
     server.shutdown()
 
 
@@ -546,7 +572,6 @@ def test_bridge_and_forward_chain_end_to_end() -> None:
     The full relay chain the rendered job assembles, both halves the real
     functions, no socat anywhere.
     """
-    import tempfile
     import urllib.request
     from http.server import HTTPServer
 
@@ -554,7 +579,7 @@ def test_bridge_and_forward_chain_end_to_end() -> None:
 
     stub = HTTPServer(("127.0.0.1", 0), _Stub)
     threading.Thread(target=stub.serve_forever, daemon=True).start()
-    sock = str(Path(tempfile.mkdtemp()) / "llm.sock")
+    sock = _short_sock()
     threading.Thread(
         target=bridge, args=(sock, f"127.0.0.1:{stub.server_address[1]}"), daemon=True
     ).start()
@@ -562,8 +587,7 @@ def test_bridge_and_forward_chain_end_to_end() -> None:
         if Path(sock).exists():
             break
         threading.Event().wait(0.1)
-    port = next(_PORTS)
-    threading.Thread(target=forward, args=(sock, port), daemon=True).start()
+    port = _start_forward(sock)
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=5) as response:
         payload = json.loads(response.read())
     assert payload["data"][0]["id"] == "test-model"
@@ -645,9 +669,8 @@ def _bridged_gateway(
 ) -> int:
     """The rendered job's chain, with a gateway upstream: returns the port
     the container-side client would call."""
-    import tempfile
 
-    sock = str(Path(tempfile.mkdtemp()) / "llm.sock")
+    sock = _short_sock()
     threading.Thread(
         target=forward_http,
         args=(sock, base),
@@ -658,17 +681,7 @@ def _bridged_gateway(
         if Path(sock).exists():
             break
         time.sleep(0.1)
-    port = next(_PORTS)
-    threading.Thread(target=forward, args=(sock, port), daemon=True).start()
-    # Wait until the TCP side actually accepts: returning on thread start
-    # races the listener's bind under a loaded test machine.
-    for _ in range(100):
-        try:
-            socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
-            break
-        except OSError:
-            time.sleep(0.05)
-    return port
+    return _start_forward(sock)
 
 
 def _get(port: int, path: str = "/v1/models") -> tuple[int, bytes, dict[str, str]]:
@@ -1190,7 +1203,6 @@ def test_the_bridge_survives_a_server_that_thinks_before_answering(
     client sees RemoteDisconnected while the server is healthy. Regression
     for exactly that, with the timeout shrunk so the test proves the
     property in seconds."""
-    import tempfile
     import time
     import urllib.request
     from http.server import HTTPServer
@@ -1207,7 +1219,7 @@ def test_the_bridge_survives_a_server_that_thinks_before_answering(
 
     stub = HTTPServer(("127.0.0.1", 0), _Slow)
     threading.Thread(target=stub.serve_forever, daemon=True).start()
-    sock = str(Path(tempfile.mkdtemp()) / "llm.sock")
+    sock = _short_sock()
     threading.Thread(
         target=bridge, args=(sock, f"127.0.0.1:{stub.server_address[1]}"), daemon=True
     ).start()
@@ -1215,8 +1227,7 @@ def test_the_bridge_survives_a_server_that_thinks_before_answering(
         if Path(sock).exists():
             break
         time.sleep(0.1)
-    port = next(_PORTS)
-    threading.Thread(target=forward, args=(sock, port), daemon=True).start()
+    port = _start_forward(sock)
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=10) as response:
         payload = json.loads(response.read())
     assert payload["data"][0]["id"] == "test-model"
@@ -1567,3 +1578,30 @@ def test_the_context_says_when_a_tool_is_not_available(tmp_path: Path) -> None:
     )
     assert "- gracemaker: NOT available in here" in context
     assert "module: command not found" in context and "Do not try to make it work" in context
+
+
+def test_verify_treats_an_http_error_as_a_reachable_route(bridged_stub: int) -> None:
+    """A captive proxy answering 403 proves a route exists; HTTPError is a
+    URLError subclass and used to be swallowed as darkness."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class _Forbidden(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(403)
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), _Forbidden)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with pytest.raises(SandboxError, match=r"HTTP 403"):
+            verify(
+                bridged_stub,
+                probe_url=f"http://127.0.0.1:{server.server_address[1]}/",
+                ready_timeout_s=5,
+            )
+    finally:
+        server.shutdown()
+        server.server_close()

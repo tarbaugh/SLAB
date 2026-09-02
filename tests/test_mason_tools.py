@@ -1,5 +1,6 @@
 """Tool contract tests: file primitives, gating, truncation, SLAB integration."""
 
+import contextlib
 from pathlib import Path
 
 import pytest
@@ -767,10 +768,20 @@ def test_wait_for_run_timeout_reports_still_running(
         if "slowpoke" in listed:
             break
         _time.sleep(0.5)
-    waited = box.dispatch(_call("wait_for_run", timeout_s=1))
-    assert "still running after 1s" in waited
-    assert "slowpoke" in waited
-    assert "call wait_for_run again" in waited
+    try:
+        waited = box.dispatch(_call("wait_for_run", timeout_s=1))
+        assert "still running after 1s" in waited
+        assert "slowpoke" in waited
+        assert "call wait_for_run again" in waited
+    finally:
+        # The detached run must not outlive the test on a shared machine.
+        import os as _os
+        import re as _re
+        import signal as _signal
+
+        pid = int(_re.search(r"pid (\d+)", answer).group(1))
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            _os.killpg(pid, _signal.SIGKILL)
 
 
 # -- the mp snapshot tools ---------------------------------------------------
@@ -845,3 +856,40 @@ def test_mp_tool_errors_are_observations(
     assert "no online fallback" in answer
     answer = box.dispatch(_call("query_materials", sql="DROP TABLE materials"))
     assert "only read-only queries" in answer
+
+
+# -- the fences hold under a relative or symlinked workspace -----------------
+
+
+def test_the_sessions_fence_holds_for_a_relative_workspace_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default workspace is the relative '.slab'; resolving the request
+    path but not the sessions directory left the fence permanently open."""
+    monkeypatch.chdir(tmp_path)
+    config = MasonConfig.model_validate({})
+    session = MasonSession(
+        Path("."), workspace_root=Path(".slab"), agent=config.agent, auto_approve=True
+    )
+    sessions = Path(".slab") / "mason" / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "old.jsonl").write_text('{"role": "user", "content": "OLD TRANSCRIPT"}\n')
+    (tmp_path / "link.txt").symlink_to(sessions / "old.jsonl")
+    box = build_toolbox(session)
+    assert "refused" in box.dispatch(_call("read_file", path=".slab/mason/sessions/old.jsonl"))
+    assert "refused" in box.dispatch(_call("list_dir", path=".slab/mason/sessions"))
+    found = box.dispatch(_call("search", pattern="OLD TRANSCRIPT", path="."))
+    assert found.startswith("no matches")  # neither directly nor through the symlink
+
+
+def test_shell_and_launches_never_see_the_model_key(
+    box: Toolbox, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`env` is a common diagnostic move; the key must not be in the answer."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-FAKE-anthropic")
+    monkeypatch.setenv("SLAB_TEST_MODEL_KEY", "sk-FAKE-named")
+    session = _session(tmp_path, api_key_env="SLAB_TEST_MODEL_KEY")
+    named = build_toolbox(session)
+    answer = named.dispatch(_call("shell", command="env"))
+    assert "sk-FAKE-anthropic" not in answer and "sk-FAKE-named" not in answer
+    assert "PATH=" in answer  # the rest of the environment still arrives

@@ -209,6 +209,10 @@ class MasonSession:
         )
         self.approver: Approver = approver if approver is not None else _approve_nothing
         self.auto_approve = auto_approve
+        # API keys this session (and its delegates) read from the
+        # environment, withdrawn from os.environ once read so nothing the
+        # model drives can print them back. Shared with a parent session.
+        self.api_keys: dict[str, str] = {}
         self.observer: Observer | None = observer
         # Which agent card this session runs as; the loop sets it from the
         # spec it resolves. Delegated child sessions carry the specialist's
@@ -350,6 +354,7 @@ class MasonSession:
         )
         child.agent_name = agent_name
         child._parent = self
+        child.api_keys = self.api_keys  # one key store per conversation
         # A flag outranks config for everyone: the child's loop re-asserts
         # these over its own [agent.roster] table exactly as the parent did.
         child.flag_updates = dict(self.flag_updates)
@@ -548,8 +553,10 @@ class MasonSession:
                     if not line.strip():
                         continue
                     event = json.loads(line)
+                    if not isinstance(event, dict):
+                        raise ValueError("not a JSON object")
                     if event.get("type") == "message":
                         messages.append(event["message"])
-        except (OSError, json.JSONDecodeError, KeyError) as e:
+        except (OSError, json.JSONDecodeError, KeyError, ValueError) as e:
             raise SessionError(f"cannot resume from {transcript} (line {number}): {e}") from e
         return messages

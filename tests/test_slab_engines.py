@@ -1,13 +1,14 @@
 """Tests for the cluster engine registry and its integration with backends."""
 
 import json
+import os
 import sys
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
-from slab import EngineNotAvailableError
+from slab import EngineNotAvailableError, engines
 from slab.backends import available_engines, close_calculator, describe_engine, get_calculator
 from slab.engines import (
     EngineRegistry,
@@ -23,10 +24,22 @@ EMT_SPEC = {"calculator": "ase.calculators.emt.EMT", "version": "ase-built-in"}
 
 @pytest.fixture(autouse=True)
 def _isolated_discovery(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Keep tests blind to any real $SLAB_ENGINES, $ROOTSTOCK_ROOT, or user config."""
+    """Keep tests blind to any real $SLAB_ENGINES, $ROOTSTOCK_ROOT, or user config,
+    and keep what they write to the environment from outliving them."""
     monkeypatch.delenv("SLAB_ENGINES", raising=False)
     monkeypatch.delenv("ROOTSTOCK_ROOT", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    # build_engine writes registry env process-wide, and monkeypatch only
+    # restores what it set itself: snapshot and restore the whole map, and
+    # the module's own record of what it applied.
+    monkeypatch.setattr(engines, "_APPLIED_ENV", {})
+    before = dict(os.environ)
+    yield
+    for key in set(os.environ) - set(before):
+        del os.environ[key]
+    for key, value in before.items():
+        if os.environ.get(key) != value:
+            os.environ[key] = value
 
 
 def _write_registry(path: Path, payload: dict) -> Path:
@@ -146,11 +159,19 @@ def test_explicit_path_beats_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert find_registry_path() == other
 
 
-def test_user_config_fallback(tmp_path: Path) -> None:
+def test_user_config_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The user registry lives under $XDG_CONFIG_HOME when set (as the user
+    config does), else ~/.config; the suite isolates through the former."""
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    (xdg / "slab").mkdir(parents=True)
+    _write_registry(xdg / "slab" / "engines.json", {"cluster": "laptop", "engines": {}})
+    assert load_registry().cluster == "laptop"
+    monkeypatch.delenv("XDG_CONFIG_HOME")
     config = tmp_path / "home" / ".config" / "slab"
     config.mkdir(parents=True)
-    _write_registry(config / "engines.json", {"cluster": "laptop", "engines": {}})
-    assert load_registry().cluster == "laptop"
+    _write_registry(config / "engines.json", {"cluster": "home", "engines": {}})
+    assert load_registry().cluster == "home"
 
 
 def test_missing_explicit_or_env_path_is_loud(

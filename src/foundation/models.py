@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from foundation._ids import new_run_id
 from foundation.lifecycle import ExecutionStatus, LifecycleState
@@ -112,6 +112,17 @@ class Run(BaseModel):
     finished_at: datetime | None = None
     error: str | None = None
     failure: dict[str, Any] | None = None
+
+    @field_validator("created_at", "updated_at", "state_entered_at", "started_at", "finished_at")
+    @classmethod
+    def _aware_utc(cls, value: datetime | None) -> datetime | None:
+        """Timestamps are aware UTC: a naive one would persist, sort as a
+        string beside aware ones, and crash the retention sweep's comparison."""
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("run timestamps must be timezone-aware (use foundation.models.utcnow)")
+        return value.astimezone(UTC)
 
     @model_validator(mode="before")
     @classmethod

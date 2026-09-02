@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import platform
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -364,6 +365,7 @@ def system_messages(
     *,
     skills: dict[str, Skill] | None = None,
     team: str | None = None,
+    absent_tools: Sequence[str] = (),
 ) -> list[dict[str, Any]]:
     """The system prompt: role, core, budget, software notes, protocol, environment.
 
@@ -371,7 +373,10 @@ def system_messages(
     the bare harness voice. Layers are ordered by change frequency so a
     prefix-caching server reuses the KV cache: the role and core never
     change; the environment (with the *skills* catalog and the *team*
-    block) is stable within one session.
+    block) is stable within one session. *absent_tools* names the tools
+    the shared text mentions that this session does not offer (a
+    specialist without ``plan``, a laptop without ``submit_job``), so the
+    model is told rather than left to discover it through a failed call.
     """
     prompt = (spec.prompt.rstrip() + "\n\n" + CORE_PROMPT) if spec is not None else CORE_PROMPT
     budget = compute_profile_block(session.compute_profile)
@@ -384,4 +389,10 @@ def system_messages(
     if catalog is not None:
         prompt += FENCED_PROTOCOL.replace("{catalog}", catalog)
     environment = environment_block(session, skills, team)
+    if absent_tools:
+        environment += (
+            "\n\nNot available in this session, whatever the text above says: "
+            + ", ".join(absent_tools)
+            + ". Do not call them; use the tools the request offers."
+        )
     return [{"role": "system", "content": prompt + "\n" + environment}]

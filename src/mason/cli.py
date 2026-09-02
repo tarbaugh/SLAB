@@ -282,8 +282,10 @@ def mason_chat(
             )
             continue
         if text == "/compact":
-            mason._compact()
-            typer.echo("history compacted; summary appended to the notebook")
+            if mason._compact():
+                typer.echo(f"history compacted; summary in {session.compactions_path}")
+            else:
+                typer.echo("nothing to compact yet")
             continue
         try:
             result = mason.run_turn(text)
@@ -330,7 +332,10 @@ def mason_run(
         )
         spec, roster = _resolve_spec(agent)
         mason = Mason(session, spec=spec, roster=roster)
-        result = mason.run_turn(goal)
+        try:
+            result = mason.run_turn(goal)
+        finally:
+            session.release_session_lock()
     except (MasonError, FoundationError, SlabError) as e:
         _fail(str(e))
     typer.echo(result.text)
@@ -412,9 +417,9 @@ serve_app = typer.Typer(
 app.add_typer(serve_app, name="serve")
 
 _PartitionOpt = Annotated[
-    str | None, typer.Option("--partition", "-p", help="Partition (default: [agent.serve]'s).")
+    str | None, typer.Option("--partition", "-p", help="Partition (default: \\[agent.serve]'s).")
 ]
-_PortOpt = Annotated[int | None, typer.Option("--port", help="Override [agent.serve] port.")]
+_PortOpt = Annotated[int | None, typer.Option("--port", help="Override \\[agent.serve] port.")]
 _TimeOpt = Annotated[str | None, typer.Option("--time", help="Override the job's time limit.")]
 
 
@@ -1050,7 +1055,10 @@ def mason_sandbox_forward(
     """In-job plumbing: relay 127.0.0.1:PORT to the bridge socket (runs until killed)."""
     from mason.sandbox import forward
 
-    forward(socket_path, port)
+    try:
+        forward(socket_path, port)
+    except OSError as e:  # the port is taken, or the socket's directory is missing
+        _fail(f"cannot forward 127.0.0.1:{port} to {socket_path}: {e}")
 
 
 @sandbox_app.command("bridge")
@@ -1088,7 +1096,7 @@ def mason_sandbox_bridge(
             key_env=key_env,
             headers=parse_bridge_headers(header or []),
         )
-    except (MasonError, FoundationError, SlabError) as e:
+    except (MasonError, FoundationError, SlabError, OSError) as e:
         _fail(str(e))
 
 

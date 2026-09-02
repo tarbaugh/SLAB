@@ -364,7 +364,11 @@ class Workspace:
     def __init__(self, root: str | os.PathLike[str] = ".slab") -> None:
         self.root = Path(root).expanduser()
         self.runs = SQLiteRunStore(self.root / "runs.db")
-        self.artifacts = ArtifactStore(self.root / "cas")
+        try:
+            self.artifacts = ArtifactStore(self.root / "cas")
+        except BaseException:
+            self.runs.close()  # the store opened; a failed second half must not leak it
+            raise
 
     def __repr__(self) -> str:
         return f"Workspace({str(self.root)!r})"
@@ -424,12 +428,19 @@ class Workspace:
             yield active
         except BaseException as exc:
             record = failure_record(exc)
-            self.runs.set_status(
-                created.id,
-                ExecutionStatus.FAILED,
-                error=f"{record['type']}: {record['message']}",
-                failure=record,
-            )
+            try:
+                self.runs.set_status(
+                    created.id,
+                    ExecutionStatus.FAILED,
+                    error=f"{record['type']}: {record['message']}",
+                    failure=record,
+                )
+            except Exception as secondary:
+                # The run was already marked failed by someone else (an
+                # expire sweep, the script itself), or the store refused.
+                # The body's exception is the real cause and must be what
+                # the caller sees; the bookkeeping failure rides as a note.
+                exc.add_note(f"(recording the failure also failed: {secondary})")
             raise
         else:
             self.runs.set_status(created.id, ExecutionStatus.COMPLETED)

@@ -606,6 +606,8 @@ def test_gc_rejects_bad_policy_file(root: Path, tmp_path: Path) -> None:
     bad.write_text("{not json")
     result = runner.invoke(app, ["gc", "-w", str(root), "--policy", str(bad)])
     assert result.exit_code == 1
+    # The JSON error, not a workspace one.
+    assert "Expecting" in result.output or "policy" in result.output
 
 
 def test_gc_reports_orphans(root: Path) -> None:

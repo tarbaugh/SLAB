@@ -162,7 +162,7 @@ def test_list_runs_filters_by_session(root: Path) -> None:
     _seed(root, verified=False, session="chat-2")
     server = build_server(root)
     assert [r["id"] for r in _call(server, "list_runs", {"session": "chat-1"})] == [mine]
-    assert _call(server, "list_runs", {})[0]["session"] in ("chat-1", "chat-2")
+    assert {r["session"] for r in _call(server, "list_runs", {})} == {"chat-1", "chat-2"}
 
 
 def test_list_sessions_reports_counts_and_unstamped(root: Path) -> None:

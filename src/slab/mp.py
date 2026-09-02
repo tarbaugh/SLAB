@@ -76,7 +76,9 @@ def mp_root(root: str | os.PathLike[str] | None = None) -> Path:
                 "(the one holding metadata.sqlite, manifest.json, and cifs/)"
             )
         root = str(configured)
-    resolved = Path(root).expanduser()
+    # Absolute, because the read-only connection names the database by
+    # file URI, and a relative path cannot be expressed as one.
+    resolved = Path(root).expanduser().resolve()
     if not (resolved / "metadata.sqlite").is_file():
         raise BuilderError(
             f"{resolved} is not a Materials Project snapshot root: "

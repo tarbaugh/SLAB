@@ -304,14 +304,16 @@ more than model choice.
 | `launch_workflow` | run a workflow script as a traced, check-gated run; this is how physics happens. `args` reach the script as argv; `background=true` detaches a long run so no tool timeout can touch it |
 | `wait_for_run` | block until a run (or every running run of this session) finishes, then report its state; one call replaces a chain of sleep-and-poll shell commands |
 | `list_runs`, `show_run`, `list_engines` | the workspace's evidence surface: runs, checks with observed/expected values, failure records, capabilities; `list_runs` takes `session="this"` |
+| `list_tasks`, `describe_task` | the task vocabulary: every traced task with its signature, and one task's full docstring, so the agent never reads the package source to learn a call |
 | `search_materials`, `get_material`, `query_materials` | the offline Materials Project snapshot, present only when `[builders.mp]` names one: filtered search, one record with its CIF path, and one read-only row-capped SELECT; the structure itself arrives traced via `fetch_structure` in a workflow |
 | `submit_job`, `job_status`, `cancel_job` | SLURM plumbing, present only when the config declares partitions |
 | `notebook`, `plan` | the memory instruments (below) |
+| `recall`, `remember` | the machine's memory across sessions, described in [Memory](memory.md) |
 | `skill` | load a skill: its instructions, root path, and bundled files; the catalog is per-agent |
 | `delegate` | hand one scoped task to a specialist's own loop; the PI only, one level deep, sequential |
 | `finish` | end the task with a report citing run ids; honored only as the sole call of its reply, and only with a report |
 
-The last three belong to the roster: Mason is a research group of agent
+`skill` and `delegate` belong to the roster: Mason is a research group of agent
 cards with per-specialist skills, described in
 [The roster and skills](roster-and-skills.md).
 
@@ -327,9 +329,9 @@ auto-approve at word boundaries, but a command that contains shell control
 operators (`;`, `|`, `&`, redirection, and so on) never auto-approves.
 
 Plan the gate before an interactive session. `write_file`, `edit_file`,
-`shell`, `launch_workflow`, `submit_job`, and `cancel_job` ask, and everything
-else (reads, `list_engines`, `job_status`, the memory instruments) never
-does. A multi-step goal therefore prompts several times, every shell probe
+`shell`, `launch_workflow`, `submit_job`, `cancel_job`, and `remember` ask,
+and everything else (reads, `list_engines`, `job_status`, the notebook and
+the plan) never does. A multi-step goal therefore prompts several times, every shell probe
 included, because the default allowlist is empty. At the prompt, **Enter
 refuses**, because the default is "no", and five straight refusals abort
 the turn. Either answer `y` deliberately, run with `--auto`, or set
@@ -514,7 +516,7 @@ sbatch sandbox/mason-sandbox.sbatch
 After you have read a render of this campaign once, `launch` is the one
 motion: it runs the preflight, renders fresh, and submits. Because every
 launch re-renders, the submitted job always matches the installed code
-and the current config — a stale `mason-sandbox.sbatch` cannot happen on
+and the current config, so a stale `mason-sandbox.sbatch` cannot happen on
 this path. The render also writes `render.json`, the arguments it was
 given, so a bare `launch` repeats the last campaign and a flag overrides
 one recorded value:
@@ -538,10 +540,10 @@ learns itself. See [Machine memory](memory.md).
 
 Engine `setup` lines get snapshotted. A `module load` works on the host
 and means nothing inside the container, so the render runs each engine's
-setup once, on the host, and records what it did: the resolved binaries —
-the payload and the launcher its command references, since `mpirun` must
-be bound as surely as `pw.x` — the environment it changed, and each
-binary's library closure from `ldd`. The
+setup once, on the host, and records what it did: the resolved binaries,
+the environment it changed, and each binary's library closure from `ldd`.
+The binaries are the payload and the launcher its command references,
+because `mpirun` must be bound as surely as `pw.x`. The
 snapshot becomes bind mounts in the script and explicit `export` lines in
 the rendered `slab.toml`. Site-prefix libraries bind by directory, and
 host system libraries the base image does not ship (an ordinary RPM such
@@ -554,14 +556,14 @@ changes, and check the `[=]` line the render prints for each snapshot.
 A setup that fails to snapshot keeps a warning naming the cause.
 
 Two consequences to plan for. The rendered `slab.toml` has no `[hpc]`
-table, because the namespace has no route to the scheduler — so the
+table, because the namespace has no route to the scheduler, so the
 scheduler tools do not exist, and calculations run inside the job's own
 allocation. Size the job for its engine legs, and name QE by its install
 (`[engines.qe] bin`), which sizes `mpirun` to the allocation and binds the
 install automatically; the render warns when a hand-written command uses
 `srun`. And because no `[hpc]` would otherwise derive a `laptop` compute
-profile, the rendered config pins `compute_profile = "workstation"` — the
-honest size for one owned node — unless your own config sets a profile.
+profile, the rendered config pins `compute_profile = "workstation"`, the
+honest size for one owned node, unless your own config sets a profile.
 
 ## Reading a campaign afterwards
 
@@ -838,13 +840,13 @@ because an agent loop consumes whole turns. Its judgment is the served
 model's, so SLAB guarantees that what Mason reports is traceable and
 verified, not that its research taste is good. And the approval gate is a
 workflow control for your own account on your own machine, not a security
-sandbox, so `--auto` means what it says — for every agent on the roster.
+sandbox, so `--auto` means what it says, for every agent on the roster.
 The file fence and the session lock share that caveat: they shrink the
 blast radius of a confused agent, and the `shell` tool remains the honest
 escape, behind its own gate. When you want a real boundary, use the
 sandbox: `slab mason sandbox render` writes a batch job that runs the session
 in a container with no network, no home, and only the configured
-directories bound — see
+directories bound. See
 [The sandbox](#the-sandbox-autonomous-runs-without-a-network).
 
 What has and has not been exercised against reality, precisely:

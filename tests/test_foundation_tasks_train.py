@@ -288,6 +288,7 @@ def test_train_success_keeps_evidence_and_exports_the_model(
     assert info["test_metrics"]["rmse/depa"] == pytest.approx(0.0210)
     assert info["test_metrics"]["epoch"] == 2
     assert info["train_metrics"]["rmse/f_comp"] == pytest.approx(0.0450)
+    assert set(model["artifacts"]) >= {"potential.log", "potential-saved-model.tar.gz"}
     for kept_name, kept_hash in model["artifacts"].items():
         assert ws.runs.get_artifact(run.id, kept_name).hash == kept_hash
 
@@ -402,16 +403,19 @@ def test_train_caches_on_dataset_bytes_and_trainer_version(
     assert ws.runs.list_tasks(hit.id)[0].cache_hit is True
 
     Path(dataset).write_text(Path(dataset).read_text() + "\n")  # same path, new bytes
+    shutil.rmtree(tmp_path / "c", ignore_errors=True)  # label fixed: only the bytes may miss
     with ws.start_run(name="c3") as miss:
-        train_potential(INPUT_YAML, dataset=dataset, command=fake_gracemaker, label="c2")
+        train_potential(INPUT_YAML, dataset=dataset, command=fake_gracemaker, label="c")
     assert ws.runs.list_tasks(miss.id)[0].cache_hit is False
 
     # A trainer upgrade behind the same command re-probes and misses too.
     grace = Path(fake_gracemaker)
     (grace.parent / "python").write_text('#!/bin/sh\necho "0.6.0"\n')
-    grace.touch()  # new mtime -> new probe identity
+    later = grace.stat().st_mtime_ns + 2_000_000_000  # a new mtime whatever the fs resolution
+    os.utime(grace, ns=(later, later))
+    shutil.rmtree(tmp_path / "c", ignore_errors=True)
     with ws.start_run(name="c4") as upgraded:
-        train_potential(INPUT_YAML, dataset=dataset, command=fake_gracemaker, label="c3")
+        train_potential(INPUT_YAML, dataset=dataset, command=fake_gracemaker, label="c")
     assert ws.runs.list_tasks(upgraded.id)[0].cache_hit is False
 
 

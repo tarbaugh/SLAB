@@ -256,7 +256,14 @@ def stop(workspace_root: str | os.PathLike[str], *, cluster: str = "") -> str:
     """
     from slab.hpc import cancel
 
-    record = read_record(workspace_root)
+    try:
+        record = read_record(workspace_root)
+    except ServeError as e:
+        # The record's own error says to remove it with this verb, so this
+        # verb must be able to: a file a crash left half-written would
+        # otherwise block start, status, and stop alike.
+        clear_record(workspace_root)
+        return f"unreadable record removed ({e}); no job was cancelled"
     if record is None:
         return f"no server recorded at {record_path(workspace_root)}; nothing to stop"
     if not record.job_id:

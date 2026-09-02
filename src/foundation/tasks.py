@@ -300,7 +300,7 @@ def relax_cell(
             # ASE's CellAwareBFGS accepts a filter-wrapped Atoms and a None
             # logfile in practice, but its type stub narrows both. Ignoring
             # here keeps the idiomatic call; everything else stays typed.
-            optimizer = CellAwareBFGS(filt, trajectory=str(trajectory), logfile=None)  # type: ignore[arg-type]
+            optimizer = _MaskedCellBFGS(filt, trajectory=str(trajectory), logfile=None)  # type: ignore[arg-type]
             try:
                 converged = bool(optimizer.run(fmax=fmax, smax=smax, steps=steps))
                 energy = float(system.get_potential_energy())
@@ -312,11 +312,11 @@ def relax_cell(
                 )
                 raise
             achieved_fmax = float(np.sqrt((forces**2).sum(axis=1).max()))
-            # Only the masked stress components are relaxed toward zero; the
-            # frozen ones (off-diagonal in "orthorhombic", every non-volumetric
-            # component in "isotropic") stay at whatever the equilibrium leaves.
-            masked_stress = np.array(stress)[np.array(mask, dtype=bool)]
-            achieved_smax = float(np.abs(masked_stress).max()) if masked_stress.size else 0.0
+            # The residual the optimizer judged: the filter's projected
+            # stress (masked, and under "isotropic" the hydrostatic part
+            # only). The frozen components stay at whatever the equilibrium
+            # leaves, and reporting them here would contradict `converged`.
+            achieved_smax = _projected_smax(filt, stress, mask)
 
             active = current_run()
             if active is not None:
@@ -713,6 +713,11 @@ def collect_training_data(
         output: Path of the extended-XYZ file to write.
         label: Names the kept dataset artifact (default: the output name).
     """
+    if not list(run_ids):
+        raise FoundationError(
+            "collect_training_data needs at least one run id; name the completed "
+            "runs whose energies and forces should become labels"
+        )
     sources = _training_sources(
         run_ids, engine=engine, frames=frames, allow_mixed=allow_mixed
     )
@@ -1435,6 +1440,38 @@ def _last_trajectory_frame(trajectory: Path) -> dict[str, Any] | None:
         return None
 
 
+class _MaskedCellBFGS(CellAwareBFGS):
+    """CellAwareBFGS whose convergence test reads the filter's projected stress.
+
+    ASE's own test multiplies the raw stress by the mask component-wise and
+    ignores ``hydrostatic_strain``. Under the isotropic mask the optimizer
+    moves only the volume, yet that test demands every normal component
+    vanish on its own, which a hexagonal or tetragonal cell at its
+    isotropic equilibrium never satisfies: the run burns every step and
+    reports ``converged=False`` for a cell that is as relaxed as the mask
+    allows. The filter already computes the stress the optimizer acts on
+    (:attr:`FrechetCellFilter.stress`, projected and masked), so judge that.
+    """
+
+    def gradient_converged(self, gradient: Any) -> bool:
+        filt: Any = self.atoms  # the filter (ASE types it as the bare Atoms)
+        forces = filt.atoms.get_forces()
+        stress = getattr(filt, "stress", None)
+        if stress is None:  # before the first force call; ASE's own rule
+            stress = filt.atoms.get_stress(voigt=False) * filt.mask
+        forces_ok = bool(np.max(np.sum(forces**2, axis=1)) ** 0.5 < self.fmax)
+        return forces_ok and bool(np.max(np.abs(stress)) < self.smax)
+
+
+def _projected_smax(filt: Any, stress: Any, mask: list[bool]) -> float:
+    """The largest stress residual the optimizer was asked to remove."""
+    projected = getattr(filt, "stress", None)
+    if projected is not None:
+        return float(np.abs(np.asarray(projected)).max())
+    masked = np.array(stress)[np.array(mask, dtype=bool)]
+    return float(np.abs(masked).max()) if masked.size else 0.0
+
+
 def _keep_unique(active: Any, name: str, path: Path) -> str:
     """Store *path* as an intermediate artifact, suffixing the name on collision.
 
@@ -1442,7 +1479,12 @@ def _keep_unique(active: Any, name: str, path: Path) -> str:
     """
     stem, dot, suffix = name.rpartition(".")
     for attempt in range(1, 100):
-        candidate = name if attempt == 1 else f"{stem}-{attempt}{dot}{suffix}"
+        if attempt == 1:
+            candidate = name
+        elif dot:
+            candidate = f"{stem}-{attempt}{dot}{suffix}"
+        else:  # no extension (TensorFlow's bare 'checkpoint', a plain label)
+            candidate = f"{name}-{attempt}"
         try:
             active.keep(candidate, path, role=ArtifactRole.INTERMEDIATE)
             return candidate

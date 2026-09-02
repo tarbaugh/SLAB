@@ -8,8 +8,8 @@ Workflows are plain Python, and SLAB traces the task graph as the script
 runs, verifies the results with checks, and expires what nobody promoted.
 
 **Documentation: [tarbaugh.github.io/SLAB](https://tarbaugh.github.io/SLAB/)**
-has the overview, the tutorials (every code block executed against the real
-API), and the architecture document.
+has the overview, the tutorials, and the architecture document. Every code
+block in the tutorials that this machine can run is an exact capture.
 
 ## Install
 

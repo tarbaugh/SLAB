@@ -255,7 +255,7 @@ class ProbeResult(BaseModel):
 
 
 def find_registry_path(explicit: str | os.PathLike[str] | None = None) -> Path | None:
-    """Locate the registry file: explicit path > $SLAB_ENGINES > ~/.config/slab/engines.json.
+    """Locate the registry file: explicit path > $SLAB_ENGINES > [paths] engines > ~/.config.
 
     Returns None when no candidate exists — running without a registry is the
     normal laptop case (built-in engines only). An explicit path or an
@@ -289,7 +289,13 @@ def find_registry_path(explicit: str | os.PathLike[str] | None = None) -> Path |
                 f"[paths] engines in the slab config points to {path}, which does not exist"
             )
         return path
-    user_path = _USER_REGISTRY.expanduser()
+    # $XDG_CONFIG_HOME wins over ~/.config, as it does for the user config
+    # (slab.config.user_config_path); the two must agree on where "user"
+    # lives, and tests isolate through that variable.
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    user_path = (
+        Path(xdg).expanduser() / "slab" / "engines.json" if xdg else _USER_REGISTRY.expanduser()
+    )
     return user_path if user_path.exists() else None
 
 

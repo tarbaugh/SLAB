@@ -21,10 +21,10 @@ slab mason roster
 ```
 
 ```text
-pi                 built-in  llama3.1:8b                  13 skill(s)  [delegates]
+pi                 built-in  llama3.1:8b                  18 skill(s)  [delegates]
 analysis-expert    built-in  llama3.1:8b                  9 skill(s)
-dft-expert         built-in  llama3.1:8b                  5 skill(s)
-md-expert          built-in  llama3.1:8b                  8 skill(s)
+dft-expert         built-in  llama3.1:8b                  10 skill(s)
+md-expert          built-in  llama3.1:8b                  13 skill(s)
 ```
 
 Each agent runs the same harness with a different role prompt, its own

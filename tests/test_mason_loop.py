@@ -236,12 +236,14 @@ def test_compaction_folds_history_and_writes_the_per_session_file(tmp_path: Path
     # memory=False and software_notes=False keep the prompt small: this
     # test targets a specific token budget, and the doctrine blocks (which
     # grow over time) would nudge the estimate across it at a different step.
+    # A window large enough that only the server's counts (never the chars/4
+    # floor, which grows with the tool schemas) decide when compaction fires.
     session = _session(
-        tmp_path, context_window=6_000, compact_at=0.5, memory=False, software_notes=False
+        tmp_path, context_window=20_000, compact_at=0.5, memory=False, software_notes=False
     )
     replies: list[ChatReply | Exception] = [
         _tool_reply("list_dir", prompt_tokens=tokens)
-        for tokens in (200, 400, 900, 1_500, 3_500)  # the fifth crosses 3000
+        for tokens in (200, 400, 900, 1_500, 12_000)  # the fifth crosses 10000
     ]
     # The compaction summarizer's answer, then a post-compaction (smaller) step:
     replies.append(_text_reply("STATE: listed the directory five times."))
@@ -949,3 +951,26 @@ def test_an_honest_count_raises_no_warning(tmp_path: Path) -> None:
     session = _session(tmp_path)
     Mason(session, client=FakeClient([_text_reply("hi", prompt_tokens=6_000)])).run_turn("hi")
     assert '"type": "warning"' not in session.transcript_path.read_text()
+
+
+# -- an interrupt must not corrupt the history --------------------------------
+
+
+def test_an_interrupted_tool_call_still_gets_answered(tmp_path: Path) -> None:
+    """Ctrl-C during a slow tool must leave the assistant's tool_calls
+    answered, or the next request (and --resume) carries a protocol-invalid
+    history."""
+    session = _session(tmp_path)
+    mason = Mason(session, client=FakeClient([_tool_reply("list_dir", path=".")]))
+
+    def interrupted(call: Any) -> tuple[str, bool]:
+        raise KeyboardInterrupt
+
+    mason._dispatch = interrupted  # type: ignore[method-assign]
+    with pytest.raises(KeyboardInterrupt):
+        mason.run_turn("look")
+    calls = [m for m in mason.messages if m.get("role") == "assistant" and m.get("tool_calls")]
+    answers = [m for m in mason.messages if m.get("role") == "tool"]
+    assert len(calls) == 1 and len(answers) == 1
+    assert answers[0]["tool_call_id"] == calls[0]["tool_calls"][0]["id"]
+    assert "not run" in answers[0]["content"]

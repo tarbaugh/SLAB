@@ -14,11 +14,36 @@ are shell for the GPU node, so their variables must reach it literally.
 from __future__ import annotations
 
 import os
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from slab.config import load_merged, validate
+
+_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _env_name(value: str | None) -> str | None:
+    """A shell variable name, or None: the rendered job guards the key with
+    ``[ -n "$NAME" ]``, and a name bash cannot expand would pass that guard
+    empty and fail hours later at the first request.
+
+    Examples:
+        >>> _env_name("GATEWAY_API_KEY")
+        'GATEWAY_API_KEY'
+        >>> _env_name("MY-KEY")
+        Traceback (most recent call last):
+        ...
+        ValueError: api_key_env must be a shell variable name (letters, digits, _), not 'MY-KEY'
+    """
+    if value is None:
+        return None
+    if not _ENV_NAME.match(value):
+        raise ValueError(
+            f"api_key_env must be a shell variable name (letters, digits, _), not {value!r}"
+        )
+    return value
 
 _OLLAMA = "http://localhost:11434/v1"
 
@@ -134,6 +159,8 @@ class RosterOverride(BaseModel):
     shell_timeout_s: float | None = Field(default=None, gt=0)
     tool_protocol: Literal["native", "fenced"] | None = None
 
+    _key_env_name = field_validator("api_key_env")(lambda cls, v: _env_name(v))
+
 
 class AgentConfig(BaseModel):
     """The resident research agent's model connection and budgets (``[agent]``).
@@ -190,6 +217,8 @@ class AgentConfig(BaseModel):
     shell_timeout_s: float = Field(default=120.0, gt=0)
     tool_protocol: Literal["native", "fenced"] = "native"
     approval: Literal["ask", "auto"] = "ask"
+
+    _key_env_name = field_validator("api_key_env")(lambda cls, v: _env_name(v))
     shell_allowlist: tuple[str, ...] = ()
     # Whether 'slab mason chat' prints the model's reasoning and interim text
     # between tool calls. Display only: the transcript records reasoning

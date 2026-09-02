@@ -59,7 +59,9 @@ def _surfaced(fn: _F) -> _F:
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         try:
             return fn(*args, **kwargs)
-        except (FoundationError, SlabError) as e:
+        except (FoundationError, SlabError, ValueError) as e:
+            # ValueError is how a bad argument value (an unknown state name,
+            # a negative limit, an empty id) is reported from the store.
             raise ToolError(str(e)) from e
 
     return wrapper  # type: ignore[return-value]

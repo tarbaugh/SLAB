@@ -621,7 +621,7 @@ SLAB-shaped:
   `illegal lifecycle transition: quarantined -> promoted (promoting an
   unverified run requires force=True)`, with a `force_would_allow` attribute
   so an agent can distinguish "retry with force" from "impossible".
-- **The MCP server is thin by construction** — seven tools over the same
+- **The MCP server is thin by construction** — eleven tools over the same
   `_ops` functions the CLI calls, so agent and human observations cannot
   drift. Workflow script output is captured into results because stdout is
   the protocol channel.

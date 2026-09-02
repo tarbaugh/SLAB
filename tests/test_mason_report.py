@@ -293,3 +293,13 @@ def test_the_cached_share_the_peak_and_the_clearings_are_counted(tmp_path: Path)
     assert shown.exit_code == 0, shown.output
     assert "tokens 60000+350 (35000 cached)" in shown.output
     assert "context: peak prompt 31000 tokens, 1 clearing(s), 0 compaction(s)" in shown.output
+
+
+def test_a_json_line_that_is_not_an_object_is_counted_as_malformed(tmp_path: Path) -> None:
+    transcript = _write(
+        tmp_path / "20260901-130000-1.jsonl",
+        [_usage("2026-09-01T13:00:00+00:00"), "[]", "42"],
+    )
+    summary = summarize(transcript)
+    assert summary["steps"] == 1
+    assert summary["malformed_lines"] == 2

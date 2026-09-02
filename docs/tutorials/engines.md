@@ -442,7 +442,7 @@ invocation runs in a fresh scratch directory; structures and parameter
 files the invocation reads enter through the task's `inputs=` mapping, and
 each is a traced input. On failure the `X!X ERROR` lines from atomsk's log
 ride on the exception as notes, and the full log is kept as
-`{label}-failed.log` — the same evidence contract as the engine tasks. The
+`{label}-failed.log`, the same evidence contract as the engine tasks. The
 `atomsk-structures`, `atomsk-defects`, and `atomsk-interfaces` skills carry
 the recipes and a bundled structure checker.
 
@@ -549,7 +549,7 @@ gracemaker trainer: tensorpotential 0.6.0 via /tmp/you/grace/bin/gracemaker
 
 Two traced tasks close the loop. `collect_training_data` assembles a
 labeled dataset from the results that completed `relax`, `relax_cell`,
-and `single_point` tasks recorded — the exact energies and forces those
+and `single_point` tasks recorded, the exact energies and forces those
 engines computed. `train_potential` stages the dataset beside an
 input.yaml you author in gracemaker's own schema, runs one fit in
 slab-managed scratch, and keeps the log, the metrics, and the exported

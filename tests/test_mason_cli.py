@@ -26,7 +26,7 @@ class FakeClient:
 
 def _patch_client(monkeypatch: pytest.MonkeyPatch, replies: list[ChatReply]) -> None:
     fake = FakeClient(replies)
-    monkeypatch.setattr("mason.loop.client_from_config", lambda agent: fake)
+    monkeypatch.setattr("mason.loop.client_from_config", lambda agent, keys=None: fake)
 
 
 def _finish(report: str) -> ChatReply:

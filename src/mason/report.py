@@ -85,6 +85,9 @@ def _tally(transcript: Path) -> dict[str, Any]:
         except json.JSONDecodeError:
             malformed += 1
             continue
+        if not isinstance(event, dict):  # valid JSON, but not an event
+            malformed += 1
+            continue
         at = event.get("at")
         if isinstance(at, str):
             started = started or at

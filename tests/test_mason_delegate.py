@@ -327,7 +327,7 @@ def test_a_differing_profile_builds_a_fresh_client(
 ) -> None:
     built: list[str] = []
 
-    def fake_builder(agent: Any) -> FakeClient:
+    def fake_builder(agent: Any, keys: object = None) -> FakeClient:
         built.append(agent.model)
         return FakeClient([_call("finish", report="from the other model")])
 

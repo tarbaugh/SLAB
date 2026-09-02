@@ -144,8 +144,9 @@ def render_sbatch(
 ) -> str:
     """A complete sbatch script for *command* on the given partition.
 
-    Only declared fields become ``#SBATCH`` directives; the ``[hpc]``-level
-    ``account`` and ``setup`` apply unless the partition sets its own. The
+    Only declared fields become ``#SBATCH`` directives. The ``[hpc]``-level
+    ``account`` applies unless the partition sets its own; ``setup`` lines
+    concatenate, the ``[hpc]`` level first, then the partition's. The
     partition's ``launcher`` (``srun``, ``mpirun -np 4`` ...) prefixes the
     command — except a command invoking one of the drivers
     (``slab run ...``), which is always emitted unlaunched with an

@@ -327,8 +327,9 @@ class Partition(BaseModel):
 class HpcConfig(BaseModel):
     """The cluster around this SLAB install (``[hpc]``).
 
-    ``account`` and ``setup`` apply to every partition unless a partition
-    overrides them. ``default_partition`` is resolved (and a dangling name
+    ``account`` applies to every partition unless a partition overrides it;
+    ``setup`` lines apply to every partition and a partition's own lines
+    run after them. ``default_partition`` is resolved (and a dangling name
     refused) by :meth:`resolve_partition`, not at load: a site file may name
     the default while a project file supplies the partition table, and each
     file must validate on its own.
@@ -679,7 +680,7 @@ CONFIG_TEMPLATE = '''\
 # 'slab config show' prints the merged result with each value's origin.
 schema_version = 1
 
-# One file, three packages. Each table below is owned by exactly one of them:
+# One file, four packages; three of them own tables. Each table below is owned by exactly one:
 # [paths], [engines], [builders], and [hpc] by slab; [workspace] by foundation;
 # [agent] by mason. A table's owner validates it, so a typo inside [agent] is
 # refused by 'slab mason doctor' rather than by 'slab engines list'. A table

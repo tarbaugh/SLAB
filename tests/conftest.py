@@ -75,6 +75,8 @@ def llm_server() -> Iterator[tuple[str, LlmScript]]:
     thread.start()
     yield f"http://127.0.0.1:{httpd.server_port}/v1", script
     httpd.shutdown()
+    httpd.server_close()  # shutdown stops serving; the listening socket needs closing too
+    thread.join(timeout=5)
 
 
 def _upf_bytes(symbol: str) -> bytes:

@@ -214,13 +214,14 @@ under a new meaning.
 
 SLAB's scheduler layer is deliberately thin. Runs, caching, and verification
 live in the workspace regardless of where the process executes. The `[hpc]`
-section drives four verbs:
+section drives five verbs:
 
 ```bash
 slab hpc partitions
 slab hpc render "slab run relax.py" --name si-relax
 slab hpc submit "slab run relax.py" --name si-relax --time 02:00:00
 slab hpc status 4242314
+slab hpc cancel 4242314
 ```
 
 `render` prints the exact sbatch script that `submit` would use, so read it

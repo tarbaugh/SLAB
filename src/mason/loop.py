@@ -50,10 +50,12 @@ from mason.prompts import COMPACTION_PROMPT, system_messages, team_block
 from mason.roster import AgentSpec, check_overrides, discover_roster, skills_for
 from mason.session import MasonSession
 from mason.skills import Skill, discover_skills
-from mason.tools import Toolbox, build_toolbox
+from mason.tools import TOOL_VOCABULARY, Toolbox, build_toolbox
 
 _ERROR_STREAK_LIMIT = 5
 _COMPACTION_KEEP_MESSAGES = 6
+#: Messages that must accumulate after a compaction before another may fire.
+_COMPACTION_MIN_NEW_MESSAGES = 4
 _CHARS_PER_TOKEN = 4  # the usual rough estimate; real usage numbers override it
 #: Tool-result clearing: a result shorter than the floor is not worth the
 #: cache invalidation a clearing costs, and a clearing that frees less than
@@ -64,7 +66,7 @@ _CLEAR_AT_LEAST_CHARS = 6_000
 #: Results that must stay verbatim: a skill's instructions are consulted
 #: for the rest of the task, and a plan update is the recitation that keeps
 #: the goal in view.
-_NEVER_CLEARED = frozenset({"skill", "plan"})
+_NEVER_CLEARED = frozenset({"skill", "plan", "delegate"})
 _CLEARED_MARK = "[cleared:"
 _TEXT_RESULT_PREFIX = "[tool result: "
 #: The truncation warning needs a prompt of real size to judge: below this
@@ -150,7 +152,21 @@ def connection_profile(agent: AgentConfig) -> tuple[object, ...]:
     )
 
 
-def client_from_config(agent: AgentConfig) -> ChatBackend:
+def _take_api_key(key_var: str, keys: dict[str, str]) -> str | None:
+    """The key named by *key_var*: from *keys* when read before, else from the
+    environment, withdrawn from os.environ once read so a workflow script the
+    model launches in-process (or a shell it drives) cannot print it back
+    into the context and the transcript. *keys* is the session's store, so a
+    delegate's client finds the key there after the withdrawal."""
+    if key_var in keys:
+        return keys[key_var]
+    value = os.environ.pop(key_var, None)
+    if value is not None:
+        keys[key_var] = value
+    return value
+
+
+def client_from_config(agent: AgentConfig, keys: dict[str, str] | None = None) -> ChatBackend:
     """Build the client the config describes, refusing the unconfigured.
 
     The API key is read from the environment variable ``api_key_env``
@@ -169,7 +185,7 @@ def client_from_config(agent: AgentConfig) -> ChatBackend:
     key_var = agent.resolved_api_key_env
     api_key: str | None = None
     if key_var is not None:
-        api_key = os.environ.get(key_var)
+        api_key = _take_api_key(key_var, keys if keys is not None else {})
         if api_key is None:
             raise MasonError(
                 f"the {agent.provider} provider needs an API key: ${key_var} is not set "
@@ -242,7 +258,7 @@ class Mason:
         session.agent_name = spec.name
         self._apply_roster_override()
         self.client: ChatBackend = (
-            client if client is not None else client_from_config(session.agent)
+            client if client is not None else client_from_config(session.agent, session.api_keys)
         )
         self.all_skills = skills if skills is not None else discover_skills(session.cwd)
         self.skills = skills_for(spec, self.all_skills)
@@ -262,7 +278,12 @@ class Mason:
         catalog = self.toolbox.catalog_text() if self.fenced else None
         self._team = team_block(spec, self.roster) if "delegate" in self.toolbox.tools else None
         self.messages: list[dict[str, Any]] = system_messages(
-            session, spec, catalog, skills=self.skills, team=self._team
+            session,
+            spec,
+            catalog,
+            skills=self.skills,
+            team=self._team,
+            absent_tools=self._absent_tools(),
         )
         self._catalog = catalog
         self._last_prompt_tokens: int | None = None
@@ -272,13 +293,15 @@ class Mason:
         # and how many consecutive times it has recurred unchanged.
         self._last_identical: tuple[str, str, str] | None = None
         self._repeat_streak = 0
-        if depth == 0 and not resume_from:
+        if depth == 0:
             # The transcript says which model answered it, so a later reader
             # (a report, a benchmark score) trusts the record, not the config
-            # that may have changed since.
+            # that may have changed since. A resumed session is a new
+            # transcript and gets its own header.
             self.session.record(
                 {
                     "type": "session",
+                    "resumed": bool(resume_from),
                     "cwd": str(session.cwd),
                     "agent": spec.name,
                     "model": session.agent.model,
@@ -405,7 +428,15 @@ class Mason:
                         results=results,
                         run_ids=run_ids,
                     )
-                result, ok = self._dispatch(call)
+                try:
+                    result, ok = self._dispatch(call)
+                except BaseException:
+                    # A KeyboardInterrupt during a slow tool (or a crash below
+                    # the tool's own guard) must not leave the assistant's
+                    # tool_calls unanswered: the next request would carry a
+                    # protocol-invalid history, and --resume would replay it.
+                    self._answer_unrun(calls[position:], from_text=from_text)
+                    raise
                 result = self._note_repetition(call, result)
                 self._append_tool_result(call, result, as_text=from_text)
                 error_streak = 0 if ok else error_streak + 1
@@ -620,6 +651,10 @@ class Mason:
         else:
             self._append({"role": "tool", "tool_call_id": call.id, "content": result})
 
+    def _absent_tools(self) -> list[str]:
+        """Vocabulary tools this session does not offer, for the prompt to name."""
+        return sorted(name for name in TOOL_VOCABULARY if name not in self.toolbox.tools)
+
     # -- tool-result clearing -------------------------------------------------
 
     def _clear_tool_results(self) -> None:
@@ -703,7 +738,10 @@ class Mason:
 
     def _estimated_prompt_tokens(self) -> int:
         """The server's last count when we have one, chars/4 as the floor."""
-        estimate = sum(len(json.dumps(m)) for m in self.messages) // _CHARS_PER_TOKEN
+        sent = sum(len(json.dumps(m)) for m in self.messages)
+        if not self.fenced:
+            sent += len(json.dumps(self.toolbox.specs()))  # the schemas ride every request
+        estimate = sent // _CHARS_PER_TOKEN
         if self._last_prompt_tokens is not None:
             return max(self._last_prompt_tokens, estimate // 2)
         return estimate
@@ -712,11 +750,13 @@ class Mason:
         agent = self.session.agent
         if self._estimated_prompt_tokens() < int(agent.context_window * agent.compact_at):
             return
-        # Over budget but nothing new since the last fold: compacting again
-        # would re-summarize the summary every single step, burning a model
-        # call per turn for no reduction. Let the turn proceed; a real
-        # overflow is caught by the server and handled loudly.
-        if len(self.messages) <= self._messages_at_last_compaction:
+        # Over budget but little new since the last fold: compacting again
+        # would re-summarize the summary every step, burning a model call
+        # per turn for no reduction (a small window whose system prompt and
+        # kept tail already exceed the budget did exactly that). Let a few
+        # steps accumulate; a real overflow is caught by the server and
+        # handled loudly.
+        if len(self.messages) < self._messages_at_last_compaction + _COMPACTION_MIN_NEW_MESSAGES:
             return
         self._compact()
 
@@ -744,7 +784,22 @@ class Mason:
             None,
         )
         summary = (summary_reply.content or "").strip() or "(the summarizer said nothing)"
-        self.session.count_usage(summary_reply.prompt_tokens, summary_reply.completion_tokens)
+        self.session.count_usage(
+            summary_reply.prompt_tokens,
+            summary_reply.completion_tokens,
+            summary_reply.cached_prompt_tokens,
+        )
+        # The summarizer's call is a model call like any other: the report
+        # and the session's own counters must agree.
+        self.session.record(
+            {
+                "type": "usage",
+                "for": "compaction",
+                "cached_prompt_tokens": summary_reply.cached_prompt_tokens,
+                "prompt_tokens": summary_reply.prompt_tokens,
+                "completion_tokens": summary_reply.completion_tokens,
+            }
+        )
         # The summary already travels two ways: as a user message prepended
         # to the rebuilt conversation, and as a {type: compaction} event in
         # the transcript. The per-session file is a human debugging aid,
@@ -752,7 +807,12 @@ class Mason:
         # kept, this is what the HARNESS folded.
         self.session.compactions_append(summary)
         rebuilt = system_messages(
-            self.session, self.spec, self._catalog, skills=self.skills, team=self._team
+            self.session,
+            self.spec,
+            self._catalog,
+            skills=self.skills,
+            team=self._team,
+            absent_tools=self._absent_tools(),
         )
         tail = self.messages[boundary:]
         self.messages = [

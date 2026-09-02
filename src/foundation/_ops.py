@@ -322,10 +322,12 @@ def _verdict(run: Run, *, force: bool) -> tuple[str, str]:
     Examples:
         >>> _verdict(Run(state="verified"), force=False)[0]
         'promoted'
-        >>> _verdict(Run(state="quarantined"), force=False)
+        >>> _verdict(Run(state="quarantined", status="completed"), force=False)
         ('skipped', 'not verified: pass --force to promote it anyway')
         >>> _verdict(Run(state="quarantined", status="failed"), force=True)[0]
         'skipped'
+        >>> _verdict(Run(state="quarantined", status="running"), force=True)
+        ('skipped', 'running run: promote it by its own id if you mean to')
         >>> _verdict(Run(state="promoted"), force=False)
         ('already', 'already permanent')
     """
@@ -334,8 +336,10 @@ def _verdict(run: Run, *, force: bool) -> tuple[str, str]:
     if run.state is LifecycleState.VERIFIED:
         return "promoted", "checks passed"
     if run.state is LifecycleState.QUARANTINED:
-        if run.status is ExecutionStatus.FAILED:
-            return "skipped", "failed run: promote it by its own id if you mean to"
+        if run.status is not ExecutionStatus.COMPLETED:
+            # Failed, still running, or never started: a bulk sweep must
+            # not make any of these permanent.
+            return "skipped", f"{run.status.value} run: promote it by its own id if you mean to"
         if not force:
             return "skipped", "not verified: pass --force to promote it anyway"
         return "promoted", "forced: never verified"
@@ -377,15 +381,18 @@ def launch_script(
         raise FileNotFoundError(f"no such workflow script: {script_path}")
 
     buffer = io.StringIO()
-    old_argv = sys.argv
-    sys.argv = [str(script_path), *argv]
-    sys.path.insert(0, str(script_path.parent))
     error: str | None = None
     run_id: str | None = None
     try:
         workspace = Workspace(root)
     except Exception as e:
         raise StorageError(f"cannot open workspace at {root}: {e}") from e
+    # The interpreter state is touched only once the workspace is open, so
+    # a failed open (in a long-lived MCP process) leaves argv and path as
+    # they were.
+    old_argv = sys.argv
+    sys.argv = [str(script_path), *argv]
+    sys.path.insert(0, str(script_path.parent))
     with workspace as ws:
         try:
             # capture wraps the whole run context: @check hooks evaluate at
