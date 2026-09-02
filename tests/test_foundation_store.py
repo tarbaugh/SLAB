@@ -922,3 +922,45 @@ def test_delete_run_cascades_and_refuses_the_unexpired(store: SQLiteRunStore) ->
     # The cascade took the traced task with it, so the cache cannot serve
     # a deleted run's result:
     assert store.find_cached_task("ef" * 32) is None
+
+
+# -- journaling by filesystem --------------------------------------------------
+
+
+def test_network_filesystems_are_told_from_the_mount_table() -> None:
+    from foundation.store import on_network_filesystem
+
+    table = (
+        "/dev/sda1 / ext4 rw 0 0\n"
+        "lustre@tcp:/fs /scratch lustre rw 0 0\n"
+        "nas:/home /nfs-home nfs4 rw 0 0\n"
+        "/dev/sdb1 /nfs-home/me/local\\040disk ext4 rw 0 0\n"
+    )
+    assert on_network_filesystem("/scratch/me/ws/runs.db", table)
+    assert on_network_filesystem("/nfs-home/me/ws/runs.db", table)
+    # The longest matching mount point wins: a local disk under a network home.
+    assert not on_network_filesystem("/nfs-home/me/local disk/ws/runs.db", table)
+    assert not on_network_filesystem("/tmp/ws/runs.db", table)
+    assert not on_network_filesystem("/tmp/ws/runs.db", "")
+
+
+def test_a_network_workspace_opens_with_rollback_journaling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import foundation.store
+
+    monkeypatch.delenv("SLAB_SQLITE_JOURNAL", raising=False)
+    monkeypatch.setattr(foundation.store, "on_network_filesystem", lambda path, mounts=None: True)
+    store = SQLiteRunStore(tmp_path / "runs.db")
+    try:
+        assert store.journal_mode == "delete"
+        run = store.create(Run(name="shared-scratch"))
+        assert store.get(run.id).name == "shared-scratch"
+    finally:
+        store.close()
+    monkeypatch.setenv("SLAB_SQLITE_JOURNAL", "wal")
+    store = SQLiteRunStore(tmp_path / "runs.db")
+    try:
+        assert store.journal_mode == "wal"  # the override wins over the detection
+    finally:
+        store.close()

@@ -383,13 +383,17 @@ so the agent reads its own `.out` files with `read_file`. When a job is
 finished, `slab purge` sweeps its files from there (see
 [Lifecycle & retention](lifecycle-and-retention.md)).
 
-The session lock keeps one running loop per workspace. With the default
-`[agent] session_lock = true`, a second Mason loop in the same workspace
-is refused with a message that names the holding process, because two
-loops interleave `NOTEBOOK.md` and race the plan. Delegated specialists
-run inside the parent's lock. On a filesystem that cannot hold an
-advisory lock, the lock degrades to a warning, and
-`session_lock = false` turns it off.
+The session lock keeps one running loop per project directory. With the
+default `[agent] session_lock = true`, a second Mason loop in the same
+project directory is refused with a message that names the holding
+process, because two loops interleave `NOTEBOOK.md` and race the plan.
+Both files belong to the project, so the lock is keyed by the project:
+two campaigns in two project directories share one workspace freely,
+and the run database journals in a mode that is safe across nodes when
+the workspace sits on a network filesystem. Delegated specialists run
+inside the parent's lock. On a filesystem that cannot hold an advisory
+lock, the lock degrades to a warning, and `session_lock = false` turns
+it off.
 
 ## The sandbox: autonomous runs without a network
 

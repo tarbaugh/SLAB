@@ -974,3 +974,31 @@ def test_an_interrupted_tool_call_still_gets_answered(tmp_path: Path) -> None:
     assert len(calls) == 1 and len(answers) == 1
     assert answers[0]["tool_call_id"] == calls[0]["tool_calls"][0]["id"]
     assert "not run" in answers[0]["content"]
+
+
+def test_two_projects_share_a_workspace(tmp_path: Path) -> None:
+    """The lock guards the project's notebook and plan, so a second project
+    in the same workspace is never refused, and a symlinked path to the
+    first project takes the first project's lock."""
+    import os
+
+    config = MasonConfig.model_validate({"agent": {"model": "fake"}})
+    first = tmp_path / "campaign-1"
+    second = tmp_path / "campaign-2"
+    first.mkdir()
+    second.mkdir()
+    workspace = tmp_path / "shared-ws"
+    session1 = MasonSession(first, workspace_root=workspace, agent=config.agent, auto_approve=True)
+    Mason(session1, client=FakeClient([]))
+    session2 = MasonSession(
+        second, workspace_root=workspace, agent=config.agent, auto_approve=True
+    )
+    Mason(session2, client=FakeClient([]))  # no raise: another project
+    assert session1.session_lock_path() != session2.session_lock_path()
+    assert session1.session_lock_path().parent == workspace / "mason" / "locks"
+
+    link = tmp_path / "campaign-1-link"
+    os.symlink(first, link)
+    session3 = MasonSession(link, workspace_root=workspace, agent=config.agent, auto_approve=True)
+    with pytest.raises(MasonError, match="already working in this project directory"):
+        Mason(session3, client=FakeClient([]))

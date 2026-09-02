@@ -5,6 +5,14 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- The session lock is per project directory, not per workspace. It guards
+  `NOTEBOOK.md` and `PLAN.md`, which belong to the project, so two
+  campaigns in two project directories now share one workspace instead of
+  the second being refused with the first's path. To make that sharing
+  safe, the run store opens with rollback journaling when the database
+  sits on a network filesystem (Lustre, GPFS, NFS, and the like), where
+  WAL's shared-memory index cannot be seen from a second node;
+  `SLAB_SQLITE_JOURNAL=wal|delete` overrides the detection.
 - A planner and a worker. The `planner` card writes the plan and hands
   every step to the team; its tool allowlist has no shell, no launch, and
   no file edits, and it is refused up front when delegation is off or

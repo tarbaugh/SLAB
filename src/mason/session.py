@@ -19,6 +19,7 @@ control, not hidden in an agent-private store.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -262,15 +263,18 @@ class MasonSession:
     # -- one running session per workspace ------------------------------------
 
     def acquire_session_lock(self) -> None:
-        """Refuse to run alongside another mason in the same workspace.
+        """Refuse to run alongside another mason in the same project directory.
 
-        Two concurrent sessions interleave ``NOTEBOOK.md`` entries and race
-        each other's view of the plan, so the loop takes an advisory lock
-        before its first turn. Contention is refused loudly, naming the
+        Two concurrent sessions in one project interleave ``NOTEBOOK.md``
+        entries and race each other's view of ``PLAN.md``, so the loop takes
+        an advisory lock before its first turn. Both files are the
+        project's, so the lock is keyed by the project directory: two
+        campaigns in two projects share a workspace freely (the run store
+        journals for that). Contention is refused loudly, naming the
         holder. Delegated children never call this — they run inside the
         parent's lock. A filesystem that cannot lock (some parallel
         filesystems) degrades to a warning: an undetected concurrent session
-        beats a workspace nobody can use. ``[agent] session_lock = false``
+        beats a project nobody can use. ``[agent] session_lock = false``
         turns the lock off.
         """
         if not self.agent.session_lock or self._lock_handle is not None:
@@ -279,7 +283,7 @@ class MasonSession:
             import fcntl
         except ImportError:  # pragma: no cover - non-POSIX platform
             return
-        lock_path = self.sessions_dir.parent / "session.lock"
+        lock_path = self.session_lock_path()
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         handle = open(lock_path, "a+", encoding="utf-8")  # noqa: SIM115 - held for the process's life
         try:
@@ -289,9 +293,10 @@ class MasonSession:
             holder = handle.read().strip() or "holder unknown"
             handle.close()
             raise MasonError(
-                f"another mason session is already working in this workspace "
-                f"({holder}). Finish or stop it first, or set [agent] "
-                f"session_lock = false to run concurrent sessions anyway."
+                f"another mason session is already working in this project "
+                f"directory ({holder}). Finish or stop it first, run the new "
+                f"session from another project directory, or set [agent] "
+                f"session_lock = false to run concurrent sessions here anyway."
             ) from None
         except OSError as e:
             handle.close()
@@ -309,6 +314,15 @@ class MasonSession:
         )
         handle.flush()
         self._lock_handle = handle
+
+    def session_lock_path(self) -> Path:
+        """Where this project's lock lives: under the workspace, keyed by the project.
+
+        The real path of the project directory is hashed so a symlinked
+        and a direct path to one project take the same lock.
+        """
+        digest = hashlib.sha256(str(self.cwd.resolve()).encode("utf-8")).hexdigest()[:16]
+        return self.sessions_dir.parent / "locks" / f"{digest}.lock"
 
     def release_session_lock(self) -> None:
         """Let the workspace go (normally implicit in process exit).

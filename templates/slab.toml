@@ -15,10 +15,12 @@ schema_version = 1
 
 [workspace]
 # root = "/scratch/${USER}/slab-workspace"        # run database + artifacts
-#                                      # (parallel scratch works — slab falls back
-#                                      # from WAL journaling automatically — but
-#                                      # avoid heavy login-node polling of a
-#                                      # workspace a running job is writing to)
+#                                      # (parallel scratch works: on a network
+#                                      # filesystem the run database uses rollback
+#                                      # journaling, safe across nodes;
+#                                      # SLAB_SQLITE_JOURNAL=wal|delete overrides
+#                                      # the detection. Avoid heavy login-node
+#                                      # polling of a workspace a job is writing to)
 
 [paths]
 # pseudos = "/shared/sw/slab/pseudos"             # pseudopotential family root
@@ -161,7 +163,9 @@ schema_version = 1
 #                                           # security boundary (the shell tool is gated
 #                                           # separately by the allowlist + approval)
 # session_lock = true                       # refuse a second concurrent mason in this
-#                                           # workspace (false allows them)
+#                                           # project directory (false allows them;
+#                                           # other projects in the same workspace
+#                                           # are never refused)
 # tool_protocol = "native"                  # "fenced" for servers without a tool-call parser
 # compute_profile = "cluster"               # laptop | workstation | cluster — how big a
 #                                           # calculation the agent should reach for

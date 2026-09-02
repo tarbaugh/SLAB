@@ -395,9 +395,10 @@ places a violation hides from a passing test suite. The single shared file
 validates only its own, so a typo in `[agent]` is Mason's to refuse and
 invisible to `slab engines list`.
 
-- **Storage.** One SQLite file (WAL, `BEGIN IMMEDIATE` writes, in-transaction
-  revalidation; tested against racing threads and stale cross-process
-  handles) plus one CAS directory. A workspace is a directory; there is no
+- **Storage.** One SQLite file (WAL on a local disk, rollback journaling on
+  a network filesystem so several nodes can write it, `BEGIN IMMEDIATE`
+  writes, in-transaction revalidation; tested against racing threads and
+  stale cross-process handles) plus one CAS directory. A workspace is a directory; there is no
   daemon and nothing to configure. `RunStore` is a protocol — the Postgres
   seam — and schema versions are tracked via `PRAGMA user_version`.
 - **Engines.** `slab.backends` maps names to ASE calculators from two

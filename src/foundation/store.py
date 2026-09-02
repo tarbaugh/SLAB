@@ -146,6 +146,91 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
 }
 
 
+#: Filesystem types whose files may be open from several hosts at once. WAL
+#: keeps its index in shared memory, which only the processes of one host
+#: see, so a second host writing the same database through WAL can corrupt
+#: it. Rollback journaling locks the file itself and works across hosts
+#: wherever the filesystem honors POSIX locks.
+NETWORK_FILESYSTEMS = frozenset(
+    {
+        "nfs",
+        "nfs4",
+        "lustre",
+        "gpfs",
+        "beegfs",
+        "panfs",
+        "ceph",
+        "glusterfs",
+        "cifs",
+        "smb3",
+        "smbfs",
+        "afs",
+        "9p",
+        "virtiofs",
+        "fuse.sshfs",
+    }
+)
+
+
+def _unescape_mount(field: str) -> str:
+    """Undo the octal escapes ``/proc/mounts`` uses for spaces and tabs."""
+    return field.encode().decode("unicode_escape") if "\\" in field else field
+
+
+def on_network_filesystem(path: str | os.PathLike[str], mounts: str | None = None) -> bool:
+    """Whether *path* sits on a filesystem shared between hosts.
+
+    Reads the mount table (``/proc/self/mounts`` on Linux; *mounts* is that
+    text, for tests) and takes the type of the longest mount point that
+    prefixes the path's real location. Platforms without a mount table read
+    as local, and so does an unreadable one: a wrong "local" costs WAL's
+    fallback path, a wrong "network" only speed.
+
+    Examples:
+        >>> table = "/dev/sda1 / ext4 rw 0 0\\nlustre@tcp:/fs /scratch lustre rw 0 0\\n"
+        >>> on_network_filesystem("/scratch/me/ws/runs.db", table)
+        True
+        >>> on_network_filesystem("/home/me/ws/runs.db", table)
+        False
+    """
+    if mounts is None:
+        try:
+            mounts = Path("/proc/self/mounts").read_text(encoding="utf-8")
+        except OSError:
+            return False
+    target = os.path.realpath(os.path.dirname(os.fspath(path)) or ".")
+    best: tuple[int, str] | None = None
+    for line in mounts.splitlines():
+        fields = line.split()
+        if len(fields) < 3:
+            continue
+        point = _unescape_mount(fields[1]).rstrip("/") or "/"
+        under = target == point or target.startswith(point.rstrip("/") + "/")
+        if under and (best is None or len(point) > best[0]):
+            best = (len(point), fields[2])
+    return best is not None and best[1] in NETWORK_FILESYSTEMS
+
+
+def journal_mode_for(path: str | os.PathLike[str]) -> str:
+    """``wal`` on a local disk, ``delete`` on a network filesystem.
+
+    ``$SLAB_SQLITE_JOURNAL`` (``wal`` or ``delete``) overrides the
+    detection, for a filesystem the table does not name or a shared mount
+    known to be used from one host only.
+
+    Examples:
+        >>> import os
+        >>> os.environ["SLAB_SQLITE_JOURNAL"] = "delete"
+        >>> journal_mode_for("/anywhere/runs.db")
+        'delete'
+        >>> del os.environ["SLAB_SQLITE_JOURNAL"]
+    """
+    override = os.environ.get("SLAB_SQLITE_JOURNAL", "").strip().lower()
+    if override in ("wal", "delete"):
+        return override
+    return "delete" if on_network_filesystem(path) else "wal"
+
+
 @runtime_checkable
 class RunStore(Protocol):
     """Storage interface for runs. Implement this to add a backend (e.g. Postgres)."""
@@ -304,14 +389,20 @@ class SQLiteRunStore:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute("PRAGMA busy_timeout = 5000")
-        try:
-            self._conn.execute("PRAGMA journal_mode = WAL")
-        except sqlite3.OperationalError:
-            # Network filesystems (Lustre/GPFS/NFS scratch — where cluster
-            # workspaces live) can refuse WAL's shared-memory index.
-            # Rollback journaling is slower but works wherever the
-            # filesystem locks at all; refusing to open would be worse.
+        wanted = journal_mode_for(self._path) if self._path != ":memory:" else "wal"
+        if wanted == "wal":
+            try:
+                self._conn.execute("PRAGMA journal_mode = WAL")
+            except sqlite3.OperationalError:
+                # A filesystem that looked local but refuses WAL's
+                # shared-memory index: rollback journaling is slower but
+                # works wherever the filesystem locks at all, and refusing
+                # to open would be worse.
+                self._conn.execute("PRAGMA journal_mode = DELETE")
+        else:
             self._conn.execute("PRAGMA journal_mode = DELETE")
+        #: The journaling actually in force: ``wal`` or ``delete``.
+        self.journal_mode = str(self._conn.execute("PRAGMA journal_mode").fetchone()[0]).lower()
         try:
             self._init_schema()
         except Exception:
