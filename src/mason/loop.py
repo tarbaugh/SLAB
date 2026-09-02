@@ -9,13 +9,21 @@ code because prompts do not enforce invariants:
 * A consecutive-tool-failure streak aborts the turn with the evidence in
   place (five malformed or crashing calls in a row is a stuck agent, not
   progress).
+* Tool-result clearing at ``clear_tool_results_at`` x ``context_window``:
+  results older than the newest ``keep_tool_results`` become one-line
+  placeholders (the calls stay, so they are restorable), in batches so the
+  cached prompt prefix is rewritten rarely. Errors, skill texts, and plan
+  updates are never cleared. This is the cheap layer, and the one the
+  measurements favor: masking old observations matches summarization on
+  solve rate at about half the cost.
 * Compaction triggers at ``compact_at`` x ``context_window`` — well below
   the window, because model quality degrades before the hard limit — and a
   context-overflow answer from the server forces one immediate compaction
   and retry. Compaction folds the middle of the conversation into a
   structured summary (state, verified results, failures observed, open
-  questions), writes that summary into the lab notebook, and rebuilds the
-  system message fresh so plan and notebook re-enter the context updated.
+  questions), writes that summary into the per-session compactions file,
+  and rebuilds the system message fresh so plan and notebook re-enter the
+  context updated.
 
 Both tool protocols run through the same loop: native OpenAI tool calls, or
 the fenced-block text protocol for servers without a tool-call parser.
@@ -47,6 +55,18 @@ from mason.tools import Toolbox, build_toolbox
 _ERROR_STREAK_LIMIT = 5
 _COMPACTION_KEEP_MESSAGES = 6
 _CHARS_PER_TOKEN = 4  # the usual rough estimate; real usage numbers override it
+#: Tool-result clearing: a result shorter than the floor is not worth the
+#: cache invalidation a clearing costs, and a clearing that frees less than
+#: the batch minimum is deferred so the prompt prefix is rewritten rarely,
+#: in large steps, not every turn.
+_CLEAR_FLOOR_CHARS = 400
+_CLEAR_AT_LEAST_CHARS = 6_000
+#: Results that must stay verbatim: a skill's instructions are consulted
+#: for the rest of the task, and a plan update is the recitation that keeps
+#: the goal in view.
+_NEVER_CLEARED = frozenset({"skill", "plan"})
+_CLEARED_MARK = "[cleared:"
+_TEXT_RESULT_PREFIX = "[tool result: "
 #: Ratio at which the budget hint escalates from a bare counter to a
 #: land-the-plane instruction. 0.9 means the last 10% of turns carry the
 #: stricter form.
@@ -300,6 +320,7 @@ class Mason:
         error_streak = 0
         max_turns = self.session.agent.max_turns
         for step in range(1, max_turns + 1):
+            self._clear_tool_results()
             self._maybe_compact()
             reply = self._call_model(hint=_budget_hint(step, max_turns))
             calls = list(reply.tool_calls)
@@ -492,11 +513,14 @@ class Mason:
             if hint is not None:
                 messages = [*messages, {"role": "user", "content": hint}]
             reply = self.client.chat(messages, tools)
-        self.session.count_usage(reply.prompt_tokens, reply.completion_tokens)
+        self.session.count_usage(
+            reply.prompt_tokens, reply.completion_tokens, reply.cached_prompt_tokens
+        )
         self._last_prompt_tokens = reply.prompt_tokens
         self.session.record(
             {
                 "type": "usage",
+                "cached_prompt_tokens": reply.cached_prompt_tokens,
                 "prompt_tokens": reply.prompt_tokens,
                 "completion_tokens": reply.completion_tokens,
             }
@@ -553,6 +577,85 @@ class Mason:
             )
         else:
             self._append({"role": "tool", "tool_call_id": call.id, "content": result})
+
+    # -- tool-result clearing -------------------------------------------------
+
+    def _clear_tool_results(self) -> None:
+        """Replace old tool results with placeholders once the prompt is large.
+
+        The lightest form of context hygiene, and the one the evidence
+        favors: masking old observations matches LLM summarization on
+        solve rate at about half the cost (the SWE-agent and OpenHands
+        studies), so it runs first and compaction stays the rare fallback.
+        The rules follow the shape of Anthropic's ``clear_tool_uses``: a
+        trigger on prompt size, the newest results kept intact, oldest
+        cleared first, some tools excluded, and a minimum batch so the
+        cached prefix is not invalidated for a trivial gain. The call and
+        its arguments stay in the history, so a cleared result is
+        restorable by calling again; errors stay verbatim because the
+        record of what went wrong is what stops a model repeating it.
+        """
+        agent = self.session.agent
+        if not agent.clear_tool_results:
+            return
+        if self._estimated_prompt_tokens() < int(
+            agent.context_window * agent.clear_tool_results_at
+        ):
+            return
+        names_by_id: dict[str, str] = {}
+        results: list[int] = []  # indices of every tool-result message, in order
+        clearable: list[tuple[int, str]] = []
+        for index, message in enumerate(self.messages):
+            role = message.get("role")
+            if role == "assistant":
+                for call in message.get("tool_calls") or ():
+                    names_by_id[str(call.get("id"))] = str(call["function"]["name"])
+                continue
+            content = message.get("content")
+            if not isinstance(content, str):
+                continue
+            if role == "tool":
+                name = names_by_id.get(str(message.get("tool_call_id")), "?")
+            elif role == "user" and content.startswith(_TEXT_RESULT_PREFIX):
+                name = content[len(_TEXT_RESULT_PREFIX) :].split("]", 1)[0]
+            else:
+                continue
+            results.append(index)
+            if (
+                len(content) < _CLEAR_FLOOR_CHARS
+                or _CLEARED_MARK in content[:120]
+                or name in _NEVER_CLEARED
+                or _is_error_result(name, content)
+            ):
+                continue
+            clearable.append((index, name))
+        protected = set(results[-agent.keep_tool_results :])
+        chosen = [(index, name) for index, name in clearable if index not in protected]
+        freed = sum(len(str(self.messages[index]["content"])) for index, _ in chosen)
+        if not chosen or freed < _CLEAR_AT_LEAST_CHARS:
+            return
+        for index, name in chosen:
+            message = self.messages[index]
+            content = str(message["content"])
+            placeholder = (
+                f"{_CLEARED_MARK} {name} result, {len(content)} characters, cleared to save "
+                f"context; the call above shows what was asked — call again if the "
+                f"content is needed]"
+            )
+            if message.get("role") == "user":
+                head = content.split("\n", 1)[0]
+                placeholder = f"{head}\n{placeholder}"
+            message["content"] = placeholder
+        # The server's last count described the uncleared prompt.
+        self._last_prompt_tokens = None
+        self.session.record({"type": "clearing", "cleared": len(chosen), "chars": freed})
+        observer = self.session.observer
+        if observer is not None:
+            observer(
+                "text",
+                self.session.attribution(),
+                f"[cleared {len(chosen)} old tool result(s), {freed} characters]",
+            )
 
     # -- compaction -----------------------------------------------------------
 
@@ -622,6 +725,24 @@ class Mason:
         self._messages_at_last_compaction = len(self.messages)
         self.session.record({"type": "compaction", "summary": summary})
         return True
+
+
+def _is_error_result(name: str, content: str) -> bool:
+    """A tool result that records a failure or a refusal, kept verbatim.
+
+    Examples:
+        >>> _is_error_result("shell", "tool shell failed: exit 2\\n...")
+        True
+        >>> _is_error_result("shell", "exit 0\\nall good")
+        False
+    """
+    prefixes = (
+        f"tool {name} failed:",
+        f"tool {name} not run:",
+        f"tool {name} was not approved",
+        "refused",
+    )
+    return content.startswith(prefixes)
 
 
 def _render_for_summary(messages: list[dict[str, Any]], per_message_chars: int = 1_500) -> str:

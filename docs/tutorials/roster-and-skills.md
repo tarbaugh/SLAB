@@ -313,7 +313,8 @@ max_turns = 30
 The table accepts the connection and budget fields: `provider`,
 `endpoint`, `model`, `api_key_env`, `effort`, `temperature`,
 `context_window`, `compact_at`, `max_turns`, `max_reply_tokens`,
-`request_timeout_s`, `max_tool_output_chars`, `shell_timeout_s`, and
+`request_timeout_s`, `max_tool_output_chars`, `clear_tool_results`,
+`keep_tool_results`, `clear_tool_results_at`, `shell_timeout_s`, and
 `tool_protocol`. Session policy is deliberately not per-agent: one
 `approval` mode, one `shell_allowlist`, one `[agent.serve]` section per
 session.

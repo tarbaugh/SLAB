@@ -84,6 +84,10 @@ class ChatReply(BaseModel):
     finish_reason: str | None = None
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+    #: The part of ``prompt_tokens`` the server read from its prompt cache,
+    #: when it says (OpenAI-style ``prompt_tokens_details.cached_tokens``).
+    #: Billed at a fraction of the rest, so a cost reading needs it.
+    cached_prompt_tokens: int | None = None
 
 
 class ChatClient:
@@ -296,7 +300,23 @@ def _parse_reply(payload: dict[str, Any]) -> ChatReply:
         finish_reason=choices[0].get("finish_reason"),
         prompt_tokens=_int_or_none(usage.get("prompt_tokens")),
         completion_tokens=_int_or_none(usage.get("completion_tokens")),
+        cached_prompt_tokens=_cached_prompt_tokens(usage),
     )
+
+
+def _cached_prompt_tokens(usage: dict[str, Any]) -> int | None:
+    """``prompt_tokens_details.cached_tokens`` when the server reports it.
+
+    Examples:
+        >>> _cached_prompt_tokens({"prompt_tokens_details": {"cached_tokens": 900}})
+        900
+        >>> _cached_prompt_tokens({"prompt_tokens": 10}) is None
+        True
+    """
+    details = usage.get("prompt_tokens_details")
+    if not isinstance(details, dict):
+        return None
+    return _int_or_none(details.get("cached_tokens"))
 
 
 def _int_or_none(value: object) -> int | None:

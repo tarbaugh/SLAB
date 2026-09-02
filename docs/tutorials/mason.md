@@ -607,14 +607,44 @@ under version control, readable by humans:
 * **`AGENTS.md`** is the cross-tool conventions standard, and if the project
   has one, it enters the system prompt every session.
 
-When the conversation approaches the budget (`compact_at` × `context_window`,
-default 70%), the middle of the history is folded into a structured summary
-of state, verified results, failures observed, decisions, and open
-questions. The summary is also written to the notebook, and the system
-context is rebuilt fresh so the current plan and notebook re-enter updated.
-A context-overflow answer from the server forces the same compaction
-immediately. Failures are deliberately carried forward, because evidence of
-what went wrong is what keeps a model from repeating it.
+### Context hygiene
+
+Every model call re-sends the whole conversation, so a long session pays
+for its history on every step. Mason keeps that history small in three
+layers, cheapest first.
+
+1. **Output caps.** One tool result may occupy `max_tool_output_chars`
+   (default 12,000, about 3k tokens). Longer output is middle-truncated
+   with a marker, and the file tools window by `offset` and `limit`.
+2. **Tool-result clearing.** Once the prompt passes
+   `clear_tool_results_at` × `context_window` (default 25%), tool results
+   older than the newest `keep_tool_results` (default 6) are replaced by
+   a one-line placeholder that names the tool and the size. The call and
+   its arguments stay, so the model can call again if it needs the
+   content. Errors, refusals, skill texts, and plan updates are never
+   cleared. A clearing rewrites the cached prompt prefix, so it waits
+   until at least 6,000 characters can go at once. Set
+   `clear_tool_results = false` to turn it off.
+3. **Compaction.** When the conversation still approaches the budget
+   (`compact_at` × `context_window`, default 70%), the middle of the
+   history is folded into a structured summary of state, verified
+   results, failures observed, decisions, and open questions. The system
+   context is rebuilt fresh so the current plan and notebook re-enter
+   updated. A context-overflow answer from the server forces the same
+   compaction immediately.
+
+Failures are deliberately carried through every layer, because evidence
+of what went wrong is what keeps a model from repeating it. The order
+follows the measurements: masking old observations matches summarization
+on solve rate at about half the cost, and summarization makes runs longer,
+so clearing runs first and compaction stays the rare fallback.
+
+The system prompt and the tool list are stable across a session, and the
+per-step budget line is appended last, so a server with a prompt cache
+serves the fixed prefix from cache. `slab mason report` shows the peak
+prompt size, the cached share when the server reports one, and how many
+clearings and compactions happened. Read the cached share before judging
+a session's token total: cached input costs a fraction of the rest.
 
 ## Open-model realism
 

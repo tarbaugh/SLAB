@@ -5,6 +5,15 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- Context hygiene in three layers. Tool output is capped at 12,000
+  characters (was 24,000); once the prompt passes a quarter of the
+  context window, tool results older than the newest six are replaced by
+  a placeholder that names the tool and the size, in batches so the
+  cached prompt prefix is rewritten rarely; compaction stays the rare
+  fallback. Errors, skill texts, and plan updates are never cleared.
+  Usage events and `slab mason report` now carry the cached share of the
+  prompt, the peak prompt size, and the clearing count, so a token total
+  can be read as a cost.
 - The sandbox render carries builders in. `[builders]` travels whole into
   the rendered `slab.toml` (a sandbox without it reported every builder
   absent, whatever was mounted), a configured atomsk or gracemaker is

@@ -56,8 +56,9 @@ def _span_seconds(started: str | None, ended: str | None) -> float | None:
 
 def _tally(transcript: Path) -> dict[str, Any]:
     """Counts for one transcript file; the shared core of the summary."""
-    steps = prompt_tokens = completion_tokens = 0
-    malformed = compactions = resumes = refusals = errored = 0
+    steps = prompt_tokens = completion_tokens = cached_prompt_tokens = 0
+    peak_prompt_tokens = 0
+    malformed = compactions = clearings = resumes = refusals = errored = 0
     started: str | None = None
     ended: str | None = None
     tools: Counter[str] = Counter()
@@ -92,8 +93,13 @@ def _tally(transcript: Path) -> dict[str, Any]:
             header = event
         elif kind == "usage":
             steps += 1
-            prompt_tokens += int(event.get("prompt_tokens") or 0)
+            prompt = int(event.get("prompt_tokens") or 0)
+            prompt_tokens += prompt
+            peak_prompt_tokens = max(peak_prompt_tokens, prompt)
             completion_tokens += int(event.get("completion_tokens") or 0)
+            cached_prompt_tokens += int(event.get("cached_prompt_tokens") or 0)
+        elif kind == "clearing":
+            clearings += 1
         elif kind == "message":
             message = event.get("message") or {}
             role = message.get("role")
@@ -138,6 +144,9 @@ def _tally(transcript: Path) -> dict[str, Any]:
         "steps": steps,
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
+        "cached_prompt_tokens": cached_prompt_tokens,
+        "peak_prompt_tokens": peak_prompt_tokens,
+        "clearings": clearings,
         "started": started,
         "ended": ended,
         "span_s": _span_seconds(started, ended),
@@ -178,6 +187,7 @@ def summarize(transcript: Path, siblings: list[Path] | None = None) -> dict[str,
     total_steps = summary["steps"]
     total_prompt = summary["prompt_tokens"]
     total_completion = summary["completion_tokens"]
+    total_cached = summary["cached_prompt_tokens"]
     for sibling in siblings or []:
         child = _tally(sibling)
         delegations.append(
@@ -192,10 +202,12 @@ def summarize(transcript: Path, siblings: list[Path] | None = None) -> dict[str,
         total_steps += child["steps"]
         total_prompt += child["prompt_tokens"]
         total_completion += child["completion_tokens"]
+        total_cached += child["cached_prompt_tokens"]
     summary["delegations"] = delegations
     summary["total_steps"] = total_steps
     summary["total_prompt_tokens"] = total_prompt
     summary["total_completion_tokens"] = total_completion
+    summary["total_cached_prompt_tokens"] = total_cached
     return summary
 
 

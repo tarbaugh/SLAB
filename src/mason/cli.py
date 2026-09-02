@@ -276,8 +276,7 @@ def mason_chat(
             break
         if text == "/status":
             typer.echo(
-                f"tokens: {session.prompt_tokens} prompt, "
-                f"{session.completion_tokens} completion; "
+                f"tokens: {session.usage_text()}; "
                 f"session {session.session_id}; "
                 f"transcript {session.transcript_path}"
             )
@@ -337,7 +336,7 @@ def mason_run(
     typer.echo(result.text)
     typer.echo(
         f"[{result.stop_reason} after {result.steps} step(s); "
-        f"tokens {session.prompt_tokens}+{session.completion_tokens}; "
+        f"tokens {session.usage_text()}; "
         f"session {session.session_id}; "
         f"transcript {session.transcript_path}]",
         err=True,
@@ -567,6 +566,12 @@ def _render_event(event: dict[str, Any], full: bool) -> None:
         typer.echo(_clip(str(event.get("report", "")), full))
     elif kind == "resume":
         typer.echo(f"[{stamp}] resumed with {event.get('messages')} prior message(s)")
+    elif kind == "clearing":
+        typer.secho(
+            f"[{stamp}] cleared {event.get('cleared')} old tool result(s), "
+            f"{event.get('chars')} characters",
+            dim=True,
+        )
     # usage events are accumulated by the caller, not printed per step.
 
 
@@ -596,7 +601,7 @@ def mason_read(
         transcript = _choose_transcript(workspace)
     if not transcript.is_file():
         _fail(f"no transcript at {transcript}")
-    prompt_tokens = completion_tokens = steps = 0
+    prompt_tokens = completion_tokens = cached_tokens = steps = 0
     for number, line in enumerate(transcript.read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():
             continue
@@ -608,11 +613,14 @@ def mason_read(
         if event.get("type") == "usage":
             prompt_tokens += int(event.get("prompt_tokens") or 0)
             completion_tokens += int(event.get("completion_tokens") or 0)
+            cached_tokens += int(event.get("cached_prompt_tokens") or 0)
             steps += 1
             continue
         _render_event(event, full)
+    cached = f" ({cached_tokens} cached)" if cached_tokens else ""
     typer.secho(
-        f"\n[{steps} model call(s); tokens {prompt_tokens}+{completion_tokens}]", dim=True
+        f"\n[{steps} model call(s); tokens {prompt_tokens}+{completion_tokens}{cached}]",
+        dim=True,
     )
 
 
@@ -724,11 +732,17 @@ def mason_report(
         return
 
     tokens = f"{summary['total_prompt_tokens']}+{summary['total_completion_tokens']}"
+    if summary["total_cached_prompt_tokens"]:
+        tokens += f" ({summary['total_cached_prompt_tokens']} cached)"
     typer.echo(
         f"session {summary['session']} — {summary['total_steps']} step(s), "
         f"tokens {tokens}, {_format_span(summary['span_s'])}"
     )
     typer.echo(f"  transcript {summary['transcript']}")
+    typer.echo(
+        f"  context: peak prompt {summary['peak_prompt_tokens']} tokens, "
+        f"{summary['clearings']} clearing(s), {summary['compactions']} compaction(s)"
+    )
     for child in summary["delegations"]:
         typer.echo(
             f"  delegation {child['agent']}: {child['steps']} step(s), "

@@ -128,6 +128,9 @@ class RosterOverride(BaseModel):
     request_timeout_s: float | None = Field(default=None, gt=0)
     max_reply_tokens: int | None = Field(default=None, ge=256)
     max_tool_output_chars: int | None = Field(default=None, ge=1_000)
+    clear_tool_results: bool | None = None
+    keep_tool_results: int | None = Field(default=None, ge=1)
+    clear_tool_results_at: float | None = Field(default=None, gt=0.0, le=1.0)
     shell_timeout_s: float | None = Field(default=None, gt=0)
     tool_protocol: Literal["native", "fenced"] | None = None
 
@@ -171,7 +174,19 @@ class AgentConfig(BaseModel):
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     request_timeout_s: float = Field(default=600.0, gt=0)
     max_reply_tokens: int | None = Field(default=None, ge=256)
-    max_tool_output_chars: int = Field(default=24_000, ge=1_000)
+    # One tool result may occupy this many characters (about 3k tokens);
+    # longer output is middle-truncated with a marker, and the file tools
+    # window by offset/limit. The cap is the first layer of context hygiene.
+    max_tool_output_chars: int = Field(default=12_000, ge=1_000)
+    # The second layer: once the prompt passes clear_tool_results_at x
+    # context_window, tool results older than the newest keep_tool_results
+    # are replaced by a one-line placeholder (the call and its arguments
+    # stay, so the model can call again). Errors, skill texts, and plan
+    # updates are never cleared. Compaction, the third layer, then fires
+    # rarely.
+    clear_tool_results: bool = True
+    keep_tool_results: int = Field(default=6, ge=1)
+    clear_tool_results_at: float = Field(default=0.25, gt=0.0, le=1.0)
     shell_timeout_s: float = Field(default=120.0, gt=0)
     tool_protocol: Literal["native", "fenced"] = "native"
     approval: Literal["ask", "auto"] = "ask"

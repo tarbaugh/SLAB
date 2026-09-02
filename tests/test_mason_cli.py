@@ -93,7 +93,7 @@ def test_mason_chat_status_and_quit(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     assert result.exit_code == 0
     assert "mason ready: pi — fake" in result.output
     assert "hello!" in result.output
-    assert "tokens: 10 prompt, 2 completion" in result.output
+    assert "tokens: 10+2" in result.output
     # the id a person types into 'foundation promote --session'
     assert "session 20" in result.output
 

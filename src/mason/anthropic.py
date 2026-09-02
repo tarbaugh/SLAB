@@ -326,6 +326,7 @@ def parse_reply(payload: dict[str, Any]) -> ChatReply:
         finish_reason=None if stop_reason is None else str(stop_reason),
         prompt_tokens=_prompt_tokens(usage),
         completion_tokens=_int_or_none(usage.get("output_tokens")),
+        cached_prompt_tokens=_int_or_none(usage.get("cache_read_input_tokens")),
     )
 
 

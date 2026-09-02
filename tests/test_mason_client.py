@@ -36,7 +36,11 @@ def test_chat_round_trip_with_tools_and_usage(llm_server: tuple[str, LlmScript])
                         }
                     ],
                 },
-                usage={"prompt_tokens": 120, "completion_tokens": 15},
+                usage={
+                    "prompt_tokens": 120,
+                    "completion_tokens": 15,
+                    "prompt_tokens_details": {"cached_tokens": 96},
+                },
             ),
         )
     )
@@ -45,6 +49,7 @@ def test_chat_round_trip_with_tools_and_usage(llm_server: tuple[str, LlmScript])
     assert reply.tool_calls[0].name == "read_file"
     assert reply.tool_calls[0].arguments == {"path": "a.py"}
     assert reply.prompt_tokens == 120 and reply.completion_tokens == 15
+    assert reply.cached_prompt_tokens == 96  # the share served from the prompt cache
     sent = script.requests[0]
     assert sent["model"] == "test-model"
     assert sent["temperature"] == 0.5

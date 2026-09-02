@@ -826,3 +826,96 @@ def test_memory_catalog_survives_context_compaction(
     )
     assert "# Memory" in rebuilt_system
     assert "- no-c-compiler:" in rebuilt_system
+
+
+# -- tool-result clearing -----------------------------------------------------
+
+
+def test_old_tool_results_are_cleared_in_batches_and_skills_kept(tmp_path: Path) -> None:
+    """Masking old observations is the first layer of context hygiene: once
+    the prompt is large, results older than the newest few become one-line
+    placeholders (the calls stay, so they are restorable), while a loaded
+    skill's text survives because the model keeps consulting it."""
+    session = _session(
+        tmp_path,
+        context_window=40_000,
+        clear_tool_results_at=0.5,  # trigger at 20,000 prompt tokens
+        keep_tool_results=2,
+        memory=False,
+        software_notes=False,
+    )
+    (tmp_path / "big.txt").write_text(("x" * 80 + "\n") * 40)  # ~3,200 chars per read
+    replies: list[ChatReply | Exception] = [
+        ChatReply(
+            content=None,
+            tool_calls=(
+                ToolCall(
+                    id="call_skill",
+                    name="skill",
+                    arguments={"name": "equation-of-state"},
+                    arguments_raw=json.dumps({"name": "equation-of-state"}),
+                ),
+            ),
+            prompt_tokens=100,
+            completion_tokens=10,
+        ),
+        *(_tool_reply("read_file", prompt_tokens=100, path="big.txt") for _ in range(4)),
+        # The fifth read's answer reports a large prompt: the next step clears.
+        _tool_reply("read_file", prompt_tokens=25_000, path="big.txt"),
+        _text_reply("read enough"),
+    ]
+    client = FakeClient(replies)
+    mason = Mason(session, client=client)
+    result = mason.run_turn("read big.txt over and over")
+    assert result.stop_reason == "answer"
+
+    before = client.requests[5][0]  # the request that reported 25,000 tokens: uncleared
+    assert not any("[cleared:" in str(m.get("content")) for m in before)
+    after = client.requests[6][0]
+    tool_results = [m for m in after if m.get("role") == "tool"]
+    cleared = [m for m in tool_results if str(m["content"]).startswith("[cleared:")]
+    intact = [m for m in tool_results if not str(m["content"]).startswith("[cleared:")]
+    # Five reads: the newest two kept, the oldest three cleared; the skill kept.
+    assert len(cleared) == 3
+    assert all("read_file result" in str(m["content"]) for m in cleared)
+    assert all("call again if the content is needed" in str(m["content"]) for m in cleared)
+    assert len(intact) == 3
+    assert any("Birch" in str(m["content"]) or "equation" in str(m["content"]) for m in intact)
+    # The calls that produced the cleared results are still in the history.
+    assert sum(1 for m in after if m.get("role") == "assistant" and m.get("tool_calls")) == 6
+    # The transcript records the clearing; the raw results it recorded are untouched.
+    events = [
+        json.loads(line)
+        for line in session.transcript_path.read_text().splitlines()
+        if line.strip()
+    ]
+    clearings = [e for e in events if e.get("type") == "clearing"]
+    assert len(clearings) == 1 and clearings[0]["cleared"] == 3
+    recorded_results = [
+        e["message"]["content"]
+        for e in events
+        if e.get("type") == "message" and e["message"].get("role") == "tool"
+    ]
+    assert not any(str(c).startswith("[cleared:") for c in recorded_results)
+
+
+def test_clearing_waits_for_a_worthwhile_batch(tmp_path: Path) -> None:
+    """A clearing rewrites the cached prefix, so a trivial one is deferred."""
+    session = _session(
+        tmp_path,
+        context_window=40_000,
+        clear_tool_results_at=0.5,
+        keep_tool_results=1,
+        memory=False,
+        software_notes=False,
+    )
+    (tmp_path / "mid.txt").write_text(("y" * 40 + "\n") * 20)  # ~800 chars: over the floor
+    replies: list[ChatReply | Exception] = [
+        _tool_reply("read_file", prompt_tokens=100, path="mid.txt"),
+        _tool_reply("read_file", prompt_tokens=25_000, path="mid.txt"),
+        _text_reply("done"),
+    ]
+    client = FakeClient(replies)
+    Mason(session, client=client).run_turn("read")
+    # One clearable result of ~800 chars is below the batch minimum: nothing cleared.
+    assert not any("[cleared:" in str(m.get("content")) for m in client.requests[2][0])

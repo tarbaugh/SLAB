@@ -234,6 +234,7 @@ class MasonSession:
         self.read_files: set[Path] = set()
         self.prompt_tokens = 0
         self.completion_tokens = 0
+        self.cached_prompt_tokens = 0
         self.sessions_dir = self.workspace_root / "mason" / "sessions"
         stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         self.transcript_path = self.sessions_dir / f"{stamp}-{os.getpid()}.jsonl"
@@ -481,13 +482,38 @@ class MasonSession:
         with open(self.transcript_path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(stamped, ensure_ascii=False) + "\n")
 
-    def count_usage(self, prompt_tokens: int | None, completion_tokens: int | None) -> None:
+    def count_usage(
+        self,
+        prompt_tokens: int | None,
+        completion_tokens: int | None,
+        cached_prompt_tokens: int | None = None,
+    ) -> None:
         if prompt_tokens:
             self.prompt_tokens += prompt_tokens
         if completion_tokens:
             self.completion_tokens += completion_tokens
+        if cached_prompt_tokens:
+            self.cached_prompt_tokens += cached_prompt_tokens
         if self._parent is not None:
-            self._parent.count_usage(prompt_tokens, completion_tokens)
+            self._parent.count_usage(prompt_tokens, completion_tokens, cached_prompt_tokens)
+
+    def usage_text(self) -> str:
+        """``P+C`` tokens, with the cached share when the server reported one.
+
+        Examples:
+            >>> import types
+            >>> fake = types.SimpleNamespace(prompt_tokens=300, completion_tokens=20,
+            ...                              cached_prompt_tokens=0)
+            >>> MasonSession.usage_text(fake)
+            '300+20'
+            >>> fake.cached_prompt_tokens = 210
+            >>> MasonSession.usage_text(fake)
+            '300+20 (210 cached)'
+        """
+        text = f"{self.prompt_tokens}+{self.completion_tokens}"
+        if self.cached_prompt_tokens:
+            text += f" ({self.cached_prompt_tokens} cached)"
+        return text
 
     def latest_transcript(self) -> Path | None:
         """The newest conversation transcript in this workspace, or None.

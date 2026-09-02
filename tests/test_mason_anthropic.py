@@ -192,6 +192,7 @@ def test_prompt_tokens_include_cached_input() -> None:
     )
     assert reply.prompt_tokens == 41_500
     assert reply.completion_tokens == 12
+    assert reply.cached_prompt_tokens == 40_000  # the cheap share, for the cost reading
 
 
 def test_refusal_raises_instead_of_looking_like_an_empty_answer() -> None:

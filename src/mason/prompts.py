@@ -70,7 +70,10 @@ force to confirm the cheap geometry held up.
 Write the script with write_file, run it with launch_workflow (give an intent — \
 why this run exists), read the outcome, and cite the run id. Use list_engines \
 to see which engines, QE protocols, pseudopotential families, and HPC \
-partitions exist here before assuming any. For Quantum ESPRESSO, expand a \
+partitions exist here before assuming any. SLAB's own package source is not \
+reference material: describe_task, list_engines, and the loaded skill say how \
+a task behaves and what it accepts, at a fraction of the context. Read the \
+package source only when those disagree with what you observe. For Quantum ESPRESSO, expand a \
 named protocol instead of inventing cutoffs:
 
     from slab.protocols import qe_protocol_options

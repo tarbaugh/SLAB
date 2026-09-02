@@ -267,3 +267,29 @@ def test_a_session_that_launched_nothing_reports_none(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     assert "runs this session created: none" in result.output
     assert "no finish report" in result.output
+
+
+def test_the_cached_share_the_peak_and_the_clearings_are_counted(tmp_path: Path) -> None:
+    transcript = _write(
+        tmp_path / "20260901-120000-1.jsonl",
+        [
+            {"at": "2026-09-01T12:00:00+00:00", "type": "usage", "prompt_tokens": 9_000,
+             "completion_tokens": 100, "cached_prompt_tokens": 8_000},
+            {"at": "2026-09-01T12:00:10+00:00", "type": "usage", "prompt_tokens": 31_000,
+             "completion_tokens": 200, "cached_prompt_tokens": 27_000},
+            {"at": "2026-09-01T12:00:20+00:00", "type": "clearing", "cleared": 4,
+             "chars": 14_000},
+            {"at": "2026-09-01T12:00:30+00:00", "type": "usage", "prompt_tokens": 20_000,
+             "completion_tokens": 50},
+        ],
+    )
+    summary = summarize(transcript)
+    assert summary["prompt_tokens"] == 60_000
+    assert summary["cached_prompt_tokens"] == 35_000
+    assert summary["total_cached_prompt_tokens"] == 35_000
+    assert summary["peak_prompt_tokens"] == 31_000
+    assert summary["clearings"] == 1
+    shown = runner.invoke(app, ["report", str(transcript)])
+    assert shown.exit_code == 0, shown.output
+    assert "tokens 60000+350 (35000 cached)" in shown.output
+    assert "context: peak prompt 31000 tokens, 1 clearing(s), 0 compaction(s)" in shown.output

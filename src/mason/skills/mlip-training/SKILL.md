@@ -102,11 +102,16 @@ failure: judge it.
   and the dataset provenance (which runs, which engine, how many
   structures) together. A potential without its training provenance is
   fiction with good statistics.
-- To *use* the model: LAMMPS `pair_style grace` (or `grace/fs` with
-  the FS export), a registry engine entry pointing at
-  `tensorpotential.calculator.TPCalculator`, or ask the site to serve
-  it through rootstock. The trained model is never an `engine=` name
-  by itself.
+- To *use* the model, the routes are fixed by where tensorpotential
+  lives. It lives in gracemaker's own environment, never in SLAB's, so
+  a registry entry pointing at `tensorpotential.calculator.TPCalculator`
+  cannot import here; do not spend steps trying. The routes that work:
+  LAMMPS `pair_style grace` (or `grace/fs` with the FS export) when the
+  site's LAMMPS was built with the ML-GRACE package, or asking the site
+  to serve the checkpoint through rootstock. When neither exists on this
+  machine, report the trained artifact and its metrics, and name the
+  missing route as a machine fact. The trained model is never an
+  `engine=` name by itself.
 
 ## When not to use this
 
