@@ -219,3 +219,16 @@ def test_deep_probes_the_snapshot_and_names_a_truncated_transfer(
     ase_write(snapshot / "cifs" / "zz" / "gone.cif", bulk("Cu", "fcc", a=3.6))
     healed = runner.invoke(app, ["doctor", "--offline", "--deep"])
     assert "[+] deep mp: 5 sampled CIFs resolve and exist" in healed.output
+
+
+def test_a_render_with_an_entry_agent_is_fresh(project: Path) -> None:
+    """The freshness re-render must carry the recorded agent, or every
+    planner job would read as stale."""
+    (project / "slab.toml").write_text(
+        '[agent]\nmodel = "m"\n[agent.sandbox]\nimage = "/i.sif"\n'
+        '[hpc]\ndefault_partition = "cpu"\n[hpc.partitions.cpu]\n'
+    )
+    rendered = runner.invoke(mason_app, ["sandbox", "render", "measure a0", "--agent", "planner"])
+    assert rendered.exit_code == 0, rendered.output
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert "[+] rendered job: sandbox/ matches a fresh render" in result.output

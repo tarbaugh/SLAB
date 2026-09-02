@@ -442,7 +442,9 @@ The forwarder terminates the plain HTTP the container speaks, sends the
 request on over TLS, and authenticates with the key named by `[agent]
 api_key_env`. The key is read on the host at job start. It never enters the
 container, because the container is launched `--cleanenv` and the rendered
-`slab.toml` carries no `api_key_env` and no endpoint. The agent can
+`slab.toml` carries no `api_key_env` and no endpoint. The
+`[agent.roster.<name>]` tables travel with their `provider`, `endpoint`,
+and `api_key_env` keys removed, for the same reason. The agent can
 therefore neither read the key nor change where its requests go.
 
 The rendered job names the variable and never its value:

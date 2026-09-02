@@ -560,6 +560,10 @@ def benchmark_launch(
         Path | None,
         typer.Option("--out", help="Directory for the rendered files (default: ./sandbox)."),
     ] = None,
+    agent: Annotated[
+        str | None,
+        typer.Option("--agent", help="Agent card the job runs as (default pi)."),
+    ] = None,
 ) -> None:
     """Submit one campaign as a sandbox job; score it with 'score' after it ends."""
     from mason.cli import launch_sandbox
@@ -575,6 +579,7 @@ def benchmark_launch(
             out_dir=out_dir,
             engine_tasks=None,
             emit=typer.echo,
+            agent=agent,
         )
     except _BENCH_ERRORS as e:
         _fail(str(e))
@@ -670,6 +675,10 @@ def benchmark_render(
         Path | None,
         typer.Option("--out", help="Directory for the rendered files (default: ./sandbox)."),
     ] = None,
+    agent: Annotated[
+        str | None,
+        typer.Option("--agent", help="Agent card the job runs as (default pi)."),
+    ] = None,
 ) -> None:
     """Write the campaign's sandbox job files without submitting them.
 
@@ -688,6 +697,7 @@ def benchmark_render(
             time_limit=time_limit,
             out=out,
             engine_tasks=None,
+            agent=agent,
         )
     except _BENCH_ERRORS as e:
         _fail(str(e))

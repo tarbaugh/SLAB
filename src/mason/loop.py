@@ -47,7 +47,7 @@ from mason.client import (
 from mason.config import AgentConfig, override_agent, roster_agent_config
 from mason.errors import MasonError
 from mason.prompts import COMPACTION_PROMPT, system_messages, team_block
-from mason.roster import AgentSpec, check_overrides, discover_roster, skills_for
+from mason.roster import AgentSpec, check_overrides, discover_roster, hands, skills_for
 from mason.session import MasonSession
 from mason.skills import Skill, discover_skills
 from mason.tools import TOOL_VOCABULARY, Toolbox, build_toolbox
@@ -152,6 +152,32 @@ def connection_profile(agent: AgentConfig) -> tuple[object, ...]:
     )
 
 
+def _check_lead_can_delegate(
+    spec: AgentSpec, agent: AgentConfig, roster: dict[str, AgentSpec]
+) -> None:
+    """Refuse a card that hands its work to a team it cannot reach.
+
+    A card whose tool allowlist names ``delegate`` has no way to work
+    without it: the planner, for one, has no shell and no launch tool. Run
+    with delegation off or with nobody to delegate to, it would sit with
+    the tools of a reader. Better to say so before the session lock is
+    taken and the model is called.
+    """
+    if spec.tools is None or "delegate" not in spec.tools:
+        return
+    if not agent.delegation:
+        raise MasonError(
+            f"the {spec.name} card hands every step to its team, but [agent] "
+            f"delegation is off; set delegation = true or run another card"
+        )
+    if not hands(spec, roster):
+        raise MasonError(
+            f"the {spec.name} card hands every step to its team, but no card on the "
+            f"roster can take a brief (every other card delegates); add a card that "
+            f"does not, such as the built-in worker"
+        )
+
+
 def _take_api_key(key_var: str, keys: dict[str, str]) -> str | None:
     """The key named by *key_var*: from *keys* when read before, else from the
     environment, withdrawn from os.environ once read so a workflow script the
@@ -253,6 +279,7 @@ class Mason:
         self.depth = depth
         if depth == 0:
             check_overrides(session.agent, self.roster)
+            _check_lead_can_delegate(spec, session.agent, self.roster)
             # One running loop per workspace; children run inside this lock.
             session.acquire_session_lock()
         session.agent_name = spec.name

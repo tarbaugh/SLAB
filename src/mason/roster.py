@@ -27,8 +27,15 @@ zero, so no combination of cards can recurse.
 Cards are discovered like skills, and a name in a higher layer shadows the
 lower ones whole: project ``<cwd>/agents/*.md``, then user
 ``~/.config/slab/agents/*.md``, then the built-ins shipped in the package
-(``pi``, ``dft-expert``, ``md-expert``, ``analysis-expert``). A project
-card named ``pi.md`` therefore replaces the default agent entirely.
+(``pi``, ``planner``, ``worker``, ``dft-expert``, ``md-expert``,
+``analysis-expert``). A project card named ``pi.md`` therefore replaces
+the default agent entirely.
+
+Two cards lead: ``pi`` runs what is small and delegates what is separable,
+``planner`` runs nothing and delegates every step. A card that delegates
+is never on another card's team (:func:`hands`), so the two leads never
+brief each other, and ``worker`` is the executor for any step no
+specialist's domain names.
 
 Cards are portable content and never name models. Machine facts — which
 model, which endpoint, what budgets — live in config as
@@ -185,6 +192,22 @@ def discover_roster(cwd: Path) -> dict[str, AgentSpec]:
     roster.update(_layer(_user_root(), "user"))
     roster.update(_layer(Path(cwd) / "agents", "project"))
     return roster
+
+
+def hands(spec: AgentSpec, roster: dict[str, AgentSpec]) -> dict[str, AgentSpec]:
+    """The cards *spec* may delegate to: everyone on the roster who does not lead.
+
+    A card that delegates leads a group of its own. Delegation goes one
+    level down, so a lead handed a task would run as an executor stripped
+    of its one distinguishing tool, which the worker already is by design.
+    *spec* itself is excluded. Name order, so the team list and the
+    delegate tool's refusals read the same.
+    """
+    return {
+        name: card
+        for name, card in sorted(roster.items())
+        if name != spec.name and not card.delegates
+    }
 
 
 def check_overrides(agent: AgentConfig, roster: dict[str, AgentSpec]) -> None:

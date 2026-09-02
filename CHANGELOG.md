@@ -5,6 +5,18 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- A planner and a worker. The `planner` card writes the plan and hands
+  every step to the team; its tool allowlist has no shell, no launch, and
+  no file edits, and it is refused up front when delegation is off or
+  nobody on the roster can take a brief. The `worker` card executes any
+  scoped step no specialist's domain names. A card that delegates is a
+  lead, never a hand: the two leads are not on each other's team, and a
+  brief to one is refused. `--agent` on `slab mason sandbox render` and
+  `launch` and on `slab benchmark render` and `launch` names the entry
+  card, the render records it, and the `[agent.roster.<name>]` tables now
+  travel into the sandbox (minus provider, endpoint, and key), so the
+  planner can reason at `xhigh` while the worker runs at `low` inside one
+  job.
 - Machine memories carry a version stamp. `remember` records the software
   the fact names, at the versions present when it was written, under
   `against` in the frontmatter; the catalog compares each stamp with the

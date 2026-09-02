@@ -306,15 +306,11 @@ def build_toolbox(
         _add_machine_memory_tools(box, session)
     if visible:
         _add_skill_tool(box, session, visible)
-    if (
-        spec is not None
-        and spec.delegates
-        and depth == 0
-        and session.agent.delegation
-        and roster is not None
-        and len(roster) > 1
-    ):
-        _add_delegate_tool(box, session, spec, roster, skills, parent_client)
+    if spec is not None and spec.delegates and depth == 0 and session.agent.delegation:
+        from mason.roster import hands
+
+        if roster is not None and hands(spec, roster):
+            _add_delegate_tool(box, session, spec, roster, skills, parent_client)
     if spec is not None and spec.tools is not None:
         for name in [n for n in box.tools if n not in spec.tools and n != "finish"]:
             del box.tools[name]
@@ -1457,13 +1453,17 @@ def _add_delegate_tool(
         # spins a loop of its own.
         from mason.config import override_agent, roster_agent_config
         from mason.loop import Mason, client_from_config, connection_profile
+        from mason.roster import hands
 
         name = str(arguments["agent"])
-        target = roster.get(name)
-        others = ", ".join(sorted(n for n in roster if n != spec.name))
+        team = hands(spec, roster)
+        others = ", ".join(team)
         if name == spec.name:
             return f"you cannot delegate to yourself; your team: {others}"
+        target = team.get(name)
         if target is None:
+            if name in roster:
+                return f"{name} leads a group of its own and takes no briefs; your team: {others}"
             return f"no agent named {name!r}; your team: {others}"
         task = str(arguments["task"])
         context = arguments.get("context")

@@ -1605,3 +1605,65 @@ def test_verify_treats_an_http_error_as_a_reachable_route(bridged_stub: int) -> 
     finally:
         server.shutdown()
         server.server_close()
+
+
+# -- a planner and a worker in the job ----------------------------------------
+
+
+def test_roster_tables_travel_without_connection_keys(tmp_path: Path) -> None:
+    import tomllib
+
+    agent = _agent(
+        roster={
+            "planner": {"effort": "xhigh", "provider": "anthropic", "model": "claude-opus-5"},
+            "worker": {"effort": "low"},
+        }
+    )
+    text, warnings = sandbox_toml(_slab_cfg(), agent, tmp_path / "ws")
+    loaded = tomllib.loads(text)
+    assert loaded["agent"]["roster"] == {
+        "planner": {"effort": "xhigh", "model": "claude-opus-5"},
+        "worker": {"effort": "low"},
+    }
+    assert "anthropic" not in text
+    assert any("[agent.roster.planner] provider cannot follow" in w for w in warnings)
+    assert not any("worker" in w for w in warnings)
+
+
+def test_render_names_the_entry_agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    _minimal_project(tmp_path)
+    result = runner.invoke(
+        app,
+        ["sandbox", "render", "measure a0", "-w", str(tmp_path / "ws"), "--agent", "planner"],
+    )
+    assert result.exit_code == 0, result.output
+    script = (tmp_path / "sandbox" / "mason-sandbox.sbatch").read_text()
+    assert "mason run --auto --agent planner --endpoint" in script
+    record = json.loads((tmp_path / "sandbox" / "render.json").read_text())
+    assert record["agent"] == "planner"
+    # An unknown card fails on the host, before any job exists.
+    result = runner.invoke(
+        app,
+        ["sandbox", "render", "measure a0", "-w", str(tmp_path / "ws"), "--agent", "plannr"],
+    )
+    assert result.exit_code != 0
+    assert "no agent named 'plannr'" in result.output
+
+
+def test_launch_reuses_the_recorded_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _minimal_project(tmp_path)
+    render = runner.invoke(
+        app,
+        ["sandbox", "render", "the recorded goal", "-w", str(tmp_path / "ws"),
+         "--agent", "planner"],
+    )
+    assert render.exit_code == 0, render.output
+    submitted: list[dict[str, object]] = []
+    _fake_launch_plumbing(monkeypatch, submitted)
+    result = runner.invoke(app, ["sandbox", "launch", "-w", str(tmp_path / "ws")])
+    assert result.exit_code == 0, result.output
+    assert "--agent planner" in str(submitted[0]["script"])

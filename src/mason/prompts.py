@@ -17,7 +17,7 @@ from typing import Any
 
 from foundation import memory as memory_store
 from mason.notes import notes_block
-from mason.roster import AgentSpec
+from mason.roster import AgentSpec, hands
 from mason.session import MasonSession
 from mason.skills import Skill, catalog_block
 from slab.config import load_config as load_slab_config
@@ -251,12 +251,14 @@ Do not invent anything not in the transcript. Do not soften failures.
 def team_block(spec: AgentSpec, roster: dict[str, AgentSpec]) -> str:
     """The ``# Your team`` section for a delegating agent, or empty.
 
-    One line per other card — the descriptions are written as delegation
-    triggers, so this list is what the PI reads when deciding whom to hand
-    a task to. Rendered only when the ``delegate`` tool actually exists in
-    the session, so the prompt never promises an absent tool.
+    One line per card the agent may hand a task to — the descriptions are
+    written as delegation triggers, so this list is what a lead reads when
+    deciding whom to brief. A card that delegates is a lead, not a hand,
+    and never appears here. Rendered only when the ``delegate`` tool
+    actually exists in the session, so the prompt never promises an absent
+    tool.
     """
-    others = [card for name, card in sorted(roster.items()) if name != spec.name]
+    others = list(hands(spec, roster).values())
     if not others:
         return ""
     lines = [

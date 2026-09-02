@@ -12,9 +12,10 @@ are exact captures from real executions against a local Ollama.
 
 ## The roster
 
-Four cards ship built in. `slab mason roster` lists what is visible from the
-current project, with the layer each card came from and the model it
-would use:
+Six cards ship built in: two leads, `pi` and `planner`, three
+specialists, and a `worker`. `slab mason roster` lists what is visible
+from the current project, with the layer each card came from and the
+model it would use:
 
 ```bash
 slab mason roster
@@ -25,6 +26,8 @@ pi                 built-in  llama3.1:8b                  18 skill(s)  [delegate
 analysis-expert    built-in  llama3.1:8b                  9 skill(s)
 dft-expert         built-in  llama3.1:8b                  10 skill(s)
 md-expert          built-in  llama3.1:8b                  13 skill(s)
+planner            built-in  llama3.1:8b                  18 skill(s)  [delegates]
+worker             built-in  llama3.1:8b                  18 skill(s)
 ```
 
 Each agent runs the same harness with a different role prompt, its own
@@ -51,6 +54,9 @@ code, not prompt text:
 
 - Delegation goes one level down. A delegated agent never has the
   `delegate` tool, whatever its card says.
+- A card that delegates is a lead, not a hand. The `pi` and the
+  `planner` never appear on each other's team, and a brief sent to one
+  is refused with the team named.
 - A delegated agent also loses the `plan` tool. `PLAN.md` belongs to the
   turn owner.
 - Every mutating tool call a specialist makes passes the same approval
@@ -291,6 +297,57 @@ every claim. You do not compute and you do not speculate.
 The shared harness discipline (evidence, verification, honesty, tool
 rules) is appended to every card automatically. A card states identity
 and domain doctrine, nothing else, so 20 to 60 lines is the normal size.
+
+## A planner and a worker
+
+Deep reasoning is expensive at every step, and most steps do not need
+it. The `planner` card keeps the reasoning for the plan and hands the
+steps to cheaper agents:
+
+- The planner writes `PLAN.md` first, one step per brief, each with its
+  success criterion and the evidence it must return.
+- It hands every step to a specialist or to the `worker` with the
+  `delegate` tool, and revises the plan after each report.
+- It confirms every cited run with `show_run` before a number enters the
+  plan, and it owns the final report.
+
+The rule that the planner runs nothing is code. Its tool allowlist has
+no `shell`, no `launch_workflow`, and no file edits, so the card cannot
+drift into doing the work itself at planner prices. A planner started
+with `[agent] delegation = false`, or on a roster where every other card
+delegates, is refused before the model is called, because it would have
+the tools of a reader and nobody to brief.
+
+The `worker` is the executor for any step no specialist's domain names.
+It sees every skill, takes one brief, does what the brief says and no
+more, and returns numbers with units and run ids.
+
+Give the planner the reasoning and the worker the economy in
+`slab.toml`, then start the planner as the entry agent:
+
+```toml
+[agent.roster.planner]
+effort = "xhigh"
+
+[agent.roster.worker]
+effort = "low"
+```
+
+```bash
+slab mason run --agent planner "measure the lattice constant of fcc Cu with the balanced protocol"
+```
+
+`slab mason sandbox render`, `sandbox launch`, `slab benchmark render`,
+and `benchmark launch` take the same `--agent` flag. The render records
+it, so a later `launch` without arguments reuses it, and `slab doctor`
+re-renders with it when it checks that the job files are fresh.
+
+In a sandbox job the `[agent.roster.<name>]` tables travel with the
+rendered config, so the effort split holds inside the job. Their
+`provider`, `endpoint`, and `api_key_env` keys stay on the host, because
+every agent in the job talks to the one bridged endpoint, and the render
+warns when it drops one. A planner on a different provider than its
+workers is possible outside the sandbox only.
 
 ## A model per agent
 

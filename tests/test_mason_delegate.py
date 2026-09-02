@@ -344,3 +344,12 @@ def test_a_differing_profile_builds_a_fresh_client(
     assert result.stop_reason == "answer"
     assert built == ["bigger-model"]
     assert len(client.requests) == 2  # the parent's two calls only
+
+
+def test_a_lead_takes_no_briefs(tmp_path: Path) -> None:
+    client = FakeClient([_call("delegate", agent="planner", task="plan it"), _text("done")])
+    mason = Mason(_session(tmp_path), client=client)
+    mason.run_turn("go")
+    seen = json.dumps(client.requests[1])
+    assert "planner leads a group of its own and takes no briefs" in seen
+    assert "your team: analysis-expert, dft-expert, md-expert, worker" in seen

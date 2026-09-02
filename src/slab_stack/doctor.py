@@ -294,6 +294,7 @@ def _freshness_row(agent: AgentConfig, workspace: Path | None) -> tuple[str, str
         toml_path = out_dir / "slab.toml"
         toml_text, _warnings = sandbox_toml(slab_cfg, agent, root.resolve(), snapshots)
         engine_tasks = record.get("engine_tasks")
+        entry_agent = record.get("agent")
         script, _binds, context = render_sandbox_script(
             agent,
             hpc=slab_cfg.hpc,
@@ -306,6 +307,7 @@ def _freshness_row(agent: AgentConfig, workspace: Path | None) -> tuple[str, str
             time_limit=record.get("time_limit"),
             snapshots=snapshots,
             engine_tasks=int(str(engine_tasks)) if engine_tasks is not None else None,
+            entry_agent=str(entry_agent) if entry_agent else None,
         )
     except _ERRORS as e:
         return ("x", f"rendered job: no longer renders ({e}) — stale; re-render")

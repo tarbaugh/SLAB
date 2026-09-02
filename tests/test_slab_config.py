@@ -260,7 +260,7 @@ def test_template_declares_no_table_twice_even_in_comments(tmp_path: Path) -> No
 def test_every_key_the_template_shows_is_a_key_the_schema_accepts() -> None:
     """The template is documentation; a stale key in it teaches a load error."""
     from foundation.config import WorkspaceConfig
-    from mason.config import AgentConfig, SandboxConfig, ServeConfig
+    from mason.config import AgentConfig, RosterOverride, SandboxConfig, ServeConfig
 
     models = {
         "": SlabConfig,
@@ -278,6 +278,8 @@ def test_every_key_the_template_shows_is_a_key_the_schema_accepts() -> None:
         "[agent]": AgentConfig,
         "[agent.serve]": ServeConfig,
         "[agent.sandbox]": SandboxConfig,
+        "[agent.roster.planner]": RosterOverride,
+        "[agent.roster.worker]": RosterOverride,
     }
     table = ""
     unknown: list[str] = []

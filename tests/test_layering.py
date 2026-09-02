@@ -202,7 +202,14 @@ def test_builtin_cards_and_skills_ship_inside_the_package() -> None:
     (hatchling ships whole package directories, the py.typed precedent), and
     every built-in skill must carry its manifest."""
     cards = sorted(p.name for p in (SRC / "mason" / "agents").glob("*.md"))
-    assert cards == ["analysis-expert.md", "dft-expert.md", "md-expert.md", "pi.md"]
+    assert cards == [
+        "analysis-expert.md",
+        "dft-expert.md",
+        "md-expert.md",
+        "pi.md",
+        "planner.md",
+        "worker.md",
+    ]
     skills = sorted(
         p.name for p in (SRC / "mason" / "skills").iterdir() if p.is_dir()
     )

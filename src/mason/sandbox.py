@@ -1405,12 +1405,16 @@ def _emit_table(name: str, mapping: dict[str, Any], out: list[str]) -> None:
 
 
 #: [agent] keys that must not follow the config into the sandbox: the serve
-#: and roster machinery, the sandbox's own table, connection details the
-#: render replaces (--endpoint points at the bridge), and the approval mode
+#: machinery, the sandbox's own table, connection details the render
+#: replaces (--endpoint points at the bridge), and the approval mode
 #: (--auto on the command line is the explicit, visible choice).
-_AGENT_KEYS_DROPPED = frozenset(
-    {"serve", "roster", "sandbox", "endpoint", "api_key_env", "approval"}
-)
+_AGENT_KEYS_DROPPED = frozenset({"serve", "sandbox", "endpoint", "api_key_env", "approval"})
+
+#: [agent.roster.<name>] keys that cannot follow: every agent in the job
+#: talks to the one bridged endpoint, so a per-card provider, endpoint, or
+#: key has nothing to point at. The rest of the table (model, effort,
+#: budgets) travels, which is what a planner-and-worker split needs.
+_ROSTER_KEYS_DROPPED = frozenset({"provider", "endpoint", "api_key_env"})
 
 
 def sandbox_toml(
@@ -1482,6 +1486,18 @@ def sandbox_toml(
         for k, v in agent.model_dump(exclude_defaults=True).items()
         if k not in _AGENT_KEYS_DROPPED
     }
+    roster_tables: dict[str, dict[str, Any]] = agent_table.pop("roster", None) or {}
+    for card, table in roster_tables.items():
+        dropped = sorted(k for k in table if k in _ROSTER_KEYS_DROPPED)
+        if dropped:
+            warnings.append(
+                f"[agent.roster.{card}] {', '.join(dropped)} cannot follow the config "
+                f"into the sandbox: every agent in the job talks to the one bridged "
+                f"endpoint; the table travels without them"
+            )
+        kept = {k: v for k, v in table.items() if k not in _ROSTER_KEYS_DROPPED}
+        if kept:
+            agent_table.setdefault("roster", {})[card] = kept
     # With no [hpc] table, an unset profile would derive to "laptop" — and
     # the prompt would tell a whole compute allocation to think small (the
     # first real run's agent spent turns reasoning from "this is a laptop").
@@ -1671,6 +1687,7 @@ def render_record(
     time_limit: str | None,
     engine_tasks: int | None,
     out_dir: Path,
+    agent: str | None = None,
 ) -> dict[str, Any]:
     """The arguments and provenance of one render, for ``render.json``.
 
@@ -1684,6 +1701,7 @@ def render_record(
 
     return {
         "goal": goal,
+        "agent": agent,
         "partition": partition,
         "time_limit": time_limit,
         "engine_tasks": engine_tasks,
@@ -1717,6 +1735,7 @@ def render_sandbox_script(
     time_limit: str | None = None,
     snapshots: dict[str, SetupSnapshot] | None = None,
     engine_tasks: int | None = None,
+    entry_agent: str | None = None,
 ) -> tuple[str, list[str], str]:
     """The batch script for one autonomous, network-dark session.
 
@@ -1730,7 +1749,8 @@ def render_sandbox_script(
     the serve record's), and bridge it onto a unix socket with one fixed
     destination. Container side: forward the socket to loopback, prove
     darkness and reachability with ``slab mason sandbox verify`` (either failing
-    aborts the job), then run the goal with ``slab mason run --auto``.
+    aborts the job), then run the goal with ``slab mason run --auto``, as
+    *entry_agent* when one is named (``--agent``).
 
     A gateway upstream authenticates with the key named by ``[agent]
     api_key_env``, read on the host at job start. The container is launched
@@ -1800,8 +1820,9 @@ def render_sandbox_script(
             "trap 'kill \"$FORWARD_PID\" 2>/dev/null || true' EXIT",
             f"{slab} mason sandbox verify --port {BRIDGE_PORT}",
             f"cd {shlex.quote(str(project))}",
-            f"{slab} mason run --auto --endpoint http://127.0.0.1:{BRIDGE_PORT}/v1 "
-            f"{shlex.quote(goal)}",
+            f"{slab} mason run --auto"
+            + (f" --agent {shlex.quote(entry_agent)}" if entry_agent else "")
+            + f" --endpoint http://127.0.0.1:{BRIDGE_PORT}/v1 {shlex.quote(goal)}",
         ]
     )
     command = " \\\n  ".join(

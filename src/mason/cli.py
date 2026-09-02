@@ -189,11 +189,13 @@ def render_sandbox_files(
     time_limit: str | None,
     out: Path | None,
     engine_tasks: int | None,
+    agent: str | None = None,
 ) -> tuple[Path, str]:
     """Render the sandbox job files for *goal* without submitting (public form).
 
     Shared with ``slab benchmark render``: the files land in *out* (default
     ``./sandbox``) for reading and tweaking before an explicit ``sbatch``.
+    *agent* names the card the job runs as; ``None`` is the PI.
     """
     return _render_sandbox_files(
         goal,
@@ -202,6 +204,7 @@ def render_sandbox_files(
         time_limit=time_limit,
         out=out,
         engine_tasks=engine_tasks,
+        agent=agent,
     )
 
 
@@ -851,6 +854,10 @@ def mason_sandbox_render(
             "allocation's SLURM_NTASKS — often too many for small cells).",
         ),
     ] = None,
+    agent: Annotated[
+        str | None,
+        typer.Option("--agent", help="Agent card the job runs as (default pi)."),
+    ] = None,
 ) -> None:
     """Write the batch script, slab.toml, context.md, and render.json.
 
@@ -864,6 +871,7 @@ def mason_sandbox_render(
         time_limit=time_limit,
         out=out,
         engine_tasks=engine_tasks,
+        agent=agent,
     )
     typer.echo(
         "read these files, then submit with: "
@@ -880,9 +888,13 @@ def _render_sandbox_files(
     time_limit: str | None,
     out: Path | None,
     engine_tasks: int | None,
+    agent: str | None = None,
 ) -> tuple[Path, str]:
     """Render and write the four sandbox files; echo warnings and paths."""
     import json
+
+    if agent is not None:
+        _resolve_spec(agent)  # an unknown card fails here, not inside the job
 
     from mason.sandbox import (
         render_record,
@@ -896,15 +908,15 @@ def _render_sandbox_files(
     out_dir = (out if out is not None else project / "sandbox").resolve()
     toml_path = out_dir / "slab.toml"
     try:
-        agent, hpc, root = _serve_inputs(workspace)
+        config, hpc, root = _serve_inputs(workspace)
         slab_cfg = load_slab_config(project)
         # Runs each engine's setup lines once, here on the host, so their
         # module loads can be frozen into exports and binds the container
         # can actually use.
         snapshots = snapshot_engines(slab_cfg)
-        toml_text, toml_warnings = sandbox_toml(slab_cfg, agent, root.resolve(), snapshots)
+        toml_text, toml_warnings = sandbox_toml(slab_cfg, config, root.resolve(), snapshots)
         script, bind_warnings, sandbox_context = render_sandbox_script(
-            agent,
+            config,
             hpc,
             slab_cfg,
             root.resolve(),
@@ -915,6 +927,7 @@ def _render_sandbox_files(
             time_limit=time_limit,
             snapshots=snapshots,
             engine_tasks=engine_tasks,
+            entry_agent=agent,
         )
     except (MasonError, FoundationError, SlabError) as e:
         _fail(str(e))
@@ -926,6 +939,7 @@ def _render_sandbox_files(
     context_path.write_text(sandbox_context.rstrip("\n") + "\n", encoding="utf-8")
     record = render_record(
         goal,
+        agent=agent,
         partition=partition,
         time_limit=time_limit,
         engine_tasks=engine_tasks,
@@ -966,6 +980,10 @@ def mason_sandbox_launch(
         int | None,
         typer.Option("--engine-tasks", min=1, help="Pin the MPI rank count for in-job engines."),
     ] = None,
+    agent: Annotated[
+        str | None,
+        typer.Option("--agent", help="Agent card the job runs as (default pi)."),
+    ] = None,
 ) -> None:
     """Preflight, render fresh, and submit — one motion, never a stale render.
 
@@ -992,6 +1010,8 @@ def mason_sandbox_launch(
             time_limit = str(record["time_limit"])
         if engine_tasks is None and record.get("engine_tasks") is not None:
             engine_tasks = int(str(record["engine_tasks"]))
+        if agent is None and record.get("agent"):
+            agent = str(record["agent"])
     try:
         job = launch_sandbox(
             goal,
@@ -1001,6 +1021,7 @@ def mason_sandbox_launch(
             out_dir=out_dir,
             engine_tasks=engine_tasks,
             emit=typer.echo,
+            agent=agent,
         )
     except (MasonError, FoundationError, SlabError) as e:
         _fail(str(e))
@@ -1018,6 +1039,7 @@ def launch_sandbox(
     out_dir: Path,
     engine_tasks: int | None,
     emit: Callable[[str], None],
+    agent: str | None = None,
 ) -> SubmittedJob:
     """Preflight, render fresh into *out_dir*, and submit one sandbox job.
 
@@ -1029,8 +1051,8 @@ def launch_sandbox(
     from mason.sandbox import preflight
     from slab.hpc import submit
 
-    agent, hpc, root = _serve_inputs(workspace)
-    rows = preflight(agent, root)
+    config, hpc, root = _serve_inputs(workspace)
+    rows = preflight(config, root)
     for mark, message in rows:
         emit(f"[{mark}] {message}")
     if any(mark == "-" for mark, _ in rows):
@@ -1042,6 +1064,7 @@ def launch_sandbox(
         time_limit=time_limit,
         out=out_dir,
         engine_tasks=engine_tasks,
+        agent=agent,
     )
     resolved, _spec = hpc.resolve_partition(partition)
     return submit(script, job_name="mason-sandbox", partition=resolved, directory=out_dir)

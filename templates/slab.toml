@@ -178,6 +178,19 @@ schema_version = 1
 # effort = "medium"                         # low | medium | high | xhigh | max
 # max_reply_tokens = 16000                  # bounds thinking AND reply together
 
+# -- A planner and a worker. The built-in planner card writes the plan and hands
+# every step to the team; it has no shell and no launch tool. Keep the deep
+# reasoning (and, outside the sandbox, a larger model) for it, and run the steps
+# cheaply. Cards never name models: these tables do. Start it with
+# 'slab mason run --agent planner ...' or 'slab benchmark launch --agent planner'.
+# In a sandbox job every agent shares the one bridged endpoint, so a roster
+# table's provider, endpoint, and api_key_env stay on the host; model, effort,
+# and the budgets travel.
+# [agent.roster.planner]
+# effort = "xhigh"
+# [agent.roster.worker]
+# effort = "low"
+
 # How 'slab mason serve' starts that server as a batch job. The GPU node is the
 # scheduler's choice, so the endpoint URL is discovered, never configured.
 # Compute nodes rarely have internet: download the model once, on the login node

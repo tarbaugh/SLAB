@@ -362,3 +362,21 @@ def test_memory_list_of_unstamped_memories_probes_nothing(
     result = runner.invoke(app, ["memory", "list"])
     assert result.exit_code == 0, result.output
     assert "changed since" not in result.output
+
+
+def test_benchmark_render_passes_the_entry_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import mason.cli
+
+    seen: dict[str, object] = {}
+
+    def fake(goal: str, **kwargs: object) -> tuple[Path, str]:
+        seen.update(kwargs, goal=goal)
+        return tmp_path / "mason-sandbox.sbatch", "script"
+
+    monkeypatch.setattr(mason.cli, "render_sandbox_files", fake)
+    result = runner.invoke(app, ["benchmark", "render", "1", "--agent", "planner"])
+    assert result.exit_code == 0, result.output
+    assert seen["agent"] == "planner"
+    assert "rendered Q1" in result.output

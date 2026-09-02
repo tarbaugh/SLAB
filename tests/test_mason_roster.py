@@ -312,3 +312,53 @@ def test_a_wrong_typed_description_names_the_actual_problem(tmp_path: Path) -> N
     )
     with pytest.raises(RosterError, match="must be a non-empty string"):
         parse_agent_card(directory / "listy.md", "project")
+
+
+# -- the planner and the worker -----------------------------------------------
+
+
+def test_builtin_roster_holds_two_leads_and_a_worker(tmp_path: Path) -> None:
+    from mason.roster import hands
+
+    roster = discover_roster(tmp_path)
+    assert {"planner", "worker"} <= set(roster)
+    assert roster["planner"].delegates and roster["planner"].skills_scope == "all"
+    assert not roster["worker"].delegates and roster["worker"].tools is None
+    # A lead is never a hand: neither lead is on the other's team.
+    team = ["analysis-expert", "dft-expert", "md-expert", "worker"]
+    assert list(hands(roster["planner"], roster)) == team
+    assert list(hands(roster["pi"], roster)) == team
+
+
+def test_the_planner_runs_nothing_itself(tmp_path: Path) -> None:
+    roster = discover_roster(tmp_path)
+    mason = Mason(_session(tmp_path), client=_Idle(), spec=roster["planner"], roster=roster)
+    tools = set(mason.toolbox.tools)
+    assert {"delegate", "plan", "show_run", "list_runs", "notebook", "finish"} <= tools
+    assert not tools & {"shell", "launch_workflow", "write_file", "edit_file", "submit_job"}
+    (system,) = mason.messages
+    content = system["content"]
+    assert "# Your team" in content
+    assert "- worker:" in content and "- dft-expert:" in content
+    assert "- pi:" not in content and "- planner:" not in content
+
+
+def test_a_lead_never_appears_on_a_team(tmp_path: Path) -> None:
+    mason = Mason(_session(tmp_path), client=_Idle())  # the pi
+    content = mason.messages[0]["content"]
+    assert "- worker:" in content
+    assert "- planner:" not in content
+
+
+def test_the_planner_refuses_to_run_without_a_team(tmp_path: Path) -> None:
+    from mason.errors import MasonError
+
+    roster = discover_roster(tmp_path)
+    session = _session(tmp_path, delegation=False)
+    with pytest.raises(MasonError, match=r"\[agent\] delegation is off"):
+        Mason(session, client=_Idle(), spec=roster["planner"], roster=roster)
+    leads = {name: card for name, card in roster.items() if card.delegates}
+    with pytest.raises(MasonError, match="no card on the roster can take a brief"):
+        Mason(_session(tmp_path), client=_Idle(), spec=roster["planner"], roster=leads)
+    # The pi can still run alone: it has a shell of its own.
+    Mason(_session(tmp_path / "solo", delegation=False), client=_Idle(), roster=leads)
