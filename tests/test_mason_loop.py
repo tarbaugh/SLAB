@@ -132,6 +132,7 @@ def test_the_transcript_opens_with_a_session_header(tmp_path: Path) -> None:
     assert header["model"] == "fake"
     assert header["provider"] == "openai"
     assert header["agent"] == "pi"
+    assert header["cwd"] == str(tmp_path)
     assert header["max_turns"] == 7
     assert header["compute_profile"] == "laptop"
     assert "endpoint" in header and "endpoint_origin" in header

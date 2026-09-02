@@ -254,6 +254,7 @@ class Mason:
             self.session.record(
                 {
                     "type": "session",
+                    "cwd": str(session.cwd),
                     "agent": spec.name,
                     "model": session.agent.model,
                     "provider": session.agent.provider,

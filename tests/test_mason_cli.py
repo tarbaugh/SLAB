@@ -496,6 +496,56 @@ def test_mason_read_renders_a_transcript_for_humans(tmp_path: Path) -> None:
     assert missing.exit_code != 0
 
 
+def test_mason_read_without_a_path_offers_the_sessions_by_project_and_time(
+    tmp_path: Path,
+) -> None:
+    """The pair a person identifies a session by: where it was launched, and when."""
+    import json
+
+    root = tmp_path / "ws"
+    sessions = root / "mason" / "sessions"
+    sessions.mkdir(parents=True)
+    header = {
+        "at": "2026-09-01T23:41:54+00:00",
+        "type": "session",
+        "cwd": "/home/you/cu-eos",
+        "agent": "pi",
+        "model": "m",
+    }
+    user = {
+        "at": "2026-09-01T23:41:55+00:00",
+        "type": "message",
+        "message": {"role": "user", "content": "measure a0"},
+    }
+    (sessions / "20260901-234154-2590.jsonl").write_text(
+        json.dumps(header) + "\n" + json.dumps(user) + "\n"
+    )
+    old_user = dict(user, message={"role": "user", "content": "an older question"})
+    (sessions / "20260830-090000-7.jsonl").write_text(json.dumps(old_user) + "\n")
+
+    listed = runner.invoke(app, ["read", "-w", str(root)], input="2\n")
+    assert listed.exit_code == 0, listed.output
+    assert "sessions under" in listed.output
+    assert "   1. 2026-09-01 23:41:54  /home/you/cu-eos" in listed.output
+    assert "   2. 2026-08-30 09:00:00  (project unknown)" in listed.output
+    assert "an older question" in listed.output  # number 2 was rendered
+
+    newest = runner.invoke(app, ["read", "-w", str(root)], input="\n")
+    assert newest.exit_code == 0, newest.output
+    assert "measure a0" in newest.output  # Enter takes the newest
+
+    out_of_range = runner.invoke(app, ["read", "-w", str(root)], input="9\n")
+    assert out_of_range.exit_code == 1
+    assert "between 1 and 2" in out_of_range.output
+
+    silent = runner.invoke(app, ["read", "-w", str(root)], input="")
+    assert silent.exit_code == 1
+    assert "pass the transcript path" in silent.output
+
+    empty = runner.invoke(app, ["read", "-w", str(tmp_path / "none")])
+    assert empty.exit_code == 1 and "no session transcripts" in empty.output
+
+
 # -- session stamps ----------------------------------------------------------
 
 

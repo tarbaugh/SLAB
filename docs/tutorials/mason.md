@@ -586,9 +586,12 @@ under version control, readable by humans:
 * **`.slab/mason/sessions/*.jsonl`** are append-only transcripts of every
   message, tool result, reasoning trace, compaction, and token count, and
   `slab mason chat --resume` replays the newest one. Read one with
-  `slab mason read <transcript>`: it renders the events in the chat display's
-  visual language (dimmed reasoning, cyan tool calls), clips long content
-  unless you pass `--full`, and ends with the token totals.
+  `slab mason read`: without a path it lists the workspace's sessions
+  newest first, each by the directory it was launched from and the launch
+  time, and takes a number (Enter picks the newest). It renders the events
+  in the chat display's visual language (dimmed reasoning, cyan tool
+  calls), clips long content unless you pass `--full`, and ends with the
+  token totals.
 * **`AGENTS.md`** is the cross-tool conventions standard, and if the project
   has one, it enters the system prompt every session.
 

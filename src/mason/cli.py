@@ -573,8 +573,10 @@ def _render_event(event: dict[str, Any], full: bool) -> None:
 @app.command("read")
 def mason_read(
     transcript: Annotated[
-        Path, typer.Argument(help="A session transcript (.jsonl) to render.")
-    ],
+        Path | None,
+        typer.Argument(help="A session transcript (.jsonl); omit to pick from a list."),
+    ] = None,
+    workspace: _WorkspaceOpt = None,
     full: Annotated[
         bool, typer.Option("--full", help="Show everything; no truncation.")
     ] = False,
@@ -584,10 +586,14 @@ def mason_read(
     Same visual language as 'slab mason chat': dimmed reasoning, cyan tool
     calls, plain results. A malformed line is marked and skipped — a
     viewer must show the readable majority of a damaged file, unlike
-    --resume, which must refuse it.
+    --resume, which must refuse it. Without a path, the workspace's
+    conversations are listed newest first, each by the directory it was
+    launched from and the time, and one is chosen by number.
     """
     import json as _json
 
+    if transcript is None:
+        transcript = _choose_transcript(workspace)
     if not transcript.is_file():
         _fail(f"no transcript at {transcript}")
     prompt_tokens = completion_tokens = steps = 0
@@ -608,6 +614,38 @@ def mason_read(
     typer.secho(
         f"\n[{steps} model call(s); tokens {prompt_tokens}+{completion_tokens}]", dim=True
     )
+
+
+def _choose_transcript(workspace: Path | None) -> Path:
+    """List the workspace's conversations, newest first, and take a number.
+
+    Each row is the pair that identifies a session to a person: the
+    directory it was launched from (from the transcript's header; older
+    transcripts show "project unknown") and the launch time. Enter picks
+    the newest. Without a terminal to answer from, the list is still
+    printed, and the failure says to pass a path.
+    """
+    from mason.session import session_header, transcript_groups, transcript_stamp
+
+    try:
+        root = _ops.resolve_root(workspace)
+    except (FoundationError, SlabError) as e:
+        _fail(str(e))
+    conversations = [conversation for conversation, _ in transcript_groups(root)]
+    if not conversations:
+        _fail(f"no session transcripts under {root}")
+    conversations.reverse()
+    typer.echo(f"sessions under {root}, newest first:")
+    for number, conversation in enumerate(conversations, 1):
+        launched_from = str(session_header(conversation).get("cwd") or "(project unknown)")
+        typer.echo(f"  {number:>2}. {transcript_stamp(conversation)}  {launched_from}")
+    try:
+        choice = int(typer.prompt("read which", type=int, default=1))
+    except (typer.Abort, EOFError):
+        _fail("no choice made; pass the transcript path instead")
+    if not 1 <= choice <= len(conversations):
+        _fail(f"choose a number between 1 and {len(conversations)}")
+    return conversations[choice - 1]
 
 
 def _format_span(seconds: float | None) -> str:

@@ -96,6 +96,48 @@ def transcript_groups(
     ]
 
 
+def session_header(transcript: Path) -> dict[str, Any]:
+    """The ``session`` header event a transcript opens with, or ``{}``.
+
+    Older transcripts have none; a damaged first line is skipped rather than
+    refused, because the header is a convenience for listings, not a gate.
+    Only the first few lines are read: the header is the first event a
+    session records.
+    """
+    try:
+        with open(transcript, encoding="utf-8") as handle:
+            for _ in range(5):
+                line = handle.readline()
+                if not line:
+                    break
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(event, dict) and event.get("type") == "session":
+                    return event
+    except OSError:
+        pass
+    return {}
+
+
+def transcript_stamp(transcript: Path) -> str:
+    """The launch time a transcript's name carries, as ``YYYY-MM-DD HH:MM:SS``.
+
+    Examples:
+        >>> transcript_stamp(Path("20260901-234154-2590.jsonl"))
+        '2026-09-01 23:41:54'
+        >>> transcript_stamp(Path("odd-name.jsonl"))
+        'odd-name'
+    """
+    stem = transcript.stem
+    parts = stem.split("-")
+    if len(parts) >= 2 and len(parts[0]) == 8 and len(parts[1]) == 6 and parts[0].isdigit():
+        d, t = parts[0], parts[1]
+        return f"{d[:4]}-{d[4:6]}-{d[6:]} {t[:2]}:{t[2:4]}:{t[4:]}"
+    return stem
+
+
 def transcript_for(workspace_root: str | os.PathLike[str], session: str) -> Path:
     """The conversation transcript for a session id, or a unique prefix of one.
 
