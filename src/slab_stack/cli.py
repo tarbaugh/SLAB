@@ -475,14 +475,15 @@ def benchmark_list() -> None:
         typer.echo(f"{question.number}. [{question.key}] {question.instruction}")
         keys = ", ".join(f"{name} ({unit})" for name, unit in question.results.items())
         typer.echo(f"   results: {keys}")
-        for cls in (benchmark.DFT, benchmark.MLIP):
+        for cls in benchmark.CLASSES:
             band = question.tolerance[cls]
+            reference = question.reference.get(cls, {})
             if question.kind == "threshold":
                 rule = ", ".join(f"{k} ≤ {v:g}" for k, v in band.items())
+            elif not reference:
+                rule = "no checked reference yet; a campaign in this class is refused"
             else:
-                rule = ", ".join(
-                    f"{k} = {question.reference[cls][k]:g} ± {v:g}" for k, v in band.items()
-                )
+                rule = ", ".join(f"{k} = {reference[k]:g} ± {v:g}" for k, v in band.items())
             typer.echo(f"   {cls}: {rule}")
         if question.experiment:
             typer.echo(f"   experiment: {question.experiment}")

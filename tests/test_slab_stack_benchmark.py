@@ -18,6 +18,7 @@ from typer.testing import CliRunner
 
 from foundation.models import TaskRecord, utcnow
 from foundation.runtime import Workspace
+from foundation.serialize import dumps
 from foundation.tasks import single_point
 from slab_stack import benchmark
 from slab_stack.cli import app
@@ -85,8 +86,17 @@ def _unverified_run(root: Path, session: str) -> str:
     return run.id
 
 
-def _dft_run(root: Path, session: str) -> str:
-    """A verified run whose task recipe names the qe engine (no pw.x needed)."""
+PBESOL_FAMILY = "SSSP/1.3.0/PBEsol/efficiency"
+PBE_FAMILY = "SSSP/1.3.0/PBE/efficiency"
+
+
+def _dft_run(root: Path, session: str, *, family: str | None = PBESOL_FAMILY) -> str:
+    """A verified run whose task recipe names the qe engine (no pw.x needed).
+
+    The calculator options are traced the way the loop traces them: by
+    hash, with the bytes in the artifact store. ``family=None`` leaves the
+    options out, which is a recipe the scorer cannot read a functional from.
+    """
     with Workspace(root) as ws:
         with ws.start_run(name="scf", session=session) as run:
 
@@ -94,13 +104,17 @@ def _dft_run(root: Path, session: str) -> str:
             def fine() -> bool:
                 return True
 
+        params: dict[str, Any] = {"engine": "qe"}
+        if family is not None:
+            options = {"pseudo_family": family, "kpts": [8, 8, 8]}
+            params["calculator_options"] = {"$hash": ws.artifacts.put_bytes(dumps(options))}
         ws.runs.add_task(
             TaskRecord(
                 run_id=run.id,
                 name="single_point",
                 status="completed",
                 cache_key="ab" * 32,
-                recipe={"params": {"engine": "qe"}},
+                recipe={"params": params},
                 inputs={},
                 outputs={},
                 started_at=utcnow(),
@@ -120,7 +134,12 @@ def test_the_questions_are_fixed_and_addressable() -> None:
         benchmark.find_question("zz")
     table = benchmark.questions_table()
     assert table.count("\n") == len(benchmark.QUESTIONS) + 1
-    assert "3.632 Å" in table and "energy_rmse ≤ 5 meV/atom" in table
+    assert "| 3.632 Å | 3.562 Å |" in table and "energy_rmse ≤ 5 meV/atom" in table
+    assert "| 1.07 eV | no checked value yet |" in table
+    # Every class has a tolerance for every result; references may lag (see the docs).
+    for q in benchmark.QUESTIONS:
+        assert set(q.tolerance) == set(benchmark.CLASSES)
+        assert all(set(t) == set(q.results) for t in q.tolerance.values())
 
 
 # -- scoring ------------------------------------------------------------------
@@ -195,23 +214,77 @@ def test_an_unverified_cited_run_fails_even_with_the_right_number(tmp_path: Path
     assert "never verified" in record["reason"] and "quarantined" in record["reason"]
 
 
-def test_a_dft_run_is_judged_by_the_dft_band(tmp_path: Path) -> None:
+def _score_dft(tmp_path: Path, session: str, value: float, **runs: Any) -> dict[str, Any]:
+    """Score a Q1 campaign citing dft runs made with the given families."""
     root = tmp_path / "ws"
-    session = "20260901-100000-4"
-    run_id = _dft_run(root, session)
+    run_ids = [_dft_run(root, session, family=family) for family in runs.values()]
     _transcript(
         root,
         session,
         [
             _events_header(),
             _user(Q1.instruction),
-            _finish({"a0": {"value": 3.67, "unit": "Å"}}, [run_id]),
+            _finish({"a0": {"value": value, "unit": "Å"}}, run_ids),
         ],
     )
-    record = benchmark.score_session(root, session)
-    assert record["engine_class"] == "dft" and record["engines"] == ["qe"]
-    assert record["passed"] is False  # 3.67 is inside the mlip band but not the dft one
-    assert "(dft band)" in record["reason"]
+    return benchmark.score_session(root, session)
+
+
+def test_a_dft_run_is_judged_against_its_own_functional(tmp_path: Path) -> None:
+    """PBEsol binds Cu ~2% tighter than PBE: the correct PBEsol answer must pass."""
+    record = _score_dft(tmp_path, "20260901-100000-4", 3.5645, a=PBESOL_FAMILY)
+    assert record["engine_class"] == "pbesol" and record["engines"] == ["qe"]
+    assert record["reference"] == {"a0": 3.562} and record["tolerance"] == {"a0": 0.03}
+    assert record["passed"] is True, record["reason"]
+
+    # The PBE number is wrong for a PBEsol run, and the reason names the band.
+    record = _score_dft(tmp_path, "20260901-100000-5", 3.632, a=PBESOL_FAMILY)
+    assert record["passed"] is False and "(pbesol band)" in record["reason"]
+
+    # A PBE run is judged against PBE: 3.67 is inside the mlip band, not the pbe one.
+    record = _score_dft(tmp_path, "20260901-100000-6", 3.67, a=PBE_FAMILY)
+    assert record["engine_class"] == "pbe" and record["reference"] == {"a0": 3.632}
+    assert record["passed"] is False and "(pbe band)" in record["reason"]
+
+
+def test_an_unreadable_or_mixed_functional_fails_with_that_reason(tmp_path: Path) -> None:
+    record = _score_dft(tmp_path, "20260901-100000-7", 3.6, a=None)
+    assert record["passed"] is False
+    assert "cannot tell the functional of cited run" in record["reason"]
+    assert record["engine_class"] is None  # the band was never defined
+
+    record = _score_dft(tmp_path, "20260901-100000-8", 3.6, a=PBE_FAMILY, b=PBESOL_FAMILY)
+    assert record["passed"] is False
+    assert "mix functionals" in record["reason"]
+    assert "pbe (" in record["reason"] and "pbesol (" in record["reason"]
+
+
+def test_a_class_without_a_checked_reference_is_refused_not_guessed(tmp_path: Path) -> None:
+    root = tmp_path / "ws"
+    session = "20260901-100000-9"
+    q3 = benchmark.find_question("vacancy")
+    run_id = _dft_run(root, session, family=PBESOL_FAMILY)
+    _transcript(
+        root,
+        session,
+        [
+            _events_header(),
+            _user(q3.instruction),
+            _finish({"e_vac": {"value": 1.2, "unit": "eV"}}, [run_id]),
+        ],
+    )
+    with pytest.raises(benchmark.BenchmarkError, match="no checked pbesol reference for e_vac"):
+        benchmark.score_session(root, session)
+
+
+def test_functional_of_reads_the_traced_options() -> None:
+    assert benchmark.functional_of({"pseudo_family": PBE_FAMILY}) == "pbe"
+    assert benchmark.functional_of({"pseudo_family": PBESOL_FAMILY}) == "pbesol"
+    by_file = {"pseudopotentials": {"Cu": "cu_pbesol_v1.2.uspp.F.UPF"}}
+    assert benchmark.functional_of(by_file) == "pbesol"
+    assert benchmark.functional_of({"input_data": {"system": {"input_dft": "PBEsol"}}}) == "pbesol"
+    assert benchmark.functional_of({"kpts": [4, 4, 4]}) is None
+    assert benchmark.functional_of({}) is None
 
 
 def test_thresholds_judge_the_finetune_question(tmp_path: Path) -> None:

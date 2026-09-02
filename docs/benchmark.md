@@ -31,11 +31,22 @@ a value outside the band.
 The band depends on the engine class, which the scorer reads from the
 cited runs' task recipes, never from the report's prose. A run under
 Quantum ESPRESSO (or a registry alias built on SLAB's `qe` factory) is
-`dft`; everything else (served MLIP checkpoints, classical potentials,
-EMT) is `mlip` and gets the wider band, because those engines are not
-expected to reproduce DFT. The reference is the accepted DFT-PBE value
-for both classes; experiment is listed so the reader sees the known
-distance between the two.
+judged against the reference for the functional it used, `pbe` or
+`pbesol`. The scorer reads the functional from the traced calculator
+options: `input_dft` when set, else the pseudopotential family name,
+else the pseudopotential file names. The SSSP families that SLAB installs
+by default are PBEsol, and PBEsol binds copper about 2% tighter than PBE,
+so one reference for both functionals would fail a correct answer.
+
+Everything else (served MLIP checkpoints, classical potentials, EMT) is
+`mlip`. It gets the wider band around the PBE value, because those engines
+are not expected to reproduce DFT. Experiment is listed so the reader
+sees the known distance between the functionals and the measurement.
+
+A DFT run whose functional cannot be read, or cited runs that mix
+functionals, fail with that reason. A class with no checked reference yet
+(PBEsol for question 3) is refused rather than judged, and the refusal
+says which value is missing.
 
 ## The questions
 
@@ -44,13 +55,13 @@ instruction the agent receives and the band it is judged by cannot
 drift from this page.
 
 <!-- benchmark:questions:start -->
-| # | Instruction to the agent | Reference (DFT-PBE) | Experiment | Passes when | Skills |
-| --- | --- | --- | --- | --- | --- |
-| 1 | Determine the equilibrium lattice constant of fcc Cu from an equation of state. Finish with results key `a0` in Å, and the run ids that produced it. | 3.632 Å | 3.615 Å | a0 within ±0.03 (DFT) or ±0.05 (MLIP, classical, EMT) Å | equation-of-state |
-| 2 | Compute the Cu(111) surface energy. Finish with results key `gamma_111` in J/m^2, and the run ids that produced it. | 1.33 J/m^2 | 1.83 J/m^2 (polycrystalline average) | gamma_111 within ±0.2 (DFT) or ±0.4 (MLIP, classical, EMT) J/m^2 | surface-energy |
-| 3 | Compute the monovacancy formation energy in fcc Cu. Finish with results key `e_vac` in eV, and the run ids that produced it. | 1.07 eV | 1.29 ± 0.02 eV | e_vac within ±0.15 (DFT) or ±0.3 (MLIP, classical, EMT) eV | atomsk-defects, convergence-study |
-| 4 | Estimate the melting point of Cu with the two-phase method under the served MLIP. Finish with results key `t_melt` in K, and the run ids that produced it. | 1357.77 K | 1357.77 K | t_melt within ±100 (DFT) or ±100 (MLIP, classical, EMT) K | two-phase-melting, melt-quench |
-| 5 | Fine-tune a GRACE potential on DFT labels for strained fcc Cu and validate it against held-out DFT single points. Finish with results key `energy_rmse` in meV/atom, `force_rmse` in eV/Å, and the run ids that produced them. | internal to the campaign | — | energy_rmse ≤ 5 meV/atom; force_rmse ≤ 0.1 eV/Å | mlip-training |
+| # | Instruction to the agent | Reference (PBE) | Reference (PBEsol) | Experiment | Passes when | Skills |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | Determine the equilibrium lattice constant of fcc Cu from an equation of state. Finish with results key `a0` in Å, and the run ids that produced it. | 3.632 Å | 3.562 Å | 3.615 Å | a0 within ±0.03 (DFT, against its functional's reference) or ±0.05 (MLIP, classical, EMT, against PBE) Å | equation-of-state |
+| 2 | Compute the Cu(111) surface energy. Finish with results key `gamma_111` in J/m^2, and the run ids that produced it. | 1.33 J/m^2 | 1.59 J/m^2 | 1.79 ± 0.19 J/m^2 (polycrystalline average) | gamma_111 within ±0.2 (DFT, against its functional's reference) or ±0.4 (MLIP, classical, EMT, against PBE) J/m^2 | surface-energy |
+| 3 | Compute the monovacancy formation energy in fcc Cu. Finish with results key `e_vac` in eV, and the run ids that produced it. | 1.07 eV | no checked value yet | 1.29 ± 0.02 eV | e_vac within ±0.15 (DFT, against its functional's reference) or ±0.3 (MLIP, classical, EMT, against PBE) eV | atomsk-defects, convergence-study |
+| 4 | Estimate the melting point of Cu with the two-phase method under the served MLIP. Finish with results key `t_melt` in K, and the run ids that produced it. | 1357.77 K | 1357.77 K | 1357.77 K | t_melt within ±100 (DFT, against its functional's reference) or ±100 (MLIP, classical, EMT, against PBE) K | two-phase-melting, melt-quench |
+| 5 | Fine-tune a GRACE potential on DFT labels for strained fcc Cu and validate it against held-out DFT single points. Finish with results key `energy_rmse` in meV/atom, `force_rmse` in eV/Å, and the run ids that produced them. | internal to the campaign | internal to the campaign | — | energy_rmse ≤ 5 meV/atom; force_rmse ≤ 0.1 eV/Å | mlip-training |
 <!-- benchmark:questions:end -->
 
 ## How to run a campaign
@@ -134,18 +145,27 @@ model's total is a regression, whatever else it improves.
 - Lattice constant. Experiment 3.615 Å at room temperature (Kittel,
   *Introduction to Solid State Physics*, 8th ed., Table 4, lists 3.61 Å;
   the zero-point-corrected value is 3.603 Å). PBE 3.632 Å (Haas, Tran,
-  and Blaha, *Phys. Rev. B* 79, 085104 (2009), Table I).
-- Surface energy. Experiment 1.83 J/m² for the polycrystalline average
-  (de Boer et al., *Cohesion in Metals* (1988), as tabulated in Patra et
-  al., *Proc. Natl. Acad. Sci.* 114, E9188 (2017), Table I; Tyson and
-  Miller, *Surf. Sci.* 62, 267 (1977) is the other standard
-  compilation). PBE Cu(111) 1.33 J/m² (Patra et al. 2017, Table II).
+  and Blaha, *Phys. Rev. B* 79, 085104 (2009), Table I). PBEsol 3.562 Å
+  (Csonka et al., *Phys. Rev. B* 79, 155107 (2009), Table II, the
+  BAND/LCAO column; that table's PBE value is 3.628 Å, consistent with
+  Haas et al.).
+- Surface energy. Experiment 1.79 ± 0.19 J/m² for the polycrystalline
+  average (Tyson and Miller, *Surf. Sci.* 62, 267 (1977), and Miedema,
+  *Z. Metallkd.* 69, 287 (1978), as tabulated in Patra et al., *Proc.
+  Natl. Acad. Sci.* 114, E9188 (2017), Table 1; de Boer et al.,
+  *Cohesion in Metals* (1988), gives 1.83 J/m²). PBE Cu(111) 1.33 J/m²
+  and PBEsol Cu(111) 1.59 J/m² (Patra et al. 2017, Table 2).
   Facet-resolved experimental values do not exist, so the reference is
-  the PBE facet value and experiment is the average.
+  the facet value for each functional and experiment is the average.
 - Vacancy formation energy. Experiment 1.29 ± 0.02 eV from positron
   annihilation (Triftshäuser and McGervey, *Appl. Phys.* 6, 177 (1975)).
   PBE 1.07 eV with relaxation (Angsten et al., *New J. Phys.* 16, 015018
-  (2014), Table A.1).
+  (2014), Table A.1). PBEsol: no checked value yet. Two papers tabulate
+  one (Delczeg et al., *Phys. Rev. B* 80, 205121 (2009); Medasani et
+  al., *Comput. Mater. Sci.* 101, 96 (2015)), but neither text was
+  reachable when this page was checked. Until someone reads one of them
+  and enters the value with its source, a PBEsol campaign on question 3
+  is refused, not scored.
 - Melting point. Experiment 1357.77 K, 1084.62 °C (NIST Chemistry
   WebBook; *CRC Handbook of Chemistry and Physics*, "Properties of the
   elements"). The reference is experiment for every engine class, so a
@@ -155,6 +175,7 @@ model's total is a regression, whatever else it improves.
   campaign itself, so the reference is internal to the run record.
 
 Confirmation record: every value above was checked against its cited
-source on 2026-09-01 (the PNAS values from the arXiv 1702.08515 text;
-the NJP value from the published Table A.1). A reference nobody has
+source on 2026-09-01 (the PNAS values from the published Tables 1 and 2;
+the PBEsol lattice constant from the arXiv 0903.4037 text of Csonka et
+al.; the NJP value from the published Table A.1). A reference nobody has
 checked is not a reference, so re-check before changing a value.

@@ -5,6 +5,12 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- `slab benchmark` judges a DFT campaign against the reference for the
+  functional it used, PBE or PBEsol, read from the traced calculator
+  options. The default SSSP families are PBEsol, and the first cluster
+  campaign's correct PBEsol lattice constant would have failed the PBE
+  band. Question 3 has no checked PBEsol reference yet, so a PBEsol
+  campaign on it is refused rather than guessed at.
 - `slab benchmark`: five fixed copper campaigns with DFT-PBE references and
   per-engine-class tolerance bands; `run`, `launch`, `render` (the job
   files, for hand edits before `sbatch`), `score`, and `tables`.

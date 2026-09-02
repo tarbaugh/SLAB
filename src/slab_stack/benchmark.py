@@ -27,8 +27,14 @@ from pathlib import Path
 from typing import Any
 
 from foundation import _ops
-from foundation.errors import AmbiguousRunIdError, RunNotFoundError
+from foundation.errors import (
+    AmbiguousRunIdError,
+    ArtifactNotFoundError,
+    RunNotFoundError,
+    SerializationError,
+)
 from foundation.runtime import Workspace
+from foundation.serialize import loads
 from mason.report import summarize
 from mason.session import transcript_for, transcript_groups
 from slab._version import __version__
@@ -39,9 +45,16 @@ RECORDS_FILE = Path("benchmarks") / "results.jsonl"
 #: Lifecycle states a cited run must have reached for its number to count.
 PASSING_STATES = frozenset({"verified", "promoted", "archived"})
 
-#: Engine classes the tolerance bands are keyed by.
-DFT = "dft"
+#: Engine classes the reference values and tolerance bands are keyed by. A
+#: DFT run is judged against the functional it actually used, because PBE
+#: and PBEsol give different numbers for the same crystal; everything that
+#: is not DFT (served checkpoints, classical potentials, EMT) shares the
+#: wider ``mlip`` band around the PBE value.
+PBE = "pbe"
+PBESOL = "pbesol"
 MLIP = "mlip"
+DFT_CLASSES = (PBE, PBESOL)
+CLASSES = (PBE, PBESOL, MLIP)
 
 _MARKER = "<!-- benchmark:{name}:{edge} -->"
 
@@ -55,10 +68,13 @@ class Question:
     """One fixed campaign: the science question and how its answer is judged.
 
     ``results`` maps each result name to its unit; ``reference`` and
-    ``tolerance`` are keyed by engine class (``dft`` or ``mlip``), then by
-    result name. A ``band`` question passes when every value lies within
-    ``tolerance`` of ``reference``; a ``threshold`` question passes when
-    every value is at most ``tolerance`` (no reference).
+    ``tolerance`` are keyed by engine class (``pbe``, ``pbesol``, or
+    ``mlip``), then by result name. A ``band`` question passes when every
+    value lies within ``tolerance`` of ``reference``; a ``threshold``
+    question passes when every value is at most ``tolerance`` (no
+    reference). A class missing from ``reference`` has no checked value
+    yet, and the scorer refuses to judge a campaign in that class rather
+    than guess.
     """
 
     key: str
@@ -88,9 +104,17 @@ class Question:
         )
 
 
-_A0 = 3.632
-_SURFACE = 1.33
-_VACANCY = 1.07
+def _every_class(**values: float) -> dict[str, dict[str, float]]:
+    """The same per-result values for every engine class."""
+    return {cls: dict(values) for cls in CLASSES}
+
+
+# The reference values and their sources are listed in docs/benchmark.md.
+# PBE and PBEsol are kept apart because the SSSP families SLAB installs
+# are PBEsol by default, and PBEsol binds copper about 2% tighter than PBE.
+_A0 = {PBE: 3.632, PBESOL: 3.562}
+_SURFACE = {PBE: 1.33, PBESOL: 1.59}
+_VACANCY = {PBE: 1.07}  # no checked PBEsol value yet; the scorer says so
 _MELT = 1357.77
 
 QUESTIONS: tuple[Question, ...] = (
@@ -99,8 +123,8 @@ QUESTIONS: tuple[Question, ...] = (
         number=1,
         question="Determine the equilibrium lattice constant of fcc Cu from an equation of state.",
         results={"a0": "Å"},
-        reference={DFT: {"a0": _A0}, MLIP: {"a0": _A0}},
-        tolerance={DFT: {"a0": 0.03}, MLIP: {"a0": 0.05}},
+        reference={PBE: {"a0": _A0[PBE]}, PBESOL: {"a0": _A0[PBESOL]}, MLIP: {"a0": _A0[PBE]}},
+        tolerance={PBE: {"a0": 0.03}, PBESOL: {"a0": 0.03}, MLIP: {"a0": 0.05}},
         experiment="3.615 Å",
         skills=("equation-of-state",),
     ),
@@ -109,9 +133,13 @@ QUESTIONS: tuple[Question, ...] = (
         number=2,
         question="Compute the Cu(111) surface energy.",
         results={"gamma_111": "J/m^2"},
-        reference={DFT: {"gamma_111": _SURFACE}, MLIP: {"gamma_111": _SURFACE}},
-        tolerance={DFT: {"gamma_111": 0.2}, MLIP: {"gamma_111": 0.4}},
-        experiment="1.83 J/m^2 (polycrystalline average)",
+        reference={
+            PBE: {"gamma_111": _SURFACE[PBE]},
+            PBESOL: {"gamma_111": _SURFACE[PBESOL]},
+            MLIP: {"gamma_111": _SURFACE[PBE]},
+        },
+        tolerance={PBE: {"gamma_111": 0.2}, PBESOL: {"gamma_111": 0.2}, MLIP: {"gamma_111": 0.4}},
+        experiment="1.79 ± 0.19 J/m^2 (polycrystalline average)",
         skills=("surface-energy",),
     ),
     Question(
@@ -119,10 +147,11 @@ QUESTIONS: tuple[Question, ...] = (
         number=3,
         question="Compute the monovacancy formation energy in fcc Cu.",
         results={"e_vac": "eV"},
-        reference={DFT: {"e_vac": _VACANCY}, MLIP: {"e_vac": _VACANCY}},
-        tolerance={DFT: {"e_vac": 0.15}, MLIP: {"e_vac": 0.3}},
+        reference={PBE: {"e_vac": _VACANCY[PBE]}, MLIP: {"e_vac": _VACANCY[PBE]}},
+        tolerance={PBE: {"e_vac": 0.15}, PBESOL: {"e_vac": 0.15}, MLIP: {"e_vac": 0.3}},
         experiment="1.29 ± 0.02 eV",
         skills=("atomsk-defects", "convergence-study"),
+        notes="No checked PBEsol reference yet; a PBEsol campaign is refused, not guessed at.",
     ),
     Question(
         key="melting",
@@ -131,8 +160,8 @@ QUESTIONS: tuple[Question, ...] = (
             "Estimate the melting point of Cu with the two-phase method under the served MLIP."
         ),
         results={"t_melt": "K"},
-        reference={DFT: {"t_melt": _MELT}, MLIP: {"t_melt": _MELT}},
-        tolerance={DFT: {"t_melt": 100.0}, MLIP: {"t_melt": 100.0}},
+        reference=_every_class(t_melt=_MELT),
+        tolerance=_every_class(t_melt=100.0),
         experiment="1357.77 K",
         skills=("two-phase-melting", "melt-quench"),
         notes="The reference is experiment for every engine; EMT and classical potentials miss it.",
@@ -146,10 +175,7 @@ QUESTIONS: tuple[Question, ...] = (
         ),
         results={"energy_rmse": "meV/atom", "force_rmse": "eV/Å"},
         reference={},
-        tolerance={
-            DFT: {"energy_rmse": 5.0, "force_rmse": 0.1},
-            MLIP: {"energy_rmse": 5.0, "force_rmse": 0.1},
-        },
+        tolerance=_every_class(energy_rmse=5.0, force_rmse=0.1),
         kind="threshold",
         experiment="",
         skills=("mlip-training",),
@@ -210,30 +236,109 @@ def _cited_runs(ws: Workspace, run_ids: Iterable[str]) -> list[dict[str, Any]]:
     return details
 
 
-def _engines(details: Iterable[dict[str, Any]]) -> tuple[list[str], str]:
+def _is_qe(engine: str, recipe: dict[str, Any]) -> bool:
+    """The built-in ``qe`` engine, or a registry alias built on SLAB's qe factory."""
+    return engine.strip().lower() == "qe" or "qe_calculator" in json.dumps(recipe)
+
+
+def _calculator_options(ws: Workspace, recipe: dict[str, Any]) -> dict[str, Any] | None:
+    """A task's ``calculator_options`` as it was traced, or None when unreadable.
+
+    The recipe keeps literals verbatim and larger inputs by hash; the
+    options dict is the latter, so its bytes come from the artifact store.
+    """
+    raw = (recipe.get("params") or {}).get("calculator_options")
+    if isinstance(raw, dict) and "$hash" in raw:
+        try:
+            loaded = loads(ws.artifacts.get(str(raw["$hash"])).read_bytes())
+        except (ArtifactNotFoundError, SerializationError, OSError):
+            return None
+        return loaded if isinstance(loaded, dict) else None
+    return raw if isinstance(raw, dict) else None
+
+
+def functional_of(options: dict[str, Any] | None) -> str | None:
+    """The exchange-correlation functional a qe options dict commits to.
+
+    ``input_dft`` wins when set; otherwise the pseudopotential family name
+    and then the pseudopotential file names decide, because SSSP names
+    carry the functional they were generated for.
+
+    Examples:
+        >>> functional_of({"pseudo_family": "SSSP/1.3.0/PBEsol/efficiency"})
+        'pbesol'
+        >>> functional_of({"pseudopotentials": {"Cu": "Cu.pbe-dn-kjpaw_psl.1.0.0.UPF"}})
+        'pbe'
+        >>> functional_of({"pseudo_family": "SSSP/1.3.0/PBEsol/efficiency",
+        ...                "input_data": {"system": {"input_dft": "pbe"}}})
+        'pbe'
+        >>> functional_of(None) is None
+        True
+    """
+    if not options:
+        return None
+    system = (options.get("input_data") or {}).get("system") or {}
+    clues = [
+        str(system.get("input_dft") or ""),
+        str(options.get("pseudo_family") or ""),
+        " ".join(str(v) for v in (options.get("pseudopotentials") or {}).values()),
+    ]
+    for clue in clues:
+        lowered = clue.lower()
+        if "pbesol" in lowered:
+            return PBESOL
+        if "pbe" in lowered:
+            return PBE
+    return None
+
+
+def _engines(ws: Workspace, details: Iterable[dict[str, Any]]) -> tuple[list[str], str]:
     """The engines the cited runs' tasks used, and the class the band is keyed by.
 
-    Read from the task recipes, never from the report's prose. ``dft`` when
-    any task ran the built-in ``qe`` or a registry alias built on SLAB's qe
-    factory; ``mlip`` for everything else (served checkpoints, classical
-    potentials, EMT).
+    Read from the task recipes, never from the report's prose. A DFT task
+    (the built-in ``qe`` or a registry alias built on SLAB's qe factory)
+    puts the campaign in the class of its functional, ``pbe`` or
+    ``pbesol``; everything else (served checkpoints, classical potentials,
+    EMT) is ``mlip``.
+
+    Raises:
+        BenchmarkError: A DFT task whose functional cannot be read from its
+            traced options, or cited runs that mix functionals. Either way
+            the band is undefined, and the record says why.
     """
     engines: set[str] = set()
-    dft = False
+    functionals: dict[str, str] = {}
     for run in details:
+        run_id = str(run["run"]["id"])[:10]
         for task in run.get("tasks") or []:
             recipe = task.get("recipe") or {}
             engine = (recipe.get("params") or {}).get("engine")
             if engine is None:
                 continue
             engines.add(str(engine))
-            if str(engine).strip().lower() == "qe" or "qe_calculator" in json.dumps(recipe):
-                dft = True
-    return sorted(engines), (DFT if dft else MLIP)
+            if not _is_qe(str(engine), recipe):
+                continue
+            functional = functional_of(_calculator_options(ws, recipe))
+            if functional is None:
+                raise BenchmarkError(
+                    f"cannot tell the functional of cited run {run_id} from its traced "
+                    "calculator options, so its band is undefined"
+                )
+            functionals[functional] = run_id
+    if len(functionals) > 1:
+        mixed = ", ".join(f"{f} ({r})" for f, r in sorted(functionals.items()))
+        raise BenchmarkError(f"cited runs mix functionals, so the band is undefined: {mixed}")
+    engine_class = next(iter(functionals), MLIP)
+    return sorted(engines), engine_class
 
 
 def _judge(question: Question, engine_class: str, results: dict[str, Any]) -> str | None:
-    """None when every result value satisfies the question; else the reason."""
+    """None when every result value satisfies the question; else the reason.
+
+    Raises:
+        BenchmarkError: The question has no checked reference for this
+            class, so there is nothing to judge against.
+    """
     tolerance = question.tolerance[engine_class]
     reference = question.reference.get(engine_class, {})
     for name, unit in question.results.items():
@@ -245,6 +350,11 @@ def _judge(question: Question, engine_class: str, results: dict[str, Any]) -> st
             if value > tolerance[name]:
                 return f"{name} = {value} {unit} exceeds {tolerance[name]} {unit}"
         else:
+            if name not in reference:
+                raise BenchmarkError(
+                    f"Q{question.number} has no checked {engine_class} reference for {name}; "
+                    "add one with its source to QUESTIONS before scoring this campaign"
+                )
             expected = reference[name]
             if abs(value - expected) > tolerance[name]:
                 return (
@@ -326,12 +436,15 @@ def score_session(
         ]
         if unverified:
             return fail("cited runs never verified: " + ", ".join(unverified))
-        engines, engine_class = _engines(details)
+        try:
+            engines, engine_class = _engines(ws, details)
+        except BenchmarkError as e:
+            return fail(str(e))
     record["engines"] = engines
     record["engine_class"] = engine_class
     record["reference"] = dict(asked.reference.get(engine_class, {}))
     record["tolerance"] = dict(asked.tolerance[engine_class])
-    reason = _judge(asked, engine_class, record["results"])
+    reason = _judge(asked, engine_class, record["results"])  # may refuse: no reference
     if reason is not None:
         return fail(reason)
     record["passed"] = True
@@ -428,30 +541,37 @@ def _fmt(value: float) -> str:
     return f"{value:g}"
 
 
+def _reference_cell(q: Question, cls: str) -> str:
+    if q.kind == "threshold":
+        return "internal to the campaign"
+    values = q.reference.get(cls, {})
+    if not values:
+        return "no checked value yet"
+    return ", ".join(f"{_fmt(values[name])} {unit}" for name, unit in q.results.items())
+
+
 def questions_table() -> str:
     lines = [
-        "| # | Instruction to the agent | Reference (DFT-PBE) | Experiment "
+        "| # | Instruction to the agent | Reference (PBE) | Reference (PBEsol) | Experiment "
         "| Passes when | Skills |",
-        "| --- | --- | --- | --- | --- | --- |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
     ]
     for q in QUESTIONS:
         if q.kind == "threshold":
-            reference = "internal to the campaign"
             passes = "; ".join(
-                f"{name} ≤ {_fmt(q.tolerance[DFT][name])} {unit}"
+                f"{name} ≤ {_fmt(q.tolerance[PBE][name])} {unit}"
                 for name, unit in q.results.items()
             )
         else:
-            reference = ", ".join(
-                f"{_fmt(q.reference[DFT][name])} {unit}" for name, unit in q.results.items()
-            )
             passes = "; ".join(
-                f"{name} within ±{_fmt(q.tolerance[DFT][name])} (DFT) or "
-                f"±{_fmt(q.tolerance[MLIP][name])} (MLIP, classical, EMT) {unit}"
+                f"{name} within ±{_fmt(q.tolerance[PBE][name])} (DFT, against its "
+                f"functional's reference) or ±{_fmt(q.tolerance[MLIP][name])} "
+                f"(MLIP, classical, EMT, against PBE) {unit}"
                 for name, unit in q.results.items()
             )
         lines.append(
-            f"| {q.number} | {q.instruction} | {reference} | {q.experiment or '—'} | "
+            f"| {q.number} | {q.instruction} | {_reference_cell(q, PBE)} | "
+            f"{_reference_cell(q, PBESOL)} | {q.experiment or '—'} | "
             f"{passes} | {', '.join(q.skills)} |"
         )
     return "\n".join(lines)
@@ -554,15 +674,19 @@ def render(
 
 
 __all__ = [
-    "DFT",
+    "CLASSES",
+    "DFT_CLASSES",
     "MLIP",
     "PASSING_STATES",
+    "PBE",
+    "PBESOL",
     "QUESTIONS",
     "RECORDS_FILE",
     "BenchmarkError",
     "Question",
     "append_record",
     "find_question",
+    "functional_of",
     "latest_by_cell",
     "load_records",
     "question_for",
