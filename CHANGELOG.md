@@ -5,6 +5,13 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- The sandbox render carries builders in. `[builders]` travels whole into
+  the rendered `slab.toml` (a sandbox without it reported every builder
+  absent, whatever was mounted), a configured atomsk or gracemaker is
+  snapshotted like an engine so its install is bound and its setup frozen,
+  a console script is followed to its interpreter's real prefix, and the
+  context file names each carried tool so the session does not spend its
+  opening steps probing for it.
 - `slab benchmark` judges a DFT campaign against the reference for the
   functional it used, PBE or PBEsol, read from the traced calculator
   options. The default SSSP families are PBEsol, and the first cluster

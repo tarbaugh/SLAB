@@ -855,8 +855,14 @@ _ENV_NOISE = frozenset(
 #: the host's copy over them would shadow the image's own loader setup.
 _BASE_IMAGE_LIBS = ("/lib", "/lib64", "/usr/lib", "/usr/lib64")
 
-#: What binary to resolve per engine when the command does not name one.
-_DEFAULT_PAYLOAD = {"qe": "pw.x", "lammps": "lmp"}
+#: What binary to resolve per engine or builder when the command does not
+#: name one.
+_DEFAULT_PAYLOAD = {"qe": "pw.x", "lammps": "lmp", "atomsk": "atomsk", "gracemaker": "gracemaker"}
+
+#: The builders whose install must exist inside the container. ``mp`` is a
+#: data root, bound separately; these two are executables with their own
+#: environments (gracemaker's is a whole python installation).
+_SNAPSHOT_BUILDERS = ("atomsk", "gracemaker")
 
 _LAUNCHERS = frozenset({"env", "srun", "mpirun", "mpiexec", "nice", "time"})
 
@@ -1077,6 +1083,17 @@ def snapshot_setup(
             else:
                 plain[key] = value
         ldd_text = files["ldd"].read_text() if files["ldd"].exists() else ""
+        # A console script (gracemaker, or any pip entry point) is a text
+        # file: ldd says nothing, and its prefix is a venv whose python is
+        # a symlink into another installation. Follow the script to its
+        # interpreter and the interpreter to its real prefix, and ask ldd
+        # about the real binary, so both installations get bound.
+        followed: list[str] = []
+        for binary in resolved:
+            for real in _behind_script(binary):
+                if real not in resolved and real not in followed:
+                    followed.append(real)
+                    ldd_text += _ldd(real)
         lib_dirs, system_libs = _lib_closure(ldd_text)
         return SetupSnapshot(
             engine,
@@ -1084,9 +1101,73 @@ def snapshot_setup(
             plain,
             lib_dirs,
             path_prepends=prepends,
-            extra_binaries=tuple(resolved[1:]),
+            extra_binaries=(*resolved[1:], *followed),
             system_libs=system_libs,
         )
+
+
+def _behind_script(binary: str) -> tuple[str, ...]:
+    """The real executables behind *binary*: its symlink target, and the
+    interpreter a ``#!`` line names (resolved through its own symlinks).
+
+    Examples:
+        >>> _behind_script("/definitely/not/there")
+        ()
+    """
+    path = Path(binary)
+    if not path.is_file() or _system_binary(path):
+        return ()
+    real = path.resolve()
+    behind = [str(real)] if real != path and not _system_binary(real) else []
+    try:
+        with open(real, "rb") as handle:
+            first = handle.readline(512)
+    except OSError:
+        return tuple(behind)
+    if first.startswith(b"#!"):
+        tokens = first[2:].decode("utf-8", errors="replace").split()
+        # ``#!/usr/bin/env python`` names no path worth binding; an
+        # absolute interpreter does, and so does what it links to.
+        if tokens and tokens[0].startswith("/") and not tokens[0].endswith("/env"):
+            interpreter = Path(tokens[0])
+            for candidate in (interpreter, interpreter.resolve()):
+                if (
+                    candidate.is_file()
+                    and not _system_binary(candidate)
+                    and str(candidate) not in behind
+                ):
+                    behind.append(str(candidate))
+    return tuple(behind)
+
+
+#: Where the base image's own executables live; a ``#!/bin/sh`` names
+#: nothing worth binding, and binding it would shadow the image's copy.
+_BASE_IMAGE_BINS = ("/bin", "/sbin", "/usr/bin", "/usr/sbin")
+
+
+def _system_binary(path: Path) -> bool:
+    """True for an executable the container base image provides itself.
+
+    Examples:
+        >>> _system_binary(Path("/bin/sh"))
+        True
+        >>> _system_binary(Path("/home/you/grace/bin/python"))
+        False
+    """
+    return any(
+        str(path) == base or str(path).startswith(base + "/") for base in _BASE_IMAGE_BINS
+    )
+
+
+def _ldd(binary: str) -> str:
+    """``ldd`` output for one binary, or nothing (best effort, like the probes)."""
+    try:
+        result = subprocess.run(
+            ["ldd", binary], capture_output=True, text=True, timeout=30, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout + "\n"
 
 
 def snapshot_engines(slab_cfg: SlabConfig) -> dict[str, SetupSnapshot]:
@@ -1116,6 +1197,17 @@ def snapshot_engines(slab_cfg: SlabConfig) -> dict[str, SetupSnapshot]:
         else:
             payload = payload_name(engine, table.command)
         snapshots[engine] = snapshot_setup(engine, table.setup, payload, extras=extras)
+    # Builders are executables too, and gracemaker's is a whole python
+    # installation reached through setup lines the container cannot run.
+    # A configured builder is snapshotted the same way, so its install is
+    # bound and its setup frozen — the first sandboxed training campaign
+    # spent its opening steps discovering that neither had happened.
+    for builder in _SNAPSHOT_BUILDERS:
+        table = getattr(slab_cfg.builders, builder)
+        if not table.setup and not table.command:
+            continue
+        payload = payload_name(builder, table.command)
+        snapshots[builder] = snapshot_setup(builder, tuple(table.setup), payload)
     return snapshots
 
 
@@ -1288,12 +1380,17 @@ def sandbox_toml(
     namespace requires (the SLURM controller is unreachable). Calculations
     run in-process inside the job's own allocation.
 
-    An engine present in *snapshots* has its ``setup`` lines replaced by the
-    snapshot's explicit exports — the frozen equivalent of what the module
-    loads did on the host, which the container cannot run itself.
+    An engine or builder present in *snapshots* has its ``setup`` lines
+    replaced by the snapshot's explicit exports — the frozen equivalent of
+    what the module loads did on the host, which the container cannot run
+    itself — and a bare command becomes the absolute path the host
+    resolved, since the container's PATH is only SLAB's own environment.
+    The ``[builders]`` table travels whole: a sandbox without it reports
+    every builder as absent, whatever is mounted.
     """
     warnings: list[str] = []
     engines = slab_cfg.engines.model_dump(exclude_defaults=True)
+    builders = slab_cfg.builders.model_dump(exclude_defaults=True)
     qe_command = str(engines.get("qe", {}).get("command", ""))
     if "srun" in qe_command.split():
         warnings.append(
@@ -1301,26 +1398,33 @@ def sandbox_toml(
             "sandbox (no route to the controller): edit the rendered slab.toml "
             "to an mpirun-style command sized to the job's allocation"
         )
-    for name, table in engines.items():
-        if not table.get("setup"):
-            continue
-        snapshot = (snapshots or {}).get(name)
-        if snapshot is not None and snapshot.error is None:
-            table["setup"] = snapshot.setup_lines()
+    for kind, tables in (("engines", engines), ("builders", builders)):
+        for name, table in tables.items():
+            snapshot = (snapshots or {}).get(name)
+            if snapshot is not None and snapshot.error is None and not table.get("setup"):
+                # No setup to freeze, but the command must still resolve in
+                # a container whose PATH never saw the host's.
+                if table.get("command") and not str(table["command"]).startswith("/"):
+                    table["command"] = snapshot.payload
+                continue
+            if not table.get("setup"):
+                continue
+            if snapshot is not None and snapshot.error is None:
+                table["setup"] = snapshot.setup_lines()
+                warnings.append(
+                    f"[{kind}.{name}] setup snapshotted from the host: "
+                    f"{snapshot.payload}, {snapshot.export_count()} export(s), "
+                    f"{len(_snapshot_binds(snapshot))} bind(s)"
+                )
+                continue
+            because = f" (snapshot failed: {snapshot.error})" if snapshot is not None else ""
             warnings.append(
-                f"[engines.{name}] setup snapshotted from the host: "
-                f"{snapshot.payload}, {snapshot.export_count()} export(s), "
-                f"{len(_snapshot_binds(snapshot))} bind(s)"
+                f"[{kind}.{name}] has setup lines the render could not snapshot"
+                f"{because}: module loads resolve against the host, not the "
+                f"container — bind the software read-only via [agent.sandbox] "
+                f"binds and set PATH/LD_LIBRARY_PATH in setup instead of "
+                f"'module load'"
             )
-            continue
-        because = f" (snapshot failed: {snapshot.error})" if snapshot is not None else ""
-        warnings.append(
-            f"[engines.{name}] has setup lines the render could not snapshot"
-            f"{because}: module loads resolve against the host, not the "
-            f"container — bind the software read-only via [agent.sandbox] "
-            f"binds and set PATH/LD_LIBRARY_PATH in setup instead of "
-            f"'module load'"
-        )
 
     agent_table = {
         k: v
@@ -1344,6 +1448,8 @@ def sandbox_toml(
         _emit_table("paths", paths, out)
     if engines:
         _emit_table("engines", engines, out)
+    if builders:
+        _emit_table("builders", builders, out)
     _emit_table("agent", agent_table, out)
     return "\n".join(out).rstrip() + "\n", warnings
 
@@ -1402,12 +1508,41 @@ def _header_flags(agent: AgentConfig) -> str:
     )
 
 
+def _tool_lines(snapshots: dict[str, SetupSnapshot] | None) -> list[str]:
+    """One context line per snapshotted engine or builder: what resolved,
+    and that its environment is settled. Written so the session does not
+    re-derive it by probing — the first sandboxed training campaign spent
+    seven model calls establishing that gracemaker was runnable."""
+    lines = []
+    for name, snapshot in sorted((snapshots or {}).items()):
+        if snapshot.error:
+            lines.append(
+                f"- {name}: NOT available in here (its setup could not be "
+                f"snapshotted: {snapshot.error}). Do not try to make it work."
+            )
+            continue
+        role = "builder" if name in _SNAPSHOT_BUILDERS else "engine"
+        exports = snapshot.export_count()
+        settled = (
+            f"its setup is frozen into the rendered slab.toml ({exports} export(s))"
+            if exports
+            else "no setup needed"
+        )
+        via = " via foundation's train_potential task" if name == "gracemaker" else ""
+        lines.append(
+            f"- {name} ({role}): {snapshot.payload}, {settled}. Its install is "
+            f"mounted; use it{via} without probing the environment first."
+        )
+    return lines
+
+
 def _sandbox_context(
     binds: list[str],
     *,
     gpu: bool,
     memories: Path | None,
     engine_tasks: int | None,
+    snapshots: dict[str, SetupSnapshot] | None = None,
 ) -> str:
     """The sandbox facts as a prompt block, written at render time.
 
@@ -1422,6 +1557,7 @@ def _sandbox_context(
         destination = parts[1] if len(parts) > 1 else parts[0]
         mode = parts[2] if len(parts) > 2 else "rw"
         rows.append(f"    {mode:<2}  {destination}")
+    tools = _tool_lines(snapshots)
     lines = [
         "# Sandbox",
         "",
@@ -1449,6 +1585,14 @@ def _sandbox_context(
     ]
     if engine_tasks is not None:
         lines.append(f"- MPI engines launch with {engine_tasks} rank(s).")
+    if tools:
+        lines.extend(
+            [
+                "- Software the render resolved on the host and carried in",
+                "  (`list_engines` reports the same; trust it):",
+                *("  " + line for line in tools),
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -1668,6 +1812,7 @@ def render_sandbox_script(
         gpu="--nv" in isolation_flags,
         memories=memories if agent.memory else None,
         engine_tasks=engine_tasks,
+        snapshots=snapshots,
     )
     context_path = toml_path.with_name("context.md")
     if not context_path.is_relative_to(project):

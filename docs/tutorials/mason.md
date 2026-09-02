@@ -386,6 +386,18 @@ and their modes, the missing scheduler, and the GPU. The job exports
 it, so the agent does not spend its opening steps reading the submission
 script to learn these facts.
 
+Engines and builders with `setup` lines are snapshotted on the host. The
+render runs each setup once, records the exports it made, resolves the
+command, and binds the install read-only. A console script such as
+`gracemaker` is followed to its interpreter, and the interpreter to the
+installation it links to, so a venv built on another python works inside
+the container. The rendered `slab.toml` carries the frozen exports in
+place of the setup lines, and the whole `[builders]` table, so
+`list_engines` inside the job reports the same tools as outside. The
+context file names each carried tool, and it says plainly when a setup
+could not be snapshotted, so the agent does not try to make that tool
+work.
+
 The model stays reachable through exactly one path. On the host side of the
 job, `slab mason sandbox bridge` relays a unix socket to one fixed upstream.
 Inside the container, `slab mason sandbox forward` relays that socket to

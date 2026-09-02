@@ -1427,3 +1427,143 @@ def test_launch_aborts_on_preflight_failure_before_any_submit(
     assert "[-] no image" in result.output
     assert "preflight failed" in result.output
     assert not (tmp_path / "sandbox").exists()  # aborted before rendering
+
+
+# -- builders in the sandbox --------------------------------------------------
+
+
+def _fake_console_script(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A venv-style console script whose python is a symlink into a base install."""
+    base_bin = tmp_path / "conda" / "envs" / "grace" / "bin"
+    base_bin.mkdir(parents=True)
+    real_python = base_bin / "python3.11"
+    real_python.write_text("#!/bin/sh\n")
+    real_python.chmod(0o755)
+    venv_bin = tmp_path / "grace" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to(real_python)
+    script = venv_bin / "gracemaker"
+    script.write_text(f"#!{venv_bin / 'python'}\nimport sys\n")
+    script.chmod(0o755)
+    return script, venv_bin.parent, base_bin.parent
+
+
+def test_snapshot_follows_a_console_script_to_its_interpreter(tmp_path: Path) -> None:
+    """gracemaker is a text file in a venv whose python links elsewhere: ldd
+    says nothing, so the snapshot must bind both installations itself."""
+    from mason.sandbox import _snapshot_binds, snapshot_setup
+
+    script, venv, base = _fake_console_script(tmp_path)
+    snapshot = snapshot_setup(
+        "gracemaker",
+        (f'export PATH="{venv / "bin"}:$PATH"', "export TF_FORCE_GPU_ALLOW_GROWTH=true"),
+        "gracemaker",
+    )
+    assert snapshot.error is None
+    assert snapshot.payload == str(script)
+    assert str((base / "bin" / "python3.11").resolve()) in snapshot.extra_binaries
+    binds = _snapshot_binds(snapshot)
+    assert f"{venv}:{venv}:ro" in binds
+    assert f"{base.resolve()}:{base.resolve()}:ro" in binds
+    assert "export TF_FORCE_GPU_ALLOW_GROWTH=true" in snapshot.setup_lines()
+
+
+def test_snapshot_engines_covers_the_configured_builders(tmp_path: Path) -> None:
+    from mason.sandbox import snapshot_engines
+
+    script, venv, _base = _fake_console_script(tmp_path)
+    atomsk = tmp_path / "atomsk" / "atomsk"
+    atomsk.parent.mkdir()
+    atomsk.write_text("#!/bin/sh\n")
+    atomsk.chmod(0o755)
+    cfg = _slab_cfg(
+        builders={
+            "atomsk": {"command": str(atomsk)},
+            "gracemaker": {
+                "command": "gracemaker",
+                "setup": [f'export PATH="{venv / "bin"}:$PATH"'],
+            },
+            "mp": {"root": str(tmp_path)},
+        }
+    )
+    snapshots = snapshot_engines(cfg)
+    assert set(snapshots) == {"atomsk", "gracemaker"}  # mp is a data root, not a binary
+    assert snapshots["atomsk"].error is None and snapshots["atomsk"].payload == str(atomsk)
+    assert snapshots["gracemaker"].payload == str(script)
+
+
+def test_builders_travel_into_the_sandbox_toml(tmp_path: Path) -> None:
+    """A sandbox toml without [builders] reports every builder absent, whatever
+    is mounted; with a snapshot the setup is frozen and a bare command made
+    absolute, since the container's PATH never saw the host's."""
+    from mason.sandbox import SetupSnapshot
+
+    cfg = _slab_cfg(
+        builders={
+            "mp": {"root": "/shared/mp_snapshot"},
+            "atomsk": {"command": "atomsk"},
+            "gracemaker": {
+                "command": "gracemaker",
+                "setup": ["source ~/grace/bin/activate", "export TF_FORCE_GPU_ALLOW_GROWTH=true"],
+            },
+        }
+    )
+    text, warnings = sandbox_toml(cfg, _agent(), tmp_path / "ws")
+    assert '[builders.mp]\nroot = "/shared/mp_snapshot"' in text
+    assert "source ~/grace/bin/activate" in text  # nothing snapshotted: kept, and warned
+    unsnapshotted = "[builders.gracemaker] has setup lines the render could not snapshot"
+    assert any(unsnapshotted in w for w in warnings)
+
+    grace = SetupSnapshot(
+        "gracemaker",
+        "/home/you/grace/bin/gracemaker",
+        {"VIRTUAL_ENV": "/home/you/grace", "TF_FORCE_GPU_ALLOW_GROWTH": "true"},
+        (),
+        path_prepends={"PATH": ("/home/you/grace/bin",)},
+        extra_binaries=("/home/you/conda/envs/grace/bin/python3.11",),
+    )
+    atomsk = SetupSnapshot("atomsk", "/opt/atomsk/atomsk", {}, ())
+    text, warnings = sandbox_toml(
+        cfg, _agent(), tmp_path / "ws", {"gracemaker": grace, "atomsk": atomsk}
+    )
+    assert "source ~/grace" not in text
+    assert "/home/you/grace/bin${PATH:+:$PATH}" in text
+    assert "export TF_FORCE_GPU_ALLOW_GROWTH=true" in text
+    assert 'command = "/opt/atomsk/atomsk"' in text  # resolved on the host, absolute in here
+    assert any("[builders.gracemaker] setup snapshotted from the host" in w for w in warnings)
+    # The binds reach the script, and the context tells the session so.
+    script, _, context = render_sandbox_script(
+        _agent(),
+        _HPC,
+        cfg,
+        tmp_path / "ws",
+        tmp_path / "project",
+        "train a potential",
+        toml_path=tmp_path / "sandbox" / "slab.toml",
+        snapshots={"gracemaker": grace, "atomsk": atomsk},
+    )
+    assert "--bind /home/you/grace:/home/you/grace:ro" in script
+    assert "--bind /home/you/conda/envs/grace:/home/you/conda/envs/grace:ro" in script
+    assert "--bind /opt/atomsk:/opt/atomsk:ro" in script
+    assert "- gracemaker (builder): /home/you/grace/bin/gracemaker" in context
+    assert "train_potential" in context and "without probing the environment" in context
+    assert "- atomsk (builder): /opt/atomsk/atomsk, no setup needed" in context
+
+
+def test_the_context_says_when_a_tool_is_not_available(tmp_path: Path) -> None:
+    from mason.sandbox import SetupSnapshot
+
+    cfg = _slab_cfg(builders={"gracemaker": {"setup": ["module load grace"]}})
+    broken = SetupSnapshot("gracemaker", "", {}, (), error="module: command not found")
+    _, _, context = render_sandbox_script(
+        _agent(),
+        _HPC,
+        cfg,
+        tmp_path / "ws",
+        tmp_path / "project",
+        "goal",
+        toml_path=tmp_path / "sandbox" / "slab.toml",
+        snapshots={"gracemaker": broken},
+    )
+    assert "- gracemaker: NOT available in here" in context
+    assert "module: command not found" in context and "Do not try to make it work" in context
