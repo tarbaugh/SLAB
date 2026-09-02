@@ -182,6 +182,25 @@ slab mason doctor
 slab mason run "..." --auto
 ```
 
+Check the context length before the first session. Ollama truncates
+every prompt to its `num_ctx`, 2048 or 4096 tokens by default, and says
+nothing. Mason's fixed prefix (the system prompt plus the tool schemas)
+is about 7,000 tokens on a laptop configuration, so a model served with
+the default sees a fragment of its instructions and every session looks
+like a weak model when it is a blind one. `slab mason doctor` sends a
+6,000-word prompt and reports whether the server counted it whole, and
+a session that detects the same records a warning that `slab mason
+report` shows. The fix is a model with a larger context:
+
+```bash
+printf 'FROM llama3.1:8b\nPARAMETER num_ctx 32768\n' > Modelfile
+ollama create llama3.1:8b-32k -f Modelfile
+```
+
+Then name `llama3.1:8b-32k` in the config. Setting
+`OLLAMA_CONTEXT_LENGTH=32768` before starting the server does the same
+for every model it serves.
+
 A real session, with Llama 3.1 8B, locally. The transcript is unedited
 apart from the tool and command names, which the package split changed:
 
@@ -559,26 +578,28 @@ an analysis chat instead of the raw transcript.
 
 ```console
 $ slab mason report -w .slab
-session 20260831-091200-41 — 6 step(s), tokens 72600+1730, 3m03s
-  transcript .slab/mason/sessions/20260831-091200-41.jsonl
-runs this session created:
-  01m1day70n   eos-nb                   quarantined  completed
-tool calls (5):
-  list_engines           1
-  recall                 1
-  read_file              1
-  launch_workflow        1
-  remember               1
-refusals: 1 (read_file x1)
-memory: 1 recall, 1 remember
-skills loaded: equation-of-state
-first launch at step 4
-finish reported: a0 = 3.31 A for bcc Nb (birch fit over 7 volumes, MLIP-level)
+session 20260902-032405-14411 — 10 step(s), tokens 66835+590, 1m30s
+  transcript .slab/mason/sessions/20260902-032405-14411.jsonl
+  context: peak prompt 7186 tokens, 0 clearing(s), 0 compaction(s)
+runs this session created: none
+tool calls (10):
+  launch_workflow        9
+  finish                 1
+memory: 0 recall, 0 remember
+first launch at step 1
+finish reported: The total energy of the relaxed bulk Cu is -3.49 eV.
 ```
 
-Two lines carry most of the signal. `first launch at step N` is how long
-the session prepared before it computed. The refusal and error counts say
-where the harness pushed back; a tool that shows up there repeatedly is a
+That is a real Llama 3.1 8B session, and the report convicts it in two
+lines: it finished with a number, and it created no run. Nine launches
+that left nothing behind were nine failures the model talked past, and
+the energy it reported is invented. A reader who only saw the final
+answer would not know. The `context` line says how large the prompt
+got and whether the harness had to clear or compact anything; a
+`warning` line appears under it when the server truncated the prompt.
+`first launch at step N` is how long the session prepared before it
+computed. The refusal and error counts, when present, say where the
+harness pushed back; a tool that shows up there repeatedly is a
 friction report addressed to you. For the event-by-event view, use
 `slab mason read`; the report says where to look, the viewer shows it.
 

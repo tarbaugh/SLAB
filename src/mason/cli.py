@@ -572,6 +572,8 @@ def _render_event(event: dict[str, Any], full: bool) -> None:
             f"{event.get('chars')} characters",
             dim=True,
         )
+    elif kind == "warning":
+        typer.secho(f"[{stamp}] warning: {event.get('text')}", fg=typer.colors.YELLOW)
     # usage events are accumulated by the caller, not printed per step.
 
 
@@ -743,6 +745,8 @@ def mason_report(
         f"  context: peak prompt {summary['peak_prompt_tokens']} tokens, "
         f"{summary['clearings']} clearing(s), {summary['compactions']} compaction(s)"
     )
+    for warning in summary["warnings"]:
+        typer.secho(f"  warning: {warning}", fg=typer.colors.YELLOW)
     for child in summary["delegations"]:
         typer.echo(
             f"  delegation {child['agent']}: {child['steps']} step(s), "

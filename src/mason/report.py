@@ -65,6 +65,7 @@ def _tally(transcript: Path) -> dict[str, Any]:
     refused_tools: Counter[str] = Counter()
     errored_tools: Counter[str] = Counter()
     skills: list[str] = []
+    warnings: list[str] = []
     first_launch_step: int | None = None
     finish_head: str | None = None
     finish_report: str | None = None
@@ -100,6 +101,8 @@ def _tally(transcript: Path) -> dict[str, Any]:
             cached_prompt_tokens += int(event.get("cached_prompt_tokens") or 0)
         elif kind == "clearing":
             clearings += 1
+        elif kind == "warning":
+            warnings.append(str(event.get("text") or ""))
         elif kind == "message":
             message = event.get("message") or {}
             role = message.get("role")
@@ -158,6 +161,7 @@ def _tally(transcript: Path) -> dict[str, Any]:
         "remember": tools.get("remember", 0),
         "recall": tools.get("recall", 0),
         "skills": skills,
+        "warnings": warnings,
         "compactions": compactions,
         "resumes": resumes,
         "malformed_lines": malformed,

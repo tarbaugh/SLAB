@@ -67,6 +67,10 @@ _CLEAR_AT_LEAST_CHARS = 6_000
 _NEVER_CLEARED = frozenset({"skill", "plan"})
 _CLEARED_MARK = "[cleared:"
 _TEXT_RESULT_PREFIX = "[tool result: "
+#: The truncation warning needs a prompt of real size to judge: below this
+#: estimate, a server's count and the chars/4 guess disagree for ordinary
+#: reasons.
+_TRUNCATION_MIN_TOKENS = 3_000
 #: Ratio at which the budget hint escalates from a bare counter to a
 #: land-the-plane instruction. 0.9 means the last 10% of turns carry the
 #: stricter form.
@@ -263,6 +267,7 @@ class Mason:
         self._catalog = catalog
         self._last_prompt_tokens: int | None = None
         self._messages_at_last_compaction = 0
+        self._truncation_warned = False
         # Repetition guard state: the last (name, arguments, result) triple
         # and how many consecutive times it has recurred unchanged.
         self._last_identical: tuple[str, str, str] | None = None
@@ -516,6 +521,7 @@ class Mason:
         self.session.count_usage(
             reply.prompt_tokens, reply.completion_tokens, reply.cached_prompt_tokens
         )
+        self._warn_if_truncated(messages, tools, reply.prompt_tokens)
         self._last_prompt_tokens = reply.prompt_tokens
         self.session.record(
             {
@@ -526,6 +532,42 @@ class Mason:
             }
         )
         return reply
+
+    def _warn_if_truncated(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        prompt_tokens: int | None,
+    ) -> None:
+        """Say so, once, when the server counted far fewer prompt tokens than
+        were sent: it is truncating the context, and the model is answering
+        without its instructions.
+
+        Ollama does exactly this silently, to its ``num_ctx`` (2048 or 4096
+        by default) while Mason's fixed prefix alone is several thousand
+        tokens. A session run that way looks like a weak model; it is a
+        blind one. The check is a warning, not a stop: a server's count and
+        the chars/4 estimate can differ, so only a factor of two below the
+        estimate, on a prompt of real size, counts.
+        """
+        if prompt_tokens is None or self._truncation_warned:
+            return
+        sent = sum(len(json.dumps(m)) for m in messages) + len(json.dumps(tools or []))
+        estimate = sent // _CHARS_PER_TOKEN
+        if estimate < _TRUNCATION_MIN_TOKENS or prompt_tokens * 2 >= estimate:
+            return
+        self._truncation_warned = True
+        text = (
+            f"the server counted {prompt_tokens} prompt tokens for a request of about "
+            f"{estimate}: it is truncating the context, so the model cannot see its "
+            f"instructions. Ollama truncates to its num_ctx; serve the model with a "
+            f"larger context (a Modelfile with 'PARAMETER num_ctx 32768', or "
+            f"OLLAMA_CONTEXT_LENGTH=32768 before starting the server) and run again."
+        )
+        self.session.record({"type": "warning", "text": text})
+        observer = self.session.observer
+        if observer is not None:
+            observer("harness", self.session.attribution(), f"[warning] {text}")
 
     # -- message bookkeeping --------------------------------------------------
 
@@ -652,7 +694,7 @@ class Mason:
         observer = self.session.observer
         if observer is not None:
             observer(
-                "text",
+                "harness",
                 self.session.attribution(),
                 f"[cleared {len(chosen)} old tool result(s), {freed} characters]",
             )

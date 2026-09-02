@@ -163,9 +163,56 @@ def run(
     except LlmError as e:
         failed += 1
         emit(f"[x] tool-call probe: {e}")
+    failed += _context_probe(client, emit=emit)
     primary = (agent.provider, resolved_endpoint, resolved_model)
     failed += _roster(agent, root, seen={primary}, emit=emit)
     return failed
+
+
+#: The context probe sends this many filler words: about 6k tokens, which
+#: is the size of Mason's fixed prefix (system prompt plus tool schemas)
+#: on a laptop configuration, and beyond Ollama's default num_ctx.
+_CONTEXT_PROBE_WORDS = 6_000
+
+
+def _context_probe(client: Any, *, emit: Emit) -> int:
+    """Send a prompt the size of Mason's own prefix and check the server saw it.
+
+    Ollama truncates every prompt to its ``num_ctx`` (2048 or 4096 by
+    default) and says nothing; the only trace is a ``usage.prompt_tokens``
+    far below what was sent. A model served that way never sees Mason's
+    instructions, and every session looks like a weak model when it is a
+    blind one. Returns 1 when the server truncates, else 0.
+    """
+    from mason.client import LlmError
+
+    filler = "word " * _CONTEXT_PROBE_WORDS
+    try:
+        reply = client.chat(
+            [
+                {"role": "system", "content": filler},
+                {"role": "user", "content": "Reply with the single word ok."},
+            ],
+            None,
+        )
+    except LlmError as e:
+        emit(f"[?] context probe: {e}")
+        return 0
+    counted = reply.prompt_tokens
+    if counted is None:
+        emit("[?] context probe: the server reports no usage, so truncation cannot be ruled out")
+        return 0
+    if counted * 2 < _CONTEXT_PROBE_WORDS:
+        emit(
+            f"[x] the server counted {counted} prompt tokens for a {_CONTEXT_PROBE_WORDS}-word "
+            f"prompt: it truncates the context, and Mason's own prefix is larger than "
+            f"that. Serve the model with a larger context: for Ollama, a Modelfile with "
+            f"'PARAMETER num_ctx 32768' ('ollama create <name>-32k -f Modelfile'), or "
+            f"OLLAMA_CONTEXT_LENGTH=32768 before starting the server"
+        )
+        return 1
+    emit(f"[+] a {_CONTEXT_PROBE_WORDS}-word prompt arrives intact ({counted} tokens counted)")
+    return 0
 
 
 def _roster(

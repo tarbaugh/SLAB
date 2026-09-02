@@ -5,6 +5,14 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- A truncated context is named, not endured. Ollama silently truncates
+  every prompt to its `num_ctx` (2048 or 4096 by default), below Mason's
+  fixed prefix, so every local llama session so far ran without its
+  instructions. `slab mason doctor` now sends a 6,000-word prompt and
+  reports whether the server counted it whole; a session whose server
+  counts far fewer prompt tokens than were sent records a warning once,
+  and `slab mason report` and `slab mason read` show it. The tutorial
+  gives the Modelfile fix.
 - Context hygiene in three layers. Tool output is capped at 12,000
   characters (was 24,000); once the prompt passes a quarter of the
   context window, tool results older than the newest six are replaced by

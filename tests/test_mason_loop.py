@@ -919,3 +919,33 @@ def test_clearing_waits_for_a_worthwhile_batch(tmp_path: Path) -> None:
     Mason(session, client=client).run_turn("read")
     # One clearable result of ~800 chars is below the batch minimum: nothing cleared.
     assert not any("[cleared:" in str(m.get("content")) for m in client.requests[2][0])
+
+
+# -- the truncation warning ---------------------------------------------------
+
+
+def test_a_server_that_truncates_the_prompt_is_named_once(tmp_path: Path) -> None:
+    """Ollama counts only what it kept: a prompt of thousands of tokens
+    reported as a hundred means the model never saw its instructions."""
+    session = _session(tmp_path)
+    replies: list[ChatReply | Exception] = [
+        _tool_reply("list_dir", prompt_tokens=100, path="."),
+        _tool_reply("list_dir", prompt_tokens=100, path="."),
+        _text_reply("done", prompt_tokens=100),
+    ]
+    Mason(session, client=FakeClient(replies)).run_turn("look around")
+    events = [
+        json.loads(line)
+        for line in session.transcript_path.read_text().splitlines()
+        if line.strip()
+    ]
+    warnings = [e for e in events if e.get("type") == "warning"]
+    assert len(warnings) == 1  # once per session, not once per call
+    assert "truncating the context" in warnings[0]["text"]
+    assert "num_ctx" in warnings[0]["text"]
+
+
+def test_an_honest_count_raises_no_warning(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    Mason(session, client=FakeClient([_text_reply("hi", prompt_tokens=6_000)])).run_turn("hi")
+    assert '"type": "warning"' not in session.transcript_path.read_text()
