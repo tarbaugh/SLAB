@@ -167,6 +167,7 @@ answer, backed by verified runs?
 | Model | Machine | Passed |
 | --- | --- | --- |
 | llama3.1:8b | laptop | 0/5 |
+| llama3.1:8b-32k | laptop | 0/5 |
 
 Five copper questions with known answers; [the benchmark](https://tarbaugh.github.io/SLAB/benchmark/) has the rule.
 <!-- benchmark:summary:end -->

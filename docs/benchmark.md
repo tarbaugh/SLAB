@@ -73,18 +73,24 @@ campaign in this process, scores it, and appends the record:
 slab benchmark run 1 --machine laptop
 ```
 
-Recorded from a real laptop campaign, Llama 3.1 8B served by Ollama:
+Recorded from a real laptop campaign, Llama 3.1 8B served by Ollama with
+a 32k-token context:
 
 <!-- no-verify -->
 ```text
-session 20260901-234154-2590: stopped by answer after 54 step(s)
-Q1 a0        llama3.1:8b              laptop       fail: no finish report
+session 20260902-032612-15602: stopped by finish after 18 step(s)
+Q1 a0        llama3.1:8b-32k          laptop       fail: the finish carried no structured results
 recorded in /private/tmp/you/demo/benchmarks/results.jsonl
 ```
 
-The model answered in prose instead of calling `finish`, so the campaign
-fails at the first condition, and the record says so. That is the row a
-larger model has to beat.
+The model called `finish` without the `a0` result key, so the campaign
+fails at the first condition, and the record says so. The `llama3.1:8b`
+row in the table below is the same model under Ollama's default
+2,048-token context, which truncates Mason's prefix before the model
+sees its instructions; it answered in prose and never called `finish`.
+Both rows stay, because both happened. Check the context length before a
+laptop campaign (`slab mason doctor` reports it; the Mason tutorial gives
+the fix). Those are the rows a larger model has to beat.
 
 On a cluster, submit the campaign as a sandbox job, then score it after
 the job ends. `score` finds every session whose opening message is a
@@ -133,6 +139,7 @@ slab benchmark tables
 | Model | Machine | Q1 a0 | Q2 surface | Q3 vacancy | Q4 melting | Q5 finetune | Passed |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | llama3.1:8b | laptop | fail (no finish report) | — | — | — | — | 0/5 |
+| llama3.1:8b-32k | laptop | fail (the finish carried no structured results) | — | — | — | — | 0/5 |
 <!-- benchmark:results:end -->
 
 A cell shows the reported value beside the verdict, and a failure names
