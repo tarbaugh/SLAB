@@ -746,7 +746,7 @@ gates run against the Anthropic Messages API:
 provider = "anthropic"
 model = "claude-opus-5"
 api_key_env = "ANTHROPIC_API_KEY"   # the default for this provider
-effort = "medium"                   # low | medium | high | xhigh | max
+effort = "medium"                   # none | low | medium | high | xhigh | max
 compute_profile = "laptop"          # keep the physics small while iterating
 ```
 
@@ -754,14 +754,17 @@ Three things differ from the open-model path, and Mason handles all three.
 Sampling parameters are never sent, because current Claude models reject
 `temperature` outright, so **`[agent] temperature` applies to the
 OpenAI-compatible provider only**, and `effort` is the equivalent knob.
-On the OpenAI-compatible provider `effort` is sent as `reasoning_effort`
-(`xhigh` and `max` as `high`, the field's ceiling). OpenAI reasoning
-models honor it, and so do vLLM and llama.cpp for models whose chat
-template has a dial. A server that does not know the field ignores it,
-and a thinking model then thinks as long as it likes: two campaigns on a
-Qwen model under vLLM showed no difference between `low` and `xhigh`.
-Compare the completion tokens in `slab mason report` before trusting the
-setting on a new server.
+On the OpenAI-compatible provider `effort` is sent verbatim as
+`reasoning_effort` (`max` as `xhigh`, the field's top). Servers differ in
+which values they accept. OpenAI reasoning models take the whole scale.
+vLLM and llama.cpp take what the model's chat template has a dial for. A
+hosted Qwen3.8 endpoint took `none`, `low`, and `medium` only, and its
+top level was the default when the field was left out, so on that server
+leave `effort` unset for the most reasoning. A server that does not know
+the field ignores it, and a thinking model then thinks as long as it
+likes. Compare the completion tokens in `slab mason report` before
+trusting the setting on a new server. `none` has no Anthropic equivalent
+and is sent to that provider as `low`.
 `max_tokens` is required, and it bounds thinking plus reply together, so a
 truncated turn is reported rather than passed off as a finished answer. And
 the stable system prompt is sent with a cache breakpoint.

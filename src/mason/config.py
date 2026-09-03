@@ -145,7 +145,7 @@ class RosterOverride(BaseModel):
     endpoint: str | None = None
     model: str | None = None
     api_key_env: str | None = None
-    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+    effort: Literal["none", "low", "medium", "high", "xhigh", "max"] | None = None
     context_window: int | None = Field(default=None, ge=4_096)
     compact_at: float | None = Field(default=None, gt=0.0, le=1.0)
     max_turns: int | None = Field(default=None, ge=1)
@@ -193,7 +193,7 @@ class AgentConfig(BaseModel):
     endpoint: str | None = None
     model: str | None = None
     api_key_env: str | None = None
-    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+    effort: Literal["none", "low", "medium", "high", "xhigh", "max"] | None = None
     compute_profile: Literal["laptop", "workstation", "cluster"] | None = None
     context_window: int = Field(default=65_536, ge=4_096)
     compact_at: float = Field(default=0.7, gt=0.0, le=1.0)
