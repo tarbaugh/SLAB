@@ -849,16 +849,55 @@ def test_check_structure_flags_overlapping_atoms(
     bad = tmp_path / "overlap.xsf"
     ase_write(bad, atoms)
 
+    # The bond-relative check fails by default: 0.3 A is 0.11 of a Cu-Cu bond.
     code, out = _run(CHECK, str(bad), "--json", monkeypatch=monkeypatch, capsys=capsys)
-    assert code == 0
-    report = json.loads(out)
+    assert isinstance(code, str) and "atoms overlap" in code and "covalent" in code
+    report = json.loads(out)  # the report is still printed before the failure
     assert report["min_distance_A"] == pytest.approx(0.3, abs=1e-6)
     assert report["close_pairs"] >= 1
+    assert report["closest_pair"] == ["Cu", "Cu"]
+    assert report["shortest_expected_bond_A"] == pytest.approx(2.64, abs=0.01)
+    assert report["min_distance_fraction"] == pytest.approx(0.3 / 2.64, abs=0.01)
 
     code, _ = _run(
-        CHECK, str(bad), "--fail-below", "1.0", monkeypatch=monkeypatch, capsys=capsys
+        CHECK, str(bad), "--fail-below-fraction", "0", monkeypatch=monkeypatch, capsys=capsys
     )
-    assert isinstance(code, str) and "atoms overlap" in code
+    assert code == 0  # 0 disables the relative check
+
+    code, _ = _run(
+        CHECK, str(bad), "--fail-below", "1.0", "--fail-below-fraction", "0",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert isinstance(code, str) and "atoms overlap" in code and "1.0 A" in code
+
+
+def test_check_structure_compares_the_minimum_with_the_expected_bond(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A sound cell passes the relative check: Al-Al 2.86 A is 1.18 of 2 x 1.21."""
+    code, out = _run(
+        CHECK, str(DATA / "atomsk-al-fcc-222.xsf"), "--json", "--expect-atoms", "32",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    report = json.loads(out)
+    assert report["closest_pair"] == ["Al", "Al"]
+    assert report["shortest_expected_bond_A"] == pytest.approx(2.42, abs=0.01)
+    assert report["min_distance_fraction"] == pytest.approx(1.18, abs=0.01)
+    assert report["expected_atoms"] == 32
+
+    code, out = _run(
+        CHECK, str(DATA / "atomsk-al-fcc-222.xsf"), "--expect-atoms", "64",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert isinstance(code, str) and "32 atoms, but 64 were expected" in code
+    assert "expected bond: 2.42 A (Al-Al)" in out
+
+    code, _ = _run(
+        CHECK, str(DATA / "atomsk-al-fcc-222.xsf"), "--fail-below-fraction", "-1",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 2  # argparse refuses a negative fraction
 
 
 def test_check_structure_large_cells_take_the_neighborlist_path(
