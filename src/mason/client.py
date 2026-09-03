@@ -90,6 +90,11 @@ class ChatReply(BaseModel):
     cached_prompt_tokens: int | None = None
 
 
+#: ``[agent] effort`` values to the OpenAI ``reasoning_effort`` field, whose
+#: scale stops at ``high``.
+_REASONING_EFFORT = {"xhigh": "high", "max": "high"}
+
+
 class ChatClient:
     """Blocking chat-completions client for any OpenAI-compatible ``/v1``.
 
@@ -106,6 +111,15 @@ class ChatClient:
             can be slow.
         max_reply_tokens: ``max_tokens`` per turn, or None to let the
             server default.
+        effort: ``low``/``medium``/``high``/``xhigh``/``max``, sent as the
+            OpenAI ``reasoning_effort`` field (``xhigh`` and ``max`` as
+            ``high``, the field's ceiling). OpenAI reasoning models honor
+            it, and so do vLLM and llama.cpp servers for the models whose
+            chat template has a dial. A server that does not know the field
+            ignores it, and a thinking model then thinks as long as it
+            likes: two campaigns on a Qwen model under vLLM showed no
+            change between ``low`` and ``xhigh``. The transcript's usage
+            lines tell which case a server is.
     """
 
     def __init__(
@@ -117,6 +131,7 @@ class ChatClient:
         temperature: float = 0.2,
         timeout_s: float = 600.0,
         max_reply_tokens: int | None = None,
+        effort: str | None = None,
     ) -> None:
         self.endpoint = endpoint.rstrip("/")
         self.model = model
@@ -124,6 +139,7 @@ class ChatClient:
         self.temperature = temperature
         self.timeout_s = timeout_s
         self.max_reply_tokens = max_reply_tokens
+        self.effort = effort
 
     def chat(
         self,
@@ -146,6 +162,8 @@ class ChatClient:
             body["tools"] = tools
         if self.max_reply_tokens is not None:
             body["max_tokens"] = self.max_reply_tokens
+        if self.effort is not None:
+            body["reasoning_effort"] = _REASONING_EFFORT.get(self.effort, self.effort)
         payload = self._request("/chat/completions", body)
         return _parse_reply(payload)
 

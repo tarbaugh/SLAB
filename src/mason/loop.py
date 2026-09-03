@@ -31,6 +31,7 @@ the fenced-block text protocol for servers without a tool-call parser.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from typing import Any, Literal, Protocol
@@ -53,6 +54,13 @@ from mason.skills import Skill, discover_skills
 from mason.tools import TOOL_VOCABULARY, Toolbox, build_toolbox
 
 _ERROR_STREAK_LIMIT = 5
+#: The identical call whose identical result is returned this many times in
+#: one session gets told so: the earlier copies were cleared, and the model
+#: fetched again instead of writing the fact down (a real session described
+#: one task seven times and read one template six times).
+_REFETCH_NOTE_AT = 3
+#: How much of a cleared result its placeholder quotes back.
+_CLEAR_HEAD_CHARS = 120
 _COMPACTION_KEEP_MESSAGES = 6
 #: Messages that must accumulate after a compaction before another may fire.
 _COMPACTION_MIN_NEW_MESSAGES = 4
@@ -236,6 +244,7 @@ def client_from_config(agent: AgentConfig, keys: dict[str, str] | None = None) -
         temperature=agent.temperature,
         timeout_s=agent.request_timeout_s,
         max_reply_tokens=agent.max_reply_tokens,
+        effort=agent.effort,
     )
 
 
@@ -320,6 +329,9 @@ class Mason:
         # and how many consecutive times it has recurred unchanged.
         self._last_identical: tuple[str, str, str] | None = None
         self._repeat_streak = 0
+        # Session-wide: (tool, arguments) -> (digest of its result, times seen
+        # with that same result), so a re-fetch of cleared content is named.
+        self._seen_results: dict[tuple[str, str], tuple[str, int]] = {}
         if depth == 0:
             # The transcript says which model answered it, so a later reader
             # (a report, a benchmark score) trusts the record, not the config
@@ -498,6 +510,11 @@ class Mason:
         executes every time — polling a queue legitimately repeats, and its
         result changes when it matters — but a repeat with an unchanged
         result carries an escalating note the model reads as evidence.
+
+        The second count is session-wide. Clearing turns an old result into
+        a placeholder, and a model that needs the content again fetches it
+        again, which is the design; a model that fetches the same content a
+        third time is not reading it into the notebook, and is told so.
         """
         key = (call.name, call.arguments_raw, result)
         if key == self._last_identical:
@@ -505,18 +522,29 @@ class Mason:
         else:
             self._last_identical = key
             self._repeat_streak = 1
-            return result
+        digest = hashlib.sha256(result.encode("utf-8")).hexdigest()
+        seen = self._seen_results.get((call.name, call.arguments_raw))
+        times = seen[1] + 1 if seen is not None and seen[0] == digest else 1
+        self._seen_results[(call.name, call.arguments_raw)] = (digest, times)
         if self._repeat_streak == 2:
             return (
                 f"{result}\n[note: this is the same call as the previous step, "
                 f"and the result is identical]"
             )
-        return (
-            f"{result}\n[note: this exact call has now returned this exact result "
-            f"{self._repeat_streak} times in a row. Repeating it cannot produce new "
-            f"information. Record what you learned in the notebook, change the "
-            f"approach, or finish with a report naming the blocker.]"
-        )
+        if self._repeat_streak > 2:
+            return (
+                f"{result}\n[note: this exact call has now returned this exact result "
+                f"{self._repeat_streak} times in a row. Repeating it cannot produce new "
+                f"information. Record what you learned in the notebook, change the "
+                f"approach, or finish with a report naming the blocker.]"
+            )
+        if times >= _REFETCH_NOTE_AT:
+            return (
+                f"{result}\n[note: this call has returned this same content {times} "
+                f"times in this session. Each copy costs context: write what you need "
+                f"from it into the notebook or the plan now, and stop fetching it.]"
+            )
+        return result
 
     def _answer_unrun(self, calls: list[Any], *, from_text: bool) -> None:
         """Answer tool calls we short-circuited past.
@@ -741,14 +769,19 @@ class Mason:
         for index, name in chosen:
             message = self.messages[index]
             content = str(message["content"])
-            placeholder = (
-                f"{_CLEARED_MARK} {name} result, {len(content)} characters, cleared to save "
-                f"context; the call above shows what was asked — call again if the "
-                f"content is needed]"
-            )
+            prefix, body = "", content
             if message.get("role") == "user":
-                head = content.split("\n", 1)[0]
-                placeholder = f"{head}\n{placeholder}"
+                head, _, body = content.partition("\n")
+                prefix = head + "\n"
+            # The first line survives: a signature, a count, an exit status.
+            # It is often the one fact the model wanted, and it keeps a
+            # cleared record from being fetched again just to be sure.
+            began = body.strip().split("\n", 1)[0][:_CLEAR_HEAD_CHARS]
+            placeholder = (
+                f"{prefix}{_CLEARED_MARK} {name} result, {len(content)} characters, "
+                f"cleared to save context; it began {began!r}; the call above shows "
+                f"what was asked — call again if the content is needed]"
+            )
             message["content"] = placeholder
         # The server's last count described the uncleared prompt.
         self._last_prompt_tokens = None

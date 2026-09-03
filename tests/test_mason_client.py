@@ -290,3 +290,18 @@ def test_blackholed_connect_fails_fast_instead_of_retrying(
     with pytest.raises(LlmError, match="timed out"):
         client.chat([{"role": "user", "content": "hi"}])
     assert len(attempts) == 1  # no retries against a blackhole
+
+
+def test_effort_rides_as_reasoning_effort(llm_server: tuple[str, LlmScript]) -> None:
+    """``[agent] effort`` never reached an OpenAI-compatible server before,
+    so a ``low`` worker reasoned exactly like an ``xhigh`` planner. It is
+    the API's own field now, capped at the field's ceiling."""
+    url, script = llm_server
+    for _ in range(3):
+        script.responses.append((200, _reply({"content": "ok"})))
+    ChatClient(url, "m", effort="low").chat([{"role": "user", "content": "hi"}])
+    ChatClient(url, "m", effort="xhigh").chat([{"role": "user", "content": "hi"}])
+    ChatClient(url, "m").chat([{"role": "user", "content": "hi"}])
+    assert script.requests[0]["reasoning_effort"] == "low"
+    assert script.requests[1]["reasoning_effort"] == "high"
+    assert "reasoning_effort" not in script.requests[2]

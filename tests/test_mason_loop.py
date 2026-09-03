@@ -881,6 +881,8 @@ def test_old_tool_results_are_cleared_in_batches_and_skills_kept(tmp_path: Path)
     assert len(cleared) == 3
     assert all("read_file result" in str(m["content"]) for m in cleared)
     assert all("call again if the content is needed" in str(m["content"]) for m in cleared)
+    # The first line survives the clearing: the fact the model most often wanted.
+    assert all("it began '1\\tx" in str(m["content"]) for m in cleared)
     assert len(intact) == 3
     assert any("Birch" in str(m["content"]) or "equation" in str(m["content"]) for m in intact)
     # The calls that produced the cleared results are still in the history.
@@ -1002,3 +1004,22 @@ def test_two_projects_share_a_workspace(tmp_path: Path) -> None:
     session3 = MasonSession(link, workspace_root=workspace, agent=config.agent, auto_approve=True)
     with pytest.raises(MasonError, match="already working in this project directory"):
         Mason(session3, client=FakeClient([]))
+
+
+def test_the_same_content_fetched_a_third_time_is_named(tmp_path: Path) -> None:
+    """Clearing invites a re-fetch, and one re-fetch is the design. A real
+    session described one task seven times and read one template six times
+    between clearings, never writing the answer down; the third identical
+    return now says so, whether or not the calls were consecutive."""
+    signature = _tool_reply("shell", command="echo signature")
+    other = _tool_reply("shell", command="echo other")
+    loop = Mason(
+        _session(tmp_path),
+        client=FakeClient([signature, other, signature, other, signature, _text_reply("ok")]),
+    )
+    loop.run_turn("fetch the same thing three times")
+    results = [m["content"] for m in loop.messages if m.get("role") == "tool"]
+    assert "[note" not in results[0] and "[note" not in results[2]
+    assert "3 times in this session" in results[4]
+    assert "stop fetching it" in results[4]
+    assert all("[note" not in r for r in (results[1], results[3]))

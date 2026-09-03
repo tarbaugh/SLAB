@@ -232,3 +232,23 @@ def test_a_render_with_an_entry_agent_is_fresh(project: Path) -> None:
     assert rendered.exit_code == 0, rendered.output
     result = runner.invoke(app, ["doctor", "--offline"])
     assert "[+] rendered job: sandbox/ matches a fresh render" in result.output
+
+
+def test_the_doctor_names_a_journaling_mode_the_workspace_could_not_switch(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A campaign started before an upgrade holds the database in WAL; the
+    newer store keeps WAL rather than refuse, and the doctor says so."""
+    from foundation.store import SQLiteRunStore
+
+    monkeypatch.setenv("SLAB_SQLITE_JOURNAL", "wal")
+    holder = SQLiteRunStore(project / "ws" / "runs.db")
+    try:
+        monkeypatch.setenv("SLAB_SQLITE_JOURNAL", "delete")
+        result = runner.invoke(app, ["doctor", "--offline"])
+        assert "[=] workspace:" in result.output
+        assert "opens with wal journaling; delete is wanted here" in result.output
+    finally:
+        holder.close()
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert "[+] workspace:" in result.output and "opens (delete journaling)" in result.output

@@ -302,8 +302,8 @@ more than model choice.
 | `list_dir`, `search` | listing and recursive regex search, output-capped |
 | `shell` | one command, merged output + exit code, timeout-capped; the timeout kills the whole process group, so nothing backgrounded survives it; **not** for long calculations |
 | `launch_workflow` | run a workflow script as a traced, check-gated run; this is how physics happens. `args` reach the script as argv; `background=true` detaches a long run so no tool timeout can touch it |
-| `wait_for_run` | block until a run (or every running run of this session) finishes, then report its state; one call replaces a chain of sleep-and-poll shell commands |
-| `list_runs`, `show_run`, `list_engines` | the workspace's evidence surface: runs, checks with observed/expected values, failure records, capabilities; `list_runs` takes `session="this"` |
+| `wait_for_run` | block until a run (or every running run of this session) finishes, then report its state and task tally; the timeout answer says how far each run has got; `run_id` takes an id, a prefix, or a run name from this session |
+| `list_runs`, `show_run`, `list_engines` | the workspace's evidence surface: runs, checks with observed/expected values, failure records, capabilities; `list_runs` takes `session="this"` and `status="running"`; `show_run` folds finished tasks to one line each, and `full=true` returns their recipes, inputs, and outputs |
 | `list_tasks`, `describe_task` | the task vocabulary: every traced task with its signature, and one task's full docstring, so the agent never reads the package source to learn a call |
 | `search_materials`, `get_material`, `query_materials` | the offline Materials Project snapshot, present only when `[builders.mp]` names one: filtered search, one record with its CIF path, and one read-only row-capped SELECT; the structure itself arrives traced via `fetch_structure` in a workflow |
 | `submit_job`, `job_status`, `cancel_job` | SLURM plumbing, present only when the config declares partitions |
@@ -422,6 +422,15 @@ place of the setup lines, and the whole `[builders]` table, so
 context file names each carried tool, and it says plainly when a setup
 could not be snapshotted, so the agent does not try to make that tool
 work.
+
+Do not update the SLAB checkout while a sandbox job runs. The job binds
+the checkout and imports it live, so every process the job starts after
+the update runs the new code, while the session that started it runs the
+old. The run store is where that shows: a store that wants rollback
+journaling opens a database another process holds in WAL mode, and keeps
+WAL until the workspace is quiet, so the campaign continues and the switch
+lands on the next quiet open. Pull between campaigns, and run `slab doctor`
+before the next launch.
 
 The model stays reachable through exactly one path. On the host side of the
 job, `slab mason sandbox bridge` relays a unix socket to one fixed upstream.
@@ -648,12 +657,17 @@ layers, cheapest first.
 2. **Tool-result clearing.** Once the prompt passes
    `clear_tool_results_at` × `context_window` (default 25%), tool results
    older than the newest `keep_tool_results` (default 6) are replaced by
-   a one-line placeholder that names the tool and the size. The call and
-   its arguments stay, so the model can call again if it needs the
-   content. Errors, refusals, skill texts, and plan updates are never
-   cleared. A clearing rewrites the cached prompt prefix, so it waits
-   until at least 6,000 characters can go at once. Set
-   `clear_tool_results = false` to turn it off.
+   a one-line placeholder that names the tool, the size, and the first
+   line of what it said. The call and its arguments stay, so the model
+   can call again if it needs the content. Errors, refusals, skill texts,
+   and plan updates are never cleared. A clearing rewrites the cached
+   prompt prefix, so it waits until at least 6,000 characters can go at
+   once. Set `clear_tool_results = false` to turn it off. One re-fetch of
+   cleared content is the design. The third time one call returns the
+   same content in a session, the result carries a note that says so and
+   tells the model to write the fact into the notebook, because a real
+   session described one task seven times and read one template six
+   times between clearings.
 3. **Compaction.** When the conversation still approaches the budget
    (`compact_at` × `context_window`, default 70%), the middle of the
    history is folded into a structured summary of state, verified
@@ -739,6 +753,14 @@ Three things differ from the open-model path, and Mason handles all three.
 Sampling parameters are never sent, because current Claude models reject
 `temperature` outright, so **`[agent] temperature` applies to the
 OpenAI-compatible provider only**, and `effort` is the equivalent knob.
+On the OpenAI-compatible provider `effort` is sent as `reasoning_effort`
+(`xhigh` and `max` as `high`, the field's ceiling). OpenAI reasoning
+models honor it, and so do vLLM and llama.cpp for models whose chat
+template has a dial. A server that does not know the field ignores it,
+and a thinking model then thinks as long as it likes: two campaigns on a
+Qwen model under vLLM showed no difference between `low` and `xhigh`.
+Compare the completion tokens in `slab mason report` before trusting the
+setting on a new server.
 `max_tokens` is required, and it bounds thinking plus reply together, so a
 truncated turn is reported rather than passed off as a finished answer. And
 the stable system prompt is sent with a cache breakpoint.
