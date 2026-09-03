@@ -97,6 +97,31 @@ def transcript_groups(
     ]
 
 
+def workspace_containing(path: str | os.PathLike[str] | None = None) -> Path | None:
+    """The workspace that *path* (default: the current directory) is inside, or None.
+
+    A directory is a workspace when it holds a run store (``runs.db``) or a
+    ``mason/sessions`` directory. The walk starts at *path* and climbs to
+    the filesystem root, so standing anywhere inside a workspace, its
+    sessions directory included, finds it. A project directory is not
+    inside its own ``.slab``, so the usual resolution still applies there.
+
+    Examples:
+        >>> import tempfile
+        >>> root = Path(tempfile.mkdtemp())
+        >>> workspace_containing(root) is None
+        True
+        >>> (root / "mason" / "sessions").mkdir(parents=True)
+        >>> workspace_containing(root / "mason" / "sessions") == root.resolve()
+        True
+    """
+    start = Path(path if path is not None else Path.cwd()).resolve()
+    for candidate in (start, *start.parents):
+        if (candidate / "runs.db").is_file() or (candidate / "mason" / "sessions").is_dir():
+            return candidate
+    return None
+
+
 def session_header(transcript: Path) -> dict[str, Any]:
     """The ``session`` header event a transcript opens with, or ``{}``.
 

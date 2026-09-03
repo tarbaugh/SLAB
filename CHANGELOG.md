@@ -5,6 +5,13 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- `slab mason read` and `slab mason report` find the workspace the
+  current directory is inside. Without `--workspace`, the resolution
+  used to fall to the project's `./.slab`, so running the viewer from a
+  shared workspace reported no transcripts there. Standing in a
+  workspace, its `mason/sessions` directory included, now names it, and
+  an explicit `--workspace` still wins. A workspace with one conversation
+  is read without the number prompt.
 - `[agent] effort` reaches an OpenAI-compatible server verbatim. `xhigh`
   and `max` were folded to `high`, which on a server whose top level is
   the unset default meant a planner asking for the most reasoning and
