@@ -40,7 +40,7 @@ from foundation.runtime import Workspace
 from mason.cli import app as mason_app
 from mason.errors import MasonError
 from mason.serve import mason_dir, read_record
-from mason.session import transcript_groups
+from mason.session import session_sidecars, transcript_groups
 from slab._version import __version__
 from slab.cli import config_app, engines_app, hpc_app, mp_app, protocols_app, pseudos_app
 from slab.errors import SlabError
@@ -167,8 +167,8 @@ def purge(
         bool,
         typer.Option(
             "--all-sessions",
-            help="Also delete the newest conversation transcript (kept by "
-            "default so 'slab mason chat --resume' still works).",
+            help="Also delete the newest conversation's transcript and sidecars (kept "
+            "by default so 'slab mason chat --resume' still works).",
         ),
     ] = False,
 ) -> None:
@@ -177,7 +177,8 @@ def purge(
     Expired runs lose their database rows (run, transitions, artifact
     references, tasks, checks) and any artifact bytes no surviving run
     references. Session transcripts are deleted with their delegation
-    siblings, except the newest conversation. Finished jobs' .sbatch and
+    siblings, compaction summaries, and review records, except the newest
+    conversation's. Finished jobs' .sbatch and
     .out files are swept from the workspace; jobs still in the queue, the
     running model server included, keep theirs. Irreversible — run with
     --dry-run first.
@@ -195,6 +196,7 @@ def purge(
     groups = transcript_groups(root)
     if groups and not all_sessions:
         groups = groups[:-1]  # the newest conversation stays resumable
+    sidecars = [path for conversation, _ in groups for path in session_sidecars(root, conversation)]
     try:
         active = active_job_ids()
     except SchedulerNotAvailableError:
@@ -212,7 +214,8 @@ def purge(
     if not dry_run and not yes:
         typer.confirm(
             f"permanently delete every expired run, "
-            f"{sum(1 + len(s) for _, s in groups)} transcript file(s), and "
+            f"{sum(1 + len(s) for _, s in groups)} transcript file(s), "
+            f"{len(sidecars)} compaction and review file(s), and "
             f"{len(job_files)} job file(s) from {root}?",
             abort=True,
         )
@@ -238,6 +241,11 @@ def purge(
             if not dry_run:
                 path.unlink(missing_ok=True)
             removed_transcripts += 1
+    for path in sidecars:
+        kind = "review" if path.parent.name == "reviews" else "compactions"
+        typer.echo(f"{verb} {kind} {path.name}")
+        if not dry_run:
+            path.unlink(missing_ok=True)
     if not all_sessions and transcript_groups(root):
         typer.echo("kept the newest conversation (--all-sessions removes it too)")
 
@@ -246,8 +254,8 @@ def purge(
         if not dry_run:
             path.unlink(missing_ok=True)
     typer.echo(
-        f"{verb} {removed_transcripts} transcript file(s) and "
-        f"{len(job_files)} job file(s)"
+        f"{verb} {removed_transcripts} transcript file(s), {len(sidecars)} compaction "
+        f"and review file(s), and {len(job_files)} job file(s)"
     )
 
 

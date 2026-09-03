@@ -55,6 +55,16 @@ def _seed_files(root: Path) -> None:
     (sessions / "20260826-120000-111.jsonl").write_text("{}\n")
     (sessions / "20260826-120000-111-crystal-1.jsonl").write_text("{}\n")
     (sessions / "20260827-090000-222.jsonl").write_text("{}\n")
+    # What a session leaves beside its transcripts: compaction summaries for
+    # the conversation and its delegate, and review records for both.
+    (sessions / "20260826-120000-111.compactions.md").write_text("# summary\n")
+    (sessions / "20260826-120000-111-crystal-1.compactions.md").write_text("# summary\n")
+    (sessions / "20260827-090000-222.compactions.md").write_text("# summary\n")
+    reviews = root / "mason" / "reviews"
+    reviews.mkdir(parents=True)
+    (reviews / "20260826-120000-111-review-1.md").write_text("---\n---\n")
+    (reviews / "20260826-120000-111-crystal-1-review-1.md").write_text("---\n---\n")
+    (reviews / "20260827-090000-222-review-1.md").write_text("---\n---\n")
     jobs = root / "jobs"
     jobs.mkdir(parents=True)
     (jobs / "cu-relax-1244113.sbatch").write_text("#!/bin/bash\n")
@@ -86,8 +96,14 @@ def test_purge_deletes_rows_bytes_transcripts_and_job_files(tmp_path: Path) -> N
     # The newest conversation survives for --resume; the older one is gone
     # together with its delegation sibling. Job files are swept.
     remaining = sorted(p.name for p in (root / "mason" / "sessions").iterdir())
-    assert remaining == ["20260827-090000-222.jsonl"]
+    assert remaining == ["20260827-090000-222.compactions.md", "20260827-090000-222.jsonl"]
+    assert [p.name for p in (root / "mason" / "reviews").iterdir()] == [
+        "20260827-090000-222-review-1.md"
+    ]
     assert list((root / "jobs").iterdir()) == []
+    assert "deleted compactions 20260826-120000-111.compactions.md" in result.output
+    assert "deleted review 20260826-120000-111-crystal-1-review-1.md" in result.output
+    assert "4 compaction and review file(s)" in result.output
     assert "kept the newest conversation" in result.output
 
 
@@ -101,8 +117,10 @@ def test_purge_dry_run_deletes_nothing(tmp_path: Path) -> None:
     assert "would delete 1 run(s)" in result.output
     with Workspace(root) as ws:
         assert len(ws.runs.list_runs()) == 2
-    assert len(list((root / "mason" / "sessions").iterdir())) == 3
+    assert len(list((root / "mason" / "sessions").iterdir())) == 6
+    assert len(list((root / "mason" / "reviews").iterdir())) == 3
     assert len(list((root / "jobs").iterdir())) == 2
+    assert "would delete review 20260826-120000-111-review-1.md" in result.output
 
 
 def test_purge_all_sessions_removes_the_newest_too(tmp_path: Path) -> None:
@@ -111,6 +129,7 @@ def test_purge_all_sessions_removes_the_newest_too(tmp_path: Path) -> None:
     result = runner.invoke(app, ["purge", "-w", str(root), "--yes", "--all-sessions"])
     assert result.exit_code == 0
     assert list((root / "mason" / "sessions").iterdir()) == []
+    assert list((root / "mason" / "reviews").iterdir()) == []
 
 
 def test_purge_confirmation_defaults_to_no(tmp_path: Path) -> None:

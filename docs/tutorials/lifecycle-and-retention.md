@@ -322,7 +322,7 @@ The two phases above respect the retention policy. Two verbs override it: `slab 
 
 - The database rows of every expired run: the run, its transitions, its artifact references, its tasks, and its checks. `slab show` can no longer answer for a purged run.
 - The artifact bytes those runs referenced, unless a surviving run references the same hash. Blobs that no run references at all stay, exactly as in `gc`.
-- Mason session transcripts, together with their delegation transcripts. The newest conversation stays, so `slab mason chat --resume` keeps working. Pass `--all-sessions` to remove it too.
+- Mason session transcripts, together with their delegation transcripts, their compaction summaries (`<stem>.compactions.md`), and their review records (`mason/reviews/`). The newest conversation and its files stay, so `slab mason chat --resume` keeps working. Pass `--all-sessions` to remove them too. The notebook and the plan live in the project directory and are never touched.
 - The `.sbatch` scripts and SLURM `.out` files of finished jobs, from `<workspace>/jobs/` and from the serve directory. Jobs still in the queue keep their files, and the serve endpoint record is never touched.
 
 Only runs in the `expired` state can be deleted. The store refuses any other state, so promoted and archived runs cannot be purged. Promote a run to keep it; the two commands together remove everything you did not.
