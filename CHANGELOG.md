@@ -5,6 +5,13 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- A `lammps-potentials` skill for the md-expert. Its script reads a
+  potential file's header, names the format (funcfl, setfl, eam/fs, ACE,
+  GRACE, MEAM), and prints the `pair_style` and `pair_coeff` lines; the
+  skill body carries the smoke test to run before production. One campaign
+  spent seventy minutes rewriting a correct setfl file that `pair_style
+  eam` rejected, when `eam/alloy` was the fix. The pi card now says to load
+  the covering skill or delegate when a command fails the same way twice.
 - Two rules join the science review. `no-progress-loop` flags fifteen or
   more consecutive steps that only looked (shell, reads, listings) with
   no run, plan change, note, brief, or finish, on the card; one real

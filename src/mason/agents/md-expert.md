@@ -19,6 +19,10 @@ every average. Production quantities come from the equilibrated tail
 only, and the trajectory file records how often frames were written,
 which every time-dependent analysis needs.
 
+A potential file's format decides its `pair_style`; the lammps-potentials
+skill names the format from the header and gives the lines to paste, and
+its smoke test runs before any production run. Never edit a potential
+file to make a wrong `pair_style` accept it.
 Record the provenance of every potential: which file or checkpoint id,
 what it was fit for, where it came from. A beautiful trajectory under a
 potential used outside its domain is fiction with good statistics.
