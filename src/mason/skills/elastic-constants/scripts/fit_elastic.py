@@ -13,13 +13,20 @@ mode names are Voigt strain patterns: ``e1``..``e6`` strain one component
 (``e4``..``e6`` are engineering shears), ``e12``/``e13``/``e23`` strain two
 normal components together. Symmetries and the modes they need:
 
-    isotropic     e1 e4
+    isotropic     e1 e4 (e2, e3, e5, e6 are averaged in when present)
     cubic         e1 e4 e12
+    hexagonal     e1 e2 e3 e4 e5 e6 e12 e13 e23 (the orthorhombic set)
     orthorhombic  e1 e2 e3 e4 e5 e6 e12 e13 e23
 
 Each ladder is fitted with a quadratic; the curvatures combine into the
 independent C_ij, and the 6x6 matrix gives Voigt-Reuss-Hill bulk and shear
-moduli, the Young's modulus, and the Poisson ratio.
+moduli, the Young's modulus, and the Poisson ratio. Each ladder is also
+fitted with a quartic and with a quadratic over its inner points; the
+spread of the three curvatures is the reported uncertainty, and a spread
+above 15 % is a warning. The closed-form Born stability conditions are
+checked with a 10 % margin, and Reuss moduli below 2 GPa are flagged.
+Lower symmetries (tetragonal-II, trigonal, monoclinic, triclinic) are
+refused rather than fitted with missing terms.
 """
 
 from __future__ import annotations
@@ -37,8 +44,13 @@ _EV_A3_TO_GPA = 160.21766208
 REQUIRED_MODES = {
     "isotropic": ("e1", "e4"),
     "cubic": ("e1", "e4", "e12"),
+    "hexagonal": ("e1", "e2", "e3", "e4", "e5", "e6", "e12", "e13", "e23"),
     "orthorhombic": ("e1", "e2", "e3", "e4", "e5", "e6", "e12", "e13", "e23"),
 }
+OPTIONAL_MODES = {"isotropic": ("e2", "e3", "e5", "e6")}
+SPREAD_WARNING = 0.15
+BORN_MARGIN = 0.10
+REUSS_FLOOR_GPA = 2.0
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -74,9 +86,12 @@ def _load(path: Path) -> dict[str, Any]:
     return data
 
 
-def _curvature(mode: str, rows: Any, v0: float, warnings: list[str]) -> float:
+def _curvature(
+    mode: str, rows: Any, v0: float, warnings: list[str], spreads: dict[str, float]
+) -> float:
     """The quadratic curvature of one ladder, as an eV/A^3 modulus combination
-    converted to GPa. Appends fit-quality warnings in place."""
+    converted to GPa. Appends fit-quality warnings in place and records the
+    relative spread over the alternative fits (quartic, inner window)."""
     if not isinstance(rows, list) or len(rows) < 4:
         raise SystemExit(
             f"error: mode {mode!r} has {len(rows) if isinstance(rows, list) else 'no'} "
@@ -103,7 +118,83 @@ def _curvature(mode: str, rows: Any, v0: float, warnings: list[str]) -> float:
             f"mode {mode} has a large linear term: the reference structure is "
             f"not at its energy minimum along this strain; relax it first"
         )
+    alternatives = [a2]
+    if len(deltas) >= 5:
+        alternatives.append(np.polyfit(deltas, energies, 4)[2])
+    inner = np.abs(deltas) <= 0.67 * span + 1e-12
+    if inner.sum() >= 4 and inner.sum() < len(deltas):
+        alternatives.append(np.polyfit(deltas[inner], energies[inner], 2)[0])
+    if a2 > 0 and len(alternatives) > 1:
+        spread = float((max(alternatives) - min(alternatives)) / a2)
+        spreads[mode] = spread
+        if spread > SPREAD_WARNING:
+            warnings.append(
+                f"mode {mode}: the quadratic, quartic, and inner-window fits differ "
+                f"by {spread * 100:.0f} %; the ladder is noisy or the strain range "
+                f"is too wide for a quadratic"
+            )
     return float(2.0 * a2 / v0) * _EV_A3_TO_GPA
+
+
+def _average_optional(
+    symmetry: str, data: dict[str, Any], v0: float, warnings: list[str],
+    spreads: dict[str, float], curvatures: dict[str, float],
+) -> None:
+    """For an isotropic cell, average the normal and shear ladders present."""
+    if symmetry != "isotropic":
+        return
+    present = [m for m in OPTIONAL_MODES[symmetry] if m in data["modes"]]
+    for mode in present:
+        curvatures[mode] = _curvature(mode, data["modes"][mode], v0, warnings, spreads)
+    normal = [curvatures[m] for m in ("e1", "e2", "e3") if m in curvatures]
+    shear = [curvatures[m] for m in ("e4", "e5", "e6") if m in curvatures]
+    if len(normal) < 3 or len(shear) < 3:
+        warnings.append(
+            "an amorphous cell is isotropic only on average; record e2, e3, e5, "
+            "and e6 as well so the constants average over all three directions"
+        )
+    curvatures["e1"] = float(np.mean(normal))
+    curvatures["e4"] = float(np.mean(shear))
+
+
+def _born(symmetry: str, cij: dict[str, float], warnings: list[str]) -> dict[str, float]:
+    """Closed-form Born stability conditions with a margin against the scale.
+
+    Each condition is reported as a margin: its value divided by the
+    product of the diagonal terms it involves, which is 1 for a diagonal
+    matrix and 0 at the stability limit. Margins below BORN_MARGIN warn.
+    """
+    margins: dict[str, float] = {}
+    if symmetry in ("isotropic", "cubic"):
+        c11, c12, c44 = cij["C11"], cij["C12"], cij["C44"]
+        margins["C11-C12"] = (c11 - c12) / c11 if c11 else 0.0
+        margins["C11+2C12"] = (c11 + 2 * c12) / (3 * c11) if c11 else 0.0
+        margins["C44"] = c44 / c11 if c11 else 0.0
+    else:
+        c11, c22, c33 = cij["C11"], cij["C22"], cij["C33"]
+        c12, c13, c23 = cij["C12"], cij["C13"], cij["C23"]
+        margins["C11"] = 1.0 if c11 > 0 else 0.0
+        margins["C11C22-C12^2"] = (c11 * c22 - c12**2) / (c11 * c22) if c11 * c22 else 0.0
+        det3 = (
+            c11 * c22 * c33 + 2 * c12 * c13 * c23
+            - c11 * c23**2 - c22 * c13**2 - c33 * c12**2
+        )
+        margins["det(normal block)"] = det3 / (c11 * c22 * c33) if c11 * c22 * c33 else 0.0
+        for name in ("C44", "C55", "C66"):
+            margins[name] = cij[name] / c11 if c11 else 0.0
+    failing = [name for name, margin in margins.items() if margin <= 0]
+    thin = [name for name, margin in margins.items() if 0 < margin < BORN_MARGIN]
+    if failing:
+        warnings.append(
+            f"Born stability fails for {', '.join(failing)}: the structure is "
+            f"mechanically unstable along that combination"
+        )
+    if thin:
+        warnings.append(
+            f"Born stability holds by less than {BORN_MARGIN * 100:.0f} % for "
+            f"{', '.join(thin)}; the sign of that condition is within the fit's precision"
+        )
+    return margins
 
 
 def _assemble(symmetry: str, c: dict[str, float]) -> dict[str, float]:
@@ -125,7 +216,7 @@ def _assemble(symmetry: str, c: dict[str, float]) -> dict[str, float]:
 
 def _matrix(symmetry: str, cij: dict[str, float]) -> np.ndarray:
     """The full 6x6 stiffness matrix in GPa."""
-    if symmetry == "orthorhombic":
+    if symmetry in ("orthorhombic", "hexagonal"):
         c11, c22, c33 = cij["C11"], cij["C22"], cij["C33"]
         c44, c55, c66 = cij["C44"], cij["C55"], cij["C66"]
         c12, c13, c23 = cij["C12"], cij["C13"], cij["C23"]
@@ -171,6 +262,11 @@ def _vrh(matrix: np.ndarray, warnings: list[str]) -> dict[str, Any]:
         )
         result["b_reuss_GPa"] = float(b_reuss)
         result["g_reuss_GPa"] = float(g_reuss)
+        if b_reuss < REUSS_FLOOR_GPA or g_reuss < REUSS_FLOOR_GPA:
+            warnings.append(
+                f"a Reuss modulus is below {REUSS_FLOOR_GPA:.0f} GPa; the matrix is "
+                f"nearly singular and the averages are not meaningful"
+            )
         b_hill = float((b_voigt + b_reuss) / 2.0)
         g_hill = float((g_voigt + g_reuss) / 2.0)
     result["b_hill_GPa"] = b_hill
@@ -190,12 +286,16 @@ def main(argv: list[str] | None = None) -> int:
     symmetry: str = data["symmetry"]
     v0 = float(data["v0"])
     warnings: list[str] = []
+    spreads: dict[str, float] = {}
     curvatures = {
-        mode: _curvature(mode, data["modes"][mode], v0, warnings)
+        mode: _curvature(mode, data["modes"][mode], v0, warnings, spreads)
         for mode in REQUIRED_MODES[symmetry]
     }
+    _average_optional(symmetry, data, v0, warnings, spreads, curvatures)
     cij = _assemble(symmetry, curvatures)
+    born = _born(symmetry, cij, warnings)
     moduli = _vrh(_matrix(symmetry, cij), warnings)
+    uncertainty = max(spreads.values()) if spreads else None
 
     if args.json:
         print(
@@ -204,6 +304,9 @@ def main(argv: list[str] | None = None) -> int:
                     "symmetry": symmetry,
                     "curvatures_GPa": curvatures,
                     "cij_GPa": cij,
+                    "fit_spread": spreads,
+                    "relative_uncertainty": uncertainty,
+                    "born_margins": born,
                     **moduli,
                     "warnings": warnings,
                 },
@@ -214,6 +317,15 @@ def main(argv: list[str] | None = None) -> int:
     print(f"symmetry: {symmetry}, reference volume {v0:.3f} A^3")
     for name, value in cij.items():
         print(f"  {name} = {value:8.2f} GPa")
+    if uncertainty is not None:
+        print(
+            f"fit spread (quadratic vs quartic vs inner window): up to "
+            f"{uncertainty * 100:.1f} % of a curvature"
+        )
+    print(
+        "Born stability margins: "
+        + ", ".join(f"{name} {margin:.2f}" for name, margin in born.items())
+    )
     print(
         f"bulk modulus  B: Voigt {moduli['b_voigt_GPa']:.2f}, "
         f"Hill {moduli['b_hill_GPa']:.2f} GPa"
@@ -225,6 +337,10 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"E = {moduli['youngs_GPa']:.2f} GPa, nu = {moduli['poisson']:.4f} "
         f"(isotropic VRH averages)"
+    )
+    print(
+        "precision: energy-strain C_ij at converged settings carry about 5 % "
+        "numerical and about 15 % against experiment"
     )
     for warning in warnings:
         print(f"warning: {warning}")

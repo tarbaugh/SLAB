@@ -545,6 +545,63 @@ def test_fit_elastic_recovers_a_known_orthorhombic_matrix(
     assert fit["b_reuss_GPa"] < fit["b_voigt_GPa"] + 1e-9
     assert 0.0 < fit["poisson"] < 0.5
     assert fit["warnings"] == []
+    # Exact quadratics: the quartic and inner-window fits agree to rounding.
+    assert fit["relative_uncertainty"] < 1e-6
+    assert all(margin > 0.1 for margin in fit["born_margins"].values())
+
+    hexagonal = dict(_ortho_ladders(), symmetry="hexagonal")
+    data.write_text(json.dumps(hexagonal))
+    code, out = _run(FIT_ELASTIC, str(data), "--json", monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 0 and json.loads(out)["symmetry"] == "hexagonal"
+
+
+def test_fit_elastic_reports_spread_born_margins_and_isotropic_averages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    v0 = 100.0
+
+    def ladder(c_gpa: float, quartic: float = 0.0) -> list[dict[str, float]]:
+        return [
+            {"delta": d, "energy": 0.5 * (c_gpa / _GPA) * v0 * d * d + quartic * d**4}
+            for d in (-0.02, -0.01, -0.005, 0.0, 0.005, 0.01, 0.02)
+        ]
+
+    # Isotropic: six ladders with different curvatures average to the mean.
+    modes = {"e1": ladder(90.0), "e2": ladder(100.0), "e3": ladder(110.0),
+             "e4": ladder(25.0), "e5": ladder(30.0), "e6": ladder(35.0)}
+    data = tmp_path / "glass.json"
+    data.write_text(json.dumps({"symmetry": "isotropic", "v0": v0, "modes": modes}))
+    code, out = _run(FIT_ELASTIC, str(data), "--json", monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 0
+    fit = json.loads(out)
+    assert abs(fit["cij_GPa"]["C11"] - 100.0) < 1e-6
+    assert abs(fit["cij_GPa"]["C44"] - 30.0) < 1e-6
+    assert fit["warnings"] == []
+
+    # Only e1 and e4: still fits, and says the other directions are missing.
+    data.write_text(json.dumps({"symmetry": "isotropic", "v0": v0,
+                                "modes": {"e1": modes["e1"], "e4": modes["e4"]}}))
+    code, out = _run(FIT_ELASTIC, str(data), "--json", monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 0 and any("e2, e3, e5" in w for w in json.loads(out)["warnings"])
+
+    # A strong quartic term makes the three fits disagree: the spread warns.
+    noisy = {"e1": ladder(100.0, quartic=40000.0), "e4": ladder(30.0),
+             "e12": ladder(2 * 100.0 + 2 * 40.0)}
+    data.write_text(json.dumps({"symmetry": "cubic", "v0": v0, "modes": noisy}))
+    code, out = _run(FIT_ELASTIC, str(data), "--json", monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 0
+    fit = json.loads(out)
+    assert fit["relative_uncertainty"] > 0.15
+    assert any("differ by" in w for w in fit["warnings"])
+
+    # C12 above C11 fails the Born condition C11 - C12 > 0.
+    unstable = {"e1": ladder(100.0), "e4": ladder(30.0), "e12": ladder(2 * 100.0 + 2 * 120.0)}
+    data.write_text(json.dumps({"symmetry": "cubic", "v0": v0, "modes": unstable}))
+    code, out = _run(FIT_ELASTIC, str(data), monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 0
+    assert "Born stability fails for C11-C12" in out
+    assert "not positive definite" in out
+    assert "precision:" in out
 
 
 def test_fit_elastic_refuses_and_warns_well(
