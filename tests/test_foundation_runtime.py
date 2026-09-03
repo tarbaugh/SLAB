@@ -90,6 +90,24 @@ def test_one_failure_among_many_blocks_verification(ws: Workspace) -> None:
     assert results == {"ok": True, "not-ok": False}
 
 
+def test_a_custom_check_may_carry_what_it_observed(ws: Workspace) -> None:
+    """A record that said only ``returned False`` made one real session dig
+    the artifact store by hand to learn what the lattice constant was."""
+    with ws.start_run() as run:
+        run.check(lambda: (False, 3.21), name="a0_reasonable")
+        run.check(lambda: (True, 3.17, {"near": 3.17}), name="a0_with_expected")
+        run.check(
+            lambda: {"passed": True, "observed": 361.3, "expected": {"below": 720}}, name="sp_time"
+        )
+    by_name = {r.name: r for r in ws.runs.list_check_results(run.id)}
+    a0 = by_name["a0_reasonable"]
+    assert not a0.passed and a0.kind == "custom" and a0.observed == 3.21
+    assert a0.message == "returned False; observed 3.21"
+    assert by_name["a0_with_expected"].expected == {"near": 3.17}
+    assert "expected {'near': 3.17}" in by_name["a0_with_expected"].message
+    assert by_name["sp_time"].passed and by_name["sp_time"].observed == 361.3
+
+
 def test_check_coercions(ws: Workspace) -> None:
     with ws.start_run() as run:
         run.check(lambda: None, name="assert_style_pass")

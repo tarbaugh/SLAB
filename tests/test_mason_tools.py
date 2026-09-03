@@ -1,6 +1,7 @@
 """Tool contract tests: file primitives, gating, truncation, SLAB integration."""
 
 import contextlib
+import json
 from pathlib import Path
 
 import pytest
@@ -942,6 +943,45 @@ def test_show_run_folds_finished_tasks_unless_asked_for_everything(
     assert "full=true" in compact
     full = box.dispatch(_call("show_run", run_id=run_id, full=True))
     assert '"recipe"' in full and '"tasks_summary"' not in full
+
+
+def test_show_run_returns_one_task_in_full_on_request(box: Toolbox, tmp_path: Path) -> None:
+    """A real session read the full record, saw it cut at the cap, and went
+    digging in the artifact store by hand for one task's output."""
+    (tmp_path / "wf.py").write_text(_RELAX_SCRIPT)
+    launched = box.dispatch(_call("launch_workflow", script="wf.py", intent="one task"))
+    run_id = launched.split()[1].rstrip(":")
+    by_label = json.loads(box.dispatch(_call("show_run", run_id=run_id, task="cu")))
+    assert by_label["task"]["name"] == "relax" and '"recipe"' not in json.dumps(by_label["run"])
+    assert "recipe" in by_label["task"] and "outputs" in by_label["task"]
+    assert "tasks_summary" not in by_label and by_label["checks"]
+    by_seq = json.loads(box.dispatch(_call("show_run", run_id=run_id, task="1")))
+    assert by_seq["task"] == by_label["task"]
+    missing = json.loads(box.dispatch(_call("show_run", run_id=run_id, task="nope")))
+    assert missing["error"] == "no task 'nope'; the tasks: 1 relax (cu)"
+
+
+def test_read_artifact_reads_a_runs_file_by_name_windowed(box: Toolbox, tmp_path: Path) -> None:
+    """The store is content-addressed; a real session guessed its layout by
+    hand for six minutes to read one .pwo. The tool reads it by name."""
+    (tmp_path / "wf.py").write_text(_RELAX_SCRIPT)
+    launched = box.dispatch(_call("launch_workflow", script="wf.py", intent="artifact"))
+    run_id = launched.split()[1].rstrip(":")
+    record = json.loads(box.dispatch(_call("show_run", run_id=run_id)))
+    assert record["artifacts"], "the relax run keeps at least one artifact"
+    name = record["artifacts"][0]["name"]
+
+    def read(**arguments: object) -> str:  # _call's own 'name' parameter is the tool's
+        call = ToolCall(id="ra", name="read_artifact", arguments=arguments, arguments_raw="{}")
+        return box.dispatch(call)
+
+    shown = read(run_id=run_id, name=name, limit=3)
+    assert shown.startswith(f"{name} ({record['artifacts'][0]['size_bytes']} bytes, sha256 ")
+    assert "looks binary" in shown or "\n     1\t" in shown
+    by_hash = read(run_id=run_id, name=record["artifacts"][0]["hash"][:8], limit=3)
+    assert by_hash.startswith(f"{name} (")
+    missing = read(run_id=run_id, name="nope.pwo")
+    assert missing.startswith("no artifact named 'nope.pwo'") and name in missing
 
 
 def test_run_tools_resolve_a_run_by_the_name_the_model_remembers(

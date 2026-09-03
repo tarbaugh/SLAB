@@ -61,6 +61,7 @@ TOOL_VOCABULARY = frozenset(
         "shell",
         "list_runs",
         "show_run",
+        "read_artifact",
         "launch_workflow",
         "wait_for_run",
         "list_engines",
@@ -94,6 +95,7 @@ READ_ONLY_TOOLS = frozenset(
         "search",
         "list_runs",
         "show_run",
+        "read_artifact",
         "list_engines",
         "list_tasks",
         "describe_task",
@@ -640,10 +642,50 @@ def _compact_details(details: dict[str, Any]) -> dict[str, Any]:
         else:
             compact[key] = value
     compact["note"] = (
-        "finished tasks are folded to one line each; call show_run with full=true "
-        "for their recipes, inputs, and outputs"
+        "finished tasks are folded to one line each; call show_run with task=<label "
+        "or seq> for one task's recipe, inputs, and outputs, or full=true for all"
     )
     return compact
+
+
+def _one_task(details: dict[str, Any], wanted: object) -> dict[str, Any]:
+    """The run line, its checks, and one task in full, or the choice on offer.
+
+    A real session read a 12,000-character full record, saw it cut at the
+    cap, and went digging in the artifact store by hand for the one output
+    it wanted. One task at a time fits.
+
+    Examples:
+        >>> details = {"run": {"id": "r"}, "checks": [], "tasks": [
+        ...     {"seq": 1, "name": "relax_cell", "recipe": {"params": {"label": "w-ref"}},
+        ...      "outputs": {"a0": 3.17}},
+        ...     {"seq": 2, "name": "single_point", "recipe": {}, "outputs": {}}]}
+        >>> _one_task(details, "w-ref")["task"]["outputs"]
+        {'a0': 3.17}
+        >>> _one_task(details, 2)["task"]["name"]
+        'single_point'
+        >>> _one_task(details, "nope")["error"]
+        "no task 'nope'; the tasks: 1 relax_cell (w-ref), 2 single_point"
+    """
+    tasks = list(details.get("tasks") or [])
+
+    def label(task: dict[str, Any]) -> str | None:
+        recipe = task.get("recipe")
+        params = recipe.get("params") if isinstance(recipe, dict) else None
+        value = params.get("label") if isinstance(params, dict) else None
+        return str(value) if value else None
+
+    key = str(wanted)
+    for task in tasks:
+        if str(task.get("seq")) == key or label(task) == key:
+            return {"run": details.get("run"), "checks": details.get("checks"), "task": task}
+    for task in tasks:
+        if task.get("name") == key:
+            return {"run": details.get("run"), "checks": details.get("checks"), "task": task}
+    offer = ", ".join(
+        f"{t.get('seq')} {t.get('name')}" + (f" ({label(t)})" if label(t) else "") for t in tasks
+    )
+    return {"run": details.get("run"), "error": f"no task {wanted!r}; the tasks: {offer}"}
 
 
 def _out_of_scope(session: MasonSession, path: Path, roots: tuple[Path, ...]) -> str | None:
@@ -1158,9 +1200,51 @@ def _add_workflow_tools(
         with _open_workspace(session) as ws:
             run_id, note = _resolve_run(ws, str(arguments["run_id"]))
             details = run_details(ws, run_id)
-        if not arguments.get("full"):
+        if arguments.get("task") is not None:
+            details = _one_task(details, arguments["task"])
+        elif not arguments.get("full"):
             details = _compact_details(details)
         return note + json.dumps(details, indent=1, ensure_ascii=False)
+
+    def read_artifact(arguments: dict[str, Any]) -> str:
+        from foundation._ops import run_details
+
+        wanted = str(arguments["name"])
+        offset = max(int(arguments.get("offset", 1)), 1)
+        limit = int(arguments.get("limit", _MAX_READ_LINES))
+        with _open_workspace(session) as ws:
+            run_id, note = _resolve_run(ws, str(arguments["run_id"]))
+            artifacts = run_details(ws, run_id)["artifacts"]
+            found = [a for a in artifacts if a["name"] == wanted or a["hash"].startswith(wanted)]
+            if not found:
+                names = ", ".join(a["name"] for a in artifacts) or "none"
+                return f"{note}no artifact named {wanted!r} on run {run_id[:10]}; it has: {names}"
+            artifact = found[0]
+            if not ws.artifacts.has(artifact["hash"]):
+                return (
+                    f"{note}the bytes of {wanted!r} are no longer stored (retention "
+                    f"reclaimed them); the record keeps its hash {artifact['hash'][:12]}"
+                )
+            raw = ws.artifacts.get(artifact["hash"]).read_bytes()
+        head = (
+            f"{note}{artifact['name']} ({artifact['size_bytes']} bytes, "
+            f"sha256 {artifact['hash'][:12]})"
+        )
+        if b"\x00" in raw[:8192]:
+            return f"{head}\nlooks binary; read_artifact only reads text"
+        lines = raw.decode("utf-8", errors="replace").splitlines()
+        window = lines[offset - 1 : offset - 1 + limit]
+        numbered = []
+        for i, line in enumerate(window, start=offset):
+            if len(line) > _MAX_LINE_CHARS:
+                line = line[:_MAX_LINE_CHARS] + " [line truncated]"
+            numbered.append(f"{i:6d}\t{line}")
+        shown = "\n".join(numbered) if numbered else "(no lines in this window)"
+        tail = ""
+        if len(lines) > offset - 1 + len(window):
+            last = offset + len(window) - 1
+            tail = f"\n[artifact has {len(lines)} lines; showing {offset}-{last}]"
+        return f"{head}\n{shown}{tail}"
 
     box.add(
         Tool(
@@ -1169,13 +1253,18 @@ def _add_workflow_tools(
                 "One run's record: its fields, checks with observed/expected values, "
                 "the task tally with finished tasks folded to one line each, failed "
                 "tasks and failure records in full, artifacts, and history. Pass "
-                "full=true for every task's recipe, inputs, and outputs. run_id "
-                "takes an id, a unique prefix, or the name of a run this session "
-                "created. Read this before correcting a failed run."
+                "task=<label or seq> for one task's recipe, inputs, and outputs, or "
+                "full=true for every task's. run_id takes an id, a unique prefix, or "
+                "the name of a run this session created. Read this before "
+                "correcting a failed run; read_artifact reads its files."
             ),
             parameters=_schema(
                 {
                     "run_id": {"type": "string"},
+                    "task": {
+                        "type": "string",
+                        "description": "one task's label or seq: its recipe, inputs, outputs",
+                    },
                     "full": {
                         "type": "boolean",
                         "description": "include every task's recipe, inputs, and outputs",
@@ -1184,6 +1273,28 @@ def _add_workflow_tools(
                 ["run_id"],
             ),
             handler=show_run,
+        )
+    )
+    box.add(
+        Tool(
+            name="read_artifact",
+            description=(
+                "Read one of a run's artifacts as text, line-numbered and windowed like "
+                "read_file (offset, limit). name is the artifact's name from show_run "
+                "(or a hash prefix); run_id as for show_run. This is how to read an "
+                "engine's output file (a .pwo, a LAMMPS log) after the run: the store "
+                "is content-addressed, so do not go looking for the path by hand."
+            ),
+            parameters=_schema(
+                {
+                    "run_id": {"type": "string"},
+                    "name": {"type": "string"},
+                    "offset": {"type": "integer", "description": "first line, 1-based"},
+                    "limit": {"type": "integer", "description": "lines to show (default 400)"},
+                },
+                ["run_id", "name"],
+            ),
+            handler=read_artifact,
         )
     )
 
