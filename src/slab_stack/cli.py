@@ -45,7 +45,7 @@ from slab._version import __version__
 from slab.cli import config_app, engines_app, hpc_app, mp_app, protocols_app, pseudos_app
 from slab.errors import SlabError
 from slab.hpc import SchedulerNotAvailableError, active_job_ids
-from slab_stack import benchmark
+from slab_stack import benchmark, review
 
 _PANEL_LIFECYCLE = "Runs and lifecycle"
 _PANEL_HOUSEKEEPING = "Housekeeping"
@@ -462,7 +462,14 @@ benchmark_app = typer.Typer(
 )
 app.add_typer(benchmark_app, name="benchmark", rich_help_panel=_PANEL_AGENT)
 
-_BENCH_ERRORS = (benchmark.BenchmarkError, MasonError, FoundationError, SlabError, OSError)
+_BENCH_ERRORS = (
+    benchmark.BenchmarkError,
+    review.ReviewError,
+    MasonError,
+    FoundationError,
+    SlabError,
+    OSError,
+)
 _MachineOpt = Annotated[
     str | None,
     typer.Option(
@@ -475,14 +482,46 @@ _RecordsOpt = Annotated[
     Path | None,
     typer.Option("--records", help="The records file (default benchmarks/results.jsonl)."),
 ]
+_RefereeOpt = Annotated[
+    bool,
+    typer.Option(
+        "--referee",
+        help="Also ask a model to referee each campaign (one model call per campaign).",
+    ),
+]
+_RefereeModelOpt = Annotated[
+    str | None,
+    typer.Option("--referee-model", help="Model for the referee (default: the [agent] model)."),
+]
+_RefereeEndpointOpt = Annotated[
+    str | None, typer.Option("--referee-endpoint", help="Endpoint for the referee.")
+]
+_RefereeProviderOpt = Annotated[
+    str | None, typer.Option("--referee-provider", help="Provider for the referee.")
+]
+
+
+def _referee(
+    root: Path, wanted: bool, model: str | None, endpoint: str | None, provider: str | None
+) -> Any:
+    """The referee's chat client when asked for, else None."""
+    if not wanted:
+        return None
+    return review.referee_client(root, model=model, endpoint=endpoint, provider=provider)
 
 
 def _record_line(record: dict[str, Any]) -> str:
     verdict = "pass" if record["passed"] else f"fail: {record['reason']}"
+    raised = len(record.get("flags") or [])
+    flagged = f"  [{raised} flag{'s' if raised != 1 else ''}]" if raised else ""
     return (
         f"Q{record['question']} {record['key']:<9} {record['model']:<24} "
-        f"{record['machine']:<12} {verdict}"
+        f"{record['machine']:<12} {verdict}{flagged}"
     )
+
+
+def _flag_line(flag: dict[str, Any]) -> str:
+    return f"  {flag['rule']:<22} {flag['raised_by']:<8} {flag['evidence']}: {flag['note']}"
 
 
 @benchmark_app.command("list")
@@ -517,8 +556,12 @@ def benchmark_run(
     agent: Annotated[str | None, typer.Option("--agent", help="Entry card (default pi).")] = None,
     machine: _MachineOpt = None,
     records: _RecordsOpt = None,
+    referee: _RefereeOpt = False,
+    referee_model: _RefereeModelOpt = None,
+    referee_endpoint: _RefereeEndpointOpt = None,
+    referee_provider: _RefereeProviderOpt = None,
 ) -> None:
-    """Run one campaign here, autonomously, then score and record it.
+    """Run one campaign here, autonomously, then score, review, and record it.
 
     For a laptop or an interactive node. On a cluster, prefer 'launch',
     which runs the campaign as a sandbox job, then 'score' after it ends.
@@ -539,12 +582,17 @@ def benchmark_run(
             f"after {result.steps} step(s)"
         )
         root = _ops.resolve_root(workspace)
-        record = benchmark.score_session(root, session_id, question=asked, machine=machine)
+        judge = _referee(root, referee, referee_model, referee_endpoint, referee_provider)
+        record = benchmark.score_session(
+            root, session_id, question=asked, machine=machine, referee=judge
+        )
         path = records or benchmark.records_path()
         benchmark.append_record(path, record)
     except _BENCH_ERRORS as e:
         _fail(str(e))
     typer.echo(_record_line(record))
+    for flag in record["flags"]:
+        typer.echo(_flag_line(flag))
     typer.echo(f"recorded in {path}")
 
 
@@ -612,13 +660,22 @@ def benchmark_score(
     ] = False,
     records: _RecordsOpt = None,
     as_json: Annotated[bool, typer.Option("--json", help="Emit the records as JSON.")] = False,
+    referee: _RefereeOpt = False,
+    referee_model: _RefereeModelOpt = None,
+    referee_endpoint: _RefereeEndpointOpt = None,
+    referee_provider: _RefereeProviderOpt = None,
 ) -> None:
-    """Score campaigns from their transcripts and the run record, and append the records."""
+    """Score and review campaigns from their transcripts and the run record.
+
+    The rules review every campaign; --referee also asks a model. Each
+    record appends to the records file with its flags.
+    """
     from mason.session import transcript_groups
 
     path = records or benchmark.records_path()
     try:
         root = _ops.resolve_root(workspace)
+        judge = _referee(root, referee, referee_model, referee_endpoint, referee_provider)
         asked = benchmark.find_question(question) if question is not None else None
         known = benchmark.recorded_sessions(benchmark.load_records(path))
         if session:
@@ -637,7 +694,7 @@ def benchmark_score(
                 continue
             try:
                 record = benchmark.score_session(
-                    root, target, question=asked, machine=machine, model=model
+                    root, target, question=asked, machine=machine, model=model, referee=judge
                 )
             except benchmark.BenchmarkError as e:
                 # A session that cannot be judged (no checked reference for
@@ -657,6 +714,11 @@ def benchmark_score(
         return
     for record in scored:
         typer.echo(_record_line(record))
+        for flag in record.get("flags") or []:
+            typer.echo(_flag_line(flag))
+        if record.get("referee_error"):
+            typer.secho(f"  referee failed: {record['referee_error']}", err=True,
+                        fg=typer.colors.YELLOW)
     if not scored:
         typer.echo("nothing new to score" + (f" ({skipped} already recorded)" if skipped else ""))
     elif skipped:
@@ -705,6 +767,103 @@ def benchmark_render(
         f"rendered Q{asked.number} ({asked.key}); edit if needed, then: sbatch {script_path}"
     )
     typer.echo("after the job ends: slab benchmark score")
+
+
+@benchmark_app.command("flags")
+def benchmark_flags(
+    target: Annotated[
+        str | None,
+        typer.Option("--target", help="Only this target, e.g. skill:equation-of-state."),
+    ] = None,
+    status: Annotated[
+        str | None,
+        typer.Option("--status", help="Only flags in this status: open, pending, or unknown."),
+    ] = None,
+    records: _RecordsOpt = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Emit the flags as JSON.")] = False,
+) -> None:
+    """The defect list: every flag on the latest record per model, machine, and question.
+
+    A flag is 'open' while its target is unchanged since it was raised,
+    'pending' when the skill has a newer revision no campaign has run
+    under, and 'unknown' when the skill is not in the catalog.
+    """
+    from mason.skills import discover_skills
+
+    path = records or benchmark.records_path()
+    try:
+        rows = review.ledger(benchmark.load_records(path), discover_skills(Path.cwd()))
+    except _BENCH_ERRORS as e:
+        _fail(str(e))
+    if target is not None:
+        rows = [row for row in rows if row["target"] == target]
+    if status is not None:
+        rows = [row for row in rows if row["status"] == status]
+    if as_json:
+        typer.echo(json.dumps(rows, indent=2, ensure_ascii=False))
+        return
+    if not rows:
+        typer.echo("no flags")
+        return
+    current: str | None = None
+    for row in rows:
+        if row["target"] != current:
+            current = row["target"]
+            typer.echo(current)
+        cell = f"Q{row['question']} {row['model']}/{row['machine']}"
+        against = f" against {row['against']}" if row["against"] else ""
+        typer.echo(
+            f"  {row['status']:<8} {row['rule']:<22} {cell}{against}\n"
+            f"           {row['raised_by']}: {row['evidence']}: {row['note']}"
+        )
+
+
+@benchmark_app.command("gate")
+def benchmark_gate(
+    skill: Annotated[str, typer.Argument(help="The skill whose current revision to validate.")],
+    records: _RecordsOpt = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Emit the report as JSON.")] = False,
+) -> None:
+    """Whether the benchmark validates the catalog's revision of a skill.
+
+    For every model, machine, and question that exercised the skill, the
+    newest record under the current revision is compared with the newest
+    under any earlier one. Exit 1 unless every cell is validated: a
+    campaign ran under this revision, it did not regress, and it raises
+    no flag against the skill.
+    """
+    from mason.skills import discover_skills
+
+    path = records or benchmark.records_path()
+    try:
+        report = review.gate(skill, benchmark.load_records(path), discover_skills(Path.cwd()))
+    except _BENCH_ERRORS as e:
+        _fail(str(e))
+    if as_json:
+        typer.echo(
+            json.dumps(
+                {
+                    "skill": report.skill,
+                    "digest": report.digest,
+                    "validated": report.validated,
+                    "cells": [cell.__dict__ for cell in report.cells],
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+    else:
+        typer.echo(f"{report.skill} revision {report.digest}")
+        for cell in report.cells:
+            typer.echo(
+                f"  Q{cell.question} {cell.key:<9} {cell.model:<24} {cell.machine:<12} "
+                f"{cell.verdict}: {cell.detail}"
+            )
+        if not report.cells:
+            typer.echo("  not validated: no scored campaign lists or loaded this skill")
+        typer.echo("validated" if report.validated else "not validated")
+    if not report.validated:
+        raise typer.Exit(code=1)
 
 
 @benchmark_app.command("tables")

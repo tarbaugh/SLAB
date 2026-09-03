@@ -621,6 +621,46 @@ SLAB-shaped:
   and every surface reports which of the two it used — the same
   origin-tracking habit as `slab config show`.
 
+### 7e. The science review: measured failures with an owner
+
+The benchmark (docs/benchmark.md) turns "the agent works" into a
+pass/fail per question, and the test suite subjects the *code* to
+adversarial review whose confirmed findings become regression tests.
+Until the review existed, the *science* had no such loop: a failed
+campaign recorded a verdict ("a0 outside the band") that named nothing a
+revision could edit, so a skill improved by intuition and was released on
+faith. The review closes that asymmetry with three structural pieces, in
+the house style of code over prompt text:
+
+- **Flags are attributable by construction.** An evaluator may raise a
+  defect only against a target that is a file: a skill, a card, a tool's
+  schema, or the prompt. The deterministic rules blame by mechanism (the
+  skill in force when an unverified run started, the skill whose bundled
+  script never ran); the model referee is handed the allowed targets and
+  a reply naming anything else is re-attributed to the card with the
+  referee's wording kept. A flag with no owner cannot exist.
+- **A skill revision is an identity, not a claim.** Each skill's digest
+  is the content hash of its directory, recorded by the `skill` tool at
+  load time. A flag is therefore raised against one revision, and the
+  status of a flag (open, pending, unknown) is computed from the catalog
+  rather than tracked by hand. This is the same move as content-addressed
+  artifacts: the evidence names itself.
+- **Validation is a gate, not a habit.** `slab benchmark gate <skill>`
+  compares the newest campaign under the current digest with the newest
+  under any earlier one, per model, machine, and question, and refuses
+  the revision unless a campaign ran under it, did not regress, and no
+  longer raises the flag. Absence of evidence (no campaign under the
+  revision) is refusal, matching the lifecycle argument that a missing
+  record must degrade loudly.
+
+The referee is deliberately a single structured call over an evidence
+pack rather than a second harness: it sees the transcript digest, the
+runs with their checks, and the skill bodies the agent was told to
+follow, and it answers in the same flag shape the rules write. The loop
+is then a procedure with no step that trusts an opinion: score, read the
+defect list, revise the owner, re-run the listed questions, pass the
+gate, commit the records with the revision.
+
 ## 8. Agent-native decisions, collected
 
 - **Run ids are ULIDs** (26 chars, time-ordered) and every surface accepts

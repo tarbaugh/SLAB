@@ -5,6 +5,19 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- The science review. A scored campaign now carries flags beside its
+  verdict: attributable defects, each with a rule, a target (`skill:`,
+  `card:`, `tool:`, or `prompt`), the evidence, and a note. The rules run
+  on every `slab benchmark score` and `run`; `--referee` also asks a model
+  to argue with the procedure from an evidence pack, and a referee that
+  cannot be read leaves the rules' flags in place. Every skill has a
+  digest, recorded by the `skill` tool when it loads and in the record
+  under `skills`, so a flag is raised against one revision. `slab
+  benchmark flags` is the defect list with a status per flag (open,
+  pending, unknown), `slab benchmark gate <skill>` refuses a revision
+  until a campaign under it passes without regressing or raising the
+  flag, and `tables` renders a flags region on the benchmark page.
+  `docs/review.md` describes the loop.
 - Two campaign transcripts, read and acted on. The run store asks for its
   journaling mode and keeps what the database can give: a store that
   wants rollback journaling opens a database another process holds in

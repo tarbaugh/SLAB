@@ -35,6 +35,7 @@ is no separate execution surface.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.resources
 import re
 from dataclasses import dataclass
@@ -68,6 +69,8 @@ class Skill:
     compatibility: str | None
     license: str | None
     ignored_allowed_tools: bool
+    #: The content hash of the skill directory (see :func:`skill_digest`).
+    digest: str = "unknown"
 
     def visible_to(self, agent_name: str) -> bool:
         """Whether the named agent card sees this skill in its catalog."""
@@ -122,6 +125,36 @@ def split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     if not isinstance(meta, dict):
         raise SkillError("frontmatter must be a YAML mapping")
     return meta, body.lstrip("\n")
+
+
+def skill_digest(root: Path) -> str:
+    """The revision of a skill: a short hash of every file under its root.
+
+    Hidden files and directories are left out, the way :func:`listing`
+    leaves them out. Two directories with the same files and bytes share a
+    digest wherever they live; one changed byte in ``SKILL.md`` or a script
+    is a new revision. The ``skill`` tool records the digest when the skill
+    loads, so a campaign can be told from a campaign under another revision.
+
+    Examples:
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory() as d:
+        ...     root = Path(d)
+        ...     _ = (root / "SKILL.md").write_text("---\\nname: x\\n---\\nbody\\n")
+        ...     before = skill_digest(root)
+        ...     _ = (root / "SKILL.md").write_text("---\\nname: x\\n---\\nbody!\\n")
+        ...     after = skill_digest(root)
+        >>> len(before), before != after
+        (12, True)
+    """
+    hasher = hashlib.sha256()
+    for path in sorted(p for p in root.rglob("*") if p.is_file()):
+        relative = path.relative_to(root)
+        if any(part.startswith((".", "_")) for part in relative.parts):
+            continue
+        hasher.update(relative.as_posix().encode("utf-8") + b"\0")
+        hasher.update(path.read_bytes() + b"\0")
+    return hasher.hexdigest()[:12]
 
 
 def _string_field(meta: dict[str, Any], key: str, *, limit: int, required: bool) -> str | None:
@@ -193,6 +226,7 @@ def parse_skill(skill_dir: Path, source: Source) -> Skill:
             compatibility=_string_field(meta, "compatibility", limit=500, required=False),
             license=_string_field(meta, "license", limit=500, required=False),
             ignored_allowed_tools="allowed-tools" in meta,
+            digest=skill_digest(skill_dir),
         )
     except SkillError as e:
         raise SkillError(f"{manifest}: {e}") from None
