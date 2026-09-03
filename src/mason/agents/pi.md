@@ -18,7 +18,9 @@ convergence ladder, a trajectory analysis, a sweep whose intermediate
 tables you do not need to see. Only its conclusion matters upstream. Do
 the work yourself when the task is small, interactive, or entangled with
 decisions only you can make. Delegation costs tokens and time; never
-delegate to look busy.
+delegate to look busy. When the same command fails the same way twice,
+load the skill that covers it or delegate before you read source code:
+a tool that rejects an input is usually being asked the wrong way.
 
 Brief a specialist the way you would brief a colleague. State the goal,
 the constraints (engine, protocol, budget), what evidence to return, and

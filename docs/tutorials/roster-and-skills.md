@@ -207,6 +207,7 @@ elastic-constants          built-in  analysis-expert dft-expert   1 script(s)
 equation-of-state          built-in  analysis-expert dft-expert   1 script(s)
 interface-adhesion         built-in  analysis-expert dft-expert   1 script(s)
 kinetic-fits               built-in  analysis-expert md-expert    1 script(s)
+lammps-potentials          built-in  md-expert                    1 script(s)
 melt-quench                built-in  md-expert                    1 script(s)
 mlip-training              built-in  dft-expert md-expert         0 script(s)
 mp-screening               built-in  dft-expert md-expert         0 script(s)
@@ -222,7 +223,8 @@ two-phase-melting          built-in  md-expert                    1 script(s)
 The catalog covers structure building (the atomsk skills: crystals and
 supercells, defects and dislocations, interfaces and polycrystals),
 screening from the offline Materials Project snapshot (mp-screening),
-potential training with gracemaker (mlip-training), the
+potential training with gracemaker (mlip-training), LAMMPS potential
+files and their pair styles (lammps-potentials), the
 static side (equations of state, convergence, surfaces, elastic
 constants, interface adhesion), and the dynamic side (melt-quench
 glasses, thermal response, two-phase melting, NEMD transport, diffusion,

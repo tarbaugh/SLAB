@@ -23,6 +23,8 @@ FIT_EOS = SKILLS / "equation-of-state" / "scripts" / "fit_eos.py"
 CONV = SKILLS / "convergence-study" / "scripts" / "convergence_table.py"
 RDF = SKILLS / "radial-distribution" / "scripts" / "rdf.py"
 MSD = SKILLS / "msd-diffusion" / "scripts" / "msd.py"
+PAIR_STYLE = SKILLS / "lammps-potentials" / "scripts" / "pair_style_for.py"
+DATA = Path(__file__).parent / "data"
 
 
 def _run(
@@ -426,6 +428,7 @@ def test_the_eos_template_runs_as_a_verified_traced_run_and_fits(
 def test_every_builtin_skill_validates_and_maps_to_its_specialists(tmp_path: Path) -> None:
     skills = discover_skills(tmp_path)
     assert {
+        "lammps-potentials",
         "equation-of-state",
         "convergence-study",
         "radial-distribution",
@@ -449,6 +452,7 @@ def test_every_builtin_skill_validates_and_maps_to_its_specialists(tmp_path: Pat
     assert skills["melt-quench"].agents == frozenset({"md-expert"})
     assert skills["two-phase-melting"].agents == frozenset({"md-expert"})
     assert skills["mlip-training"].agents == frozenset({"dft-expert", "md-expert"})
+    assert skills["lammps-potentials"].agents == frozenset({"md-expert"})
     for analysis in ("thermal-response", "kinetic-fits", "nemd-transport", "nucleation-cnt"):
         assert skills[analysis].agents == frozenset({"md-expert", "analysis-expert"})
     # The scriptless skills are deliberate: scripts are optional in the format.
@@ -1720,3 +1724,76 @@ def test_check_structure_refuses_missing_or_junk_files(
     junk.write_text("not a structure")
     code, _ = _run(CHECK, str(junk), monkeypatch=monkeypatch, capsys=capsys)
     assert isinstance(code, str) and "cannot read" in code
+
+
+# -- pair_style_for -----------------------------------------------------------
+
+
+def test_pair_style_for_reads_a_setfl_header_as_eam_alloy(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The Zhou tungsten file that one campaign spent seventy minutes
+    rewriting: a setfl file, fine as it is, under the wrong pair_style."""
+    path = DATA / "lammps-w-zhou-setfl.eam.alloy"
+    code, out = _run(PAIR_STYLE, str(path), monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 0
+    assert "format: setfl  elements: W" in out
+    assert "pair_style eam/alloy\n" in out
+    assert f"pair_coeff * * {path} W" in out
+    assert "warning" not in out
+
+
+def test_pair_style_for_reads_a_funcfl_header_as_eam(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = DATA / "lammps-cu-u3-funcfl.eam"
+    code, out = _run(PAIR_STYLE, str(path), "--json", monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 0
+    result = json.loads(out)
+    assert result["format"] == "funcfl"
+    assert result["pair_style"] == "eam"
+    assert result["pair_coeff"] == f"pair_coeff * * {path}"
+    assert result["warnings"] == []
+
+
+def test_pair_style_for_warns_when_the_name_and_the_header_disagree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    misnamed = tmp_path / "W.eam"
+    misnamed.write_bytes((DATA / "lammps-w-zhou-setfl.eam.alloy").read_bytes())
+    code, out = _run(PAIR_STYLE, str(misnamed), monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 0
+    assert "pair_style eam/alloy" in out  # the header wins
+    assert "warning: header is setfl but the name" in out
+
+
+def test_pair_style_for_needs_elements_for_ace_and_grace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ace = tmp_path / "W.yace"
+    ace.write_text("elements: [W]\n")
+    code, out = _run(PAIR_STYLE, str(ace), monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 0
+    assert "pair_style pace" in out and "El..." in out and "pass --elements" in out
+    code, out = _run(
+        PAIR_STYLE, str(ace), "--elements", "W", monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert code == 0 and f"pair_coeff * * {ace} W" in out and "warning" not in out
+    grace = tmp_path / "grace-2l-omat"
+    grace.mkdir()
+    code, out = _run(
+        PAIR_STYLE, str(grace), "--elements", "W", "Re", monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert code == 0 and "pair_style grace" in out and f"pair_coeff * * {grace} W Re" in out
+
+
+def test_pair_style_for_refuses_what_it_cannot_classify(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    other = tmp_path / "structure.cif"
+    other.write_text("data_W\n_cell_length_a 3.17\n")
+    code, _ = _run(PAIR_STYLE, str(other), monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 2
+    missing = tmp_path / "missing.eam"
+    code, _ = _run(PAIR_STYLE, str(missing), monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 2
