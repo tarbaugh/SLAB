@@ -205,10 +205,69 @@ def test_rdf_finds_the_fcc_nearest_neighbor_peak(
     code, out = _run(RDF, str(data), "--json", monkeypatch=monkeypatch, capsys=capsys)
     assert code == 0
     result = json.loads(out)
-    # fcc nearest neighbors sit at a/sqrt(2) = 2.556 A.
+    # fcc nearest neighbors sit at a/sqrt(2) = 2.556 A, twelve of them.
     assert 2.45 < result["first_peak_r_A"] < 2.66
     assert result["first_peak_g"] > 3.0
     assert result["frames"] == 1
+    assert abs(result["coordination_number"] - 12.0) < 1e-6
+    assert 2.55 < result["first_minimum_r_A"] < 3.6  # the gap right after the shell
+    assert result["first_peak_g_se"] is None  # one frame gives no block error
+
+
+def test_rdf_normalises_same_species_pairs_to_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An ideal gas of 32 atoms: g must tend to 1, not (N-1)/N = 0.97."""
+    from ase import Atoms
+
+    rng = np.random.default_rng(3)
+    frames = [
+        Atoms("Ar32", positions=rng.uniform(0.0, 20.0, size=(32, 3)), cell=[20.0] * 3, pbc=True)
+        for _ in range(60)
+    ]
+    data = tmp_path / "gas.xyz"
+    ase_write(data, frames)
+    code, out = _run(
+        RDF, str(data), "--bins", "40", "--json", monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert code == 0
+    result = json.loads(out)
+    assert abs(result["tail_mean_g"] - 1.0) < 0.03
+    assert result["first_peak_g_se"] is not None
+    assert not any("not 1" in w for w in result["warnings"])
+
+    # The highest peak is not the first: a crystal with a taller second shell
+    # still reports the nearest-neighbour peak first.
+    code, out = _run(RDF, str(data), monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 0 and "tail: g averages" in out
+
+
+def test_rdf_large_cells_take_the_neighbour_list_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    atoms = bulk("Al", "fcc", a=4.046, cubic=True) * (8, 8, 8)  # 2048 atoms
+    data = tmp_path / "big.xyz"
+    ase_write(data, atoms)
+    code, out = _run(
+        RDF, str(data), "--rmax", "6.0", "--bins", "120", "--json",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    result = json.loads(out)
+    assert abs(result["first_peak_r_A"] - 4.046 / np.sqrt(2)) < 0.06
+    assert abs(result["coordination_number"] - 12.0) < 1e-6
+
+
+def test_rdf_refuses_an_npt_frame_below_the_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    big = bulk("Cu", "fcc", a=3.615, cubic=True) * (3, 3, 3)
+    small = big.copy()
+    small.set_cell(big.cell * 0.5, scale_atoms=True)
+    data = tmp_path / "npt.xyz"
+    ase_write(data, [big, small])
+    code, _ = _run(RDF, str(data), "--rmax", "5.0", monkeypatch=monkeypatch, capsys=capsys)
+    assert isinstance(code, str) and "at frame 1" in code
 
 
 def test_rdf_refuses_rmax_beyond_the_minimum_image_limit(
@@ -258,8 +317,56 @@ def test_msd_recovers_a_random_walk_diffusion_coefficient(
     assert code == 0
     result = json.loads(out)
     expected = sigma**2 / 2.0  # MSD = 3 sigma^2 n = 6 D t with dt = 1 fs
-    assert 0.6 * expected < result["d_A2_per_fs"] < 1.6 * expected
+    assert 0.8 * expected < result["d_A2_per_fs"] < 1.2 * expected
     assert result["atoms_averaged"] == n_atoms
+    assert 0.9 < result["beta"] < 1.1
+    assert result["d_se_cm2_per_s"] is not None and len(result["d_blocks_cm2_per_s"]) == 5
+    assert result["d_se_cm2_per_s"] < 0.3 * result["d_cm2_per_s"]
+    for axis in "xyz":
+        assert 0.7 * expected < result["d_per_axis_A2_per_fs"][axis] < 1.3 * expected
+    assert result["warnings"] == []
+
+    # Two axes: the same D, from the x and y components alone.
+    code, out = _run(
+        MSD, str(data), "--dt-fs", "1.0", "--axes", "xy", "--json",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    planar = json.loads(out)
+    assert 0.8 * expected < planar["d_A2_per_fs"] < 1.2 * expected
+
+    # Yeh-Hummer adds a positive correction that scales with 1/L.
+    code, out = _run(
+        MSD, str(data), "--dt-fs", "1.0", "--yeh-hummer", "1e-3", "--temperature", "1000",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0 and "Yeh-Hummer D_inf" in out
+
+
+def test_msd_flags_a_plateau_and_a_changing_cell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ase import Atoms
+
+    rng = np.random.default_rng(11)
+    n_frames = 120
+    # Atoms rattling about fixed sites: the MSD plateaus and beta is near 0.
+    sites = rng.uniform(0.0, 10.0, size=(20, 3))
+    frames = []
+    for i in range(n_frames):
+        cell = [10.0 + (0.01 if i > n_frames // 2 else 0.0)] * 3  # an NPT-like jump
+        rattled = sites + rng.normal(0.0, 0.05, sites.shape)
+        frames.append(Atoms("Ar20", positions=rattled, cell=cell))
+    data = tmp_path / "solid.xyz"
+    ase_write(data, frames)
+    code, out = _run(
+        MSD, str(data), "--dt-fs", "1.0", "--json", monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert code == 0
+    result = json.loads(out)
+    assert result["beta"] < 0.3
+    assert any("plateaued" in w for w in result["warnings"])
+    assert any("cell changes between frames" in w for w in result["warnings"])
 
 
 def test_msd_refuses_short_input_and_bad_flags(
@@ -274,6 +381,14 @@ def test_msd_refuses_short_input_and_bad_flags(
     assert isinstance(code, str) and "not enough for an MSD" in code
     code, _ = _run(MSD, str(data), "--dt-fs", "-1", monkeypatch=monkeypatch, capsys=capsys)
     assert isinstance(code, str) and "--dt-fs" in code
+    code, _ = _run(
+        MSD, str(data), "--dt-fs", "1", "--fit-to", "0.8", monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert isinstance(code, str) and "0.5" in code
+    code, _ = _run(
+        MSD, str(data), "--dt-fs", "1", "--axes", "xq", monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert isinstance(code, str) and "--axes" in code
 
 
 # -- the template and the whole loop ------------------------------------------
