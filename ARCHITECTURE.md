@@ -591,7 +591,12 @@ SLAB-shaped:
   with an honest harness footer. The depth limit, the child's loss of
   `plan` and `delegate`, the shared approval gate with attributed
   previews, and the delegation kill switch are all code, not prompt text,
-  in the house style. The shared notebook is the blackboard: attributed
+  in the house style. So is the critic: a card that `reviews` is read-only
+  by construction, is reached only through the `review` tool, and leaves
+  its findings as a review record beside the transcripts; a card that
+  reviews first (the planner) has its launches and briefs refused until
+  the critic approves the plan, with the approval tied to a digest of the
+  text it approved. The shared notebook is the blackboard: attributed
   entries carry state between agents so briefs stay small. Skills follow
   the open Agent Skills format verbatim (per-specialist categorization
   rides in the spec's `metadata` map), and their bundled scripts execute

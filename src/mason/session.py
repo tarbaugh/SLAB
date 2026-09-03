@@ -237,6 +237,10 @@ class MasonSession:
         self.notebook_path = self.cwd / "NOTEBOOK.md"
         self.plan_path = self.cwd / "PLAN.md"
         self.read_files: set[Path] = set()
+        # Whether a critic has approved the plan, for a card that spends no
+        # compute before one has (review_first). The loop sets it from the
+        # persisted reviews at start; the review tool sets it on approval.
+        self.plan_approved = False
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.cached_prompt_tokens = 0

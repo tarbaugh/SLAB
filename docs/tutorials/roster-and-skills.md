@@ -3,8 +3,9 @@
 Mason is a research group, not a single agent. The group is the roster: a
 set of agents defined as markdown files called agent cards. The default
 agent is `pi`, the principal investigator. The PI can hand a scoped task
-to a specialist with the `delegate` tool. Every agent can load skills:
-reusable procedure packages with tested analysis scripts.
+to a specialist with the `delegate` tool, and a plan to the critic with
+the `review` tool. Every agent can load skills: reusable procedure
+packages with tested analysis scripts.
 
 This page shows how to use the roster, how to write a card and a skill,
 and how to configure a different model per agent. The recorded outputs
@@ -12,8 +13,8 @@ are exact captures from real executions against a local Ollama.
 
 ## The roster
 
-Six cards ship built in: two leads, `pi` and `planner`, three
-specialists, and a `worker`. `slab mason roster` lists what is visible
+Seven cards ship built in: two leads, `pi` and `planner`, three
+specialists, a `worker`, and a `critic`. `slab mason roster` lists what is visible
 from the current project, with the layer each card came from and the
 model it would use:
 
@@ -24,9 +25,10 @@ slab mason roster
 ```text
 pi                 built-in  llama3.1:8b                  18 skill(s)  [delegates]
 analysis-expert    built-in  llama3.1:8b                  9 skill(s)
+critic             built-in  llama3.1:8b                  18 skill(s)  [reviews]
 dft-expert         built-in  llama3.1:8b                  10 skill(s)
 md-expert          built-in  llama3.1:8b                  13 skill(s)
-planner            built-in  llama3.1:8b                  18 skill(s)  [delegates]
+planner            built-in  llama3.1:8b                  18 skill(s)  [delegates, review first]
 worker             built-in  llama3.1:8b                  18 skill(s)
 ```
 
@@ -57,6 +59,8 @@ code, not prompt text:
 - A card that delegates is a lead, not a hand. The `pi` and the
   `planner` never appear on each other's team, and a brief sent to one
   is refused with the team named.
+- A card that reviews takes no briefs. A brief sent to the `critic` is
+  refused, and the refusal names the `review` tool.
 - A delegated agent also loses the `plan` tool. `PLAN.md` belongs to the
   turn owner.
 - Every mutating tool call a specialist makes passes the same approval
@@ -109,6 +113,79 @@ Delegation quality is the served model's quality. The capture above is
 explicit briefs; it also fails some attempts, so expect retries. Larger
 served models handle larger briefs. The single loop remains the default
 experience, and nothing requires you to delegate.
+
+## A critic before compute
+
+A plan is cheapest to fix before the first run. The `critic` card reads
+a plan, a brief, or a workflow script and returns a verdict with
+numbered findings, each marked blocking or advisory. It runs nothing and
+writes nothing. The rules are code, not prompt text:
+
+- A card with `reviews: true` is read-only by construction. The toolbox
+  keeps only the tools that observe: the file readers, `list_runs`,
+  `show_run`, the engine and task catalogs, the Materials Project
+  lookups, `job_status`, `skill`, `recall`, and `finish`. An allowlist
+  that names anything else is refused when the card loads.
+- A critic takes no briefs. `delegate` refuses it and names the `review`
+  tool instead, so every review leaves a record.
+- The `review(subject?, focus?, agent?)` tool belongs to the leads. It
+  hands `PLAN.md` (the default subject) or a file path to the critic,
+  runs the critic's own loop, and returns the findings under a verdict
+  line, with the harness line after them. The critic passes its verdict
+  in the `verdict` argument of `finish`: `approve` or `revise`. A review
+  that ends without one is recorded as `none`, and `none` approves
+  nothing.
+- The findings persist. Each review is one markdown file under
+  `.slab/mason/reviews/`, named after the session transcript, and the
+  transcript records a `review` event that names it.
+- The planner spends no compute before an approval. Its card sets
+  `review_first: true`, so `delegate`, `launch_workflow`, and
+  `submit_job` are refused until the critic has approved the plan. The
+  refusal comes before any approval prompt.
+- An approval belongs to one text. The record carries a digest of the
+  reviewed plan. A session that starts with the same plan on disk starts
+  approved, and an edited plan is a different plan.
+- The lead's environment block shows the latest review of the plan, so
+  the findings survive compaction. When the plan has changed since the
+  review, the block says so.
+
+The record stands alone. The harness wrote this one during a scripted
+test run, so the findings are two lines rather than a served model's
+review:
+
+```text
+---
+subject: "plan"
+digest: "bd787cb9c53a2802"
+verdict: "revise"
+reviewer: "critic"
+session: "20260903-010916-8876"
+transcript: "20260903-010916-8876-critic-1.jsonl"
+at: "2026-09-03T01:09:16.131554+00:00"
+---
+# Findings
+
+1. blocking. "report a in Å": the step has no check. Add a @check that the relaxed stress is below a stated tolerance, so the run can reach verified.
+2. advisory. The plan does not say which cell (primitive or conventional) the value is read from; name it, because the two differ by a factor of sqrt(2).
+
+# Reviewed text
+
+# Goal
+
+Lattice constant of fcc Cu under emt.
+
+1. relax_cell the conventional cell; report a in Å.
+```
+
+The `pi` has the same tool, and its doctrine is to review a campaign
+plan before the first launch. Nothing gates the PI, because a small
+interactive task needs no critic. Give the critic the reasoning a
+review needs in `slab.toml`:
+
+```toml
+[agent.roster.critic]
+effort = "xhigh"
+```
 
 ## Skills
 
@@ -293,6 +370,12 @@ every claim. You do not compute and you do not speculate.
   `matching` (the default) shows the skills that name this card, plus
   the unrestricted ones.
 - `delegates: true` grants the `delegate` tool, at depth zero only.
+- `reviews: true` makes the card a critic: read-only by construction,
+  reached with the `review` tool, never briefed. It cannot be combined
+  with `delegates` or `review_first`.
+- `review_first: true` refuses the card's `delegate`, `launch_workflow`,
+  and `submit_job` until a critic has approved the plan. A `tools`
+  allowlist on such a card must name `review`.
 
 The shared harness discipline (evidence, verification, honesty, tool
 rules) is appended to every card automatically. A card states identity
@@ -306,6 +389,9 @@ steps to cheaper agents:
 
 - The planner writes `PLAN.md` first, one step per brief, each with its
   success criterion and the evidence it must return.
+- It hands the plan to the critic with the `review` tool and resolves
+  the blocking findings. The harness refuses its briefs until the
+  verdict is `approve`.
 - It hands every step to a specialist or to the `worker` with the
   `delegate` tool, and revises the plan after each report.
 - It confirms every cited run with `show_run` before a number enters the

@@ -33,7 +33,7 @@ import sqlite3
 import subprocess
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -78,9 +78,38 @@ TOOL_VOCABULARY = frozenset(
         "recall",
         "remember",
         "delegate",
+        "review",
         "finish",
     }
 )
+
+#: The tools that observe and never act: no file write, no launch, no shell,
+#: no entry in the notebook, the plan, or machine memory. A card that
+#: ``reviews`` gets exactly this slice of the session, whatever its
+#: allowlist says, so a critic cannot fix the plan it was asked to judge.
+READ_ONLY_TOOLS = frozenset(
+    {
+        "read_file",
+        "list_dir",
+        "search",
+        "list_runs",
+        "show_run",
+        "list_engines",
+        "list_tasks",
+        "describe_task",
+        "search_materials",
+        "get_material",
+        "query_materials",
+        "job_status",
+        "skill",
+        "recall",
+        "finish",
+    }
+)
+
+#: What a ``review_first`` card may not call before a critic approves the
+#: plan: the three tools that spend compute.
+_GATED_UNTIL_REVIEWED = ("launch_workflow", "submit_job", "delegate")
 
 _MAX_READ_LINES = 400
 _MAX_LINE_CHARS = 500
@@ -274,7 +303,11 @@ def build_toolbox(
     from the session's project directory. *roster* and *parent_client*
     feed the ``delegate`` tool, which exists only when the card delegates,
     the depth is zero, ``[agent] delegation`` is on, and the roster holds
-    someone to delegate to.
+    someone to delegate to; the ``review`` tool exists under the same
+    switch for a card that delegates or reviews first, when the roster
+    holds a critic. A card that ``reviews`` keeps only the read-only tools.
+    A card that reviews first has its compute-spending tools refused until
+    the plan is approved.
     """
     if skills is None:
         skills = discover_skills(session.cwd)
@@ -309,13 +342,18 @@ def build_toolbox(
         _add_machine_memory_tools(box, session)
     if visible:
         _add_skill_tool(box, session, visible)
-    if spec is not None and spec.delegates and depth == 0 and session.agent.delegation:
-        from mason.roster import hands
+    if spec is not None and depth == 0 and session.agent.delegation and roster is not None:
+        from mason.roster import critics, hands
 
-        if roster is not None and hands(spec, roster):
+        if spec.delegates and hands(spec, roster):
             _add_delegate_tool(box, session, spec, roster, skills, parent_client)
+        if (spec.delegates or spec.review_first) and critics(roster):
+            _add_review_tool(box, session, spec, roster, skills, parent_client, read_roots)
     if spec is not None and spec.tools is not None:
         for name in [n for n in box.tools if n not in spec.tools and n != "finish"]:
+            del box.tools[name]
+    if spec is not None and spec.reviews:
+        for name in [n for n in box.tools if n not in READ_ONLY_TOOLS]:
             del box.tools[name]
     if depth > 0:
         box.tools.pop("plan", None)
@@ -332,11 +370,20 @@ def build_toolbox(
                 "way (a workaround, a missing utility, a device limit) belongs in "
                 "`remember` first, or the next session pays for it again. Call "
                 "finish alone, as the only tool call of its message, after the "
-                "evidence it cites has been read."
+                "evidence it cites has been read. When you were asked to review, "
+                "pass the verdict in `verdict`; a review without one is no verdict."
             ),
             parameters=_schema(
                 {
                     "report": {"type": "string"},
+                    "verdict": {
+                        "type": "string",
+                        "enum": ["approve", "revise"],
+                        "description": (
+                            "for a review only: approve when no finding is blocking, "
+                            "revise when one is"
+                        ),
+                    },
                     "results": {
                         "type": "object",
                         "description": "result name -> {value, unit}",
@@ -356,6 +403,8 @@ def build_toolbox(
             handler=lambda arguments: str(arguments.get("report", "")),
         )
     )
+    if spec is not None and spec.review_first and depth == 0:
+        _gate_until_reviewed(box, session)
     return box
 
 
@@ -1659,6 +1708,53 @@ def _add_hpc_tools(box: Toolbox, session: MasonSession) -> None:
 # -- delegation ---------------------------------------------------------------
 
 
+def _run_child(
+    session: MasonSession,
+    roster: dict[str, AgentSpec],
+    skills: dict[str, Skill],
+    parent_client: Any | None,
+    target: AgentSpec,
+    brief: str,
+) -> tuple[Any, MasonSession]:
+    """Run *target*'s own loop on *brief*, one level down; (result, child session).
+
+    The one place a tool spins a loop of its own, shared by ``delegate``
+    and ``review``. The child derives from the *base* config so the entry
+    agent's own [agent.roster] table never leaks into it; CLI flags are
+    re-asserted on top because a flag outranks config for everyone.
+    """
+    # Local imports: tools must not import the loop at module scope (the
+    # loop imports tools).
+    from mason.config import override_agent, roster_agent_config
+    from mason.loop import Mason, client_from_config, connection_profile
+
+    effective = roster_agent_config(session.base_agent, target.name)
+    if session.flag_updates:
+        effective = override_agent(effective, dict(session.flag_updates))
+    child_session = session.spawn(target.name, effective)
+    reuse = parent_client is not None and connection_profile(
+        child_session.agent
+    ) == connection_profile(session.agent)
+    client = (
+        parent_client
+        if reuse
+        else client_from_config(child_session.agent, child_session.api_keys)
+    )
+    child = Mason(
+        child_session, client=client, skills=skills, spec=target, roster=roster, depth=1
+    )
+    return child.run_turn(brief), child_session
+
+
+def _harness_footer(name: str, result: Any, child_session: MasonSession) -> str:
+    """The bracketed line a lead reads before trusting a child's report."""
+    return (
+        f"[{name}: {result.stop_reason} after {result.steps} step(s); "
+        f"tokens {child_session.prompt_tokens}+{child_session.completion_tokens}; "
+        f"transcript {child_session.transcript_path.name}]"
+    )
+
+
 def _add_delegate_tool(
     box: Toolbox,
     session: MasonSession,
@@ -1668,11 +1764,6 @@ def _add_delegate_tool(
     parent_client: Any | None,
 ) -> None:
     def delegate(arguments: dict[str, Any]) -> str:
-        # Local imports: tools must not import the loop at module scope
-        # (the loop imports tools), and delegation is the one place a tool
-        # spins a loop of its own.
-        from mason.config import override_agent, roster_agent_config
-        from mason.loop import Mason, client_from_config, connection_profile
         from mason.roster import hands
 
         name = str(arguments["agent"])
@@ -1682,31 +1773,18 @@ def _add_delegate_tool(
             return f"you cannot delegate to yourself; your team: {others}"
         target = team.get(name)
         if target is None:
+            if name in roster and roster[name].reviews:
+                return (
+                    f"{name} reviews and takes no briefs; hand it the plan or a file "
+                    f"with the review tool. your team: {others}"
+                )
             if name in roster:
                 return f"{name} leads a group of its own and takes no briefs; your team: {others}"
             return f"no agent named {name!r}; your team: {others}"
         task = str(arguments["task"])
         context = arguments.get("context")
-        # The child derives from the *base* config so the entry agent's own
-        # [agent.roster] table never leaks into a specialist; CLI flags are
-        # re-asserted on top because a flag outranks config for everyone.
-        effective = roster_agent_config(session.base_agent, name)
-        if session.flag_updates:
-            effective = override_agent(effective, dict(session.flag_updates))
-        child_session = session.spawn(name, effective)
-        reuse = parent_client is not None and connection_profile(
-            child_session.agent
-        ) == connection_profile(session.agent)
-        client = (
-            parent_client
-            if reuse
-            else client_from_config(child_session.agent, child_session.api_keys)
-        )
-        child = Mason(
-            child_session, client=client, skills=skills, spec=target, roster=roster, depth=1
-        )
         brief = task if not context else f"{task}\n\nContext from {spec.name}:\n{context}"
-        result = child.run_turn(brief)
+        result, child_session = _run_child(session, roster, skills, parent_client, target, brief)
         session.record(
             {
                 "type": "delegate",
@@ -1717,12 +1795,7 @@ def _add_delegate_tool(
                 "steps": result.steps,
             }
         )
-        footer = (
-            f"[{name}: {result.stop_reason} after {result.steps} step(s); "
-            f"tokens {child_session.prompt_tokens}+{child_session.completion_tokens}; "
-            f"transcript {child_session.transcript_path.name}]"
-        )
-        return f"{result.text}\n\n{footer}"
+        return f"{result.text}\n\n{_harness_footer(name, result, child_session)}"
 
     box.add(
         Tool(
@@ -1752,6 +1825,192 @@ def _add_delegate_tool(
             handler=delegate,
         )
     )
+
+
+# -- review: a critic before compute -----------------------------------------
+
+
+def _review_brief(label: str, text: str, focus: object) -> str:
+    """The critic's brief: what to judge, how to report, and the text itself."""
+    parts = [
+        f"Review {label} before compute is spent on it. Judge it by the questions "
+        f"in your card, quote what you judge, and number every finding as blocking "
+        f"or advisory with the change that would resolve it.",
+    ]
+    if focus:
+        parts.append(f"Focus from the lead: {focus}")
+    parts.append(
+        "Then call finish alone, with the verdict in its `verdict` argument: approve "
+        "when no finding is blocking, revise when one is."
+    )
+    parts.append(f"--- {label} ---\n{text.rstrip()}\n--- end ---")
+    return "\n\n".join(parts)
+
+
+_VERDICT_HEAD = {
+    "approve": "verdict: approve. No finding is blocking; compute may be spent on it.",
+    "revise": "verdict: revise. Resolve the blocking findings, then review again.",
+    "none": (
+        "verdict: none. The critic ended without a verdict; nothing is approved. "
+        "Read the harness line, then review again."
+    ),
+}
+
+
+def _add_review_tool(
+    box: Toolbox,
+    session: MasonSession,
+    spec: AgentSpec,
+    roster: dict[str, AgentSpec],
+    skills: dict[str, Skill],
+    parent_client: Any | None,
+    read_roots: tuple[Path, ...],
+) -> None:
+    from mason.reviews import PLAN_SUBJECT, Verdict, digest, write_review
+
+    def review(arguments: dict[str, Any]) -> str:
+        from mason.roster import critics
+
+        available = critics(roster)
+        chosen = arguments.get("agent")
+        if chosen is None:
+            target = next(iter(available.values()))
+        else:
+            found = available.get(str(chosen))
+            if found is None:
+                return (
+                    f"no critic named {chosen!r}; the critics on the roster: "
+                    f"{', '.join(available)}"
+                )
+            target = found
+        subject = str(arguments.get("subject") or PLAN_SUBJECT)
+        if subject == PLAN_SUBJECT:
+            text = session.plan_text()
+            if not text.strip():
+                return (
+                    "nothing to review: PLAN.md does not exist or is empty; write the "
+                    "plan with the plan tool first"
+                )
+            label = "the plan (PLAN.md)"
+        else:
+            path = _resolve(session, subject)
+            if refused := _out_of_scope(session, path, read_roots):
+                return refused
+            if not path.is_file():
+                return f"nothing to review: {path} is not a file; pass 'plan' or a file path"
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                return f"refused: {path} is not a text file"
+            label = f"the file {path}"
+        brief = _review_brief(label, text, arguments.get("focus"))
+        result, child_session = _run_child(session, roster, skills, parent_client, target, brief)
+        verdict: Verdict = (
+            result.verdict
+            if result.stop_reason == "finish" and result.verdict in ("approve", "revise")
+            else "none"
+        )
+        record = write_review(
+            session,
+            subject=subject,
+            text=text,
+            verdict=verdict,
+            reviewer=target.name,
+            transcript=child_session.transcript_path.name,
+            findings=result.text,
+        )
+        if (
+            subject == PLAN_SUBJECT
+            and verdict == "approve"
+            and digest(session.plan_text()) == digest(text)
+        ):
+            session.plan_approved = True
+        session.record(
+            {
+                "type": "review",
+                "agent": target.name,
+                "subject": subject,
+                "verdict": verdict,
+                "record": record.name,
+                "transcript": child_session.transcript_path.name,
+                "stop": result.stop_reason,
+                "steps": result.steps,
+            }
+        )
+        return (
+            f"{_VERDICT_HEAD[verdict]}\n\n{result.text}\n\n"
+            f"{_harness_footer(target.name, result, child_session)}\n"
+            f"[review recorded in {record}]"
+        )
+
+    box.add(
+        Tool(
+            name="review",
+            description=(
+                "Hand the plan, or a file, to the critic before compute is spent on "
+                "it. The critic is read-only: it runs its own loop against the "
+                "shared workspace, returns numbered findings marked blocking or "
+                "advisory, and ends with a verdict, approve or revise. The findings "
+                "are kept as a review record. Review the plan before the first "
+                "brief or launch, and again when the plan changes in substance."
+            ),
+            parameters=_schema(
+                {
+                    "subject": {
+                        "type": "string",
+                        "description": "'plan' (the default) for PLAN.md, or a file path",
+                    },
+                    "focus": {
+                        "type": "string",
+                        "description": "optional: what the critic should scrutinize most",
+                    },
+                    "agent": {
+                        "type": "string",
+                        "description": "optional: a critic's name when the roster has several",
+                    },
+                },
+                [],
+            ),
+            handler=review,
+        )
+    )
+
+
+def _plan_gate_refusal(session: MasonSession) -> str | None:
+    """Why a review_first card may not spend compute yet, or None when it may."""
+    if session.plan_approved:
+        return None
+    if not session.plan_text().strip():
+        return (
+            "refused: this card spends no compute before the critic approves the plan, "
+            "and PLAN.md is empty; write the plan with the plan tool, then call review"
+        )
+    return (
+        "refused: the plan has not been approved by the critic; call review (subject "
+        "'plan'), resolve the blocking findings in the plan, and review again until "
+        "the verdict is approve"
+    )
+
+
+def _gated(tool: Tool, session: MasonSession) -> Tool:
+    """*tool*, refusing until the plan is approved — before any approval prompt."""
+
+    def handler(arguments: dict[str, Any]) -> str:
+        refusal = _plan_gate_refusal(session)
+        return refusal if refusal is not None else tool.handler(arguments)
+
+    def gate(arguments: dict[str, Any]) -> bool:
+        # A call the gate will refuse never asks the user to approve it.
+        return _plan_gate_refusal(session) is None and tool.needs_approval(arguments)
+
+    return replace(tool, handler=handler, gate=gate)
+
+
+def _gate_until_reviewed(box: Toolbox, session: MasonSession) -> None:
+    for name in _GATED_UNTIL_REVIEWED:
+        tool = box.tools.get(name)
+        if tool is not None:
+            box.tools[name] = _gated(tool, session)
 
 
 # -- skills ------------------------------------------------------------------

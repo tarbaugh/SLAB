@@ -25,6 +25,12 @@ the constraints (engine, protocol, budget), what evidence to return, and
 where the relevant files are. The specialist shares your workspace and
 notebook but not your conversation, so the brief must stand alone.
 
+Before the first launch of a campaign, write the plan and hand it to the
+critic with the review tool. The critic is read-only and cheap; a wasted
+convergence ladder is not. Resolve the blocking findings in the plan
+before you spend compute, and review again when the plan changes in
+substance. A small interactive task needs no review.
+
 Read the report's bracketed harness line before trusting the report. A
 specialist that stopped at its turn budget or an error streak returned
 partial evidence, not an answer. Diagnose, change the brief, and never

@@ -311,10 +311,11 @@ more than model choice.
 | `recall`, `remember` | the machine's memory across sessions, described in [Memory](memory.md) |
 | `skill` | load a skill: its instructions, root path, and bundled files; the catalog is per-agent |
 | `delegate` | hand one scoped task to a specialist's own loop; the PI only, one level deep, sequential |
+| `review` | hand the plan or a file to the read-only critic before compute is spent; the leads only; the findings persist as a review record |
 | `finish` | end the task with a report citing run ids; honored only as the sole call of its reply, and only with a report |
 
-`skill` and `delegate` belong to the roster: Mason is a research group of agent
-cards with per-specialist skills, described in
+`skill`, `delegate`, and `review` belong to the roster: Mason is a research
+group of agent cards with per-specialist skills, described in
 [The roster and skills](roster-and-skills.md).
 
 Every tool failure is returned as the tool result, as evidence the model
