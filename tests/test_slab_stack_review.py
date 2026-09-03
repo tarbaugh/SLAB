@@ -32,8 +32,9 @@ LONG_AGO = "2000-01-01T00:00:00+00:00"
 FAR_AHEAD = "2999-01-01T00:00:00+00:00"
 
 
-def _header(agent: str = "pi") -> dict[str, Any]:
+def _header(agent: str = "pi", **extra: Any) -> dict[str, Any]:
     return {
+        **extra,
         "at": "2026-09-01T10:00:00+00:00",
         "type": "session",
         "agent": agent,
@@ -69,6 +70,15 @@ def _call(name: str, **arguments: Any) -> dict[str, Any]:
                 {"type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}
             ],
         },
+    }
+
+
+def _usage(completion_tokens: int) -> dict[str, Any]:
+    return {
+        "at": "2026-09-01T10:00:02+00:00",
+        "type": "usage",
+        "prompt_tokens": 1_000,
+        "completion_tokens": completion_tokens,
     }
 
 
@@ -132,6 +142,68 @@ class ScriptedReferee:
 
 
 # -- the rules ----------------------------------------------------------------
+
+
+def _looks(n: int, tokens: int = 100) -> list[dict[str, Any]]:
+    """*n* steps that only look: a usage event, a shell call, its result."""
+    events: list[dict[str, Any]] = []
+    for _ in range(n):
+        events += [_usage(tokens), _call("shell", command="ls"), _result("exit 0\nsandbox/")]
+    return events
+
+
+def test_fifteen_steps_that_only_look_are_a_loop_the_card_owns(tmp_path: Path) -> None:
+    """One real campaign spent 72 minutes and 80 % of its completion tokens
+    in two such windows, rewriting a potential file that one keyword would
+    have loaded; nothing in the loop made it step back."""
+    root = tmp_path / "ws"
+    session = "20260901-100000-1"
+    _transcript(root, session, [_header(), _user(Q1.instruction), *_looks(16), _finish(None, None)])
+    Workspace(root).close()
+    flags = _flags(benchmark.score_session(root, session))
+    flag = flags[("no-progress-loop", "card:pi")]
+    assert flag["evidence"] == "steps 1-16"
+    assert "16 consecutive steps only looked" in flag["note"]
+    assert "1,600 completion tokens" in flag["note"] or "1600 completion tokens" in flag["note"]
+    assert ("reasoning-heavy", "prompt") not in flags
+
+
+def test_fourteen_looks_or_a_plan_in_the_middle_are_not_a_loop(tmp_path: Path) -> None:
+    root = tmp_path / "ws"
+    short = "20260901-100000-2"
+    _transcript(root, short, [_header(), _user(Q1.instruction), *_looks(14), _finish(None, None)])
+    split = "20260901-100000-3"
+    plan = [_call("plan", content="# revised"), _result("PLAN.md updated")]
+    _transcript(
+        root, split,
+        [_header(), _user(Q1.instruction), *_looks(10), *plan, *_looks(10), _finish(None, None)],
+    )
+    Workspace(root).close()
+    for session in (short, split):
+        flags = benchmark.score_session(root, session)["flags"]
+        assert not [f for f in flags if f["rule"] == "no-progress-loop"], session
+
+
+def test_a_step_that_thinks_at_length_and_writes_nothing_is_flagged_on_the_prompt(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "ws"
+    unset = "20260901-100000-4"
+    heavy = [_usage(9_000), _call("shell", command="sed -n 1,5p f"), _result("exit 0\n...")]
+    writing = [_usage(12_000), _call("plan", content="# plan"), _result("PLAN.md updated")]
+    _transcript(
+        root, unset, [_header(), _user(Q1.instruction), *heavy, *writing, _finish(None, None)]
+    )
+    dialed = "20260901-100000-5"
+    _transcript(
+        root, dialed, [_header(effort="low"), _user(Q1.instruction), *heavy, _finish(None, None)]
+    )
+    Workspace(root).close()
+    flag = _flags(benchmark.score_session(root, unset))[("reasoning-heavy", "prompt")]
+    assert flag["evidence"] == "steps 1"  # the 12,000-token plan step wrote something
+    assert "peak 9,000" in flag["note"] and "effort was unset" in flag["note"]
+    flag = _flags(benchmark.score_session(root, dialed))[("reasoning-heavy", "prompt")]
+    assert "effort was low" in flag["note"]
 
 
 def test_a_campaign_that_never_loaded_the_skill_is_flagged_for_it(tmp_path: Path) -> None:
