@@ -795,6 +795,14 @@ and is sent to that provider as `low`.
 truncated turn is reported rather than passed off as a finished answer. And
 the stable system prompt is sent with a cache breakpoint.
 
+Both providers share one retry discipline. A 5xx answer is retried five
+times with growing waits, about 80 s in all, so a gateway that answers 502
+for a minute is outlasted. A connection that cannot be made fails after
+three quick attempts, so a wrong endpoint fails in seconds. A 4xx answer is
+never retried. A specialist or a critic whose server fails mid-turn returns
+a result rather than an error: its harness line says `error` and the step
+it reached, and its transcript holds those steps.
+
 Two caveats, both load-bearing:
 
 **This path needs billed API access, which a Claude subscription does not

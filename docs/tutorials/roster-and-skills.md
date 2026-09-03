@@ -100,10 +100,10 @@ The secret word is "perovskite".
 [analysis-expert: answer after 3 step(s); tokens 6269+140; transcript 20260825-040035-17009-analysis-expert-1.jsonl]
 ```
 
-The harness line is honest. When a specialist stops at its turn budget
-or an error streak, the PI reads `max_turns` or `error_streak` there,
-not a confident report. The PI card's doctrine is to read that line
-before trusting the text above it.
+The harness line is honest. When a specialist stops at its turn budget,
+an error streak, or a server failure, the PI reads `max_turns`,
+`error_streak`, or `error` there, not a confident report. The PI card's
+doctrine is to read that line before trusting the text above it.
 
 `slab mason chat --resume` replays only conversation transcripts. A
 delegation archive is never resumed as a conversation.
@@ -471,7 +471,9 @@ ignores it, and a server that knows only part of the scale may treat the
 rest as unset. On a server whose top level is the unset default, leave
 the planner's `effort` out rather than writing `xhigh`. Check the
 completion tokens per call in `slab mason report` before relying on
-it. Their
+it. `slab doctor` notes a roster table that sets `effort` while `[agent]`
+does not, because every card without a table then runs at the server's
+default, and a table for a card that only `--agent` can start. Their
 `provider`, `endpoint`, and `api_key_env` keys stay on the host, because
 every agent in the job talks to the one bridged endpoint, and the render
 warns when it drops one. A planner on a different provider than its
