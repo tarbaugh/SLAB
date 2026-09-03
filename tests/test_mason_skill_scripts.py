@@ -469,7 +469,7 @@ CNT = SKILLS / "nucleation-cnt" / "scripts" / "cnt.py"
 _KB_EV = 8.617333262e-5
 
 
-def test_fit_rates_recovers_an_arrhenius_law(
+def test_fit_rates_recovers_an_arrhenius_law_with_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     data = tmp_path / "rates.json"
@@ -486,9 +486,41 @@ def test_fit_rates_recovers_an_arrhenius_law(
     assert abs(fit["ea_eV"] - 0.5) < 1e-6
     assert abs(fit["prefactor"] - 1e-4) / 1e-4 < 1e-4
     assert fit["r2"] > 0.999999
+    assert fit["ea_se_eV"] is not None and fit["ea_se_eV"] < 1e-6  # exact data
+    assert fit["ea_lnA_correlation"] > 0.9  # compensation: Ea up, ln A up
+    assert fit["curvature"]["verdict"] == "arrhenius"
+    assert abs(fit["t_ref_K"] - 1.0 / np.mean(1.0 / np.array([500, 600, 700, 800, 900]))) < 1e-9
+
+    # Scattered replicas with errors: a weighted fit with a real error bar,
+    # and the diffusion prefactor as an attempt frequency.
+    rng = np.random.default_rng(5)
+    rows = [
+        {"T": t, "value": 1e-4 * np.exp(-0.5 / (_KB_EV * t)) * (1 + rng.normal(0, 0.1)),
+         "err": 1e-5 * np.exp(-0.5 / (_KB_EV * t))}
+        for t in (500, 500, 600, 600, 700, 700, 800, 800, 900, 900)
+    ]
+    data.write_text(json.dumps(rows))
+    code, out = _run(
+        FIT_RATES, str(data), "--mode", "arrhenius", "--jump-length", "2.5", "--json",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    fit = json.loads(out)
+    assert fit["weighted"] and fit["points"] == 10 and fit["temperatures"] == 5
+    assert abs(fit["ea_eV"] - 0.5) < 3 * fit["ea_se_eV"] + 0.02
+    assert 0.005 < fit["ea_se_eV"] < 0.05
+    # nu = 2 d D0 / a^2 with D0 in cm^2/s and a = 2.5 A = 2.5e-8 cm.
+    expected_nu = 6 * fit["prefactor"] / (2.5e-8) ** 2
+    assert abs(fit["attempt_frequency_per_s"] - expected_nu) / expected_nu < 1e-9
+
+    code, out = _run(
+        FIT_RATES, str(data), "--mode", "arrhenius", "--jump-length", "2.5",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0 and "+/-" in out and "attempt frequency" in out
 
 
-def test_fit_rates_recovers_a_vft_law(
+def test_fit_rates_sees_curvature_and_fits_vft_and_myega(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     data = tmp_path / "growth.json"
@@ -502,14 +534,44 @@ def test_fit_rates_recovers_a_vft_law(
     assert abs(fit["t0_K"] - 250.0) < 5.0
     assert abs(fit["b_K"] - 1500.0) / 1500.0 < 0.05
     assert abs(fit["prefactor"] - 12.0) / 12.0 < 0.15
+    assert abs(fit["strength_D"] - 6.0) < 0.3
     assert fit["warnings"] == []
 
+    # The same VFT data is curved on an Arrhenius plot, and the fit says so.
+    code, out = _run(
+        FIT_RATES, str(data), "--mode", "arrhenius", "--json",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    fit = json.loads(out)
+    assert fit["curvature"]["verdict"] == "curved"
+    assert any("curved" in w for w in fit["warnings"])
 
-def test_fit_rates_locates_the_melting_crossing(
+    # MYEGA recovers its own parameters.
+    rows = [
+        {"T": t, "value": 5.0 * np.exp(-(800.0 / t) * np.exp(600.0 / t))}
+        for t in range(500, 1100, 100)
+    ]
+    data.write_text(json.dumps(rows))
+    code, out = _run(
+        FIT_RATES, str(data), "--mode", "myega", "--json", monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert code == 0
+    fit = json.loads(out)
+    assert abs(fit["c_K"] - 600.0) < 15.0
+    assert abs(fit["k_K"] - 800.0) / 800.0 < 0.05
+    assert abs(fit["prefactor"] - 5.0) / 5.0 < 0.1
+
+
+def test_fit_rates_locates_the_melting_crossing_with_an_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     data = tmp_path / "velocity.json"
-    rows = [{"T": t, "value": 0.004 * (823.0 - t)} for t in (700, 760, 820, 880, 940)]
+    rng = np.random.default_rng(2)
+    rows = [
+        {"T": t, "value": 0.004 * (823.0 - t) + rng.normal(0, 0.02)}
+        for t in (700, 780, 800, 820, 850, 870, 940)
+    ]
     data.write_text(json.dumps(rows))
     code, out = _run(
         FIT_RATES, str(data), "--mode", "crossing", "--json",
@@ -518,7 +580,22 @@ def test_fit_rates_locates_the_melting_crossing(
     assert code == 0
     fit = json.loads(out)
     assert len(fit["crossings"]) == 1
-    assert abs(fit["crossings"][0]["T_K"] - 823.0) < 0.5
+    assert fit["window_points"] == 5  # 780 to 870 within 60 K of the crossing
+    assert abs(fit["t_m_K"] - 823.0) < 10.0
+    assert fit["t_m_se_K"] is not None and 0.5 < fit["t_m_se_K"] < 15.0
+    assert abs(fit["kinetic_coefficient_per_K"] - 0.004) / 0.004 < 0.3
+
+    # Too few points near the crossing: the two-point fallback, and it says so.
+    rows = [{"T": t, "value": 0.004 * (823.0 - t)} for t in (600, 800, 1000)]
+    data.write_text(json.dumps(rows))
+    code, out = _run(
+        FIT_RATES, str(data), "--mode", "crossing", "--window", "50", "--json",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    fit = json.loads(out)
+    assert abs(fit["t_m_K"] - 823.0) < 0.5 and fit["t_m_se_K"] is None
+    assert any("no error bar" in w for w in fit["warnings"])
 
 
 def test_fit_rates_refuses_what_it_cannot_fit(
@@ -538,11 +615,23 @@ def test_fit_rates_refuses_what_it_cannot_fit(
     )
     assert isinstance(code, str) and "never change sign" in code
 
+    # Replicas at one temperature are kept, but two distinct temperatures are still needed.
     data.write_text(json.dumps([{"T": 500, "value": 1.0}, {"T": 500, "value": 2.0}]))
     code, _ = _run(
         FIT_RATES, str(data), "--mode", "arrhenius", monkeypatch=monkeypatch, capsys=capsys
     )
-    assert isinstance(code, str) and "duplicate temperatures" in code
+    assert isinstance(code, str) and "distinct temperatures" in code
+
+    # Three points without errors: a fit, but no error bar, and it says so.
+    rows = [{"T": t, "value": 1e-4 * np.exp(-0.5 / (_KB_EV * t))} for t in (500, 700, 900)]
+    data.write_text(json.dumps(rows))
+    code, out = _run(
+        FIT_RATES, str(data), "--mode", "arrhenius", "--json",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    fit = json.loads(out)
+    assert fit["ea_se_eV"] is None and any("no error bar" in w for w in fit["warnings"])
 
 
 # -- fit_nemd -----------------------------------------------------------------
