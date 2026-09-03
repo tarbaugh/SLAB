@@ -302,7 +302,7 @@ class _FakeClient:
 
     def chat(
         self, messages: list[dict[str, object]], tools: list[dict[str, object]] | None = None
-    ) -> ChatReply:
+    , **options: object) -> ChatReply:
         self.requests.append([dict(m) for m in messages])
         return self.replies.pop(0)
 

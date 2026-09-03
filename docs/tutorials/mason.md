@@ -670,15 +670,20 @@ layers, cheapest first.
    older than the newest `keep_tool_results` (default 6) are replaced by
    a one-line placeholder that names the tool, the size, and the first
    line of what it said. The call and its arguments stay, so the model
-   can call again if it needs the content. Errors, refusals, skill texts,
-   and plan updates are never cleared. A clearing rewrites the cached
-   prompt prefix, so it waits until at least 6,000 characters can go at
-   once. Set `clear_tool_results = false` to turn it off. One re-fetch of
-   cleared content is the design. The third time one call returns the
-   same content in a session, the result carries a note that says so and
-   tells the model to write the fact into the notebook, because a real
-   session described one task seven times and read one template six
-   times between clearings.
+   can call again if it needs the content. Errors, refusals, and skill
+   texts are never cleared. The newest plan update is kept verbatim, and
+   an older one is replaced by a one-line marker as soon as a newer one
+   arrives, because three copies of a growing plan rode every prompt of
+   one campaign. A clearing rewrites the cached prompt prefix, so it
+   waits until at least 6,000 characters can go at once. Set
+   `clear_tool_results = false` to turn it off. One re-fetch of cleared
+   content is the design. A second identical fetch whose first copy is
+   still in context returns a one-line pointer to that copy instead of
+   the body; shell results are exempt, because a command legitimately
+   re-runs. The third time one call returns the same content in a
+   session, the result carries a note that says so and tells the model to
+   write the fact into the notebook, because a real session described one
+   task seven times and read one template six times between clearings.
 3. **Compaction.** When the conversation still approaches the budget
    (`compact_at` × `context_window`, default 70%), the middle of the
    history is folded into a structured summary of state, verified
@@ -692,6 +697,17 @@ of what went wrong is what keeps a model from repeating it. The order
 follows the measurements: masking old observations matches summarization
 on solve rate at about half the cost, and summarization makes runs longer,
 so clearing runs first and compaction stays the rare fallback.
+
+Two more controls bound one step's spend. Every request carries a
+`max_tokens` of `[agent] max_reply_tokens`, or 16,000 when unset, reduced
+to the room the window has left after the prompt. A thinking model's
+think block counts toward it, so the cap bounds one step, not the
+campaign, and a cut reply is marked and asked once more. And after
+fifteen consecutive steps made only of reading and listing tools, with
+nothing launched, planned, noted, briefed, or finished, the per-step
+budget line tells the model to step back, and says so again every five
+steps. One campaign spent 72 minutes in such a run with nothing to
+interrupt it.
 
 The system prompt and the tool list are stable across a session, and the
 per-step budget line is appended last, so a server with a prompt cache
