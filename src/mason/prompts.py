@@ -17,7 +17,8 @@ from typing import Any
 
 from foundation import memory as memory_store
 from mason.notes import notes_block
-from mason.roster import AgentSpec, hands
+from mason.reviews import review_block
+from mason.roster import AgentSpec, critics, hands
 from mason.session import MasonSession
 from mason.skills import Skill, catalog_block
 from slab.config import load_config as load_slab_config
@@ -256,28 +257,49 @@ Do not invent anything not in the transcript. Do not soften failures.
 """
 
 
-def team_block(spec: AgentSpec, roster: dict[str, AgentSpec]) -> str:
-    """The ``# Your team`` section for a delegating agent, or empty.
+def team_block(
+    spec: AgentSpec,
+    roster: dict[str, AgentSpec],
+    *,
+    delegate: bool = True,
+    review: bool = True,
+) -> str:
+    """The ``# Your team`` section for a lead, or empty.
 
     One line per card the agent may hand a task to — the descriptions are
     written as delegation triggers, so this list is what a lead reads when
     deciding whom to brief. A card that delegates is a lead, not a hand,
-    and never appears here. Rendered only when the ``delegate`` tool
-    actually exists in the session, so the prompt never promises an absent
-    tool.
+    and never appears among the hands; a card that reviews is listed
+    apart, under the review tool, because it takes no briefs. *delegate*
+    and *review* say which of the two tools the session actually offers:
+    each list renders only behind its tool, so the prompt never promises
+    an absent one.
     """
-    others = list(hands(spec, roster).values())
-    if not others:
+    others = list(hands(spec, roster).values()) if delegate else []
+    reviewers = (
+        [card for name, card in critics(roster).items() if name != spec.name] if review else []
+    )
+    if not others and not reviewers:
         return ""
-    lines = [
-        "# Your team",
-        "",
-        "Specialists you can hand a scoped task to with the delegate tool. "
-        "Delegate work that is separable and would crowd your context; brief "
-        "them with the goal, the constraints, and what to return.",
-        "",
-    ]
-    lines.extend(f"- {card.name}: {card.description}" for card in others)
+    lines = ["# Your team"]
+    if others:
+        lines += [
+            "",
+            "Specialists you can hand a scoped task to with the delegate tool. "
+            "Delegate work that is separable and would crowd your context; brief "
+            "them with the goal, the constraints, and what to return.",
+            "",
+        ]
+        lines.extend(f"- {card.name}: {card.description}" for card in others)
+    if reviewers:
+        lines += [
+            "",
+            "Critics you can hand the plan or a file to with the review tool, before "
+            "compute is spent on it. A critic is read-only and takes no briefs; its "
+            "findings are kept as a review record.",
+            "",
+        ]
+        lines.extend(f"- {card.name}: {card.description}" for card in reviewers)
     return "\n".join(lines)
 
 
@@ -302,8 +324,14 @@ def environment_block(
     session: MasonSession,
     skills: dict[str, Skill] | None = None,
     team: str | None = None,
+    *,
+    review: bool = False,
 ) -> str:
-    """The per-session context: where we are, what exists here, what memory says."""
+    """The per-session context: where we are, what exists here, what memory says.
+
+    *review* adds the latest review of the plan, read fresh each time the
+    block is built so a verdict recorded a moment ago survives compaction.
+    """
     from slab.hpc import allocated_tasks, cpu_budget
 
     lines = [
@@ -355,6 +383,10 @@ def environment_block(
     plan = session.plan_text()
     if plan:
         lines.append("\n# Current plan (PLAN.md)\n" + plan)
+    if review:
+        latest = review_block(session)
+        if latest:
+            lines.append("\n" + latest)
     notebook = session.notebook_tail()
     if notebook:
         lines.append("\n# Lab notebook (latest entries)\n" + notebook)
@@ -379,6 +411,7 @@ def system_messages(
     *,
     skills: dict[str, Skill] | None = None,
     team: str | None = None,
+    review: bool = False,
     absent_tools: Sequence[str] = (),
 ) -> list[dict[str, Any]]:
     """The system prompt: role, core, budget, software notes, protocol, environment.
@@ -402,7 +435,7 @@ def system_messages(
         prompt += "\n" + notes_block(load_slab_config(session.cwd)) + "\n"
     if catalog is not None:
         prompt += FENCED_PROTOCOL.replace("{catalog}", catalog)
-    environment = environment_block(session, skills, team)
+    environment = environment_block(session, skills, team, review=review)
     if absent_tools:
         environment += (
             "\n\nNot available in this session, whatever the text above says: "

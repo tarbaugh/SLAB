@@ -48,7 +48,15 @@ from mason.client import (
 from mason.config import AgentConfig, override_agent, roster_agent_config
 from mason.errors import MasonError
 from mason.prompts import COMPACTION_PROMPT, system_messages, team_block
-from mason.roster import AgentSpec, check_overrides, discover_roster, hands, skills_for
+from mason.reviews import plan_is_approved
+from mason.roster import (
+    AgentSpec,
+    check_overrides,
+    critics,
+    discover_roster,
+    hands,
+    skills_for,
+)
 from mason.session import MasonSession
 from mason.skills import Skill, discover_skills
 from mason.tools import TOOL_VOCABULARY, Toolbox, build_toolbox
@@ -74,7 +82,7 @@ _CLEAR_AT_LEAST_CHARS = 6_000
 #: Results that must stay verbatim: a skill's instructions are consulted
 #: for the rest of the task, and a plan update is the recitation that keeps
 #: the goal in view.
-_NEVER_CLEARED = frozenset({"skill", "plan", "delegate"})
+_NEVER_CLEARED = frozenset({"skill", "plan", "delegate", "review"})
 _CLEARED_MARK = "[cleared:"
 _TEXT_RESULT_PREFIX = "[tool result: "
 #: The truncation warning needs a prompt of real size to judge: below this
@@ -135,6 +143,8 @@ class TurnResult(BaseModel):
     #: and the run ids the model cited for them. Empty for every other stop.
     results: dict[str, Any] = Field(default_factory=dict)
     run_ids: tuple[str, ...] = ()
+    #: A review's verdict, ``approve`` or ``revise``, when finish carried one.
+    verdict: str | None = None
 
     @property
     def finished(self) -> bool:
@@ -183,6 +193,31 @@ def _check_lead_can_delegate(
             f"the {spec.name} card hands every step to its team, but no card on the "
             f"roster can take a brief (every other card delegates); add a card that "
             f"does not, such as the built-in worker"
+        )
+
+
+def _check_review_first(
+    spec: AgentSpec, agent: AgentConfig, roster: dict[str, AgentSpec]
+) -> None:
+    """Refuse a card that must be reviewed before compute but cannot be.
+
+    A ``review_first`` card's launches and briefs are refused until a
+    critic approves the plan. With delegation off, or with no critic on
+    the roster, that approval can never arrive, and the card would sit
+    with every compute tool refusing. Say so before the model is called.
+    """
+    if not spec.review_first:
+        return
+    if not agent.delegation:
+        raise MasonError(
+            f"the {spec.name} card spends no compute before a critic approves the plan, "
+            f"but [agent] delegation is off, so no critic can run; set delegation = "
+            f"true or run another card"
+        )
+    if not critics(roster):
+        raise MasonError(
+            f"the {spec.name} card spends no compute before a critic approves the plan, "
+            f"but no card on the roster reviews; add one, such as the built-in critic"
         )
 
 
@@ -289,8 +324,12 @@ class Mason:
         if depth == 0:
             check_overrides(session.agent, self.roster)
             _check_lead_can_delegate(spec, session.agent, self.roster)
+            _check_review_first(spec, session.agent, self.roster)
             # One running loop per workspace; children run inside this lock.
             session.acquire_session_lock()
+            # An approval on record for the plan as it reads now still holds:
+            # a resumed campaign does not pay for a second review.
+            session.plan_approved = plan_is_approved(session)
         session.agent_name = spec.name
         self._apply_roster_override()
         self.client: ChatBackend = (
@@ -312,13 +351,25 @@ class Mason:
         )
         self.fenced = session.agent.tool_protocol == "fenced"
         catalog = self.toolbox.catalog_text() if self.fenced else None
-        self._team = team_block(spec, self.roster) if "delegate" in self.toolbox.tools else None
+        self._team = (
+            team_block(
+                spec,
+                self.roster,
+                delegate="delegate" in self.toolbox.tools,
+                review="review" in self.toolbox.tools,
+            )
+            or None
+        )
+        # The latest review of the plan is shown to whoever acts on it: a
+        # card that can ask for one, or one that may not launch without one.
+        self._shows_review = "review" in self.toolbox.tools or spec.review_first
         self.messages: list[dict[str, Any]] = system_messages(
             session,
             spec,
             catalog,
             skills=self.skills,
             team=self._team,
+            review=self._shows_review,
             absent_tools=self._absent_tools(),
         )
         self._catalog = catalog
@@ -452,12 +503,15 @@ class Mason:
                     run_ids = (
                         tuple(str(r) for r in raw_ids) if isinstance(raw_ids, list) else ()
                     )
+                    raw_verdict = call.arguments.get("verdict")
+                    verdict = raw_verdict if raw_verdict in ("approve", "revise") else None
                     self.session.record(
                         {
                             "type": "finish",
                             "report": report,
                             "results": results,
                             "run_ids": list(run_ids),
+                            "verdict": verdict,
                         }
                     )
                     return TurnResult(
@@ -466,6 +520,7 @@ class Mason:
                         steps=step,
                         results=results,
                         run_ids=run_ids,
+                        verdict=verdict,
                     )
                 try:
                     result, ok = self._dispatch(call)
@@ -872,6 +927,7 @@ class Mason:
             self._catalog,
             skills=self.skills,
             team=self._team,
+            review=self._shows_review,
             absent_tools=self._absent_tools(),
         )
         tail = self.messages[boundary:]

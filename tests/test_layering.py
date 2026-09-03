@@ -204,6 +204,7 @@ def test_builtin_cards_and_skills_ship_inside_the_package() -> None:
     cards = sorted(p.name for p in (SRC / "mason" / "agents").glob("*.md"))
     assert cards == [
         "analysis-expert.md",
+        "critic.md",
         "dft-expert.md",
         "md-expert.md",
         "pi.md",

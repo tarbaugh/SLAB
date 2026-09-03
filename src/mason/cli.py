@@ -372,7 +372,16 @@ def mason_roster() -> None:
         effective = roster_agent_config(agent, name)
         model = effective.model or "(model not configured)"
         visible = len(skills_for(spec, skills))
-        marker = "  [delegates]" if spec.delegates else ""
+        roles = [
+            label
+            for flag, label in (
+                (spec.delegates, "delegates"),
+                (spec.reviews, "reviews"),
+                (spec.review_first, "review first"),
+            )
+            if flag
+        ]
+        marker = f"  [{', '.join(roles)}]" if roles else ""
         typer.echo(
             f"{name:<18} {spec.source:<9} {model:<28} {visible} skill(s){marker}"
         )
@@ -572,6 +581,12 @@ def _render_event(event: dict[str, Any], full: bool) -> None:
     elif kind == "finish":
         typer.secho(f"\n=== final report @ {stamp} " + "=" * 39, bold=True)
         typer.echo(_clip(str(event.get("report", "")), full))
+    elif kind == "review":
+        typer.secho(
+            f"[{stamp}] review by {event.get('agent')} of {event.get('subject')}: "
+            f"verdict {event.get('verdict')} ({event.get('record')})",
+            fg=typer.colors.MAGENTA,
+        )
     elif kind == "resume":
         typer.echo(f"[{stamp}] resumed with {event.get('messages')} prior message(s)")
     elif kind == "clearing":

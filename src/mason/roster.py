@@ -22,20 +22,29 @@ current session. ``skills`` is ``matching`` (the skills whose
 ``mason-agents`` include this card, plus the unrestricted ones) or ``all``
 (the full catalog; the PI uses this so solo mode loses nothing).
 ``delegates`` grants the ``delegate`` tool — only ever at delegation depth
-zero, so no combination of cards can recurse.
+zero, so no combination of cards can recurse. ``reviews`` makes the card a
+critic: read-only by construction (the toolbox keeps only
+:data:`mason.tools.READ_ONLY_TOOLS`, whatever the allowlist says), reached
+through the ``review`` tool rather than ``delegate``, its findings kept as
+a review record. ``review_first`` makes the card spend no compute before a
+critic has approved the plan: ``delegate``, ``launch_workflow``, and
+``submit_job`` refuse until then.
 
 Cards are discovered like skills, and a name in a higher layer shadows the
 lower ones whole: project ``<cwd>/agents/*.md``, then user
 ``~/.config/slab/agents/*.md``, then the built-ins shipped in the package
-(``pi``, ``planner``, ``worker``, ``dft-expert``, ``md-expert``,
-``analysis-expert``). A project card named ``pi.md`` therefore replaces
-the default agent entirely.
+(``pi``, ``planner``, ``worker``, ``critic``, ``dft-expert``,
+``md-expert``, ``analysis-expert``). A project card named ``pi.md``
+therefore replaces the default agent entirely.
 
 Two cards lead: ``pi`` runs what is small and delegates what is separable,
 ``planner`` runs nothing and delegates every step. A card that delegates
 is never on another card's team (:func:`hands`), so the two leads never
 brief each other, and ``worker`` is the executor for any step no
-specialist's domain names.
+specialist's domain names. One card reviews: ``critic`` reads a plan or a
+script before compute is spent and returns a verdict; it takes no briefs
+(:func:`critics`), and the planner may not launch until it has approved
+the plan.
 
 Cards are portable content and never name models. Machine facts — which
 model, which endpoint, what budgets — live in config as
@@ -52,12 +61,14 @@ from typing import Any, Literal
 from mason.config import AgentConfig
 from mason.errors import MasonError
 from mason.skills import Skill, SkillError, split_frontmatter, valid_name, visible_catalog
-from mason.tools import TOOL_VOCABULARY
+from mason.tools import READ_ONLY_TOOLS, TOOL_VOCABULARY
 from slab.config import user_config_path
 
 Source = Literal["built-in", "user", "project"]
 
-_KNOWN_KEYS = frozenset({"name", "description", "tools", "skills", "delegates"})
+_KNOWN_KEYS = frozenset(
+    {"name", "description", "tools", "skills", "delegates", "reviews", "review_first"}
+)
 
 
 class RosterError(MasonError):
@@ -74,6 +85,8 @@ class AgentSpec:
     tools: frozenset[str] | None  # None = every tool the session offers
     skills_scope: Literal["matching", "all"]
     delegates: bool
+    reviews: bool  # a critic: read-only, reached with the review tool
+    review_first: bool  # spends no compute before a critic approves the plan
     source: Source
     path: Path
 
@@ -86,6 +99,13 @@ def _required_string(meta: dict[str, Any], key: str, limit: int) -> str:
         raise RosterError(f"frontmatter {key!r} must be a non-empty string")
     if len(value) > limit:
         raise RosterError(f"frontmatter {key!r} exceeds {limit} characters ({len(value)})")
+    return value
+
+
+def _flag(meta: dict[str, Any], key: str) -> bool:
+    value = meta.get(key, False)
+    if not isinstance(value, bool):
+        raise RosterError(f"frontmatter {key!r} must be true or false")
     return value
 
 
@@ -139,18 +159,42 @@ def parse_agent_card(path: Path, source: Source) -> AgentSpec:
         scope = meta.get("skills", "matching")
         if scope not in ("matching", "all"):
             raise RosterError(f"frontmatter 'skills' must be 'matching' or 'all', not {scope!r}")
-        delegates = meta.get("delegates", False)
-        if not isinstance(delegates, bool):
-            raise RosterError("frontmatter 'delegates' must be true or false")
+        delegates = _flag(meta, "delegates")
+        reviews = _flag(meta, "reviews")
+        review_first = _flag(meta, "review_first")
+        if reviews and delegates:
+            raise RosterError(
+                "a card that reviews leads nothing: 'reviews' and 'delegates' cannot both be true"
+            )
+        if reviews and review_first:
+            raise RosterError(
+                "a card that reviews spends no compute, so 'review_first' has nothing to gate"
+            )
+        tools = _tools_allowlist(meta)
+        if review_first and tools is not None and "review" not in tools:
+            raise RosterError(
+                "a card that reviews first must be able to ask for the review: add "
+                "'review' to its 'tools'"
+            )
+        if reviews and tools is not None:
+            beyond = sorted(tools - READ_ONLY_TOOLS)
+            if beyond:
+                raise RosterError(
+                    f"frontmatter 'tools' names {', '.join(repr(n) for n in beyond)}, which "
+                    f"a card that reviews cannot use; a critic is read-only and may name: "
+                    f"{', '.join(sorted(READ_ONLY_TOOLS))}"
+                )
         if not body.strip():
             raise RosterError("the card has no body; the body is the agent's role prompt")
         return AgentSpec(
             name=name,
             description=" ".join(description.split()),
             prompt=body.strip(),
-            tools=_tools_allowlist(meta),
+            tools=tools,
             skills_scope=scope,
             delegates=delegates,
+            reviews=reviews,
+            review_first=review_first,
             source=source,
             path=path.resolve(),
         )
@@ -195,19 +239,26 @@ def discover_roster(cwd: Path) -> dict[str, AgentSpec]:
 
 
 def hands(spec: AgentSpec, roster: dict[str, AgentSpec]) -> dict[str, AgentSpec]:
-    """The cards *spec* may delegate to: everyone on the roster who does not lead.
+    """The cards *spec* may delegate to: everyone who neither leads nor reviews.
 
     A card that delegates leads a group of its own. Delegation goes one
     level down, so a lead handed a task would run as an executor stripped
     of its one distinguishing tool, which the worker already is by design.
+    A card that reviews takes reviews, not briefs: it reaches the roster
+    through the ``review`` tool, so its findings are always recorded.
     *spec* itself is excluded. Name order, so the team list and the
     delegate tool's refusals read the same.
     """
     return {
         name: card
         for name, card in sorted(roster.items())
-        if name != spec.name and not card.delegates
+        if name != spec.name and not card.delegates and not card.reviews
     }
+
+
+def critics(roster: dict[str, AgentSpec]) -> dict[str, AgentSpec]:
+    """The cards that review, in name order; the first is the default critic."""
+    return {name: card for name, card in sorted(roster.items()) if card.reviews}
 
 
 def check_overrides(agent: AgentConfig, roster: dict[str, AgentSpec]) -> None:
