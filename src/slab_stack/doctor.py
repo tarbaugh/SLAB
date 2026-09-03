@@ -70,11 +70,20 @@ def _workspace_row(workspace: Path | None) -> tuple[str, str]:
     if not Path(root).exists():
         return ("=", f"workspace: none yet at {root} (created on first use)")
     try:
-        with Workspace(root):
-            pass
+        with Workspace(root) as ws:
+            mode, wanted = ws.runs.journal_mode, ws.runs.journal_mode_wanted
     except _ERRORS as e:
         return ("x", f"workspace: {e}")
-    return ("+", f"workspace: {root} opens")
+    if mode != wanted:
+        # A campaign started before an upgrade holds the database in the
+        # old mode; the store keeps that mode rather than refuse, and the
+        # switch lands on the next open with nothing else holding it.
+        return (
+            "=",
+            f"workspace: {root} opens with {mode} journaling; {wanted} is wanted here, "
+            f"and the switch lands on the next open with no other process holding it",
+        )
+    return ("+", f"workspace: {root} opens ({mode} journaling)")
 
 
 def _memory_row() -> tuple[str, str]:

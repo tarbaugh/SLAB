@@ -17,7 +17,7 @@ import os
 import sqlite3
 import threading
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, Self, cast, runtime_checkable
@@ -231,6 +231,51 @@ def journal_mode_for(path: str | os.PathLike[str]) -> str:
     return "delete" if on_network_filesystem(path) else "wal"
 
 
+def _journal_mode(conn: sqlite3.Connection) -> str:
+    return str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+
+
+def settle_journal_mode(conn: sqlite3.Connection, wanted: str) -> str:
+    """Ask the database for *wanted* journaling; keep what it can give.
+
+    Leaving WAL needs every other connection closed, and entering it needs
+    a filesystem with shared memory. SQLite reports both refusals as an
+    ``OperationalError``, and neither is a reason to refuse the open: the
+    store works in the other mode, only slower or only from this host, and
+    the switch lands the next time the file is opened with nothing else
+    holding it. The case that matters is a running campaign holding the
+    database in WAL mode while a newer SLAB asks for rollback journaling.
+    Refusing the open deadlocks the workspace under a hot upgrade, and four
+    refused opens once did exactly that.
+
+    Returns the mode in force after the attempt.
+
+    Examples:
+        >>> import os, tempfile
+        >>> conn = sqlite3.connect(os.path.join(tempfile.mkdtemp(), "runs.db"))
+        >>> settle_journal_mode(conn, "delete")
+        'delete'
+        >>> settle_journal_mode(conn, "wal")
+        'wal'
+        >>> settle_journal_mode(conn, "wal")
+        'wal'
+        >>> conn.close()
+    """
+    current = _journal_mode(conn)
+    if current == wanted:
+        return current
+    try:
+        conn.execute(f"PRAGMA journal_mode = {wanted.upper()}")
+    except sqlite3.OperationalError:
+        if wanted == "wal":
+            # A filesystem that looked local but refuses WAL's shared-memory
+            # index: rollback journaling is slower but works wherever the
+            # filesystem locks at all, and refusing to open would be worse.
+            with suppress(sqlite3.OperationalError):
+                conn.execute("PRAGMA journal_mode = DELETE")
+    return _journal_mode(conn)
+
+
 @runtime_checkable
 class RunStore(Protocol):
     """Storage interface for runs. Implement this to add a backend (e.g. Postgres)."""
@@ -386,26 +431,24 @@ class SQLiteRunStore:
             self._path = str(resolved)
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(self._path, check_same_thread=False, isolation_level=None)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA foreign_keys = ON")
-        self._conn.execute("PRAGMA busy_timeout = 5000")
-        wanted = journal_mode_for(self._path) if self._path != ":memory:" else "wal"
-        if wanted == "wal":
-            try:
-                self._conn.execute("PRAGMA journal_mode = WAL")
-            except sqlite3.OperationalError:
-                # A filesystem that looked local but refuses WAL's
-                # shared-memory index: rollback journaling is slower but
-                # works wherever the filesystem locks at all, and refusing
-                # to open would be worse.
-                self._conn.execute("PRAGMA journal_mode = DELETE")
-        else:
-            self._conn.execute("PRAGMA journal_mode = DELETE")
-        #: The journaling actually in force: ``wal`` or ``delete``.
-        self.journal_mode = str(self._conn.execute("PRAGMA journal_mode").fetchone()[0]).lower()
         try:
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA foreign_keys = ON")
+            self._conn.execute("PRAGMA busy_timeout = 5000")
+            #: The journaling this location calls for: ``wal`` or ``delete``.
+            self.journal_mode_wanted = (
+                journal_mode_for(self._path) if self._path != ":memory:" else "wal"
+            )
+            #: The journaling actually in force. It differs from the wanted
+            #: mode while another process holds the database open in the
+            #: other one; see :func:`settle_journal_mode`.
+            self.journal_mode = settle_journal_mode(self._conn, self.journal_mode_wanted)
             self._init_schema()
-        except Exception:
+        except BaseException:
+            # A connection that outlives a failed open keeps the database
+            # open in whatever mode it found, and blocks every later attempt
+            # to switch: four such leaks once deadlocked a shared workspace
+            # for an hour.
             self._conn.close()
             raise
 

@@ -863,6 +863,8 @@ schema_version = 1
 # In a sandbox job every agent shares the one bridged endpoint, so a roster
 # table's provider, endpoint, and api_key_env stay on the host; model, effort,
 # and the budgets travel.
+# effort reaches an OpenAI-compatible server as reasoning_effort; a server that
+# does not know the field ignores it, so confirm the split in 'slab mason report'.
 # [agent.roster.planner]
 # effort = "xhigh"
 # [agent.roster.worker]

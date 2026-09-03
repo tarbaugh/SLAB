@@ -343,7 +343,11 @@ it, so a later `launch` without arguments reuses it, and `slab doctor`
 re-renders with it when it checks that the job files are fresh.
 
 In a sandbox job the `[agent.roster.<name>]` tables travel with the
-rendered config, so the effort split holds inside the job. Their
+rendered config, so the effort split holds inside the job. The split is
+only as real as the server: `effort` reaches an OpenAI-compatible server
+as `reasoning_effort`, and a server that does not know the field ignores
+it. Check the completion tokens per call in `slab mason report` before
+relying on it. Their
 `provider`, `endpoint`, and `api_key_env` keys stay on the host, because
 every agent in the job talks to the one bridged endpoint, and the render
 warns when it drops one. A planner on a different provider than its

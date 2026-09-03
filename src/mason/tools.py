@@ -29,13 +29,16 @@ import json
 import os
 import re
 import shlex
+import sqlite3
 import subprocess
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from foundation.runtime import Workspace
     from mason.roster import AgentSpec
 
 from foundation import memory as memory_store
@@ -439,6 +442,161 @@ def _subprocess_env(session: MasonSession) -> dict[str, str]:
     return {key: value for key, value in os.environ.items() if key not in hidden}
 
 
+class RunStoreUnavailable(Exception):
+    """The workspace's run store could not be opened, and what to do about it.
+
+    Raised in place of the bare ``StorageError`` or ``sqlite3`` error so the
+    text the model reads carries the recovery. A database another process
+    holds, or a filesystem refusing locks, is a fault of the workspace and
+    not of the work: a real session read a bare "database is locked", spent
+    an hour on byte-level forensics, and deleted the store's write-ahead
+    log by hand.
+    """
+
+    def __init__(self, root: Path, cause: BaseException) -> None:
+        super().__init__(
+            f"the run store at {root} could not be opened ({cause}). This is a fault "
+            f"of the workspace, not of your work: another process may hold the "
+            f"database, or the filesystem may be refusing locks. Wait about a "
+            f"minute and retry this call once. If it fails again, record the fault "
+            f"in the notebook and finish with a report naming it. Do not inspect, "
+            f"modify, or delete files under {root}."
+        )
+
+
+def _open_workspace(session: MasonSession) -> Workspace:
+    """Open the session's workspace, or raise :class:`RunStoreUnavailable`."""
+    from foundation.errors import FoundationError
+    from foundation.runtime import Workspace
+
+    try:
+        return Workspace(session.workspace_root)
+    except (FoundationError, sqlite3.Error) as e:
+        raise RunStoreUnavailable(Path(session.workspace_root), e) from e
+
+
+_STORE_MUTATION = re.compile(r"(?:^|[\s;|&(])(?:rm|rmdir|mv|truncate|shred|unlink|dd)\s")
+
+
+def _store_mutation(command: str, workspace_root: Path) -> str | None:
+    """The refusal when a shell command would rewrite the run store by hand.
+
+    The store's database and its sidecar files (``runs.db`` and its
+    ``-wal``, ``-shm``, and ``-journal`` companions) belong to SQLite: a
+    session that cannot open them reports the fault, it does not repair
+    them. The guard is a name match, not a parser: a deleting verb in a
+    command that names the database or the workspace root. A copy made to
+    inspect elsewhere passes.
+
+    Examples:
+        >>> root = Path("/ws")
+        >>> _store_mutation("rm -f runs.db-wal runs.db-shm", root) is None
+        False
+        >>> _store_mutation("cd /ws && rm -rf cas/ab", root) is None
+        False
+        >>> _store_mutation("cp /ws/runs.db /tmp/copy.db", root) is None
+        True
+        >>> _store_mutation("rm -f build/*.o", root) is None
+        True
+    """
+    if not _STORE_MUTATION.search(command):
+        return None
+    root = str(workspace_root)
+    if "runs.db" not in command and root not in command:
+        return None
+    return (
+        f"refused: this command would delete or move files of the run store under "
+        f"{root}. The workspace is SLAB's record of every run, and its database is "
+        f"never repaired by hand. If the store cannot be opened, wait about a "
+        f"minute, retry the tool once, then report the fault with finish."
+    )
+
+
+def _tally_line(statuses: list[str], hits: int) -> str:
+    """``3 completed, 1 running (2 cache hits)`` from a run's task statuses."""
+    tally = Counter(statuses)
+    order = ("completed", "running", "failed")
+    parts = [f"{tally[status]} {status}" for status in order if tally.get(status)]
+    parts += [f"{n} {status}" for status, n in sorted(tally.items()) if status not in order]
+    line = ", ".join(parts) or "no tasks"
+    if hits:
+        line += f" ({hits} cache hit{'s' if hits != 1 else ''})"
+    return line
+
+
+def _progress(ws: Workspace, run_id: str) -> str:
+    """One line of what a run has done so far: its task tally and its checks."""
+    tasks = ws.runs.list_tasks(run_id)
+    line = "tasks: " + _tally_line(
+        [task.status.value for task in tasks], sum(1 for task in tasks if task.cache_hit)
+    )
+    checks = ws.runs.list_check_results(run_id)
+    if checks:
+        line += f"; checks: {sum(1 for c in checks if c.passed)}/{len(checks)} passed"
+    return line
+
+
+def _compact_details(details: dict[str, Any]) -> dict[str, Any]:
+    """The run record with its finished tasks folded to one line each.
+
+    A full record carries every task's recipe, inputs, and outputs. A
+    labeling run of 88 tasks made that 190,000 characters, and a real
+    session polled it six times, spending its context on setup lines.
+    Checks, the run's failure record, and every field of a failed task
+    stay verbatim, because they are what a correction is computed from.
+
+    Examples:
+        >>> details = {"run": {"id": "r"}, "checks": [], "tasks": [
+        ...     {"seq": 1, "name": "single_point", "status": "completed",
+        ...      "cache_hit": True, "duration_s": 0.0, "error": None, "failure": None,
+        ...      "recipe": {"params": {"label": "rattle_T300_0"},
+        ...                 "extra": {"setup": ["..."] * 32}},
+        ...      "inputs": {"atoms": "sha256:..."}, "outputs": {}},
+        ...     {"seq": 2, "name": "single_point", "status": "failed",
+        ...      "cache_hit": False, "duration_s": 1.5, "error": "boom",
+        ...      "failure": {"message": "boom"}, "recipe": {}, "inputs": {},
+        ...      "outputs": {}}], "artifacts": [], "history": []}
+        >>> compact = _compact_details(details)
+        >>> compact["tasks_summary"]
+        '1 completed, 1 failed (1 cache hit)'
+        >>> sorted(compact["tasks"][0])
+        ['cache_hit', 'duration_s', 'label', 'name', 'seq', 'status']
+        >>> compact["tasks"][1]["failure"]
+        {'message': 'boom'}
+        >>> list(compact)
+        ['run', 'checks', 'tasks_summary', 'tasks', 'artifacts', 'history', 'note']
+    """
+    tasks = list(details.get("tasks") or [])
+    folded: list[dict[str, Any]] = []
+    for task in tasks:
+        if task.get("status") == "failed" or task.get("error") or task.get("failure"):
+            folded.append(task)
+            continue
+        line = {key: task.get(key) for key in ("seq", "name", "status", "cache_hit", "duration_s")}
+        recipe = task.get("recipe")
+        params = recipe.get("params") if isinstance(recipe, dict) else None
+        label = params.get("label") if isinstance(params, dict) else None
+        if label:
+            line["label"] = label
+        folded.append(line)
+    summary = _tally_line(
+        [str(task.get("status")) for task in tasks],
+        sum(1 for task in tasks if task.get("cache_hit")),
+    )
+    compact: dict[str, Any] = {}
+    for key, value in details.items():
+        if key == "tasks":
+            compact["tasks_summary"] = summary
+            compact["tasks"] = folded
+        else:
+            compact[key] = value
+    compact["note"] = (
+        "finished tasks are folded to one line each; call show_run with full=true "
+        "for their recipes, inputs, and outputs"
+    )
+    return compact
+
+
 def _out_of_scope(session: MasonSession, path: Path, roots: tuple[Path, ...]) -> str | None:
     """The refusal observation when *path* leaves the file fence, else None.
 
@@ -753,6 +911,8 @@ def _add_shell_tool(box: Toolbox, session: MasonSession) -> None:
         command = str(arguments["command"])
         if refused := _rank_overcommit(command):
             return refused
+        if refused := _store_mutation(command, Path(session.workspace_root)):
+            return refused
         timeout = min(
             float(arguments.get("timeout_s", session.agent.shell_timeout_s)),
             _MAX_SHELL_TIMEOUT_S,
@@ -861,13 +1021,17 @@ def _add_workflow_tools(
         return session.session_id if value == "this" else value
 
     def list_runs(arguments: dict[str, Any]) -> str:
-        from foundation.runtime import Workspace
-
         state = arguments.get("state")
+        status = arguments.get("status")
+        if status is None and state in ("running", "completed", "failed"):
+            # The two words are easy to swap; take the meaning, not the key.
+            state, status = None, state
         limit = int(arguments.get("limit", 10))
         session_filter = _session_filter(arguments.get("session"))
-        with Workspace(session.workspace_root) as ws:
-            runs = ws.runs.list_runs(state=state, session=session_filter, limit=limit)
+        with _open_workspace(session) as ws:
+            runs = ws.runs.list_runs(
+                state=state, status=status, session=session_filter, limit=limit
+            )
             if not runs:
                 where = f" for session {session_filter!r}" if session_filter else ""
                 return f"no runs in this workspace yet{where}"
@@ -889,6 +1053,10 @@ def _add_workflow_tools(
                         "type": "string",
                         "description": "quarantined | verified | promoted | expired",
                     },
+                    "status": {
+                        "type": "string",
+                        "description": "running | completed | failed",
+                    },
                     "session": {
                         "type": "string",
                         "description": (
@@ -904,23 +1072,62 @@ def _add_workflow_tools(
         )
     )
 
+    def _resolve_run(ws: Workspace, value: str) -> tuple[str, str]:
+        """A run id or unique prefix, else this session's newest run of that name.
+
+        The name is what the model remembers (a real transcript passed the
+        script's name twice and was told no run matched), so it resolves
+        too, with a note saying which run was taken.
+        """
+        from foundation.errors import RunNotFoundError, SessionNotFoundError
+
+        try:
+            return ws.runs.resolve(value), ""
+        except RunNotFoundError as not_found:
+            try:
+                runs = ws.runs.list_runs(session=session.session_id, limit=200)
+            except SessionNotFoundError:
+                runs = []
+            named = [run for run in runs if run.name == value]
+            if not named:
+                raise not_found from None
+            run = named[0]  # newest first
+            return run.id, (
+                f"(resolved {value!r} by name to run {run.id[:10]}, this session's "
+                f"newest run of that name)\n"
+            )
+
     def show_run(arguments: dict[str, Any]) -> str:
         from foundation._ops import run_details
-        from foundation.runtime import Workspace
 
-        with Workspace(session.workspace_root) as ws:
-            details = run_details(ws, str(arguments["run_id"]))
-        return json.dumps(details, indent=1, ensure_ascii=False)
+        with _open_workspace(session) as ws:
+            run_id, note = _resolve_run(ws, str(arguments["run_id"]))
+            details = run_details(ws, run_id)
+        if not arguments.get("full"):
+            details = _compact_details(details)
+        return note + json.dumps(details, indent=1, ensure_ascii=False)
 
     box.add(
         Tool(
             name="show_run",
             description=(
-                "Everything about one run: checks with observed/expected values, "
-                "tasks, artifacts, failure records, history. Read this before "
-                "correcting a failed run."
+                "One run's record: its fields, checks with observed/expected values, "
+                "the task tally with finished tasks folded to one line each, failed "
+                "tasks and failure records in full, artifacts, and history. Pass "
+                "full=true for every task's recipe, inputs, and outputs. run_id "
+                "takes an id, a unique prefix, or the name of a run this session "
+                "created. Read this before correcting a failed run."
             ),
-            parameters=_schema({"run_id": {"type": "string"}}, ["run_id"]),
+            parameters=_schema(
+                {
+                    "run_id": {"type": "string"},
+                    "full": {
+                        "type": "boolean",
+                        "description": "include every task's recipe, inputs, and outputs",
+                    },
+                },
+                ["run_id"],
+            ),
             handler=show_run,
         )
     )
@@ -947,7 +1154,10 @@ def _add_workflow_tools(
                     stderr=subprocess.STDOUT,
                     stdin=subprocess.DEVNULL,
                     start_new_session=True,
-                    env=_subprocess_env(session),
+                    # Block-buffered stdout reaches the log only at exit; a
+                    # real session polled an empty log eight times while
+                    # the run was labeling structures. Line by line instead.
+                    env={**_subprocess_env(session), "PYTHONUNBUFFERED": "1"},
                 )
         except OSError as e:
             return f"could not start the background run: {e}"
@@ -1036,28 +1246,30 @@ def _add_workflow_tools(
     def wait_for_run(arguments: dict[str, Any]) -> str:
         import time
 
-        from foundation._ops import run_details
         from foundation.errors import SessionNotFoundError
-        from foundation.runtime import Workspace
 
-        run_id = arguments.get("run_id")
+        wanted = arguments.get("run_id")
         timeout = min(float(arguments.get("timeout_s", 900.0)), _MAX_WAIT_TIMEOUT_S)
         deadline = time.monotonic() + timeout
         # A background launch takes a moment to register its run, so an
         # empty workspace gets a grace window before "nothing is running"
         # counts as an answer.
         grace_until = time.monotonic() + min(_WAIT_GRACE_S, timeout)
+        run_id: str | None = None
+        note = ""
         while True:
-            with Workspace(session.workspace_root) as ws:
-                if run_id:
-                    details = run_details(ws, str(run_id))
-                    run = details["run"]
-                    if run["status"] != "running":
+            with _open_workspace(session) as ws:
+                if wanted:
+                    if run_id is None:
+                        run_id, note = _resolve_run(ws, str(wanted))
+                    run = ws.runs.get(run_id)
+                    if run.status.value != "running":
                         return (
-                            f"run {run['id']}: state={run['state']} "
-                            f"status={run['status']}; read it with show_run"
+                            f"{note}run {run.id}: state={run.state.value} "
+                            f"status={run.status.value}; {_progress(ws, run.id)}; "
+                            f"read it with show_run"
                         )
-                    still = [f"{run['id'][:10]}  {run['name']}  running"]
+                    running = [run]
                 else:
                     try:
                         runs = ws.runs.list_runs(session=session.session_id, limit=50)
@@ -1073,13 +1285,18 @@ def _add_workflow_tools(
                             )
                         finished = "\n".join(_run_line(r) for r in runs[:10])
                         return f"no run of this session is running; the record:\n{finished}"
-                    still = [f"{r.id[:10]}  {r.name}  running" for r in running]
-            if time.monotonic() >= deadline:
-                lines = "\n".join(still) or "(none registered yet)"
-                return (
-                    f"still running after {timeout:.0f}s:\n{lines}\n"
-                    f"call wait_for_run again to keep waiting"
-                )
+                if time.monotonic() >= deadline:
+                    # The tally answers "is it moving?" without a show_run
+                    # of the whole record: a real session queried the
+                    # database by hand for exactly this count.
+                    lines = "\n".join(
+                        f"{r.id[:10]}  {r.name}  running; {_progress(ws, r.id)}"
+                        for r in running
+                    ) or "(none registered yet)"
+                    return (
+                        f"{note}still running after {timeout:.0f}s:\n{lines}\n"
+                        f"call wait_for_run again to keep waiting"
+                    )
             time.sleep(min(_WAIT_POLL_S, max(0.05, deadline - time.monotonic())))
 
     box.add(
@@ -1087,9 +1304,12 @@ def _add_workflow_tools(
             name="wait_for_run",
             description=(
                 "Block until a run finishes (or the timeout passes), then report "
-                "its state. Without run_id, waits for every running run this "
-                "session created — the partner of launch_workflow background=true. "
-                "One call replaces a chain of sleep-and-poll shell commands."
+                "its state and task tally. run_id takes an id, a unique prefix, or "
+                "the name of a run this session created; without it, waits for "
+                "every running run this session created — the partner of "
+                "launch_workflow background=true. One call replaces a chain of "
+                "sleep-and-poll shell commands, and the timeout answer says how "
+                "far each run has got."
             ),
             parameters=_schema(
                 {

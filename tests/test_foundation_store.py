@@ -964,3 +964,70 @@ def test_a_network_workspace_opens_with_rollback_journaling(
         assert store.journal_mode == "wal"  # the override wins over the detection
     finally:
         store.close()
+
+
+def test_a_held_wal_database_opens_in_wal_when_rollback_is_wanted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A running campaign holds the database in WAL mode; a newer store that
+    wants rollback journaling must open anyway, in WAL, instead of refusing.
+    A real upgrade under a running campaign refused every open for an hour,
+    and each refused open leaked a connection that blocked the next."""
+    db = tmp_path / "runs.db"
+    monkeypatch.setenv("SLAB_SQLITE_JOURNAL", "wal")
+    holder = SQLiteRunStore(db)
+    assert holder.journal_mode == "wal"
+    try:
+        monkeypatch.setenv("SLAB_SQLITE_JOURNAL", "delete")
+        newer = SQLiteRunStore(db)
+        try:
+            assert newer.journal_mode_wanted == "delete"
+            assert newer.journal_mode == "wal"  # kept what the file could give
+            run = newer.create(Run(name="under-upgrade"))
+            assert holder.get(run.id).name == "under-upgrade"
+        finally:
+            newer.close()
+    finally:
+        holder.close()
+    settled = SQLiteRunStore(db)  # nothing holds it now: the switch lands
+    try:
+        assert settled.journal_mode == "delete"
+        assert settled.get(run.id).name == "under-upgrade"
+    finally:
+        settled.close()
+
+
+def test_a_failed_open_closes_its_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A connection left open by a failed constructor holds the database in
+    whatever mode it found and blocks every later switch."""
+    real_connect = sqlite3.connect
+    closed: list[bool] = []
+
+    class FailingConnection:
+        def __init__(self, conn: object) -> None:
+            object.__setattr__(self, "_conn", conn)
+
+        def execute(self, sql: str, *args: object) -> object:
+            if "busy_timeout" in sql:
+                raise sqlite3.OperationalError("disk I/O error")
+            return object.__getattribute__(self, "_conn").execute(sql, *args)
+
+        def close(self) -> None:
+            closed.append(True)
+            object.__getattribute__(self, "_conn").close()
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(object.__getattribute__(self, "_conn"), name)
+
+        def __setattr__(self, name: str, value: object) -> None:
+            setattr(object.__getattribute__(self, "_conn"), name, value)
+
+    monkeypatch.setattr(
+        "foundation.store.sqlite3.connect",
+        lambda *a, **k: FailingConnection(real_connect(*a, **k)),
+    )
+    with pytest.raises(sqlite3.OperationalError):
+        SQLiteRunStore(tmp_path / "runs.db")
+    assert closed == [True]

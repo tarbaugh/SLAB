@@ -5,6 +5,24 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- Two campaign transcripts, read and acted on. The run store asks for its
+  journaling mode and keeps what the database can give: a store that
+  wants rollback journaling opens a database another process holds in
+  WAL mode, in WAL, instead of refusing every open under a hot upgrade,
+  and a failed open closes its connection instead of leaking one that
+  blocks the next. Mason's run tools report an unopenable store with the
+  recovery (wait, retry once, report) instead of a bare "database is
+  locked", the shell refuses to delete or move the store's files, and the
+  prompt says the workspace is a record, not a thing to repair.
+  `show_run` folds finished tasks to one line each (`full=true` returns
+  the recipes), `wait_for_run` reports each run's task tally, both take a
+  run's name as well as its id, `list_runs` takes `status`, and
+  background launches write their log line by line. A cleared tool
+  result keeps its first line, and the third identical return of one call
+  in a session carries a note to write the fact down. `[agent] effort`
+  now reaches an OpenAI-compatible server as `reasoning_effort`; it was
+  not sent at all before, so a `low` worker reasoned exactly like an
+  `xhigh` one.
 - The session lock is per project directory, not per workspace. It guards
   `NOTEBOOK.md` and `PLAN.md`, which belong to the project, so two
   campaigns in two project directories now share one workspace instead of

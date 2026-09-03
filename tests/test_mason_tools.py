@@ -773,6 +773,7 @@ def test_wait_for_run_timeout_reports_still_running(
         assert "still running after 1s" in waited
         assert "slowpoke" in waited
         assert "call wait_for_run again" in waited
+        assert "running; tasks:" in waited  # the tally says whether it is moving
     finally:
         # The detached run must not outlive the test on a shared machine.
         import os as _os
@@ -893,3 +894,131 @@ def test_shell_and_launches_never_see_the_model_key(
     answer = named.dispatch(_call("shell", command="env"))
     assert "sk-FAKE-anthropic" not in answer and "sk-FAKE-named" not in answer
     assert "PATH=" in answer  # the rest of the environment still arrives
+
+
+# -- the run tools after two campaigns' transcripts --------------------------
+
+
+_RELAX_SCRIPT = (
+    "from foundation import check, converged\n"
+    "from foundation.tasks import relax\n"
+    "from ase.build import bulk\n"
+    "atoms = bulk('Cu', 'fcc', a=3.6)\n"
+    "relaxed, info = relax(atoms, engine='emt', fmax=0.05, label='cu')\n"
+    "@check\n"
+    "def forces_converged():\n"
+    "    return converged(info['fmax'], below=0.05)\n"
+)
+
+
+def _launch_named(box: Toolbox, script: str, name: str) -> str:
+    arguments = {"script": script, "name": name}
+    call = ToolCall(id="t1", name="launch_workflow", arguments=arguments, arguments_raw="{}")
+    return box.dispatch(call)
+
+
+def test_show_run_folds_finished_tasks_unless_asked_for_everything(
+    box: Toolbox, tmp_path: Path
+) -> None:
+    """The full record of an 88-task run was 190,000 characters, and a real
+    session polled it six times; finished tasks now fold to one line, and
+    the recipes come back on request."""
+    (tmp_path / "wf.py").write_text(_RELAX_SCRIPT)
+    launched = box.dispatch(_call("launch_workflow", script="wf.py", intent="fold test"))
+    run_id = launched.split()[1].rstrip(":")
+    compact = box.dispatch(_call("show_run", run_id=run_id))
+    assert '"tasks_summary": "1 completed"' in compact
+    assert '"label": "cu"' in compact
+    assert '"recipe"' not in compact
+    assert "full=true" in compact
+    full = box.dispatch(_call("show_run", run_id=run_id, full=True))
+    assert '"recipe"' in full and '"tasks_summary"' not in full
+
+
+def test_run_tools_resolve_a_run_by_the_name_the_model_remembers(
+    box: Toolbox, tmp_path: Path
+) -> None:
+    """A real transcript passed the script's name to wait_for_run twice and
+    was told no run matched; the name resolves now, with a note."""
+    (tmp_path / "wf.py").write_text(_RELAX_SCRIPT)
+    _launch_named(box, "wf.py", "cu-relax")
+    shown = box.dispatch(_call("show_run", run_id="cu-relax"))
+    assert shown.startswith("(resolved 'cu-relax' by name to run ")
+    assert '"name": "cu-relax"' in shown
+    waited = box.dispatch(_call("wait_for_run", run_id="cu-relax", timeout_s=5))
+    assert "status=completed" in waited
+    assert "tasks: 1 completed; checks: 1/1 passed" in waited
+    missing = box.dispatch(_call("show_run", run_id="no-such-run"))
+    assert "failed: RunNotFoundError" in missing
+
+
+def test_list_runs_takes_a_status_and_forgives_the_swap(box: Toolbox, tmp_path: Path) -> None:
+    """``state="running"`` raised a ValueError at a real session; the word
+    names a status, and it is read as one."""
+    (tmp_path / "wf.py").write_text("print('ok')\n")
+    _launch_named(box, "wf.py", "quick")
+    assert "quick" in box.dispatch(_call("list_runs", status="completed"))
+    assert "no runs" in box.dispatch(_call("list_runs", state="running"))
+    assert "no runs" in box.dispatch(_call("list_runs", status="failed"))
+
+
+def test_shell_refuses_to_rewrite_the_run_store_by_hand(box: Toolbox, tmp_path: Path) -> None:
+    """A real session deleted a live database's write-ahead log from the
+    shell. The store's files are SQLite's; the session reports, it does
+    not repair."""
+    workspace = tmp_path / ".slab"
+    refused = box.dispatch(_call("shell", command=f"rm -f {workspace}/runs.db-wal"))
+    assert refused.startswith("refused: this command would delete or move files of the run store")
+    refused = box.dispatch(_call("shell", command=f"cd {workspace} && rm -f runs.db-shm"))
+    assert "refused" in refused
+    allowed = box.dispatch(_call("shell", command="rm -f nothing-here.txt"))
+    assert allowed.startswith("exit 0")
+    copied = box.dispatch(_call("shell", command=f"ls {workspace}/runs.db >/dev/null; echo ok"))
+    assert "ok" in copied
+
+
+def test_a_locked_run_store_is_reported_with_its_recovery(
+    box: Toolbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bare "database is locked" sent a real session into an hour of
+    forensics; the fault now arrives with what to do instead."""
+    from foundation.errors import StorageError
+
+    def refuse(self: object, root: object = None) -> None:
+        raise StorageError(f"cannot open workspace at {root}: database is locked")
+
+    monkeypatch.setattr("foundation.runtime.Workspace.__init__", refuse)
+    answer = box.dispatch(_call("list_runs"))
+    assert answer.startswith("tool list_runs failed: RunStoreUnavailable: the run store at ")
+    assert "database is locked" in answer
+    assert "Wait about a minute and retry this call once" in answer
+    assert "Do not inspect, modify, or delete files under" in answer
+    assert "RunStoreUnavailable" in box.dispatch(_call("wait_for_run", timeout_s=1))
+
+
+def test_background_launches_write_their_log_line_by_line(
+    box: Toolbox, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A block-buffered log stayed empty for two hours of labeling while a
+    real session polled it; the launch asks python for unbuffered output."""
+    import types
+
+    seen: dict[str, object] = {}
+
+    def fake_popen(command: list[str], **kwargs: object) -> object:
+        seen["env"] = kwargs["env"]
+        return types.SimpleNamespace(pid=4242)
+
+    monkeypatch.setattr("mason.tools.subprocess.Popen", fake_popen)
+    (tmp_path / "wf.py").write_text("print('ok')\n")
+    answer = box.dispatch(
+        ToolCall(
+            id="t1",
+            name="launch_workflow",
+            arguments={"script": "wf.py", "background": True},
+            arguments_raw="{}",
+        )
+    )
+    assert "pid 4242" in answer
+    env = seen["env"]
+    assert isinstance(env, dict) and env["PYTHONUNBUFFERED"] == "1"
