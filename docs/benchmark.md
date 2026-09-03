@@ -28,6 +28,12 @@ reference. A campaign that fails records why: no finish report, no
 structured result, a cited run that does not exist or never verified, or
 a value outside the band.
 
+The verdict is an outcome, not a defect. After the verdict, the review
+reads the same evidence and raises flags: attributable defects, each
+naming the skill, card, or tool a revision edits. The flags travel in the
+record beside the verdict. [The science review](review.md) describes the
+evaluators, the flag statuses, and the gate a skill revision must pass.
+
 The band depends on the engine class, which the scorer reads from the
 cited runs' task recipes, never from the report's prose. A run under
 Quantum ESPRESSO (or a registry alias built on SLAB's `qe` factory) is
@@ -127,7 +133,8 @@ Rules for the record:
   again; the renderer keeps the latest record per model, machine, and
   question.
 
-Then rewrite the tables on this page and the summary in the README:
+Then rewrite the tables on this page (the questions, the results, and
+the flags) and the summary in the README:
 
 ```bash
 slab benchmark tables
@@ -142,10 +149,23 @@ slab benchmark tables
 | llama3.1:8b-32k | laptop | fail (the finish carried no structured results) | — | — | — | — | 0/5 |
 <!-- benchmark:results:end -->
 
-A cell shows the reported value beside the verdict, and a failure names
-its reason. Score the same five questions again after every change to
-the prompt, the tools, the roster, or the skills. A change that lowers a
-model's total is a regression, whatever else it improves.
+A cell shows the reported value beside the verdict, a failure names its
+reason, and a reviewed campaign shows how many flags it raised. Score the
+same five questions again after every change to the prompt, the tools,
+the roster, or the skills. A change that lowers a model's total is a
+regression, whatever else it improves.
+
+## Flags
+
+The flags on the latest record per model, machine, and question. A flag
+is `open` while its target is unchanged, `pending` when the skill has a
+newer revision no campaign has run under, and `unknown` when the record
+carried no digest. `slab benchmark gate <skill>` says whether the
+benchmark validates a skill revision.
+
+<!-- benchmark:flags:start -->
+No flag has been raised on a recorded campaign.
+<!-- benchmark:flags:end -->
 
 ## Reference values and their sources
 

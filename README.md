@@ -172,6 +172,12 @@ answer, backed by verified runs?
 Five copper questions with known answers; [the benchmark](https://tarbaugh.github.io/SLAB/benchmark/) has the rule.
 <!-- benchmark:summary:end -->
 
+Every scored campaign is also reviewed. The rules and an optional model
+referee raise flags, each naming the skill, card, or tool a revision
+edits, and `slab benchmark gate <skill>` refuses a skill revision until a
+campaign under it passes without the flag. [The science
+review](https://tarbaugh.github.io/SLAB/review/) has the loop.
+
 ## Development
 
 ```bash

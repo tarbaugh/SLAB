@@ -352,7 +352,8 @@ def test_render_rewrites_only_the_marker_regions(tmp_path: Path) -> None:
     docs.write_text(
         "# Page\n\nprose above\n\n<!-- benchmark:questions:start -->\nold\n"
         "<!-- benchmark:questions:end -->\n\nmore prose\n\n"
-        "<!-- benchmark:results:start -->\n<!-- benchmark:results:end -->\n\ntail\n"
+        "<!-- benchmark:results:start -->\n<!-- benchmark:results:end -->\n\n"
+        "<!-- benchmark:flags:start -->\n<!-- benchmark:flags:end -->\n\ntail\n"
     )
     readme = tmp_path / "README.md"
     readme.write_text("# R\n<!-- benchmark:summary:start -->\nx\n<!-- benchmark:summary:end -->\n")
@@ -360,7 +361,9 @@ def test_render_rewrites_only_the_marker_regions(tmp_path: Path) -> None:
         _record(),
         _record(session="s3", key="vacancy", question=3, passed=False, reason="no finish report",
                 results={}),
-        _record(session="s4", model="tiny-8b", passed=False, reason="the finish cited no run ids"),
+        _record(session="s4", model="tiny-8b", passed=False, reason="the finish cited no run ids",
+                flags=[{"rule": "finish-incomplete", "target": "card:pi", "evidence": "finish",
+                        "note": "the finish cited no run ids", "raised_by": "rules"}]),
     ]
     changed = benchmark.render(records, docs=docs, readme=readme)
     assert changed == [docs, readme]
@@ -370,6 +373,8 @@ def test_render_rewrites_only_the_marker_regions(tmp_path: Path) -> None:
     assert "| 1 | Determine the equilibrium lattice constant" in text
     assert "| m-30b | laptop | pass (3.6 Å)" in text
     assert "fail (no finish report)" in text
+    assert "fail (3.6 Å; the finish cited no run ids; 1 flag)" in text
+    assert "| card:pi | finish-incomplete | open | — | Q1 | tiny-8b | laptop | rules |" in text
     assert "| 1/5 |" in text and "| 0/5 |" in text
     summary = readme.read_text()
     assert "| m-30b | laptop | 1/5 |" in summary and "| tiny-8b | laptop | 0/5 |" in summary
@@ -413,7 +418,9 @@ def test_cli_list_score_and_render(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
     scored = runner.invoke(app, ["benchmark", "score", "--machine", "hpc-a"])
     assert scored.exit_code == 0, scored.output
-    assert "Q1 a0        big-70b                  hpc-a        pass" in scored.output
+    assert "Q1 a0        big-70b                  hpc-a        pass  [1 flag]" in scored.output
+    assert "  script-not-used        rules    loaded at step" not in scored.output
+    assert "  skill-not-loaded       rules    no skill event" in scored.output
     records = benchmark.load_records(tmp_path / "benchmarks" / "results.jsonl")
     assert len(records) == 1 and records[0]["machine"] == "hpc-a"
 
@@ -430,6 +437,7 @@ def test_cli_list_score_and_render(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     docs.write_text(
         "<!-- benchmark:questions:start -->\n<!-- benchmark:questions:end -->\n"
         "<!-- benchmark:results:start -->\n<!-- benchmark:results:end -->\n"
+        "<!-- benchmark:flags:start -->\n<!-- benchmark:flags:end -->\n"
     )
     (tmp_path / "README.md").write_text(
         "<!-- benchmark:summary:start -->\n<!-- benchmark:summary:end -->\n"

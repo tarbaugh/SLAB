@@ -10,6 +10,11 @@ structured result, a cited run that never verified, or a value outside
 the band. The score is the answer to one question: was a correct answer
 achieved?
 
+After the verdict, the review (:mod:`slab_stack.review`) reads the same
+evidence and raises flags: attributable defects, each naming the skill,
+card, or tool a revision would edit. The flags travel in the record
+beside ``passed`` and ``reason``.
+
 Records are JSON lines in ``benchmarks/results.jsonl`` in the project
 directory, so they travel from the cluster into the repository by an
 ordinary commit. ``render`` rewrites marker regions in the docs page and
@@ -24,7 +29,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from foundation import _ops
 from foundation.errors import (
@@ -38,6 +43,11 @@ from foundation.serialize import loads
 from mason.report import summarize
 from mason.session import transcript_for, transcript_groups
 from slab._version import __version__
+from slab_stack import review
+
+if TYPE_CHECKING:
+    from mason.loop import ChatBackend
+    from mason.skills import Skill
 
 #: Where a project keeps its scored campaigns, relative to the project root.
 RECORDS_FILE = Path("benchmarks") / "results.jsonl"
@@ -371,9 +381,16 @@ def score_session(
     question: Question | None = None,
     machine: str | None = None,
     model: str | None = None,
+    catalog: dict[str, Skill] | None = None,
+    referee: ChatBackend | None = None,
 ) -> dict[str, Any]:
-    """Score one campaign and return its record. Never raises for a failed
-    campaign — the record carries ``passed`` and ``reason``.
+    """Score one campaign, review it, and return its record. Never raises
+    for a failed campaign — the record carries ``passed`` and ``reason``,
+    and ``flags`` from the review.
+
+    *catalog* is the skill catalog the flags are judged against (the one
+    visible from the working directory when omitted); *referee* is a chat
+    client for the referee, or None to run the rules alone.
 
     Raises :class:`BenchmarkError` only when there is nothing to score: no
     such session, or a session that is not a benchmark campaign.
@@ -399,24 +416,39 @@ def score_session(
         "provider": summary.get("provider"),
         "endpoint_origin": summary.get("endpoint_origin"),
         "machine": machine or summary.get("compute_profile") or "unknown",
+        "agent": summary.get("agent") or "pi",
         "engine_class": None,
         "engines": [],
+        "skills": review.loaded_skills(transcript),
         "run_ids": list(finish.get("run_ids") or []),
         "results": dict(finish.get("results") or {}),
         "reference": {},
         "tolerance": {},
         "passed": False,
         "reason": None,
+        "flags": [],
+        "reviewed_by": [],
         "steps": summary.get("total_steps"),
         "prompt_tokens": summary.get("total_prompt_tokens"),
         "completion_tokens": summary.get("total_completion_tokens"),
         "scored_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "slab_version": __version__,
     }
+    with Workspace(root) as ws:
+        _judge_campaign(ws, asked, finish, record)  # may refuse: no reference
+        review.review(
+            root, transcript, asked, record, ws=ws, catalog=catalog, referee_client=referee
+        )
+    return record
 
-    def fail(reason: str) -> dict[str, Any]:
+
+def _judge_campaign(
+    ws: Workspace, asked: Question, finish: dict[str, Any], record: dict[str, Any]
+) -> None:
+    """Settle ``passed`` and ``reason`` in *record* from the finish and the runs."""
+
+    def fail(reason: str) -> None:
         record["reason"] = reason
-        return record
 
     if not finish.get("reported"):
         return fail("no finish report")
@@ -424,22 +456,21 @@ def score_session(
         return fail("the finish carried no structured results")
     if not record["run_ids"]:
         return fail("the finish cited no run ids")
-    with Workspace(root) as ws:
-        try:
-            details = _cited_runs(ws, record["run_ids"])
-        except BenchmarkError as e:
-            return fail(str(e))
-        unverified = [
-            f"{run['run']['id'][:10]} ({run['run']['state']})"
-            for run in details
-            if run["run"]["state"] not in PASSING_STATES
-        ]
-        if unverified:
-            return fail("cited runs never verified: " + ", ".join(unverified))
-        try:
-            engines, engine_class = _engines(ws, details)
-        except BenchmarkError as e:
-            return fail(str(e))
+    try:
+        details = _cited_runs(ws, record["run_ids"])
+    except BenchmarkError as e:
+        return fail(str(e))
+    unverified = [
+        f"{run['run']['id'][:10]} ({run['run']['state']})"
+        for run in details
+        if run["run"]["state"] not in PASSING_STATES
+    ]
+    if unverified:
+        return fail("cited runs never verified: " + ", ".join(unverified))
+    try:
+        engines, engine_class = _engines(ws, details)
+    except BenchmarkError as e:
+        return fail(str(e))
     record["engines"] = engines
     record["engine_class"] = engine_class
     record["reference"] = dict(asked.reference.get(engine_class, {}))
@@ -448,7 +479,7 @@ def score_session(
     if reason is not None:
         return fail(reason)
     record["passed"] = True
-    return record
+    return None
 
 
 # -- records ------------------------------------------------------------------
@@ -586,10 +617,14 @@ def _cell(record: dict[str, Any] | None, question: Question) -> str:
         if isinstance((entry := (record.get("results") or {}).get(name)), dict)
         and isinstance(entry.get("value"), int | float)
     )
+    raised = len(record.get("flags") or [])
+    flagged = f"{raised} flag" + ("s" if raised != 1 else "") if raised else ""
     if record.get("passed"):
-        return f"pass ({values})" if values else "pass"
+        detail = "; ".join(part for part in (values, flagged) if part)
+        return f"pass ({detail})" if detail else "pass"
     reason = str(record.get("reason") or "failed")
-    return f"fail ({values}; {reason})" if values else f"fail ({reason})"
+    detail = "; ".join(part for part in (values, reason, flagged) if part)
+    return f"fail ({detail})"
 
 
 def results_table(records: Iterable[dict[str, Any]]) -> str:
@@ -610,6 +645,27 @@ def results_table(records: Iterable[dict[str, Any]]) -> str:
         lines.append(
             f"| {model} | {machine} | " + " | ".join(cols) + f" | {passed}/{len(QUESTIONS)} |"
         )
+    return "\n".join(lines)
+
+
+def flags_table(records: Iterable[dict[str, Any]], catalog: dict[str, Skill] | None = None) -> str:
+    """The defect list: every flag on the latest record per cell, with its status."""
+    from mason.skills import discover_skills
+
+    rows = review.ledger(records, catalog if catalog is not None else discover_skills(Path.cwd()))
+    if not rows:
+        return "No flag has been raised on a recorded campaign."
+    lines = [
+        "| Target | Rule | Status | Revision | Q | Model | Machine | Raised by | Evidence | Note |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for row in rows:
+        cells = [
+            row["target"], row["rule"], row["status"], row["against"] or "—",
+            f"Q{row['question']}", row["model"], row["machine"], row["raised_by"],
+            row["evidence"], row["note"],
+        ]
+        lines.append("| " + " | ".join(str(c).replace("|", "\\|") for c in cells) + " |")
     return "\n".join(lines)
 
 
@@ -659,13 +715,20 @@ def render(
     docs: Path | None,
     readme: Path | None,
     link: str = "https://tarbaugh.github.io/SLAB/benchmark/",
+    catalog: dict[str, Skill] | None = None,
 ) -> list[Path]:
-    """Rewrite the marker regions; return the files that changed."""
+    """Rewrite the marker regions; return the files that changed.
+
+    The docs page carries three regions (``questions``, ``results``,
+    ``flags``) and the README one (``summary``). *catalog* decides each
+    flag's status; the working directory's catalog when omitted.
+    """
     records = list(records)
     changed: list[Path] = []
     if docs is not None:
         touched = rewrite_region(docs, "questions", questions_table())
         touched = rewrite_region(docs, "results", results_table(records)) or touched
+        touched = rewrite_region(docs, "flags", flags_table(records, catalog)) or touched
         if touched:
             changed.append(docs)
     if readme is not None and rewrite_region(readme, "summary", readme_summary(records, link)):
@@ -686,6 +749,7 @@ __all__ = [
     "Question",
     "append_record",
     "find_question",
+    "flags_table",
     "functional_of",
     "latest_by_cell",
     "load_records",

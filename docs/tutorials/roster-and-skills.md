@@ -265,6 +265,35 @@ The spec's experimental `allowed-tools` field is accepted and ignored.
 The toolbox already gates approval per call, and `slab mason skills` reports
 the field as ignored so nothing is silent.
 
+## Revise a skill
+
+Every skill has a digest: a short hash of every file under its root. The
+`skill` tool records it when the skill loads, and a benchmark campaign
+carries it in its record. A flag the review raises on a skill is raised
+against that revision.
+
+Revise a skill from its flags, not from intuition:
+
+1. Read the open flags on the skill.
+
+    ```bash
+    slab benchmark flags --target skill:equation-of-state --status open
+    ```
+
+2. Edit the description, the body, or the script the flag names, and run
+   the script's test.
+3. Run the campaigns for the questions that list the skill, and score
+   them.
+4. Check the gate. It refuses the revision until a campaign under it
+   passes without regressing or raising the flag.
+
+    ```bash
+    slab benchmark gate equation-of-state
+    ```
+
+[The science review](../review.md) describes the flags, the evaluators,
+and the gate.
+
 ## Write an agent card
 
 A card is one markdown file whose body is the agent's role prompt:

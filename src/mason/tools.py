@@ -1764,7 +1764,11 @@ def _add_skill_tool(box: Toolbox, session: MasonSession, skills: dict[str, Skill
         if found is None:
             known = ", ".join(sorted(skills))
             return f"no skill named {name!r}; available skills: {known}"
-        session.record({"type": "skill", "name": name, "source": found.source})
+        # The digest names the revision that loaded, so a benchmark flag
+        # raised on this campaign is attributable to one revision of the skill.
+        session.record(
+            {"type": "skill", "name": name, "source": found.source, "digest": found.digest}
+        )
         return listing(found)
 
     box.add(

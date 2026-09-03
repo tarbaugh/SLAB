@@ -230,6 +230,10 @@ def test_the_system_prompt_carries_the_skill_catalog(tmp_path: Path) -> None:
     assert "# Skills" not in plain
 
 
+def box_skill_digest(session: MasonSession) -> str:
+    return discover_skills(session.cwd)["equation-of-state"].digest
+
+
 def test_skill_tool_returns_body_root_and_files(tmp_path: Path) -> None:
     session = _session(tmp_path)
     box = build_toolbox(session)
@@ -246,6 +250,8 @@ def test_skill_tool_returns_body_root_and_files(tmp_path: Path) -> None:
     assert {"type": "skill", "name": "equation-of-state", "source": "built-in"}.items() <= (
         events[-1].items()
     )
+    # The revision that loaded, so a benchmark flag can be pinned to it.
+    assert events[-1]["digest"] == box_skill_digest(session)
 
 
 def test_unknown_skill_answers_with_the_available_names(tmp_path: Path) -> None:
