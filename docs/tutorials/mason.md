@@ -640,8 +640,10 @@ under version control, readable by humans:
   header records the effort and the SLAB version, and each token count
   carries the server's finish reason, so a review can tell a truncated
   turn from a finished one. A reply with no text and no tool call is a
-  fault, not an answer: the loop asks once more, and a second empty reply
-  ends the turn marked truncated when the server says so. Also,
+  fault, not an answer: the loop asks once more. A reply the server cut
+  at the reply-token ceiling is asked once more at low effort, with a
+  request for a short answer, and a second cut ends the turn marked
+  truncated. Also,
   `slab mason chat --resume` replays the newest one. Read one with
   `slab mason read`: without a path it lists the workspace's sessions
   newest first, each by the directory it was launched from and the launch
@@ -702,7 +704,9 @@ Two more controls bound one step's spend. Every request carries a
 `max_tokens` of `[agent] max_reply_tokens`, or 16,000 when unset, reduced
 to the room the window has left after the prompt. A thinking model's
 think block counts toward it, so the cap bounds one step, not the
-campaign, and a cut reply is marked and asked once more. And after
+campaign. A cut reply is asked once more at low effort, because the
+identical request would be cut the same way, and a second cut is marked.
+And after
 fifteen consecutive steps made only of reading and listing tools, with
 nothing launched, planned, noted, briefed, or finished, the per-step
 budget line tells the model to step back, and says so again every five
