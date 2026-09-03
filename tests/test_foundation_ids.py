@@ -23,9 +23,21 @@ def test_time_ordering_explicit_timestamps() -> None:
     assert earlier < later
 
 
+def _wait_for_next_millisecond() -> None:
+    """Spin until the wall clock's millisecond changes.
+
+    The ordering guarantee is per millisecond, so the test needs the
+    embedded timestamps to differ. Reading the clock is what the generator
+    itself does; ``time.sleep`` may be shortened or patched out.
+    """
+    start = time.time_ns() // 1_000_000
+    while time.time_ns() // 1_000_000 == start:
+        pass
+
+
 def test_time_ordering_wall_clock() -> None:
     a = new_run_id()
-    time.sleep(0.005)  # > 1ms tick so the embedded timestamps differ
+    _wait_for_next_millisecond()
     b = new_run_id()
     assert a < b
 

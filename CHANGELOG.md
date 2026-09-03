@@ -5,6 +5,14 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- The test suite sleeps for real again. The fixture that skips the model
+  client's retry backoff patched `time.sleep` on the shared module, so every
+  wait in the suite became a no-op: the run-id ordering test compared ids
+  minted in the same millisecond and failed two runs in three, and the
+  tests that wait for an orphaned child or a silent endpoint measured
+  nothing. The client now waits through its own `_sleep` attribute and the
+  fixture patches that. The run-id test waits for the clock to tick instead
+  of sleeping.
 - A quarantined run explains itself. A custom check may return
   `(passed, observed)` or `(passed, observed, expected)`, or a dict with
   those keys, and the record shows the value instead of `returned False`.

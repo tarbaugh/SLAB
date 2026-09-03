@@ -152,7 +152,7 @@ def test_unreachable_endpoint_teaches_and_bounds_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sleeps: list[float] = []
-    monkeypatch.setattr("mason.client.time.sleep", sleeps.append)
+    monkeypatch.setattr("mason.client._sleep", sleeps.append)
     client = ChatClient("http://127.0.0.1:9", "m", timeout_s=2)
     with pytest.raises(LlmError, match="is the model server running"):
         client.chat([])
@@ -249,7 +249,7 @@ def test_5xx_answers_are_retried_then_surfaced(
     where 1 s and 4 s burned every attempt inside five seconds."""
     url, script = llm_server
     sleeps: list[float] = []
-    monkeypatch.setattr("mason.client.time.sleep", sleeps.append)
+    monkeypatch.setattr("mason.client._sleep", sleeps.append)
     monkeypatch.setattr("mason.client.random.uniform", lambda a, b: 1.0)
     script.responses.append((502, {"error": {"message": "bad gateway"}}))
     script.responses.append((503, {"error": {"message": "overloaded"}}))
@@ -265,7 +265,7 @@ def test_five_5xx_answers_exhaust_the_retries(
 ) -> None:
     url, script = llm_server
     sleeps: list[float] = []
-    monkeypatch.setattr("mason.client.time.sleep", sleeps.append)
+    monkeypatch.setattr("mason.client._sleep", sleeps.append)
     monkeypatch.setattr("mason.client.random.uniform", lambda a, b: 1.0)
     for _ in range(5):
         script.responses.append((502, {"error": {"message": "bad gateway"}}))
