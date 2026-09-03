@@ -65,6 +65,17 @@ class _LlmHandler(BaseHTTPRequestHandler):
         pass
 
 
+@pytest.fixture(autouse=True)
+def _no_retry_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retries wait for real in life: about 80 s after five 5xx answers.
+
+    The fake server answers 500 once a test's script runs dry, so without
+    this every such test would wait the whole backoff. A test that asserts
+    on the waits patches ``time.sleep`` itself, and its patch wins.
+    """
+    monkeypatch.setattr("mason.client.time.sleep", lambda s: None)
+
+
 @pytest.fixture()
 def llm_server() -> Iterator[tuple[str, LlmScript]]:
     """A live local OpenAI-compatible server driven by a per-test script."""
