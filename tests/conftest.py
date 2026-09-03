@@ -71,9 +71,14 @@ def _no_retry_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
 
     The fake server answers 500 once a test's script runs dry, so without
     this every such test would wait the whole backoff. A test that asserts
-    on the waits patches ``time.sleep`` itself, and its patch wins.
+    on the waits patches ``mason.client._sleep`` itself, and its patch wins.
+
+    Patch the client's own attribute, never ``time.sleep``: ``mason.client.time``
+    is the shared ``time`` module, so a patch there turns every sleep in the
+    suite into a no-op, and a test that sleeps to let a clock tick or a child
+    process finish then measures nothing.
     """
-    monkeypatch.setattr("mason.client.time.sleep", lambda s: None)
+    monkeypatch.setattr("mason.client._sleep", lambda s: None)
 
 
 @pytest.fixture()

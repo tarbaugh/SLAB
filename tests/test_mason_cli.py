@@ -225,7 +225,7 @@ def test_mason_doctor_unreachable_endpoint(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("mason.client.time.sleep", lambda s: None)
+    monkeypatch.setattr("mason.client._sleep", lambda s: None)
     result = runner.invoke(
         app, ["doctor", "--endpoint", "http://127.0.0.1:9/v1", "--model", "m"]
     )

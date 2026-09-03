@@ -43,6 +43,9 @@ _BACKOFF_CAP_S = 60.0
 #: node, a firewall): three quick attempts, as before, so 'slab doctor' and a
 #: mistyped endpoint fail in seconds rather than minutes.
 _REACH_RETRIES = 3
+# The retry wait, as a module attribute so the test suite can replace it
+# without touching the shared ``time`` module.
+_sleep = time.sleep
 _REACH_BACKOFF_S = (1.0, 4.0)
 
 
@@ -292,7 +295,7 @@ def request_json(
         limit = _RETRIES if server_error else _REACH_RETRIES
         if attempt >= limit - 1:
             break
-        time.sleep(_backoff_s(attempt, server_error=server_error))
+        _sleep(_backoff_s(attempt, server_error=server_error))
     assert last_error is not None
     raise last_error
 
