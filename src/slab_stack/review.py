@@ -112,12 +112,20 @@ class Flag:
 
 @dataclass
 class Step:
-    """One model call: the tool calls it made and the results they got."""
+    """One model call: the tool calls it made, the results they got, its cost."""
 
     index: int
     at: str | None
     calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     results: list[str] = field(default_factory=list)
+    #: The completion tokens the server billed for this step, when the
+    #: transcript's usage event said.
+    completion_tokens: int | None = None
+
+    @property
+    def looking(self) -> bool:
+        """True when every call only reads: shell, files, listings, lookups."""
+        return bool(self.calls) and all(name in _LOOKING_TOOLS for name, _ in self.calls)
 
 
 @dataclass
@@ -142,6 +150,12 @@ class Campaign:
     @property
     def agent(self) -> str:
         return str(self.header.get("agent") or "pi")
+
+    @property
+    def effort(self) -> str | None:
+        """The reasoning dial the header recorded, or None for an older transcript."""
+        value = self.header.get("effort")
+        return None if value is None else str(value)
 
     @property
     def loaded(self) -> dict[str, str]:
@@ -198,11 +212,17 @@ def _arguments(call: dict[str, Any]) -> dict[str, Any]:
 
 
 def walk(transcript: Path) -> Campaign:
-    """Read a transcript into a :class:`Campaign`; malformed lines are skipped."""
+    """Read a transcript into a :class:`Campaign`; malformed lines are skipped.
+
+    A usage event precedes the assistant message it paid for (the loop
+    records the count before it appends the message), so the count waits
+    for the next step.
+    """
     campaign = Campaign()
     step_index = 0
     current: Step | None = None
     pending: list[Step] = []
+    paid: int | None = None
     for line in transcript.read_text(encoding="utf-8").splitlines():
         try:
             event = json.loads(line)
@@ -219,7 +239,8 @@ def walk(transcript: Path) -> Campaign:
             role = message.get("role")
             if role == "assistant":
                 step_index += 1
-                current = Step(index=step_index, at=at)
+                current = Step(index=step_index, at=at, completion_tokens=paid)
+                paid = None
                 campaign.steps.append(current)
                 for call in message.get("tool_calls") or []:
                     name = str((call.get("function") or {}).get("name") or "?")
@@ -228,6 +249,9 @@ def walk(transcript: Path) -> Campaign:
             elif role == "tool" and pending:
                 owner = pending.pop(0)
                 owner.results.append(str(message.get("content") or ""))
+        elif kind == "usage" and "for" not in event:
+            raw = event.get("completion_tokens")
+            paid = int(raw) if isinstance(raw, int) else None
         elif kind == "skill":
             campaign.loads.append(
                 SkillLoad(
@@ -259,6 +283,39 @@ def session_runs(ws: Workspace, session: str) -> list[dict[str, Any]]:
 
 
 # -- the rules ----------------------------------------------------------------
+
+#: Tools that only look. A step made of these alone changes nothing the
+#: workspace records: no run, no plan, no note, no brief, no report.
+_LOOKING_TOOLS = frozenset(
+    {
+        "shell",
+        "read_file",
+        "list_dir",
+        "search",
+        "list_runs",
+        "show_run",
+        "job_status",
+        "wait_for_run",
+        "describe_task",
+        "list_tasks",
+        "list_engines",
+        "get_material",
+        "search_materials",
+        "query_materials",
+        "recall",
+        "skill",
+    }
+)
+#: This many consecutive looking steps is a loop, not reconnaissance. One
+#: real campaign spent 72 minutes and 80 % of its completion tokens in two
+#: such windows, rewriting a potential file that one keyword would have
+#: loaded.
+_PROGRESS_WINDOW = 15
+#: A step billed this many completion tokens wrote no plan, file, note, or
+#: report: the model thought at length and had little to show for it.
+_HEAVY_STEP_TOKENS = 8_000
+#: The tools whose call justifies a long think.
+_WRITING_TOOLS = frozenset({"plan", "finish", "write_file", "edit_file", "notebook"})
 
 
 def _script_names(skill: Skill) -> list[str]:
@@ -308,6 +365,11 @@ def rules(
       (``tool:finish``).
     - ``finish-incomplete``: no finish, no structured results, or no run
       ids. The card's reporting instructions (``card:<agent>``).
+    - ``no-progress-loop``: fifteen or more consecutive steps only looked
+      (shell, reads, listings), with no run, plan change, note, brief, or
+      finish. The card's doctrine on when to step back (``card:<agent>``).
+    - ``reasoning-heavy``: a step billed 8,000 or more completion tokens
+      and wrote nothing. The dial, which the note names (``prompt``).
     """
     flags: list[Flag] = []
     card = f"card:{campaign.agent}"
@@ -414,7 +476,68 @@ def rules(
                     f"{name} was reported in {reported!r}; the question asks for {unit!r}.",
                 )
             )
+
+    for first, last, spent in _looking_windows(campaign.steps):
+        flags.append(
+            Flag(
+                "no-progress-loop",
+                card,
+                f"steps {first}-{last}",
+                f"{last - first + 1} consecutive steps only looked (shell, reads, listings) "
+                f"with no run, plan change, note, brief, or finish; {spent} completion "
+                f"tokens went into them.",
+            )
+        )
+    heavy = [
+        step
+        for step in campaign.steps
+        if (step.completion_tokens or 0) >= _HEAVY_STEP_TOKENS
+        and not any(name in _WRITING_TOOLS for name, _ in step.calls)
+    ]
+    if heavy:
+        dial = campaign.effort or "unset"
+        peak = max(step.completion_tokens or 0 for step in heavy)
+        flags.append(
+            Flag(
+                "reasoning-heavy",
+                "prompt",
+                "steps " + ", ".join(str(step.index) for step in heavy),
+                f"{len(heavy)} step(s) billed {_HEAVY_STEP_TOKENS:,}+ completion tokens "
+                f"(peak {peak:,}) and wrote no plan, file, note, or report; effort was "
+                f"{dial}.",
+            )
+        )
     return flags
+
+
+def _looking_windows(steps: list[Step]) -> list[tuple[int, int, int]]:
+    """``(first, last, completion_tokens)`` for every maximal run of looking
+    steps at least ``_PROGRESS_WINDOW`` long.
+
+    Examples:
+        >>> looks = [Step(i, None, [("shell", {})], completion_tokens=10) for i in range(1, 17)]
+        >>> _looking_windows(looks)
+        [(1, 16, 160)]
+        >>> plan = Step(9, None, [("plan", {})])
+        >>> _looking_windows(looks[:8] + [plan] + looks[9:])
+        []
+    """
+    windows: list[tuple[int, int, int]] = []
+    run: list[Step] = []
+
+    def close() -> None:
+        if len(run) >= _PROGRESS_WINDOW:
+            spent = sum(step.completion_tokens or 0 for step in run)
+            windows.append((run[0].index, run[-1].index, spent))
+        run.clear()
+
+    for step in steps:
+        if step.looking:
+            run.append(step)
+        else:
+            close()
+    close()
+    return windows
 
 
 # -- the referee --------------------------------------------------------------

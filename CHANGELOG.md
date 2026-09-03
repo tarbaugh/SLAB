@@ -5,6 +5,13 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- Two rules join the science review. `no-progress-loop` flags fifteen or
+  more consecutive steps that only looked (shell, reads, listings) with
+  no run, plan change, note, brief, or finish, on the card; one real
+  campaign spent 72 minutes and 80 % of its completion tokens in two such
+  windows. `reasoning-heavy` flags a step billed 8,000 or more completion
+  tokens that wrote nothing, on the prompt, and names the effort the
+  transcript header recorded.
 - A model call that gets a 5xx answer retries five times with exponential
   backoff, about 80 s in all, instead of three times inside five seconds,
   so a gateway that answers 502 for a minute is outlasted; a connection

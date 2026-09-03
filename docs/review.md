@@ -50,6 +50,8 @@ nothing. Each rule blames one target.
 | `run-not-verified` | A run the session made never reached `verified`. | The skill in force when the run started, else `card:<agent>` |
 | `unit-mismatch` | A reported unit is not the question's unit. | `tool:finish` |
 | `finish-incomplete` | No finish, no structured results, or no run ids. | `card:<agent>` |
+| `no-progress-loop` | Fifteen or more consecutive steps only looked: shell, reads, listings, with no run launched, no plan change, no note, no brief, and no finish. | `card:<agent>` |
+| `reasoning-heavy` | A step was billed 8,000 or more completion tokens and wrote no plan, file, note, or report. The note names the recorded effort. | `prompt` |
 
 The skill in force is the skill loaded most recently before the run
 started. The rule reads the load time from the transcript and the start
