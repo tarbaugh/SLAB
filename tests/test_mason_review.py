@@ -8,7 +8,7 @@ import pytest
 from typer.testing import CliRunner
 
 from mason.cli import app
-from mason.client import ChatReply, ToolCall
+from mason.client import ChatReply, LlmError, ToolCall
 from mason.config import MasonConfig
 from mason.errors import MasonError
 from mason.loop import Mason
@@ -474,3 +474,32 @@ def test_cli_read_renders_the_review_event(tmp_path: Path) -> None:
     result = runner.invoke(app, ["read", str(mason.session.transcript_path)])
     assert result.exit_code == 0, result.output
     assert "review by critic of plan: verdict revise" in result.output
+
+
+def test_a_critic_killed_by_the_server_returns_a_result_not_an_exception(tmp_path: Path) -> None:
+    """One real critic lost five steps and twenty minutes to a gateway 502
+    that surfaced as 'tool review failed'; the lead then paid for the whole
+    review again. The failure is now a result with the steps it reached."""
+    (tmp_path / "PLAN.md").write_text(PLAN)
+    client = FakeClient(
+        [
+            _call("review", subject="plan"),
+            LlmError("http://gw/v1/chat/completions answered 502: bad gateway"),
+            _text("noted"),
+        ]
+    )
+    roster = discover_roster(tmp_path)
+    mason = Mason(_session(tmp_path), client=client, spec=roster["planner"], roster=roster)
+    result = mason.run_turn("plan the campaign")
+    assert result.stop_reason == "answer"
+    (answer,) = _tool_results(client, "c_review")
+    assert answer.startswith("verdict: none.")
+    assert "the model server failed mid-turn after step 1" in answer
+    assert "answered 502" in answer
+    assert "[critic: error after 1 step(s);" in answer
+    (review,) = load_reviews(mason.session)
+    assert review.verdict == "none"
+    events = [json.loads(line) for line in mason.session.transcript_path.read_text().splitlines()]
+    (event,) = [e for e in events if e["type"] == "review"]
+    assert event["stop"] == "error" and event["steps"] == 1
+    assert not mason.session.plan_approved

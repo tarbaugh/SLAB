@@ -107,7 +107,7 @@ _TRUNCATION_MIN_TOKENS = 3_000
 #: stricter form.
 _BUDGET_LAST_STRETCH = 0.9
 
-StopReason = Literal["answer", "finish", "max_turns", "error_streak"]
+StopReason = Literal["answer", "finish", "max_turns", "error_streak", "error"]
 
 
 def _budget_hint(step: int, max_turns: int) -> str:
@@ -335,6 +335,10 @@ class Mason:
     ) -> None:
         self.session = session
         self.roster = roster if roster is not None else discover_roster(session.cwd)
+        #: The step the current or last turn reached; read by a parent whose
+        #: child died of a transport error mid-turn, so the footer can say
+        #: how far it got.
+        self.steps_taken = 0
         if spec is None:
             spec = self.roster["pi"]  # the built-in layer guarantees pi exists
         self.spec = spec
@@ -461,6 +465,7 @@ class Mason:
         empty_nudged = False
         max_turns = self.session.agent.max_turns
         for step in range(1, max_turns + 1):
+            self.steps_taken = step
             self._clear_tool_results()
             self._maybe_compact()
             reply = self._call_model(hint=_budget_hint(step, max_turns))

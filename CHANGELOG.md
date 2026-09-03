@@ -5,6 +5,13 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- A model call that gets a 5xx answer retries five times with exponential
+  backoff, about 80 s in all, instead of three times inside five seconds,
+  so a gateway that answers 502 for a minute is outlasted; a connection
+  that cannot be made still fails in seconds. A critic or a specialist whose
+  server fails mid-turn returns a result with the steps it reached and its
+  transcript, where before the exception discarded the review and the lead
+  paid for it twice.
 - A reply with no text and no tool call is nudged once, not taken as the
   answer, and the OpenAI-compatible `length` finish reason now reads as
   `max_tokens`, so a truncated turn on vLLM or a gateway carries the

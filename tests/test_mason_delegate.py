@@ -147,7 +147,11 @@ def test_a_child_harness_stop_is_reported_not_hidden(tmp_path: Path) -> None:
     assert delegated["stop"] == "max_turns"
 
 
-def test_a_crashing_child_client_becomes_tool_failure_evidence(tmp_path: Path) -> None:
+def test_a_child_killed_by_the_server_returns_a_result_with_its_steps(tmp_path: Path) -> None:
+    """The server's failure is the child's stop reason, not a harness
+    failure of the delegate tool: the steps it took are in its transcript,
+    and the footer says how far it got, so the lead can re-brief rather
+    than pay for the whole task again."""
     session = _session(tmp_path)
     client = FakeClient(
         [
@@ -163,7 +167,10 @@ def test_a_crashing_child_client_becomes_tool_failure_evidence(tmp_path: Path) -
         m for m in client.requests[-1]
         if m.get("role") == "tool" and m.get("tool_call_id") == "c_delegate"
     )
-    assert "tool delegate failed: LlmError: the server went away" in str(tool_result["content"])
+    text = str(tool_result["content"])
+    assert text.startswith("stopped: the model server failed mid-turn after step 1")
+    assert "the server went away" in text
+    assert "[md-expert: error after 1 step(s);" in text
 
 
 def test_unknown_and_self_targets_answer_with_the_team(tmp_path: Path) -> None:

@@ -48,7 +48,8 @@ in the brief and ask for the value with its unit.
 # Checking
 
 Read the bracketed harness line before the report. An agent that stopped
-at its turn budget or an error streak returned partial evidence, not an
+at its turn budget, an error streak, or a server error returned partial
+evidence, not an
 answer. Confirm every cited run with show_run and check that it reached
 verified; a number without a run id does not enter the plan. When a step
 fails, read the failure record, change the brief to address it, and

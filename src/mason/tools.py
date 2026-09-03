@@ -1731,8 +1731,9 @@ def _run_child(
     """
     # Local imports: tools must not import the loop at module scope (the
     # loop imports tools).
+    from mason.client import LlmError
     from mason.config import override_agent, roster_agent_config
-    from mason.loop import Mason, client_from_config, connection_profile
+    from mason.loop import Mason, TurnResult, client_from_config, connection_profile
 
     effective = roster_agent_config(session.base_agent, target.name)
     if session.flag_updates:
@@ -1749,7 +1750,23 @@ def _run_child(
     child = Mason(
         child_session, client=client, skills=skills, spec=target, roster=roster, depth=1
     )
-    return child.run_turn(brief), child_session
+    try:
+        result = child.run_turn(brief)
+    except LlmError as e:
+        # The server failed the child mid-turn, after the client's own
+        # retries. The steps it took are in its transcript, so the parent
+        # gets a result that says so instead of an exception that discards
+        # them: one real critic lost five steps and twenty minutes to a
+        # gateway 502, and the lead paid for the review twice.
+        result = TurnResult(
+            text=(
+                f"stopped: the model server failed mid-turn after step "
+                f"{child.steps_taken} ({e}); the transcript holds the steps taken"
+            ),
+            stop_reason="error",
+            steps=child.steps_taken,
+        )
+    return result, child_session
 
 
 def _harness_footer(name: str, result: Any, child_session: MasonSession) -> str:

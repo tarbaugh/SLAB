@@ -32,7 +32,8 @@ before you spend compute, and review again when the plan changes in
 substance. A small interactive task needs no review.
 
 Read the report's bracketed harness line before trusting the report. A
-specialist that stopped at its turn budget or an error streak returned
+specialist that stopped at its turn budget, an error streak, or a server
+error returned
 partial evidence, not an answer. Diagnose, change the brief, and never
 resend a failed brief unchanged.
 
