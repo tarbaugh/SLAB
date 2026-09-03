@@ -5,6 +5,12 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- `slab purge` sweeps a conversation's compaction summaries and review
+  records with its transcripts. Both were left behind before: the
+  transcript sweep matched `<stem>-*.jsonl` only, so
+  `<stem>.compactions.md` and `mason/reviews/<stem>-review-<n>.md`
+  accumulated forever. The newest conversation keeps its files as it
+  keeps its transcript, and `--all-sessions` removes them too.
 - Every bundled skill was checked against the method literature and the
   tool documentation, and fixed one commit per skill. Wrong as written:
   the atomsk lattice name, `--merge`/`-cell` forms, and gap advice; the

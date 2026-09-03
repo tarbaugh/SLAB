@@ -122,6 +122,30 @@ def workspace_containing(path: str | os.PathLike[str] | None = None) -> Path | N
     return None
 
 
+def session_sidecars(workspace_root: str | os.PathLike[str], conversation: Path) -> list[Path]:
+    """The files a conversation leaves beside its transcripts: compaction
+    summaries and review records, for it and for its delegation sessions.
+
+    A session writes ``<stem>.compactions.md`` next to its transcript and
+    ``<workspace>/mason/reviews/<stem>-review-<n>.md`` for each review. A
+    delegation session's stem is the conversation's stem with an agent
+    name and an ordinal appended, so a prefix match on the stem collects
+    the whole group. ``slab purge`` deletes these with the transcripts;
+    the notebook and the plan live in the project and are never touched.
+    """
+    root = Path(workspace_root) / "mason"
+    stem = conversation.stem
+    files = [
+        p
+        for p in (root / "sessions").glob(f"{stem}*.compactions.md")
+        if p.is_file()
+    ]
+    reviews = root / "reviews"
+    if reviews.is_dir():
+        files.extend(p for p in reviews.glob(f"{stem}*-review-*.md") if p.is_file())
+    return sorted(files)
+
+
 def session_header(transcript: Path) -> dict[str, Any]:
     """The ``session`` header event a transcript opens with, or ``{}``.
 
