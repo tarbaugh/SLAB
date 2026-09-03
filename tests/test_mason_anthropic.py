@@ -256,6 +256,18 @@ def test_request_shape_matches_the_messages_api(llm_server: tuple[str, LlmScript
     assert "top_p" not in sent and "top_k" not in sent
 
 
+def test_effort_none_has_no_anthropic_spelling(llm_server: tuple[str, LlmScript]) -> None:
+    """``none`` is the OpenAI field's off switch, and the same roster table
+    may point at either provider, so here it goes out as ``low``, the
+    lowest the Messages API has, rather than as a 400."""
+    url, script = llm_server
+    script.responses.append((200, _message([{"type": "text", "text": "ok"}])))
+    AnthropicClient("claude-opus-5", "sk-ant-test", endpoint=url, effort="none").chat(
+        [{"role": "user", "content": "hello"}]
+    )
+    assert script.requests[0]["output_config"] == {"effort": "low"}
+
+
 def test_auth_uses_the_x_api_key_and_version_headers(
     llm_server: tuple[str, LlmScript],
 ) -> None:

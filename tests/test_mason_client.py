@@ -295,13 +295,16 @@ def test_blackholed_connect_fails_fast_instead_of_retrying(
 def test_effort_rides_as_reasoning_effort(llm_server: tuple[str, LlmScript]) -> None:
     """``[agent] effort`` never reached an OpenAI-compatible server before,
     so a ``low`` worker reasoned exactly like an ``xhigh`` planner. It is
-    the API's own field now, capped at the field's ceiling."""
+    the API's own field now, sent verbatim: ``xhigh`` used to be folded to
+    ``high``, which on a server whose top level is the unset default
+    (a hosted Qwen3.8 endpoint) meant asking for the most and getting
+    less. ``none`` is the field's own off switch, and ``max`` is the
+    Anthropic word for the top."""
     url, script = llm_server
-    for _ in range(3):
+    for _ in range(5):
         script.responses.append((200, _reply({"content": "ok"})))
-    ChatClient(url, "m", effort="low").chat([{"role": "user", "content": "hi"}])
-    ChatClient(url, "m", effort="xhigh").chat([{"role": "user", "content": "hi"}])
+    for effort in ("none", "low", "xhigh", "max"):
+        ChatClient(url, "m", effort=effort).chat([{"role": "user", "content": "hi"}])
     ChatClient(url, "m").chat([{"role": "user", "content": "hi"}])
-    assert script.requests[0]["reasoning_effort"] == "low"
-    assert script.requests[1]["reasoning_effort"] == "high"
-    assert "reasoning_effort" not in script.requests[2]
+    sent = [r.get("reasoning_effort") for r in script.requests]
+    assert sent == ["none", "low", "xhigh", "xhigh", None]

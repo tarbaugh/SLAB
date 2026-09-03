@@ -445,7 +445,7 @@ Give the planner the reasoning and the worker the economy in
 effort = "xhigh"
 
 [agent.roster.worker]
-effort = "low"
+effort = "none"
 ```
 
 ```bash
@@ -460,9 +460,12 @@ re-renders with it when it checks that the job files are fresh.
 In a sandbox job the `[agent.roster.<name>]` tables travel with the
 rendered config, so the effort split holds inside the job. The split is
 only as real as the server: `effort` reaches an OpenAI-compatible server
-as `reasoning_effort`, and a server that does not know the field ignores
-it. Check the completion tokens per call in `slab mason report` before
-relying on it. Their
+verbatim as `reasoning_effort`, a server that does not know the field
+ignores it, and a server that knows only part of the scale may treat the
+rest as unset. On a server whose top level is the unset default, leave
+the planner's `effort` out rather than writing `xhigh`. Check the
+completion tokens per call in `slab mason report` before relying on
+it. Their
 `provider`, `endpoint`, and `api_key_env` keys stay on the host, because
 every agent in the job talks to the one bridged endpoint, and the render
 warns when it drops one. A planner on a different provider than its

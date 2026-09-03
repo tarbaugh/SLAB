@@ -90,9 +90,10 @@ class ChatReply(BaseModel):
     cached_prompt_tokens: int | None = None
 
 
-#: ``[agent] effort`` values to the OpenAI ``reasoning_effort`` field, whose
-#: scale stops at ``high``.
-_REASONING_EFFORT = {"xhigh": "high", "max": "high"}
+#: ``[agent] effort`` values to the OpenAI ``reasoning_effort`` field. Every
+#: value is the field's own name except ``max``, an Anthropic word, which
+#: goes out as ``xhigh``, the field's top.
+_REASONING_EFFORT = {"max": "xhigh"}
 
 
 class ChatClient:
@@ -111,15 +112,17 @@ class ChatClient:
             can be slow.
         max_reply_tokens: ``max_tokens`` per turn, or None to let the
             server default.
-        effort: ``low``/``medium``/``high``/``xhigh``/``max``, sent as the
-            OpenAI ``reasoning_effort`` field (``xhigh`` and ``max`` as
-            ``high``, the field's ceiling). OpenAI reasoning models honor
-            it, and so do vLLM and llama.cpp servers for the models whose
-            chat template has a dial. A server that does not know the field
-            ignores it, and a thinking model then thinks as long as it
-            likes: two campaigns on a Qwen model under vLLM showed no
-            change between ``low`` and ``xhigh``. The transcript's usage
-            lines tell which case a server is.
+        effort: ``none``/``low``/``medium``/``high``/``xhigh``/``max``, sent
+            verbatim as the OpenAI ``reasoning_effort`` field (``max`` as
+            ``xhigh``, the field's top). None sends no field, and the server
+            then applies its own default. Servers differ in which values
+            they accept: OpenAI reasoning models take the whole scale, vLLM
+            and llama.cpp take what the model's chat template has a dial
+            for, and a hosted Qwen3.8 endpoint took ``none``, ``low``, and
+            ``medium`` only, with ``xhigh`` as the unset default. A server
+            that does not know the field ignores it, and a thinking model
+            then thinks as long as it likes. The transcript's usage lines
+            tell which case a server is.
     """
 
     def __init__(

@@ -5,6 +5,13 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- `[agent] effort` reaches an OpenAI-compatible server verbatim. `xhigh`
+  and `max` were folded to `high`, which on a server whose top level is
+  the unset default meant a planner asking for the most reasoning and
+  getting less. `xhigh` now goes out as itself and `max` as `xhigh`. The
+  scale gains `none`, the field's own off switch, for a worker that
+  should not think at all. The Anthropic provider has no `none` and
+  sends `low` for it.
 - The science review. A scored campaign now carries flags beside its
   verdict: attributable defects, each with a rule, a target (`skill:`,
   `card:`, `tool:`, or `prompt`), the evidence, and a note. The rules run

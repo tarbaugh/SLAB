@@ -50,6 +50,10 @@ class ModelRefusalError(LlmError):
     """Claude's safety classifiers declined the request (``stop_reason: refusal``)."""
 
 
+#: ``[agent] effort`` values with no Anthropic spelling.
+_EFFORT = {"none": "low"}
+
+
 class AnthropicClient:
     """Chat backend speaking the Anthropic Messages API.
 
@@ -60,7 +64,8 @@ class AnthropicClient:
         max_reply_tokens: ``max_tokens`` per turn; bounds thinking *and* reply.
         effort: ``low``/``medium``/``high``/``xhigh``/``max`` — the depth and
             spend control that replaces sampling parameters here. None leaves
-            the server default.
+            the server default. ``none`` is an OpenAI word with no Anthropic
+            equivalent and goes out as ``low``, the lowest this API has.
         timeout_s: Per-request timeout.
     """
 
@@ -111,7 +116,7 @@ class AnthropicClient:
         if tools:
             body["tools"] = [_tool_spec(tool) for tool in tools]
         if self.effort is not None:
-            body["output_config"] = {"effort": self.effort}
+            body["output_config"] = {"effort": _EFFORT.get(self.effort, self.effort)}
         payload = request_json(
             f"{self.endpoint}/messages",
             headers=self._headers,
