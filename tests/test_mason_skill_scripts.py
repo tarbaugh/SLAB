@@ -857,7 +857,7 @@ def test_quench_report_tail_density_and_densification(
             Atoms("Cu8", positions=np.random.default_rng(i).uniform(0, a, (8, 3)),
                   cell=[a] * 3, pbc=True)
         )
-    data = tmp_path / "quench.traj"
+    data = tmp_path / "quench-100Kps-r1.traj"
     ase_write(data, frames)
     expected = 8 * 63.546 * 1.66053906660 / 11.0**3
     code, out = _run(
@@ -868,6 +868,67 @@ def test_quench_report_tail_density_and_densification(
     report = json.loads(out)["reports"][0]
     assert abs(report["rho_g_cm3"] - expected) / expected < 1e-6
     assert abs(report["delta_v"] - (1.0 - expected / 9.0)) < 1e-6
+    assert report["rate_K_per_ps"] == 100.0 and report["replica"] == 1
+    assert any("not a declared hold" in w for w in report["warnings"])
+
+    # A declared hold of 10 frames: exact plateau, no drift, no warning.
+    code, out = _run(
+        QUENCH_REPORT, str(data), "--hold-frames", "10", "--json",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    report = json.loads(out)["reports"][0]
+    assert report["hold_frames"] == 10 and report["warnings"] == []
+    assert report["rho_se_g_cm3"] == 0.0
+
+    # A hold that still drifts is flagged.
+    code, out = _run(
+        QUENCH_REPORT, str(data), "--hold-frames", "16", "--json",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    assert any("has not settled" in w for w in json.loads(out)["reports"][0]["warnings"])
+
+
+def test_quench_report_groups_replicas_and_fits_the_log_rate_law(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ase import Atoms
+
+    def trajectory(name: str, a: float) -> Path:
+        frames = [
+            Atoms("Cu8", positions=np.random.default_rng(i).uniform(0, a, (8, 3)),
+                  cell=[a] * 3, pbc=True)
+            for i in range(8)
+        ]
+        path = tmp_path / name
+        ase_write(path, frames)
+        return path
+
+    # Density 8 m / a^3: a slower quench packs denser here (smaller a).
+    files = [
+        trajectory("quench-100Kps-r1.traj", 11.0),
+        trajectory("quench-100Kps-r2.traj", 11.02),
+        trajectory("quench-10Kps-r1.traj", 10.9),
+        trajectory("quench-1Kps-r1.traj", 10.8),
+    ]
+    code, out = _run(
+        QUENCH_REPORT, *(str(f) for f in files), "--hold-frames", "8", "--json",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    result = json.loads(out)
+    rates = {r["rate_K_per_ps"]: r for r in result["rates"]}
+    assert rates[100.0]["replicas"] == 2 and rates[100.0]["rho_spread_g_cm3"] > 0
+    assert rates[1.0]["replicas"] == 1 and rates[1.0]["rho_spread_g_cm3"] is None
+    assert rates[1.0]["rho_g_cm3"] > rates[10.0]["rho_g_cm3"] > rates[100.0]["rho_g_cm3"]
+    assert result["log_rate_law"]["slope_per_decade_g_cm3"] < 0
+
+    code, out = _run(
+        QUENCH_REPORT, *(str(f) for f in files), "--hold-frames", "8",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0 and "over 2 replica(s)" in out and "log10(rate" in out
 
 
 def test_quench_report_refuses_thin_or_unbounded_input(
@@ -889,6 +950,13 @@ def test_quench_report_refuses_thin_or_unbounded_input(
         QUENCH_REPORT, str(short), "--tail", "1.5", monkeypatch=monkeypatch, capsys=capsys
     )
     assert isinstance(code, str) and "--tail" in code
+
+    five = tmp_path / "five.traj"
+    ase_write(five, [Atoms("Cu", positions=[[0, 0, 0]], cell=[10] * 3, pbc=True)] * 5)
+    code, _ = _run(
+        QUENCH_REPORT, str(five), "--hold-frames", "9", monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert isinstance(code, str) and "fewer than the 9 hold frames" in code
 
 
 # -- fit_thermal_ramp ---------------------------------------------------------
@@ -1134,20 +1202,24 @@ def test_the_quench_template_runs_verified_and_reports_densities(
         intent="skill template shakeout (EMT melt-quench)", capture_output=True,
     )
     assert result["state"] == "verified"
-    assert result["checks_passed"] == result["checks_total"] == 2
+    assert result["checks_passed"] == result["checks_total"] == 3
     trajectories = sorted(tmp_path.glob("quench-*.traj"))
     assert len(trajectories) == 2
-    assert (tmp_path / "quench.json").is_file()
+    summary = json.loads((tmp_path / "quench.json").read_text())
+    assert summary["hold_frames"] == 10
 
     code, out = _run(
-        QUENCH_REPORT, *(str(t) for t in trajectories), "--rho-c", "9.12", "--json",
-        monkeypatch=monkeypatch, capsys=capsys,
+        QUENCH_REPORT, *(str(t) for t in trajectories), "--hold-frames", "10",
+        "--rho-c", "9.12", "--json", monkeypatch=monkeypatch, capsys=capsys,
     )
     assert code == 0
-    reports = json.loads(out)["reports"]
+    result = json.loads(out)
+    reports = result["reports"]
     # EMT copper glass/quenched solid lands near the crystal's 9.1 g/cm^3.
     assert all(7.0 < r["rho_g_cm3"] < 9.6 for r in reports)
     assert all(-0.1 < r["delta_v"] < 0.25 for r in reports)
+    assert all(r["rho_se_g_cm3"] is not None for r in reports)
+    assert len(result["rates"]) == 2 and result["log_rate_law"] is not None
 
 
 def test_the_ramp_template_runs_verified_and_yields_a_classical_cp(
