@@ -5,6 +5,16 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- The mlip-training skill separates the dataset for a from-scratch fit
+  from the dataset for fine-tuning a foundation model. From scratch: a
+  coverage table by region, atom counts over structure counts,
+  decorrelated snapshots, one round of active learning, and a transfer
+  test set. Fine-tuning: tens to a few hundred targeted structures, the
+  PBE provenance of the GRACE OAM labels against SLAB's PBEsol default,
+  an anchor slice against forgetting, `eval_init_stats` as the baseline,
+  and an untrained property computed with both models. The shared rules
+  hold out whole sources and note that `single_point` labels carry no
+  stress.
 - The review brief carries the lead's own catalog and material lookups
   (`list_engines`, `list_tasks`, `describe_task`, `get_material`) from the
   session, newest first, within a 2,000-character cap each and 8,000 in
