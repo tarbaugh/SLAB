@@ -652,6 +652,7 @@ def test_fit_nemd_kappa_from_json_and_text_profiles(
     assert code == 0
     fit = json.loads(out)
     assert abs(fit["k_W_mK"] - 1.5) < 1e-6
+    assert fit["k_se_W_mK"] < 1e-9 and abs(fit["mean_T_K"] - 310.0) < 1e-9
     assert fit["warnings"] == []
 
     text = tmp_path / "profile.dat"
@@ -664,6 +665,63 @@ def test_fit_nemd_kappa_from_json_and_text_profiles(
     assert abs(json.loads(out)["k_W_mK"] - 1.5) < 1e-6
 
 
+def test_fit_nemd_folds_a_sawtooth_and_windows_the_fit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A periodic Muller-Plathe profile: up on the first half, down on the
+    # second, with curved ends where the exchange slabs sit.
+    xs = np.linspace(0.0, 100.0, 41)
+    rows = []
+    for x in xs:
+        base = 300.0 + 0.2 * x if x <= 50.0 else 300.0 + 0.2 * (100.0 - x)
+        distance_to_slab = min(x, abs(x - 50.0), 100.0 - x)
+        bend = 3.0 if distance_to_slab < 6.0 else 0.0
+        rows.append({"x": float(x), "T": base - bend})
+    profile = tmp_path / "sawtooth.json"
+    profile.write_text(json.dumps(rows))
+
+    # Unfolded, the fit is meaningless and the script says so.
+    code, out = _run(
+        FIT_NEMD, "kappa", str(profile), "--flux", "3e9", "--json",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0 and any("not linear" in w for w in json.loads(out)["warnings"])
+
+    code, out = _run(
+        FIT_NEMD, "kappa", str(profile), "--flux", "3e9", "--fold", "--drop-ends", "3", "--json",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    fit = json.loads(out)
+    assert fit["folded"] and abs(fit["k_W_mK"] - 1.5) < 1e-6
+    assert fit["half_mismatch"] < 1e-6 and fit["warnings"] == []
+    assert fit["halves"][0]["gradient_K_m"] > 0 > fit["halves"][1]["gradient_K_m"]
+
+    # A window by position gives the same answer as dropping bins.
+    code, out = _run(
+        FIT_NEMD, "kappa", str(profile), "--flux", "3e9", "--xmin", "8", "--xmax", "42",
+        "--json", monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0 and abs(json.loads(out)["k_W_mK"] - 1.5) < 1e-6
+
+    # Time blocks give a mean and a standard error.
+    block2 = tmp_path / "block2.json"
+    block2.write_text(json.dumps([{"x": r["x"], "T": r["T"] * 1.02} for r in rows]))
+    code, out = _run(
+        FIT_NEMD, "kappa", str(profile), str(block2), "--flux", "3e9", "--fold",
+        "--drop-ends", "3", "--json", monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    fit = json.loads(out)
+    assert len(fit["blocks"]) == 2 and fit["k_W_mK_block_se"] > 0
+
+    code, out = _run(
+        FIT_NEMD, "kappa", str(profile), "--flux", "3e9", "--fold", "--drop-ends", "3",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0 and "half-profile mismatch" in out and "<T> =" in out
+
+
 def test_fit_nemd_tbr_measures_the_interface_jump(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -671,17 +729,31 @@ def test_fit_nemd_tbr_measures_the_interface_jump(
     rows += [
         {"x": float(x), "T": 365.0 - 0.1 * (float(x) - 52.0)} for x in np.linspace(52.0, 100.0, 13)
     ]
+    # bend the two bins next to the interface, as real profiles do
+    rows[11]["T"] -= 2.0
+    rows[12]["T"] -= 4.0
+    rows[13]["T"] += 4.0
+    rows[14]["T"] += 2.0
     profile = tmp_path / "tbr.json"
     profile.write_text(json.dumps(rows))
     # both branches extrapolate to the interface with a 30 K jump; R = 30/3e9 = 1e-8
     code, out = _run(
-        FIT_NEMD, "tbr", str(profile), "--flux", "3e9", "--interface", "50", "--json",
-        monkeypatch=monkeypatch, capsys=capsys,
+        FIT_NEMD, "tbr", str(profile), "--flux", "3e9", "--interface", "50",
+        "--exclude-interface", "9", "--json", monkeypatch=monkeypatch, capsys=capsys,
     )
     assert code == 0
     fit = json.loads(out)
     assert abs(fit["tbr_m2K_W"] - 1e-8) / 1e-8 < 0.05
+    assert abs(fit["conductance_MW_m2K"] - 100.0) < 5.0
     assert abs(fit["left"]["k_W_mK"] - 3.0) < 1e-6
+    assert fit["left"]["points"] == 11 and fit["warnings"] == []
+
+    # Without the exclusion the bent bins enter the fit, and the script says so.
+    code, out = _run(
+        FIT_NEMD, "tbr", str(profile), "--flux", "3e9", "--interface", "50", "--json",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0 and any("no points were excluded" in w for w in json.loads(out)["warnings"])
 
 
 def test_fit_nemd_refuses_bad_geometry(
@@ -700,6 +772,12 @@ def test_fit_nemd_refuses_bad_geometry(
         monkeypatch=monkeypatch, capsys=capsys,
     )
     assert isinstance(code, str) and "at least 3" in code
+
+    code, _ = _run(
+        FIT_NEMD, "kappa", str(profile), "--flux", "1e9", "--drop-ends", "5",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert isinstance(code, str) and "removes every point" in code
 
     bad = tmp_path / "bad.dat"
     bad.write_text("1 2 3\n")
@@ -1172,8 +1250,10 @@ def test_cnt_gamma_inverts_gibbs_thomson_exactly(
 ) -> None:
     tm, dhf, gamma = 823.0, 2.4e8, 0.06
     rows = [
-        {"T": t, "r_star_nm": 2 * gamma * tm / (dhf * (tm - t)) * 1e9}
-        for t in (600.0, 650.0, 700.0)
+        {"T": t, "r_star_nm": 2 * gamma * tm / (dhf * (tm - t)) * 1e9,
+         "r_low_nm": 0.9 * 2 * gamma * tm / (dhf * (tm - t)) * 1e9,
+         "r_high_nm": 1.1 * 2 * gamma * tm / (dhf * (tm - t)) * 1e9}
+        for t in (700.0, 750.0, 800.0)
     ]
     data = tmp_path / "rstar.json"
     data.write_text(json.dumps(rows))
@@ -1185,6 +1265,61 @@ def test_cnt_gamma_inverts_gibbs_thomson_exactly(
     fit = json.loads(out)
     assert abs(fit["gamma_J_m2"] - gamma) < 1e-9
     assert fit["gamma_std_J_m2"] < 1e-12
+    assert abs(fit["gamma_at_tm_J_m2"] - gamma) < 1e-9  # a flat gamma(T) extrapolates flat
+    assert abs(fit["dgamma_dT_J_m2K"]) < 1e-12
+    assert abs(fit["points"][0]["gamma_se_J_m2"] - 0.1 * gamma) < 1e-9  # bracket half-width
+    assert fit["warnings"] == []
+
+
+def test_cnt_gamma_from_cluster_counts_and_its_temperature_law(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import math
+
+    tm, dhf, omega = 823.0, 2.4e8, 30.5
+    rho_s = 1.0 / (omega * 1e-30)
+    # gamma rising toward Tm at 1e-4 J/m^2/K, as seeding finds.
+    rows = []
+    for t in (700.0, 750.0, 800.0, 810.0):
+        gamma = 0.06 + 1e-4 * (t - tm)
+        dgv = dhf * (tm - t) / tm
+        r_star = 2 * gamma / dgv
+        n_star = (4 / 3) * math.pi * r_star**3 * rho_s
+        rows.append({"T": t, "n_star": n_star, "n_low": 0.9 * n_star, "n_high": 1.1 * n_star,
+                     "order_parameter": "q6 > 0.33, rc 3.2 A"})
+    data = tmp_path / "seeds.json"
+    data.write_text(json.dumps(rows))
+    code, out = _run(
+        CNT, "gamma", str(data), "--tm", str(tm), "--dhf", str(dhf), "--omega", str(omega),
+        "--json", monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    fit = json.loads(out)
+    assert abs(fit["gamma_at_tm_J_m2"] - 0.06) < 1e-9
+    assert abs(fit["dgamma_dT_J_m2K"] - 1e-4) < 1e-12
+    assert fit["gamma_at_tm_se_J_m2"] < 1e-9
+    assert fit["order_parameter"] == "q6 > 0.33, rc 3.2 A"
+    assert fit["warnings"] == []  # all within 20 % undercooling, no small nuclei
+
+    # Without --omega the atom counts cannot be converted.
+    code, _ = _run(
+        CNT, "gamma", str(data), "--tm", str(tm), "--dhf", str(dhf),
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert isinstance(code, str) and "--omega" in code
+
+    # One deep undercooling with a tiny nucleus and no criterion: three warnings.
+    data.write_text(json.dumps([{"T": 500.0, "n_star": 20.0}]))
+    code, out = _run(
+        CNT, "gamma", str(data), "--tm", str(tm), "--dhf", str(dhf), "--omega", str(omega),
+        "--json", monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    warnings = json.loads(out)["warnings"]
+    assert any("overestimates" in w for w in warnings)
+    assert any("few shells" in w for w in warnings)
+    assert any("order_parameter" in w for w in warnings)
+    assert any("one undercooling" in w for w in warnings)
 
 
 def test_cnt_barrier_matches_the_closed_form(
@@ -1192,7 +1327,7 @@ def test_cnt_barrier_matches_the_closed_form(
 ) -> None:
     import math
 
-    tm, dhf, gamma, t = 823.0, 2.4e8, 0.06, 600.0
+    tm, dhf, gamma, t = 823.0, 2.4e8, 0.06, 700.0
     code, out = _run(
         CNT, "barrier", "--gamma", str(gamma), "--tm", str(tm), "--dhf", str(dhf),
         "--temps", str(t), "--omega", "30.5", "--json",
@@ -1206,6 +1341,71 @@ def test_cnt_barrier_matches_the_closed_form(
     assert abs(row["dG_star_eV"] - expected_ev) / expected_ev < 1e-9
     expected_n = (4 / 3) * math.pi * (2 * gamma / dgv) ** 3 / (30.5e-30)
     assert abs(row["n_star_atoms"] - expected_n) / expected_n < 1e-9
+
+    # gamma(T) from a slope: at 700 K with slope 1e-4 from Tm, gamma is 0.0477.
+    code, out = _run(
+        CNT, "barrier", "--gamma", str(gamma), "--gamma-slope", "1e-4", "--tm", str(tm),
+        "--dhf", str(dhf), "--temps", str(t), "--json", monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    row = json.loads(out)["rows"][0]
+    assert abs(row["gamma_J_m2"] - (gamma - 1e-4 * 123.0)) < 1e-9
+
+    # theta = 90 deg is f = 0.5: barrier and cap atom count halve.
+    code, out = _run(
+        CNT, "barrier", "--gamma", str(gamma), "--tm", str(tm), "--dhf", str(dhf),
+        "--temps", str(t), "--omega", "30.5", "--theta", "90", "--json",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    result = json.loads(out)
+    assert abs(result["f_het"] - 0.5) < 1e-12
+    assert abs(result["rows"][0]["dG_star_eV"] - expected_ev / 2) / expected_ev < 1e-9
+    assert abs(result["rows"][0]["n_star_atoms"] - expected_n / 2) / expected_n < 1e-9
+
+
+def test_cnt_rate_and_the_driving_force_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import math
+
+    tm, dhf, gamma, t, omega = 823.0, 2.4e8, 0.06, 700.0, 30.5
+    code, out = _run(
+        CNT, "rate", "--gamma", str(gamma), "--tm", str(tm), "--dhf", str(dhf),
+        "--temps", str(t), "--omega", str(omega), "--attachment", "2e11", "--json",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    row = json.loads(out)["rows"][0]
+    rho_s = 1 / (omega * 1e-30)
+    dgv = dhf * (tm - t) / tm
+    n_star = (4 / 3) * math.pi * (2 * gamma / dgv) ** 3 * rho_s
+    z = math.sqrt((dgv / rho_s) / (6 * math.pi * 1.380649e-23 * t * n_star))
+    assert abs(row["zeldovich"] - z) / z < 1e-9
+    barrier_j = 16 * math.pi * gamma**3 / (3 * dgv**2)
+    j = rho_s * z * 2e11 * math.exp(-barrier_j / (1.380649e-23 * t))
+    assert abs(row["rate_per_m3_s"] - j) / j < 1e-6
+
+    # A driving-force table overrides the linear form, and no undercooling warning fires.
+    table = tmp_path / "dmu.json"
+    table.write_text(json.dumps([{"T": 500.0, "dgv_J_m3": 5e7}, {"T": 823.0, "dgv_J_m3": 0.0}]))
+    code, out = _run(
+        CNT, "barrier", "--gamma", str(gamma), "--tm", str(tm), "--dhf", str(dhf),
+        "--temps", "600", "--dmu-table", str(table), "--json",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    result = json.loads(out)
+    expected_dgv = 5e7 * (823.0 - 600.0) / (823.0 - 500.0)
+    assert abs(result["rows"][0]["dGv_J_m3"] - expected_dgv) / expected_dgv < 1e-9
+    assert result["warnings"] == []
+
+    # The same temperature under the linear form is 27 % undercooling: a warning.
+    code, out = _run(
+        CNT, "barrier", "--gamma", str(gamma), "--tm", str(tm), "--dhf", str(dhf),
+        "--temps", "600", monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0 and "overestimates the driving force" in out
 
 
 def test_cnt_refuses_the_wrong_regime(
@@ -1224,6 +1424,12 @@ def test_cnt_refuses_the_wrong_regime(
         "--temps", "600", "--f-het", "1.5", monkeypatch=monkeypatch, capsys=capsys,
     )
     assert isinstance(code, str) and "--f-het" in code
+
+    code, _ = _run(
+        CNT, "rate", "--gamma", "0.06", "--tm", "823", "--dhf", "2.4e8",
+        "--temps", "700", monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert isinstance(code, str) and "--omega" in code
 
 
 # -- the MD and strain templates, end to end ----------------------------------
