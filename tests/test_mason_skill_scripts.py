@@ -62,6 +62,31 @@ def test_fit_eos_recovers_emt_copper(
     assert 10.5 < fit["v0_per_atom_A3"] < 12.5
     assert 80.0 < fit["b_GPa"] < 220.0
     assert fit["points"] == 7
+    assert 2.0 < fit["b_prime"] < 8.0
+    assert fit["rms_residual_meV_per_atom"] < 1.0
+    assert fit["warnings"] == []
+    low, high = fit["volume_range_of_v0"]
+    assert 0.80 < low < 0.90 and 1.10 < high < 1.25  # linear 0.94-1.06 is wide in volume
+
+    code, out = _run(FIT_EOS, str(data), "--natoms", "1", monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 0 and "B' =" in out and "scanned V/V0" in out
+
+
+def test_fit_eos_warns_in_json_when_the_minimum_is_at_an_edge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Points that all sit on one side of the minimum: the fitted V0 falls
+    outside the inner points, and the warning rides in the JSON too."""
+    points = [p for p in _emt_eos_points() if p["volume"] > 11.0][:4]
+    assert len(points) == 4
+    data = tmp_path / "edge.json"
+    data.write_text(json.dumps(points))
+    code, out = _run(
+        FIT_EOS, str(data), "--json", "--natoms", "1", monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert code == 0
+    fit = json.loads(out)
+    assert any("outside the inner points" in w for w in fit["warnings"])
 
 
 def test_fit_eos_refuses_thin_or_malformed_input(
@@ -107,7 +132,50 @@ def test_convergence_table_names_the_cheapest_converged_rung(
     code, out = _run(CONV, str(data), "--natoms", "1", monkeypatch=monkeypatch, capsys=capsys)
     assert code == 0
     assert "converged at 50" in out
+    assert "confirmed by 2 later rung(s)" in out
     assert "<- reference" in out
+
+
+def test_convergence_table_reads_forces_and_pressures_and_wants_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Forces converge later than energies here: the energy verdict is 40,
+    the force verdict 50, and a pressure ladder needs its own key."""
+    ladder = [
+        {"value": 30, "energy": -10.0100, "fmax": 0.0300},
+        {"value": 40, "energy": -10.0005, "fmax": 0.0120},
+        {"value": 50, "energy": -10.0003, "fmax": 0.0040},
+        {"value": 60, "energy": -10.0001, "fmax": 0.0010},
+        {"value": 70, "energy": -10.0000, "fmax": 0.0000},
+    ]
+    data = tmp_path / "conv.json"
+    data.write_text(json.dumps(ladder))
+    code, out = _run(CONV, str(data), "--json", monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 0 and json.loads(out)["converged_at"] == "40"
+
+    code, out = _run(
+        CONV, str(data), "--quantity", "force", "--json", monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert code == 0
+    verdict = json.loads(out)
+    assert verdict["converged_at"] == "50" and verdict["unit"] == "meV/A"
+    assert verdict["threshold"] == 5.0
+
+    code, _ = _run(
+        CONV, str(data), "--quantity", "pressure", monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert isinstance(code, str) and "no 'pressure'" in code
+
+    # Rung 60 is within threshold but only the reference follows it: not confirmed.
+    short = [
+        {"value": 30, "energy": -10.0100},
+        {"value": 40, "energy": -10.0050},
+        {"value": 60, "energy": -10.0001},
+        {"value": 70, "energy": -10.0000},
+    ]
+    data.write_text(json.dumps(short))
+    code, out = _run(CONV, str(data), monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 0 and "not converged" in out and "2 later rungs" in out
 
 
 def test_convergence_table_says_when_the_ladder_is_too_short(
