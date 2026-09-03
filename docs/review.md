@@ -168,7 +168,9 @@ Do not merge a skill revision that the gate refuses.
     ```
 
 3. Revise the target. For a skill, edit its description, its body, or
-   its script, and run the skill's script test.
+   its script, and run the skill's script test. For a card, edit its
+   role prompt. For `prompt`, set `[agent] effort` or edit the system
+   prompt outside any card.
 
 4. Run the campaigns for the questions that list the skill, under the new
    revision, and score them.

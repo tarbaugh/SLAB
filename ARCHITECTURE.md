@@ -661,6 +661,21 @@ is then a procedure with no step that trusts an opinion: score, read the
 defect list, revise the owner, re-run the listed questions, pass the
 gate, commit the records with the revision.
 
+Two rules read the *shape* of a campaign rather than its results, and
+they came from one transcript that spent 72 minutes and 80 % of its
+completion tokens in shell calls that changed nothing the workspace
+records. `no-progress-loop` blames the card for fifteen consecutive
+steps made only of looking tools; `reasoning-heavy` blames the prompt
+for a step that was billed 8,000 or more completion tokens and wrote
+nothing, naming the effort the transcript header recorded. The set of
+looking tools is defined once, in `mason.tools`, and the loop uses the
+same set live: after fifteen such steps the per-turn budget line tells
+the model to step back. The rule and the intervention cannot drift
+apart, because they are one definition. The transcript header records
+the effort and the SLAB version for the same reason the `skill` event
+records a digest: an attributable defect needs the dial and the code
+that were in force, not the config as it stands today.
+
 ## 8. Agent-native decisions, collected
 
 - **Run ids are ULIDs** (26 chars, time-ordered) and every surface accepts
