@@ -968,20 +968,28 @@ def test_fit_thermal_ramp_slopes_and_latent_heat(
     crystal = tmp_path / "crystal.json"
     liquid = tmp_path / "liquid.json"
     crystal.write_text(
-        json.dumps([{"T": t, "E": -100.0 + 0.01 * t, "V": 500.0 + 0.05 * t}
+        json.dumps([{"T": t, "H": -100.0 + 0.01 * t, "V": 500.0 + 0.05 * t, "N": 32,
+                     "mass_amu": 32 * 63.546, "L": [7.94 + 0.0004 * t] * 3}
                     for t in range(300, 800, 100)])
     )
     liquid.write_text(
-        json.dumps([{"T": t, "E": -80.0 + 0.012 * t, "V": 520.0 + 0.05 * t}
+        json.dumps([{"T": t, "H": -80.0 + 0.012 * t, "V": 520.0 + 0.05 * t, "N": 32}
                     for t in range(300, 800, 100)])
     )
     code, out = _run(FIT_RAMP, str(crystal), "--json", monkeypatch=monkeypatch, capsys=capsys)
     assert code == 0
     fit = json.loads(out)
     assert abs(fit["cp_total_eV_K"] - 0.01) < 1e-9
+    assert fit["cp_total_se_eV_K"] < 1e-9  # exact line, five rungs
     # 0.01 eV/K over ~525 A^3 -> 3.05e6 J/(m^3 K); CTE = 0.05/(3*525)
     assert abs(fit["cp_vol_J_m3K"] - 3.05e6) / 3.05e6 < 0.01
     assert abs(fit["cte_per_K"] - 0.05 / (3 * 525.0)) / (0.05 / (3 * 525.0)) < 0.01
+    # 0.01 eV/K over 32 atoms is 3.63 k_B per atom, 30.2 J/(mol K).
+    assert abs(fit["cp_kB_per_atom"] - 0.01 / (32 * _KB_EV)) < 1e-6
+    assert abs(fit["cp_J_molK"] - 30.15) < 0.1
+    assert abs(fit["cp_J_kgK"] - 474.4) < 1.0
+    assert len(fit["cte_per_axis_per_K"]) == 3
+    assert fit["warnings"] == []
 
     code, out = _run(
         FIT_RAMP, str(crystal), "--other", str(liquid), "--at", "500", "--json",
@@ -990,14 +998,54 @@ def test_fit_thermal_ramp_slopes_and_latent_heat(
     assert code == 0
     fit = json.loads(out)
     assert abs(fit["dH_eV"] - 21.0) < 1e-9  # (-80+6) - (-100+5)
+    assert abs(fit["dH_eV_per_atom"] - 21.0 / 32) < 1e-9
+    assert abs(fit["dH_kJ_mol"] - 21.0 / 32 * 96.485) < 0.01
+
+    code, out = _run(FIT_RAMP, str(crystal), monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 0 and "k_B/atom" in out and "CTE per axis" in out
 
 
-def test_fit_thermal_ramp_refuses_extrapolation_and_thin_windows(
+def test_fit_thermal_ramp_uses_measured_temperatures_and_sees_hysteresis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ramp = tmp_path / "ramp.json"
+    # The measured temperatures run 10 % hot; the slope against them is 0.01/1.1.
+    rows = [
+        {"T": t, "T_measured": 1.1 * t, "H": -100.0 + 0.01 * 1.1 * t, "V": 500.0, "N": 8,
+         "H_se": 0.001, "direction": "up"}
+        for t in range(300, 800, 100)
+    ]
+    rows += [
+        {"T": t, "T_measured": 1.1 * t, "H": -100.0 + 0.01 * 1.1 * t + 0.5, "V": 500.0,
+         "N": 8, "H_se": 0.001, "direction": "down"}
+        for t in (600, 500, 400, 300)
+    ]
+    ramp.write_text(json.dumps(rows))
+    code, out = _run(FIT_RAMP, str(ramp), "--json", monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 0
+    fit = json.loads(out)
+    assert fit["fitted_temperature"] == "measured"
+    assert abs(fit["cp_total_eV_K"] - 0.01) < 1e-9
+    assert len(fit["hysteresis"]) == 4
+    assert any("hysteresis" in w for w in fit["warnings"])
+
+    # Per-axis expansion that differs between axes is flagged.
+    rows = [
+        {"T": t, "H": 0.01 * t, "V": 500.0 * (1 + 3e-5 * (t - 300)), "N": 8,
+         "L": [7.9 * (1 + 5e-5 * (t - 300)), 7.9, 8.0 * (1 + 4e-5 * (t - 300))]}
+        for t in range(300, 800, 100)
+    ]
+    ramp.write_text(json.dumps(rows))
+    code, out = _run(FIT_RAMP, str(ramp), "--json", monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 0 and any("between axes" in w for w in json.loads(out)["warnings"])
+
+
+def test_fit_thermal_ramp_refuses_extrapolation_thin_windows_and_unequal_cells(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     ramp = tmp_path / "ramp.json"
     ramp.write_text(
-        json.dumps([{"T": t, "E": 0.01 * t, "V": 500.0} for t in range(300, 800, 100)])
+        json.dumps([{"T": t, "E": 0.01 * t, "V": 500.0, "N": 8} for t in range(300, 800, 100)])
     )
     code, _ = _run(
         FIT_RAMP, str(ramp), "--other", str(ramp), "--at", "900",
@@ -1012,6 +1060,25 @@ def test_fit_thermal_ramp_refuses_extrapolation_and_thin_windows(
 
     code, _ = _run(FIT_RAMP, str(ramp), "--at", "500", monkeypatch=monkeypatch, capsys=capsys)
     assert isinstance(code, str) and "--other and --at" in code
+
+    bigger = tmp_path / "bigger.json"
+    bigger.write_text(
+        json.dumps([{"T": t, "E": 0.03 * t, "V": 1500.0, "N": 24} for t in range(300, 800, 100)])
+    )
+    code, _ = _run(
+        FIT_RAMP, str(ramp), "--other", str(bigger), "--at", "500",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert isinstance(code, str) and "8 atoms" in code and "24" in code
+
+    # Rows without N still give a per-cell slope, and say so.
+    ramp.write_text(json.dumps([{"T": t, "E": 0.01 * t, "V": 500.0} for t in range(300, 700, 100)]))
+    code, out = _run(FIT_RAMP, str(ramp), "--json", monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 0
+    fit = json.loads(out)
+    assert "cp_kB_per_atom" not in fit
+    assert any("no atom count" in w for w in fit["warnings"])
+    assert any("at least 5" in w for w in fit["warnings"])
 
 
 # -- adhesion -----------------------------------------------------------------
@@ -1244,7 +1311,10 @@ def test_the_ramp_template_runs_verified_and_yields_a_classical_cp(
     # Classical solid: c_p near 3 kB/atom. 32 atoms in ~1500 A^3 puts the
     # volumetric value in the couple-of-1e6 J/(m^3 K) range.
     assert 1.5e6 < fit["cp_vol_J_m3K"] < 8.0e6
+    assert 2.0 < fit["cp_kB_per_atom"] < 4.5
     assert fit["cte_per_K"] > 0
+    assert fit["fitted_temperature"] == "measured" and fit["n_atoms"] == 32
+    assert len(fit["cte_per_axis_per_K"]) == 3
 
 
 # -- check_structure (atomsk-structures) --------------------------------------
