@@ -8,6 +8,7 @@ import json
 import runpy
 import sys
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -452,8 +453,8 @@ def test_every_builtin_skill_validates_and_maps_to_its_specialists(tmp_path: Pat
         assert skills[analysis].agents == frozenset({"md-expert", "analysis-expert"})
     # The scriptless skills are deliberate: scripts are optional in the format.
     assert not (skills["surface-energy"].root / "scripts").exists()
-    assert not (skills["two-phase-melting"].root / "scripts").exists()
     assert not (skills["mlip-training"].root / "scripts").exists()
+    assert (skills["two-phase-melting"].root / "scripts" / "interface_velocity.py").is_file()
 
 
 # -- fit_rates ----------------------------------------------------------------
@@ -1430,6 +1431,90 @@ def test_cnt_refuses_the_wrong_regime(
         "--temps", "700", monkeypatch=monkeypatch, capsys=capsys,
     )
     assert isinstance(code, str) and "--omega" in code
+
+
+# -- interface_velocity (two-phase-melting) -----------------------------------
+
+INTERFACE = SKILLS / "two-phase-melting" / "scripts" / "interface_velocity.py"
+
+
+def _coexistence_frames(n_frames: int, growth_per_frame: float, seed: int = 1) -> list[Any]:
+    """A 4x4x16 fcc Cu box whose crystal slab (z below z_c) grows each frame;
+    the rest is random at the same density, the liquid stand-in."""
+    from ase import Atoms
+
+    rng = np.random.default_rng(seed)
+    crystal = bulk("Cu", "fcc", a=3.615, cubic=True) * (4, 4, 16)
+    cell = crystal.cell.lengths()
+    frames = []
+    for k in range(n_frames):
+        z_c = 0.35 * cell[2] + growth_per_frame * k
+        positions = crystal.get_positions().copy()
+        liquid = positions[:, 2] >= z_c
+        positions[liquid, 0] = rng.uniform(0.0, cell[0], liquid.sum())
+        positions[liquid, 1] = rng.uniform(0.0, cell[1], liquid.sum())
+        positions[liquid, 2] = rng.uniform(z_c, cell[2], liquid.sum())
+        frames.append(Atoms("Cu" * len(crystal), positions=positions, cell=crystal.cell, pbc=True))
+    return frames
+
+
+def test_interface_velocity_separates_crystal_from_liquid_and_fits_the_slope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    frames = _coexistence_frames(n_frames=8, growth_per_frame=1.0)
+    data = tmp_path / "coex-r1.traj"
+    ase_write(data, frames)
+    code, out = _run(
+        INTERFACE, str(data), "--dt-fs", "1000", "--interfaces", "1", "--fit-from", "0",
+        "--fit-to", "1", "--cutoff", "3.1", "--json", monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    result = json.loads(out)
+    replica = result["replicas"][0]
+    # The crystal slab starts at 35 % of the box and grows 1 A per frame (1 ps).
+    assert 0.25 < replica["fraction_first"] < 0.45
+    assert replica["fraction_last"] > replica["fraction_first"]
+    assert abs(result["v_A_per_ps"] - 1.0) < 0.3
+    assert abs(result["v_m_per_s"] - 100.0) < 30.0
+    assert replica["r2"] > 0.9
+    assert any("one trajectory" in w for w in result["warnings"])
+
+    # Two interfaces halve the velocity; two replicas give a spread.
+    other = tmp_path / "coex-r2.traj"
+    ase_write(other, _coexistence_frames(n_frames=8, growth_per_frame=1.0, seed=2))
+    code, out = _run(
+        INTERFACE, str(data), str(other), "--dt-fs", "1000", "--fit-from", "0", "--fit-to", "1",
+        "--cutoff", "3.1", monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    assert "2 interfaces" in out and "+/-" in out
+
+
+def test_interface_velocity_classifies_a_perfect_crystal_and_refuses_bad_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    crystal = bulk("Cu", "fcc", a=3.615, cubic=True) * (3, 3, 3)
+    data = tmp_path / "crystal.traj"
+    ase_write(data, [crystal] * 5)
+    code, out = _run(
+        INTERFACE, str(data), "--dt-fs", "100", "--json", monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert code == 0
+    result = json.loads(out)
+    assert result["replicas"][0]["fraction_first"] == 1.0
+    assert result["replicas"][0]["q6bar_mean_first"] > 0.45
+    assert any("consumed a phase" in w for w in result["warnings"])
+
+    code, _ = _run(
+        INTERFACE, str(data), "--dt-fs", "100", "--fit-from", "0.9", "--fit-to", "0.5",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert isinstance(code, str) and "--fit-from" in code
+    code, _ = _run(
+        INTERFACE, str(data), "--dt-fs", "100", "--cutoff", "0.5",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert isinstance(code, str) and "--cutoff" in code
 
 
 # -- the MD and strain templates, end to end ----------------------------------
