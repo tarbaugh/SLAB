@@ -745,30 +745,48 @@ def test_fit_thermal_ramp_refuses_extrapolation_and_thin_windows(
 # -- adhesion -----------------------------------------------------------------
 
 
-def test_adhesion_reports_w_adh_and_the_potency_factor(
+def test_adhesion_reports_w_adh_gamma_int_and_the_potency_factor(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # W_adh = 10 eV over 100 A^2 = 0.1 eV/A^2 = 1.6022 J/m^2; gamma equal to
-    # W_adh puts cos(theta) at 0: theta 90 deg, f = 0.5 exactly.
+    # W_adh = 10 eV over 100 A^2 = 0.1 eV/A^2 = 1.6022 J/m^2. With surface
+    # energies 1.0 + 1.0 the interface energy is 0.3978; a substrate-liquid
+    # energy equal to it puts cos(theta) at 0: theta 90 deg, f = 0.5 exactly.
     code, out = _run(
         ADHESION, "--e-interface", "-110", "--e-a", "-60", "--e-b", "-40",
-        "--area", "100", "--gamma", "1.6021766208", "--json",
+        "--area", "100", "--gamma-a", "1.0", "--gamma-b", "1.0",
+        "--gamma-nl", str(2.0 - 1.6021766208), "--gamma-sl", "0.25", "--json",
         monkeypatch=monkeypatch, capsys=capsys,
     )
     assert code == 0
     fit = json.loads(out)
+    assert fit["quantity"] == "work_of_adhesion"
     assert abs(fit["w_adh_J_m2"] - 1.6021766208) < 1e-9
+    assert abs(fit["gamma_int_J_m2"] - (2.0 - 1.6021766208)) < 1e-9
     assert abs(fit["cos_theta"]) < 1e-9
     assert abs(fit["f_het"] - 0.5) < 1e-9
     assert fit["warnings"] == []
+
+    # Strain energies per area from the free-lattice slab energies, and the
+    # work-of-separation name for frozen references.
+    code, out = _run(
+        ADHESION, "--e-interface", "-110", "--e-a", "-60", "--e-b", "-40",
+        "--area", "100", "--e-a-free", "-61", "--e-b-free", "-40",
+        "--frozen-references", monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    assert "W_sep =" in out
+    assert "strain energy of slab a: 0.1602 J/m^2" in out
+    assert "strain energy of slab b: 0.0000 J/m^2" in out
 
 
 def test_adhesion_clamps_complete_wetting_and_flags_repulsion(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    # gamma_NS = 0.3978 is far below gamma_NL - gamma_SL = 2.0 - 0.25.
     code, out = _run(
         ADHESION, "--e-interface", "-110", "--e-a", "-60", "--e-b", "-40",
-        "--area", "100", "--gamma", "0.5", "--json",
+        "--area", "100", "--gamma-a", "1.0", "--gamma-b", "1.0",
+        "--gamma-nl", "2.0", "--gamma-sl", "0.25", "--json",
         monkeypatch=monkeypatch, capsys=capsys,
     )
     assert code == 0
@@ -785,11 +803,26 @@ def test_adhesion_clamps_complete_wetting_and_flags_repulsion(
     assert fit["w_adh_J_m2"] < 0
     assert any("do not bind" in w for w in fit["warnings"])
 
+    # 100 eV over 100 A^2 is 160 J/m^2: no real interface binds like that.
+    code, out = _run(
+        ADHESION, "--e-interface", "-200", "--e-a", "-60", "--e-b", "-40",
+        "--area", "100", "--json", monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0 and any("outside the range" in w for w in json.loads(out)["warnings"])
+
     code, _ = _run(
         ADHESION, "--e-interface", "-1", "--e-a", "-1", "--e-b", "-1", "--area", "0",
         monkeypatch=monkeypatch, capsys=capsys,
     )
     assert isinstance(code, str) and "--area" in code
+
+    # The wetting angle needs the interface energy, so the surface energies.
+    code, _ = _run(
+        ADHESION, "--e-interface", "-110", "--e-a", "-60", "--e-b", "-40",
+        "--area", "100", "--gamma-nl", "0.4", "--gamma-sl", "0.25",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert isinstance(code, str) and "--gamma-a" in code
 
 
 # -- cnt ----------------------------------------------------------------------
