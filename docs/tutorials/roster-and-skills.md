@@ -227,7 +227,8 @@ two-phase-melting          built-in  md-expert                    1 script(s)
 The catalog covers structure building (the atomsk skills: crystals and
 supercells, defects and dislocations, interfaces and polycrystals),
 screening from the offline Materials Project snapshot (mp-screening),
-potential training with gracemaker (mlip-training), LAMMPS potential
+potential training and fine-tuning with gracemaker, with the dataset
+rules for each (mlip-training), LAMMPS potential
 files and their pair styles (lammps-potentials), the
 static side (equations of state, convergence, surfaces, elastic
 constants, interface adhesion), and the dynamic side (melt-quench

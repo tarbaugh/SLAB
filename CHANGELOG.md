@@ -15,6 +15,8 @@ All notable changes to SLAB, newest first. Dates are commit dates on
   and an untrained property computed with both models. The shared rules
   hold out whole sources and note that `single_point` labels carry no
   stress.
+  The engines tutorial gains a paragraph on what the collector leaves to
+  the dataset's author, by kind of fit.
 - The review brief carries the lead's own catalog and material lookups
   (`list_engines`, `list_tasks`, `describe_task`, `get_material`) from the
   session, newest first, within a 2,000-character cap each and 8,000 in
