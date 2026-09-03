@@ -624,6 +624,18 @@ and the tensorpotential version enter it too, so changed data at the
 same path or an upgraded trainer honestly recomputes, and a repeated
 identical fit is a cache hit.
 
+The tasks do not decide what a good dataset holds. That depends on the
+kind of fit. A potential trained from scratch knows nothing outside its
+data, so its dataset must cover every region the study will visit:
+equilibrium phases, thermal snapshots, strained and compressed cells,
+defects and surfaces. A fine-tuned foundation model already covers
+general chemistry, so its dataset is small and concentrated on the
+target, with a few anchor structures against forgetting and a recorded
+baseline of the foundation model's own error. Both hold out whole
+sources for the test set, because adjacent frames of one relaxation are
+near-duplicates. The `mlip-training` skill states these rules for each
+path, and the resident agent follows them.
+
 A real fit belongs on a GPU partition. Submit the workflow through the
 scheduler (`slab hpc submit "slab run train.py"`), and give the
 `[builders.gracemaker]` setup lines the module loads and the
