@@ -138,7 +138,13 @@ writes nothing. The rules are code, not prompt text:
   `list_tasks`, `describe_task`, and `get_material` results from the
   session, newest first, each cut to 2,000 characters and 8,000 in all,
   so the critic spends its steps on the observable and the contract
-  instead of re-gathering the fingerprint.
+  instead of re-gathering the fingerprint. The brief says not to re-run
+  those lookups. A second review of the same subject in one session is a
+  re-review: the brief carries the prior findings and asks the critic to
+  say, for each, whether the text now resolves it. When the critic's
+  reply is cut at its reply-token ceiling on the retry too, the verdict
+  line says so and names the lead's one move, which is to review again.
+  The config change belongs to the operator.
 - The findings persist. Each review is one markdown file under
   `.slab/mason/reviews/`, named after the session transcript, and the
   transcript records a `review` event that names it.
@@ -183,12 +189,18 @@ Lattice constant of fcc Cu under emt.
 
 The `pi` has the same tool, and its doctrine is to review a campaign
 plan before the first launch. Nothing gates the PI, because a small
-interactive task needs no critic. Give the critic the reasoning a
-review needs in `slab.toml`:
+interactive task needs no critic. The critic takes `[agent] effort`
+unless its roster table says otherwise. Set it there, and set it lower
+than a planner's: a verdict over a few thousand characters of plan needs
+medium reasoning, and a thinking model at `xhigh` can spend the whole
+reply cap on its think block before it writes a word. One real critic
+pass ran 78 minutes and 73,000 completion tokens over twelve steps and
+returned no verdict.
 
 ```toml
 [agent.roster.critic]
-effort = "xhigh"
+effort = "medium"
+max_reply_tokens = 32000
 ```
 
 ## Skills

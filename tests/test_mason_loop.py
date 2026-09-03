@@ -392,11 +392,37 @@ def test_explicit_compute_profile_wins_over_the_derived_one(tmp_path: Path) -> N
 
 
 def test_truncated_answers_are_reported_not_passed_off_as_finished(tmp_path: Path) -> None:
-    reply = ChatReply(content="half an ans", finish_reason="max_tokens", prompt_tokens=10)
-    result = Mason(_session(tmp_path), client=FakeClient([reply])).run_turn("go")
+    cut = ChatReply(content="half an ans", finish_reason="max_tokens", prompt_tokens=10)
+    again = ChatReply(content="still half", finish_reason="max_tokens", prompt_tokens=10)
+    result = Mason(_session(tmp_path), client=FakeClient([cut, again])).run_turn("go")
     assert result.stop_reason == "answer"
+    assert result.truncated
+    assert result.text.startswith("still half")
     assert "truncated" in result.text
     assert "max_reply_tokens" in result.text
+
+
+def test_a_cut_reply_is_asked_again_once_at_low_effort(tmp_path: Path) -> None:
+    """A real critic at xhigh filled its whole reply cap with thinking, twice,
+    and the identical second request lost the verdict too. The retry asks
+    for brevity and drops the effort for that one call only."""
+    cut = ChatReply(content="", finish_reason="max_tokens", prompt_tokens=100, completion_tokens=1)
+    answer = ChatReply(content="verdict: fine", prompt_tokens=100, completion_tokens=5)
+    client = FakeClient([cut, answer])
+    result = Mason(_session(tmp_path, effort="xhigh"), client=client).run_turn("go")
+    assert result.text == "verdict: fine" and not result.truncated
+    assert "effort" not in client.options[0]
+    assert client.options[1]["effort"] == "low"
+    nudge = client.requests[1][0][-2]  # the last message is the ephemeral budget line
+    assert nudge["role"] == "user" and "cut at the reply-token ceiling" in nudge["content"]
+
+
+def test_the_cut_retry_keeps_reasoning_off_when_the_agent_runs_without_it(tmp_path: Path) -> None:
+    cut = ChatReply(content="", finish_reason="max_tokens", prompt_tokens=100, completion_tokens=1)
+    answer = ChatReply(content="ok", prompt_tokens=100, completion_tokens=5)
+    client = FakeClient([cut, answer])
+    Mason(_session(tmp_path, effort="none"), client=client).run_turn("go")
+    assert client.options[1]["effort"] == "none"
 
 
 def test_short_circuit_answers_every_tool_call(tmp_path: Path) -> None:
@@ -1060,8 +1086,9 @@ def test_a_second_empty_reply_ends_the_turn_marked_truncated_when_the_server_say
     session = _session(tmp_path)
     empty = ChatReply(content=None, prompt_tokens=100, completion_tokens=20_000)
     cut = ChatReply(content="", finish_reason="max_tokens", prompt_tokens=100, completion_tokens=1)
-    result = Mason(session, client=FakeClient([empty, cut])).run_turn("go")
+    result = Mason(session, client=FakeClient([empty, cut, cut])).run_turn("go")
     assert result.stop_reason == "answer"
+    assert result.truncated
     assert result.text.startswith("\n\n[truncated:")
 
 

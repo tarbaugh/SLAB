@@ -5,6 +5,15 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- The review brief writes the scope a lead had to learn to write by hand.
+  It says not to re-run the recorded lookups it carries, and a second
+  review of the same subject in one session carries the prior findings and
+  asks whether each is resolved. A reply cut at the reply-token ceiling is
+  asked once more at low effort with a request for brevity, instead of the
+  identical request that would be cut the same way. When a critic is cut
+  on the retry too, the verdict line tells the lead its one move and
+  leaves the config to the operator. One real review ran 78 minutes and
+  returned no verdict; the lead's hand-scoped third review took ten.
 - The mlip-training skill separates the dataset for a from-scratch fit
   from the dataset for fine-tuning a foundation model. From scratch: a
   coverage table by region, atom counts over structure counts,

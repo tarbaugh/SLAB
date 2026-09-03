@@ -104,6 +104,22 @@ _EMPTY_REPLY_NUDGE = (
     "[harness] your reply was empty: act with a tool call, or call finish with "
     "the report"
 )
+#: A reply the server cut at max_tokens carried nothing usable: with a
+#: thinking model the whole budget went to the think block. Repeating the
+#: identical request would repeat the cut, so the retry asks for brevity
+#: and runs at low effort. One real critic pass spent 78 minutes and
+#: 73,000 completion tokens over twelve steps, then lost its verdict this way.
+_CUT_REPLY_NUDGE = (
+    "[harness] your reply was cut at the reply-token ceiling before it ended, so "
+    "none of it was received. Do not deliberate further: answer in a few lines, "
+    "or call finish with a short report (for a review: the verdict and one line "
+    "per finding)."
+)
+_TRUNCATED_MARK = (
+    "\n\n[truncated: the reply hit the reply-token ceiling twice, the second time "
+    "at low effort; the operator can raise [agent] max_reply_tokens or lower the "
+    "effort for this agent]"
+)
 #: Messages that must accumulate after a compaction before another may fire.
 _COMPACTION_MIN_NEW_MESSAGES = 4
 _CHARS_PER_TOKEN = 4  # the usual rough estimate; real usage numbers override it
@@ -197,6 +213,17 @@ class ChatBackend(Protocol):
     ) -> ChatReply: ...
 
 
+def _retry_effort(configured: str | None) -> str:
+    """The effort for the one retry after a cut reply: low, unless the agent
+    already runs without reasoning.
+
+    Examples:
+        >>> _retry_effort("xhigh"), _retry_effort(None), _retry_effort("none")
+        ('low', 'low', 'none')
+    """
+    return "none" if configured == "none" else "low"
+
+
 class TurnResult(BaseModel):
     """How one ``run_turn`` ended."""
 
@@ -211,6 +238,8 @@ class TurnResult(BaseModel):
     run_ids: tuple[str, ...] = ()
     #: A review's verdict, ``approve`` or ``revise``, when finish carried one.
     verdict: str | None = None
+    #: The answer was cut at the reply-token ceiling, on the retry too.
+    truncated: bool = False
 
     @property
     def finished(self) -> bool:
@@ -458,6 +487,7 @@ class Mason:
         self._seen_results: dict[tuple[str, str], tuple[str, int, int | None, int]] = {}
         # Consecutive steps whose calls were all looking tools.
         self._looking_streak = 0
+        self._effort_override: str | None = None
         if depth == 0:
             # The transcript says which model answered it, so a later reader
             # (a report, a benchmark score) trusts the record, not the config
@@ -516,6 +546,7 @@ class Mason:
         self._append({"role": "user", "content": user_text})
         error_streak = 0
         empty_nudged = False
+        cut_nudged = False
         max_turns = self.session.agent.max_turns
         for step in range(1, max_turns + 1):
             self.steps_taken = step
@@ -537,21 +568,27 @@ class Mason:
             self._observe_step(reply, interim=bool(calls) and not from_text)
             if not calls:
                 text = reply.content or ""
-                if not text.strip() and not empty_nudged:
+                if reply.finish_reason == "max_tokens" and not cut_nudged:
+                    # The budget bounds thinking plus text together, so a cut
+                    # reply usually holds no text at all. Ask once for a short
+                    # answer at low effort; a second cut ends the turn below.
+                    cut_nudged = True
+                    self._append({"role": "user", "content": _CUT_REPLY_NUDGE})
+                    self._effort_override = _retry_effort(self.session.agent.effort)
+                    continue
+                if not text.strip() and not empty_nudged and reply.finish_reason != "max_tokens":
                     # No text and no call is a fault, not an answer. Ask once;
-                    # a second empty reply ends the turn below, marked
-                    # truncated when the server says so.
+                    # a second empty reply ends the turn below.
                     empty_nudged = True
                     self._append({"role": "user", "content": _EMPTY_REPLY_NUDGE})
                     continue
-                if reply.finish_reason == "max_tokens":
-                    # A truncated answer must not be passed off as a finished
-                    # one: the reply budget bounds thinking plus text together.
-                    text += (
-                        "\n\n[truncated: the model hit its reply-token ceiling; "
-                        "raise [agent] max_reply_tokens or narrow the goal]"
-                    )
-                return TurnResult(text=text, stop_reason="answer", steps=step)
+                truncated = reply.finish_reason == "max_tokens"
+                if truncated:
+                    # A truncated answer must not be passed off as a finished one.
+                    text += _TRUNCATED_MARK
+                return TurnResult(
+                    text=text, stop_reason="answer", steps=step, truncated=truncated
+                )
             for position, call in enumerate(calls):
                 if call.name == "finish" and call.arguments_error is None:
                     if len(calls) > 1:
@@ -815,8 +852,14 @@ class Mason:
         messages = self.messages
         if hint is not None:
             messages = [*messages, {"role": "user", "content": hint}]
+        # A one-call effort override, set by the cut-reply retry and consumed
+        # here, so the next ordinary step runs at the configured effort.
+        options: dict[str, Any] = {"max_tokens": self._reply_budget()}
+        if self._effort_override is not None:
+            options["effort"] = self._effort_override
+            self._effort_override = None
         try:
-            reply = self.client.chat(messages, tools, max_tokens=self._reply_budget())
+            reply = self.client.chat(messages, tools, **options)
         except ContextOverflowError as e:
             # The server knows the window better than our estimate: compact
             # once and retry. If there was nothing left to fold, retrying
@@ -830,7 +873,8 @@ class Mason:
             messages = self.messages
             if hint is not None:
                 messages = [*messages, {"role": "user", "content": hint}]
-            reply = self.client.chat(messages, tools, max_tokens=self._reply_budget())
+            options["max_tokens"] = self._reply_budget()
+            reply = self.client.chat(messages, tools, **options)
         self.session.count_usage(
             reply.prompt_tokens, reply.completion_tokens, reply.cached_prompt_tokens
         )

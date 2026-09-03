@@ -2022,26 +2022,55 @@ def _add_delegate_tool(
 # -- review: a critic before compute -----------------------------------------
 
 
+#: How much of the prior review's findings a re-review brief carries.
+_PRIOR_FINDINGS_CHARS = 4_000
+
+
 def _review_brief(
-    label: str, text: str, focus: object, facts: dict[str, str] | None = None
+    label: str,
+    text: str,
+    focus: object,
+    facts: dict[str, str] | None = None,
+    prior: Any | None = None,
 ) -> str:
     """The critic's brief: what to judge, how to report, the lead's facts, the text.
 
     *facts* are the lead's own catalog and material lookups this session,
     newest first, each cut to ``_FACT_CHARS`` and all of them to
-    ``_FACTS_CHARS``, so the critic can check the fingerprint without
-    re-running the lookups.
+    ``_FACTS_CHARS``, and the brief says not to re-run them. *prior* is
+    this session's last review of the same subject: the brief then asks
+    first whether its findings are resolved. Both were once left to the
+    lead's ``focus``; a real lead learned to write "do NOT re-verify
+    machine facts" only after a review had run for 78 minutes without a
+    verdict, and the scoped re-review then took ten.
     """
     parts = [
         f"Review {label} before compute is spent on it. Judge it by the questions "
         f"in your card, quote what you judge, and number every finding as blocking "
         f"or advisory with the change that would resolve it.",
     ]
+    if prior is not None and prior.findings.strip():
+        parts.append(
+            f"This is a re-review. Your prior review of {label} (verdict: "
+            f"{prior.verdict}) found:\n"
+            f"{_truncate_middle(prior.findings.strip(), _PRIOR_FINDINGS_CHARS)}\n"
+            f"Take those findings in order and say for each whether the text as it "
+            f"reads now resolves it. Do not re-verify what the text records as "
+            f"verified this session unless a finding turns on it. Add a new finding "
+            f"only when it is blocking."
+        )
     if focus:
         parts.append(f"Focus from the lead: {focus}")
+    if facts:
+        parts.append(
+            "The evidence block below holds the lead's recorded lookups from this "
+            "session. Do not re-run them; re-check only what contradicts the text."
+        )
     parts.append(
-        "Then call finish alone, with the verdict in its `verdict` argument: approve "
-        "when no finding is blocking, revise when one is."
+        "Decide the verdict before you write, and keep each finding to one line "
+        "plus the change that resolves it. Then call finish alone, with the verdict "
+        "in its `verdict` argument: approve when no finding is blocking, revise "
+        "when one is."
     )
     if facts:
         parts.append(_facts_block(facts))
@@ -2080,6 +2109,16 @@ _VERDICT_HEAD = {
         "Read the harness line, then review again."
     ),
 }
+#: The head when the critic's answer was cut at its reply-token ceiling on
+#: the retry too. Written for the lead, which cannot change the config
+#: mid-run: it names the lead's one move and the operator's.
+_CUT_VERDICT_HEAD = (
+    "verdict: none. The critic's reply was cut at its reply-token ceiling, on the "
+    "low-effort retry too, so nothing is approved. Review again: the brief will "
+    "carry this review's findings, so keep the focus to whether they are resolved. "
+    "Lowering the critic's effort or raising its max_reply_tokens is the operator's "
+    "move, in [agent.roster.critic], not yours."
+)
 
 
 def _add_review_tool(
@@ -2091,7 +2130,7 @@ def _add_review_tool(
     parent_client: Any | None,
     read_roots: tuple[Path, ...],
 ) -> None:
-    from mason.reviews import PLAN_SUBJECT, Verdict, digest, write_review
+    from mason.reviews import PLAN_SUBJECT, Verdict, digest, prior_review, write_review
 
     def review(arguments: dict[str, Any]) -> str:
         from mason.roster import critics
@@ -2128,7 +2167,8 @@ def _add_review_tool(
             except UnicodeDecodeError:
                 return f"refused: {path} is not a text file"
             label = f"the file {path}"
-        brief = _review_brief(label, text, arguments.get("focus"), session.facts)
+        prior = prior_review(session, subject)
+        brief = _review_brief(label, text, arguments.get("focus"), session.facts, prior)
         result, child_session = _run_child(session, roster, skills, parent_client, target, brief)
         verdict: Verdict = (
             result.verdict
@@ -2162,8 +2202,9 @@ def _add_review_tool(
                 "steps": result.steps,
             }
         )
+        head = _CUT_VERDICT_HEAD if getattr(result, "truncated", False) else _VERDICT_HEAD[verdict]
         return (
-            f"{_VERDICT_HEAD[verdict]}\n\n{result.text}\n\n"
+            f"{head}\n\n{result.text}\n\n"
             f"{_harness_footer(target.name, result, child_session)}\n"
             f"[review recorded in {record}]"
         )

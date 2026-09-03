@@ -165,6 +165,19 @@ def latest_plan_review(session: MasonSession) -> Review | None:
     return plan_reviews[-1] if plan_reviews else None
 
 
+def prior_review(session: MasonSession, subject: str) -> Review | None:
+    """The most recent review of *subject* written by this session, if any.
+
+    A re-review carries it into the critic's brief, so the critic judges
+    whether the earlier findings are resolved instead of starting over.
+    Reviews from other sessions in the same workspace do not count: their
+    findings concern a text this session may never have seen.
+    """
+    stem = session.transcript_path.stem
+    mine = [r for r in load_reviews(session) if r.subject == subject and r.session == stem]
+    return mine[-1] if mine else None
+
+
 def plan_is_approved(session: MasonSession) -> bool:
     """Whether the plan on disk, as it reads now, carries an approving review.
 

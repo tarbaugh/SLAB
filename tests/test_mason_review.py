@@ -30,6 +30,7 @@ class FakeClient:
         self.replies = list(replies)
         self.requests: list[list[dict[str, Any]]] = []
         self.tools: list[list[str]] = []
+        self.options: list[dict[str, Any]] = []
 
     def chat(
         self,
@@ -39,6 +40,7 @@ class FakeClient:
     ) -> ChatReply:
         self.requests.append([dict(m) for m in messages])
         self.tools.append([t["function"]["name"] for t in tools or []])
+        self.options.append(dict(options))
         answer = self.replies.pop(0)
         if isinstance(answer, Exception):
             raise answer
@@ -541,9 +543,59 @@ def test_the_review_brief_carries_the_leads_lookups_newest_first(tmp_path: Path)
     assert '"emt"' in brief and "no-such-task" not in brief
     evidence_end = brief.index("--- end of the lead's evidence ---")
     assert evidence_end < brief.index("--- the plan (PLAN.md) ---")
+    assert "Do not re-run them; re-check only what contradicts the text." in brief
+    assert "Decide the verdict before you write" in brief
 
 
 def test_a_review_with_no_lookups_carries_no_evidence_block(tmp_path: Path) -> None:
     _, client = _reviewed(tmp_path, "approve")
     brief = client.requests[1][1]["content"]
     assert "evidence the lead gathered" not in brief
+    assert "Do not re-run them" not in brief
+    assert "re-review" not in brief
+
+
+def test_a_re_review_carries_this_sessions_prior_findings(tmp_path: Path) -> None:
+    """A real lead wrote "do NOT re-verify machine facts... judge ONLY whether
+    the three blocking findings are resolved" by hand, on its third try;
+    the scoped review then took ten minutes where the unscoped one had
+    run 78 without a verdict. The harness now writes that scope itself."""
+    mason, client = _reviewed(tmp_path, "revise")
+    client.replies.extend(
+        [
+            _call("review", subject="plan"),
+            _call("finish", report="1. resolved.", verdict="approve"),
+            _text("done"),
+        ]
+    )
+    mason.run_turn("review the plan again")
+    brief = client.requests[4][1]["content"]
+    assert "This is a re-review. Your prior review of the plan (PLAN.md) (verdict: revise)" in brief
+    assert "step 1 names no k-mesh check" in brief
+    assert "say for each whether the text as it reads now resolves it" in brief
+    assert brief.index("re-review") < brief.index("--- the plan (PLAN.md) ---")
+
+
+def test_another_sessions_review_is_not_a_prior_for_this_one(tmp_path: Path) -> None:
+    from mason.reviews import prior_review
+
+    mason, _ = _reviewed(tmp_path, "revise")
+    assert prior_review(mason.session, "plan") is not None
+    other = _session(tmp_path / "second")
+    other.workspace_root = mason.session.workspace_root  # same workspace, other session
+    assert prior_review(other, "plan") is None
+
+
+def test_a_critic_cut_at_its_ceiling_tells_the_lead_its_one_move(tmp_path: Path) -> None:
+    (tmp_path / "PLAN.md").write_text(PLAN)
+    cut = ChatReply(content="", finish_reason="max_tokens", prompt_tokens=100, completion_tokens=1)
+    client = FakeClient([_call("review", subject="plan"), cut, cut, _text("noted")])
+    roster = discover_roster(tmp_path)
+    mason = Mason(_session(tmp_path), client=client, spec=roster["planner"], roster=roster)
+    mason.run_turn("plan the campaign")
+    shown = _tool_results(client, "c_review")[0]
+    assert shown.startswith("verdict: none. The critic's reply was cut at its reply-token ceiling")
+    assert "operator's move, in [agent.roster.critic], not yours" in shown
+    assert "raise [agent] max_reply_tokens or narrow the goal" not in shown
+    assert client.options[2]["effort"] == "low"  # the critic's retry, not the lead's
+    assert not mason.session.plan_approved
