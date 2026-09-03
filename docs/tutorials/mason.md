@@ -639,7 +639,11 @@ under version control, readable by humans:
   `slab mason chat --resume` replays the newest one. Read one with
   `slab mason read`: without a path it lists the workspace's sessions
   newest first, each by the directory it was launched from and the launch
-  time, and takes a number (Enter picks the newest). It renders the events
+  time, and takes a number (Enter picks the newest; a workspace with one
+  session shows it without asking). Without `--workspace`, the workspace
+  is the one the current directory is inside, so `cd` into a shared
+  workspace and run `slab mason read` there. The `report` command finds
+  the workspace the same way. It renders the events
   in the chat display's visual language (dimmed reasoning, cyan tool
   calls), clips long content unless you pass `--full`, and ends with the
   token totals.

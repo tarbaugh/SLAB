@@ -546,6 +546,90 @@ def test_mason_read_without_a_path_offers_the_sessions_by_project_and_time(
     assert empty.exit_code == 1 and "no session transcripts" in empty.output
 
 
+def _two_sessions(root: Path) -> None:
+    import json
+
+    sessions = root / "mason" / "sessions"
+    sessions.mkdir(parents=True)
+    header = {"type": "session", "cwd": "/home/you/cu-eos", "agent": "pi", "model": "m"}
+    user = {"type": "message", "message": {"role": "user", "content": "measure a0"}}
+    (sessions / "20260901-234154-2590.jsonl").write_text(
+        json.dumps(header) + "\n" + json.dumps(user) + "\n"
+    )
+    old_user = dict(user, message={"role": "user", "content": "an older question"})
+    (sessions / "20260830-090000-7.jsonl").write_text(json.dumps(old_user) + "\n")
+
+
+def test_mason_read_finds_the_workspace_the_current_directory_is_inside(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Standing in a workspace (or under it) reads its transcripts, not ./.slab's."""
+    monkeypatch.delenv("SLAB_WORKSPACE", raising=False)
+    root = tmp_path / "ws"
+    _two_sessions(root)
+
+    monkeypatch.chdir(root / "mason" / "sessions")
+    inside = runner.invoke(app, ["read"], input="\n")
+    assert inside.exit_code == 0, inside.output
+    assert "(the current directory is inside it)" in inside.output
+    assert "measure a0" in inside.output
+
+    monkeypatch.chdir(root)
+    at_root = runner.invoke(app, ["read"], input="2\n")
+    assert at_root.exit_code == 0, at_root.output
+    assert "an older question" in at_root.output
+
+    # A run store alone marks a workspace too.
+    bare = tmp_path / "bare"
+    (bare / "mason" / "sessions").mkdir(parents=True)
+    (bare / "runs.db").write_bytes(b"")
+    (bare / "mason" / "sessions").rmdir()
+    monkeypatch.chdir(bare)
+    assert "no session transcripts under" in runner.invoke(app, ["read"]).output
+
+    # --workspace still wins over where you stand.
+    monkeypatch.chdir(root)
+    elsewhere = runner.invoke(app, ["read", "-w", str(tmp_path / "none")])
+    assert elsewhere.exit_code == 1 and "no session transcripts" in elsewhere.output
+
+    # Outside any workspace the usual resolution applies: ./.slab, empty here.
+    monkeypatch.chdir(tmp_path)
+    outside = runner.invoke(app, ["read"])
+    assert outside.exit_code == 1 and ".slab" in outside.output
+
+
+def test_mason_read_shows_a_lone_session_without_asking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    monkeypatch.delenv("SLAB_WORKSPACE", raising=False)
+    root = tmp_path / "ws"
+    sessions = root / "mason" / "sessions"
+    sessions.mkdir(parents=True)
+    user = {"type": "message", "message": {"role": "user", "content": "the only question"}}
+    (sessions / "20260901-234154-2590.jsonl").write_text(json.dumps(user) + "\n")
+
+    monkeypatch.chdir(root)
+    alone = runner.invoke(app, ["read"], input="")  # no answer needed
+    assert alone.exit_code == 0, alone.output
+    assert "the one session under" in alone.output
+    assert "read which" not in alone.output
+    assert "the only question" in alone.output
+
+
+def test_mason_report_finds_the_workspace_the_current_directory_is_inside(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("SLAB_WORKSPACE", raising=False)
+    root = tmp_path / "ws"
+    _two_sessions(root)
+    monkeypatch.chdir(root / "mason")
+    result = runner.invoke(app, ["report", "--json"])
+    assert result.exit_code == 0, result.output
+    assert '"session": "20260901-234154-2590"' in result.output
+
+
 # -- session stamps ----------------------------------------------------------
 
 

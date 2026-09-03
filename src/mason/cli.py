@@ -604,7 +604,9 @@ def _render_event(event: dict[str, Any], full: bool) -> None:
 def mason_read(
     transcript: Annotated[
         Path | None,
-        typer.Argument(help="A session transcript (.jsonl); omit to pick from a list."),
+        typer.Argument(
+            help="A session transcript (.jsonl); omit to pick from the workspace's list."
+        ),
     ] = None,
     workspace: _WorkspaceOpt = None,
     full: Annotated[
@@ -618,7 +620,10 @@ def mason_read(
     viewer must show the readable majority of a damaged file, unlike
     --resume, which must refuse it. Without a path, the workspace's
     conversations are listed newest first, each by the directory it was
-    launched from and the time, and one is chosen by number.
+    launched from and the time, and one is chosen by number; a workspace
+    with one conversation shows it at once. The workspace is the one the
+    current directory is inside when no --workspace is given, so 'cd' into
+    a workspace and 'slab mason read' reads from it.
     """
     import json as _json
 
@@ -649,26 +654,49 @@ def mason_read(
     )
 
 
+def _transcript_root(workspace: Path | None) -> tuple[Path, bool]:
+    """The workspace a transcript viewer reads from, and whether cwd chose it.
+
+    An explicit --workspace (or $SLAB_WORKSPACE, which the option reads)
+    wins. Otherwise, standing inside a workspace names it: the viewer is
+    run from wherever the transcripts are, and the usual resolution would
+    point at the project's ./.slab instead. Only then does the usual
+    resolution (config, then ./.slab) apply.
+    """
+    from mason.session import workspace_containing
+
+    if workspace is None:
+        found = workspace_containing()
+        if found is not None:
+            return found, True
+    try:
+        return _ops.resolve_root(workspace), False
+    except (FoundationError, SlabError) as e:
+        _fail(str(e))
+
+
 def _choose_transcript(workspace: Path | None) -> Path:
     """List the workspace's conversations, newest first, and take a number.
 
     Each row is the pair that identifies a session to a person: the
     directory it was launched from (from the transcript's header; older
     transcripts show "project unknown") and the launch time. Enter picks
-    the newest. Without a terminal to answer from, the list is still
-    printed, and the failure says to pass a path.
+    the newest, and a workspace with one conversation is read without
+    asking. Without a terminal to answer from, the list is still printed,
+    and the failure says to pass a path.
     """
     from mason.session import session_header, transcript_groups, transcript_stamp
 
-    try:
-        root = _ops.resolve_root(workspace)
-    except (FoundationError, SlabError) as e:
-        _fail(str(e))
+    root, from_cwd = _transcript_root(workspace)
     conversations = [conversation for conversation, _ in transcript_groups(root)]
     if not conversations:
         _fail(f"no session transcripts under {root}")
     conversations.reverse()
-    typer.echo(f"sessions under {root}, newest first:")
+    where = f"{root} (the current directory is inside it)" if from_cwd else str(root)
+    if len(conversations) == 1:
+        typer.echo(f"the one session under {where}: {transcript_stamp(conversations[0])}")
+        return conversations[0]
+    typer.echo(f"sessions under {where}, newest first:")
     for number, conversation in enumerate(conversations, 1):
         launched_from = str(session_header(conversation).get("cwd") or "(project unknown)")
         typer.echo(f"  {number:>2}. {transcript_stamp(conversation)}  {launched_from}")
@@ -716,7 +744,9 @@ def mason_report(
 
     The digest is arithmetic over the transcript; 'slab mason read' remains
     the event-by-event viewer. Delegation transcripts roll into the totals,
-    and the runs the session created come from the workspace record.
+    and the runs the session created come from the workspace record. The
+    workspace is the one the current directory is inside when no
+    --workspace is given, as for 'slab mason read'.
     """
     import json
 
@@ -724,13 +754,13 @@ def mason_report(
     from mason.report import session_runs, summarize
     from mason.session import transcript_for, transcript_groups
 
+    root, _from_cwd = _transcript_root(workspace)
     try:
-        root = _ops.resolve_root(workspace)
         if session is not None:
             if transcript is not None:
                 _fail("give a transcript path or --session, not both")
             transcript = transcript_for(root, session)
-    except (MasonError, FoundationError, SlabError) as e:
+    except MasonError as e:
         _fail(str(e))
     groups = transcript_groups(root)
     if transcript is None:
