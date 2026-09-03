@@ -5,6 +5,14 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- A quarantined run explains itself. A custom check may return
+  `(passed, observed)` or `(passed, observed, expected)`, or a dict with
+  those keys, and the record shows the value instead of `returned False`.
+  `show_run` takes `task=<label or seq>` and returns that one task in
+  full, and the new `read_artifact` tool reads a run's artifact as text
+  by name, windowed like `read_file`. One real session read a full record
+  cut at the cap, then guessed the artifact store's layout by hand for
+  six minutes to read one output file.
 - A `lammps-potentials` skill for the md-expert. Its script reads a
   potential file's header, names the format (funcfl, setfl, eam/fs, ACE,
   GRACE, MEAM), and prints the `pair_style` and `pair_coeff` lines; the

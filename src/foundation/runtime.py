@@ -110,9 +110,13 @@ def check(
 
     The decorated function takes no arguments — close over whatever it needs.
     It runs when the run completes and may return an :class:`~foundation.checks.Assertion`
-    (or a list of them), a bare bool, or nothing at all — plain ``assert``
+    (or a list of them), a bare bool, a ``(bool, observed)`` or
+    ``(bool, observed, expected)`` tuple, a ``{"passed": bool, "observed":
+    ..., "expected": ...}`` dict, or nothing at all — plain ``assert``
     statements work: raising ``AssertionError`` records a failure, returning
-    ``None`` records a pass.
+    ``None`` records a pass. Carry the observed value when you can: a
+    record that says ``returned False`` made one real session dig the
+    artifact store by hand to learn what the lattice constant was.
 
     Raises:
         NoActiveRunError: Used outside a ``with ws.start_run(...)`` block.
@@ -267,6 +271,16 @@ def _evaluate_check(run_id: str, name: str, fn: _CheckFn) -> list[CheckResult]:
                 message=f"returned {outcome}",
             )
         ]
+    if isinstance(outcome, tuple) and outcome and isinstance(outcome[0], bool):
+        observed = outcome[1] if len(outcome) > 1 else None
+        expected = outcome[2] if len(outcome) > 2 else None
+        return [_custom_with_values(run_id, name, outcome[0], observed, expected)]
+    if isinstance(outcome, dict) and isinstance(outcome.get("passed"), bool):
+        return [
+            _custom_with_values(
+                run_id, name, outcome["passed"], outcome.get("observed"), outcome.get("expected")
+            )
+        ]
     if isinstance(outcome, Assertion):
         return [_from_assertion(run_id, name, outcome)]
     if isinstance(outcome, Iterable):
@@ -321,6 +335,24 @@ def _coerce_foreign_bool(outcome: object) -> object:
     if kind.__module__ == "numpy" and kind.__name__ in ("bool_", "bool"):
         return bool(outcome)
     return outcome
+
+
+def _custom_with_values(
+    run_id: str, name: str, passed: bool, observed: object, expected: object
+) -> CheckResult:
+    """A custom check that said what it saw, so the record can show it."""
+    message = f"returned {passed}; observed {observed!r}"
+    if expected is not None:
+        message += f", expected {expected!r}"
+    return CheckResult(
+        run_id=run_id,
+        name=name,
+        kind="custom",
+        passed=passed,
+        message=message,
+        observed=observed,
+        expected=expected,
+    )
 
 
 def _from_assertion(run_id: str, name: str, assertion: Assertion) -> CheckResult:
