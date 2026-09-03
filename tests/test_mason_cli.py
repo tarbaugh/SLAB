@@ -19,7 +19,10 @@ class FakeClient:
         self.replies = list(replies)
 
     def chat(
-        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        **options: Any,
     ) -> ChatReply:
         return self.replies.pop(0)
 

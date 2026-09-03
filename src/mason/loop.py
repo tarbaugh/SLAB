@@ -60,6 +60,7 @@ from mason.roster import (
 from mason.session import MasonSession
 from mason.skills import Skill, discover_skills
 from mason.tools import TOOL_VOCABULARY, Toolbox, build_toolbox
+from slab._version import __version__
 
 _ERROR_STREAK_LIMIT = 5
 #: The identical call whose identical result is returned this many times in
@@ -70,6 +71,18 @@ _REFETCH_NOTE_AT = 3
 #: How much of a cleared result its placeholder quotes back.
 _CLEAR_HEAD_CHARS = 120
 _COMPACTION_KEEP_MESSAGES = 6
+#: The summarizer's reply budget. A summary is a working state, not a
+#: transcript: one real compaction ran to 14,000 tokens carrying the
+#: working state of a dead end, most of it lost to the next fold anyway.
+_COMPACTION_MAX_TOKENS = 4_096
+#: What the model reads after a reply with no text and no tool call. Such a
+#: reply is a fault (a thinking model that spent its budget in the think
+#: block, or a template that emitted nothing), not an answer; one campaign
+#: closed on exactly that after two and a half hours. The loop asks once.
+_EMPTY_REPLY_NUDGE = (
+    "[harness] your reply was empty: act with a tool call, or call finish with "
+    "the report"
+)
 #: Messages that must accumulate after a compaction before another may fire.
 _COMPACTION_MIN_NEW_MESSAGES = 4
 _CHARS_PER_TOKEN = 4  # the usual rough estimate; real usage numbers override it
@@ -127,7 +140,12 @@ class ChatBackend(Protocol):
     """What the loop needs from a model client (tests substitute a script)."""
 
     def chat(
-        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        *,
+        effort: str | None = None,
+        max_tokens: int | None = None,
     ) -> ChatReply: ...
 
 
@@ -400,6 +418,10 @@ class Mason:
                     "endpoint_origin": session.endpoint_origin,
                     "compute_profile": session.compute_profile,
                     "max_turns": session.agent.max_turns,
+                    # The reasoning dial and the code that ran, so a review
+                    # can attribute a bloated or a truncated turn.
+                    "effort": session.agent.effort,
+                    "version": __version__,
                 }
             )
         if resume_from:
@@ -436,6 +458,7 @@ class Mason:
         """Drive one goal until an answer, a finish, or a harness stop."""
         self._append({"role": "user", "content": user_text})
         error_streak = 0
+        empty_nudged = False
         max_turns = self.session.agent.max_turns
         for step in range(1, max_turns + 1):
             self._clear_tool_results()
@@ -456,6 +479,13 @@ class Mason:
             self._observe_step(reply, interim=bool(calls) and not from_text)
             if not calls:
                 text = reply.content or ""
+                if not text.strip() and not empty_nudged:
+                    # No text and no call is a fault, not an answer. Ask once;
+                    # a second empty reply ends the turn below, marked
+                    # truncated when the server says so.
+                    empty_nudged = True
+                    self._append({"role": "user", "content": _EMPTY_REPLY_NUDGE})
+                    continue
                 if reply.finish_reason == "max_tokens":
                     # A truncated answer must not be passed off as a finished
                     # one: the reply budget bounds thinking plus text together.
@@ -670,6 +700,7 @@ class Mason:
                 "cached_prompt_tokens": reply.cached_prompt_tokens,
                 "prompt_tokens": reply.prompt_tokens,
                 "completion_tokens": reply.completion_tokens,
+                "finish_reason": reply.finish_reason,
             }
         )
         return reply
@@ -897,6 +928,8 @@ class Mason:
                 {"role": "user", "content": _render_for_summary(folded)},
             ],
             None,
+            effort="low",
+            max_tokens=_COMPACTION_MAX_TOKENS,
         )
         summary = (summary_reply.content or "").strip() or "(the summarizer said nothing)"
         self.session.count_usage(
@@ -913,6 +946,7 @@ class Mason:
                 "cached_prompt_tokens": summary_reply.cached_prompt_tokens,
                 "prompt_tokens": summary_reply.prompt_tokens,
                 "completion_tokens": summary_reply.completion_tokens,
+                "finish_reason": summary_reply.finish_reason,
             }
         )
         # The summary already travels two ways: as a user message prepended

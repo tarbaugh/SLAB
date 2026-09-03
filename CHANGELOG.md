@@ -5,6 +5,16 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- A reply with no text and no tool call is nudged once, not taken as the
+  answer, and the OpenAI-compatible `length` finish reason now reads as
+  `max_tokens`, so a truncated turn on vLLM or a gateway carries the
+  truncation marker instead of passing as finished. The transcript header
+  records `effort` and `version`, and every usage event records
+  `finish_reason`. The compaction summarizer runs at `low` effort with a
+  4,096-token reply budget. The shell tool decodes binary output with
+  replacement characters instead of failing the call. `slab doctor` notes
+  a roster table that sets `effort` while `[agent]` does not, and a table
+  for a card that only `--agent` can start.
 - `slab purge` sweeps a conversation's compaction summaries and review
   records with its transcripts. Both were left behind before: the
   transcript sweep matched `<stem>-*.jsonl` only, so

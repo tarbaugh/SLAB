@@ -212,6 +212,15 @@ def test_shell_reports_exit_code_and_stderr(box: Toolbox) -> None:
     assert "out" in answer and "[stderr]" in answer and "err" in answer
 
 
+def test_shell_keeps_binary_output_as_evidence(box: Toolbox) -> None:
+    """A stray byte on stdout once failed the whole call with a
+    UnicodeDecodeError; the exit code and the readable part are the evidence."""
+    answer = box.dispatch(_call("shell", command="printf 'head \\xd8\\xb4 tail'"))
+    assert answer.startswith("exit 0\n")
+    assert "head" in answer and "tail" in answer
+    assert "UnicodeDecodeError" not in answer
+
+
 def test_shell_timeout_returns_partial_evidence(box: Toolbox) -> None:
     answer = box.dispatch(_call("shell", command="echo started; sleep 5", timeout_s=0.2))
     assert "timed out after 0s" in answer or "timed out" in answer

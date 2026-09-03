@@ -253,7 +253,10 @@ FAILURES OBSERVED: what failed, its diagnosis, what must not be repeated.
 DECISIONS: choices made and their reasons.
 OPEN: the immediate next steps and unresolved questions.
 
-Do not invent anything not in the transcript. Do not soften failures.
+Do not invent anything not in the transcript. Do not soften failures. Keep \
+FAILURES OBSERVED to one line per failure: what failed, and what must not be \
+repeated. Do not carry a dead end's working state forward. The whole summary \
+fits in about 1500 words.
 """
 
 

@@ -252,3 +252,30 @@ def test_the_doctor_names_a_journaling_mode_the_workspace_could_not_switch(
         holder.close()
     result = runner.invoke(app, ["doctor", "--offline"])
     assert "[+] workspace:" in result.output and "opens (delete journaling)" in result.output
+
+
+def test_the_doctor_notes_effort_that_does_not_reach_the_agents_that_run(tmp_path: Path) -> None:
+    """One real campaign set the planner and the worker dials while pi and
+    the critic, which have no table, ran at the server's default: the top
+    of the scale on a hosted endpoint."""
+    from mason.config import MasonConfig
+    from mason.doctor import effort_notes
+    from mason.roster import discover_roster
+
+    roster = discover_roster(tmp_path)
+    shaped_like_the_cluster = MasonConfig.model_validate(
+        {
+            "agent": {
+                "model": "m",
+                "roster": {"planner": {"effort": "xhigh"}, "worker": {"effort": "low"}},
+            }
+        }
+    ).agent
+    notes = effort_notes(shaped_like_the_cluster, roster)
+    assert len(notes) == 2
+    assert notes[0].startswith("[?] effort:") and "[agent] effort" in notes[0]
+    assert notes[1].startswith("[?] planner:") and "--agent planner" in notes[1]
+    dialed = MasonConfig.model_validate(
+        {"agent": {"model": "m", "effort": "medium", "roster": {"worker": {"effort": "none"}}}}
+    ).agent
+    assert effort_notes(dialed, roster) == []

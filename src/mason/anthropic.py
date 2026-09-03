@@ -98,12 +98,19 @@ class AnthropicClient:
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        *,
+        effort: str | None = None,
+        max_tokens: int | None = None,
     ) -> ChatReply:
-        """One Messages round trip, translated in both directions."""
+        """One Messages round trip, translated in both directions.
+
+        *effort* and *max_tokens* override the instance's settings for this
+        one call (the compaction summarizer thinks little and answers short).
+        """
         system, turns = translate_messages(messages)
         body: dict[str, Any] = {
             "model": self.model,
-            "max_tokens": self.max_reply_tokens,
+            "max_tokens": self.max_reply_tokens if max_tokens is None else max_tokens,
             "messages": turns,
         }
         if system:
@@ -115,8 +122,9 @@ class AnthropicClient:
             ]
         if tools:
             body["tools"] = [_tool_spec(tool) for tool in tools]
-        if self.effort is not None:
-            body["output_config"] = {"effort": _EFFORT.get(self.effort, self.effort)}
+        wanted = self.effort if effort is None else effort
+        if wanted is not None:
+            body["output_config"] = {"effort": _EFFORT.get(wanted, wanted)}
         payload = request_json(
             f"{self.endpoint}/messages",
             headers=self._headers,

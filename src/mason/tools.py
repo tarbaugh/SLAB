@@ -978,7 +978,7 @@ def _add_shell_tool(box: Toolbox, session: MasonSession) -> None:
                 cwd=session.cwd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
+                text=False,  # decoded below with replacement: binary output is evidence too
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,
                 env=_subprocess_env(session),
@@ -994,7 +994,7 @@ def _add_shell_tool(box: Toolbox, session: MasonSession) -> None:
                 _os.killpg(process.pid, _signal.SIGKILL)
 
         try:
-            stdout, stderr = process.communicate(timeout=timeout)
+            raw_stdout, raw_stderr = process.communicate(timeout=timeout)
         except KeyboardInterrupt:
             # Ctrl-C in the REPL reaches only this process now (the child
             # runs in its own session), so the interrupt must kill the
@@ -1022,6 +1022,11 @@ def _add_shell_tool(box: Toolbox, session: MasonSession) -> None:
                 f"command timed out after {timeout:.0f}s; the command and its "
                 f"process group were killed; partial output:\n{partial}"
             )
+        # A stray byte (an ELF header, a Latin-1 log) once failed the whole
+        # call as a UnicodeDecodeError; a replacement character keeps the
+        # evidence and the exit code.
+        stdout = raw_stdout.decode("utf-8", errors="replace")
+        stderr = raw_stderr.decode("utf-8", errors="replace")
         completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
         output = completed.stdout + (
             f"\n[stderr]\n{completed.stderr}" if completed.stderr.strip() else ""
@@ -1033,8 +1038,9 @@ def _add_shell_tool(box: Toolbox, session: MasonSession) -> None:
             name="shell",
             description=(
                 "Run one shell command in the project directory (stdout+stderr, "
-                "with the exit code). A timeout kills the command's whole process "
-                "group — nohup and '&' do not survive it. Not for long "
+                "with the exit code). A timeout (timeout_s, default 120 s) kills "
+                "the command's whole process group — nohup and '&' do not survive "
+                "it — so scope filesystem searches to a directory. Not for long "
                 "calculations — use launch_workflow (background=true for long "
                 "ones) or submit_job for those."
             ),

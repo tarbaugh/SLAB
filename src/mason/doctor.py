@@ -215,6 +215,41 @@ def _context_probe(client: Any, *, emit: Emit) -> int:
     return 0
 
 
+
+def effort_notes(agent: AgentConfig, roster: dict[str, Any]) -> list[str]:
+    """Where ``effort`` is set but does not reach the agents that run.
+
+    Two traps from one real campaign. ``[agent.roster.<name>]`` tables set
+    the dial for the planner and the worker while ``[agent]`` leaves it
+    unset, so the PI and the critic, which have no table, run at the
+    server's default: on a hosted endpoint that default is the top of the
+    scale. And a table for a card the PI never delegates to (a lead, such
+    as the planner) applies only when a run starts with ``--agent`` for
+    that card. Notes, not failures: the config is valid, just not doing
+    what it looks like it does.
+    """
+    from mason.roster import critics, hands
+
+    notes: list[str] = []
+    tables = agent.roster or {}
+    dialed = sorted(name for name, table in tables.items() if table.effort is not None)
+    if dialed and agent.effort is None:
+        notes.append(
+            f"[?] effort: [agent.roster.{'/'.join(dialed)}] set effort but [agent] does "
+            f"not, so every card without a table (pi, the critic) runs at the server's "
+            f"default; set [agent] effort"
+        )
+    lead = roster.get("pi")
+    if lead is not None:
+        reachable = {"pi", *hands(lead, roster), *critics(roster)}
+        for name in sorted(tables):
+            if name in roster and name not in reachable:
+                notes.append(
+                    f"[?] {name}: pi never delegates to it, so its [agent.roster.{name}] "
+                    f"table applies only when a run starts with --agent {name}"
+                )
+    return notes
+
 def _roster(
     agent: AgentConfig,
     root: Path,
@@ -236,10 +271,13 @@ def _roster(
     from mason.serve import discover_endpoint
 
     try:
-        check_overrides(agent, discover_roster(Path.cwd()))
+        roster = discover_roster(Path.cwd())
+        check_overrides(agent, roster)
     except (MasonError, FoundationError, SlabError) as e:
         emit(f"[x] roster: {e}")
         return 1
+    for note in effort_notes(agent, roster):
+        emit(note)
     failures = 0
     for name in sorted(agent.roster):
         effective = roster_agent_config(agent, name)

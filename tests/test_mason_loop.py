@@ -11,6 +11,7 @@ from mason.config import MasonConfig
 from mason.errors import MasonError
 from mason.loop import Mason
 from mason.session import MasonSession
+from slab._version import __version__
 from slab.config import HpcConfig
 
 
@@ -20,11 +21,16 @@ class FakeClient:
     def __init__(self, replies: list[ChatReply | Exception]) -> None:
         self.replies = list(replies)
         self.requests: list[tuple[list[dict[str, Any]], list[dict[str, Any]] | None]] = []
+        self.options: list[dict[str, Any]] = []
 
     def chat(
-        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        **options: Any,
     ) -> ChatReply:
         self.requests.append(([dict(m) for m in messages], tools))
+        self.options.append(dict(options))
         answer = self.replies.pop(0)
         if isinstance(answer, Exception):
             raise answer
@@ -253,6 +259,10 @@ def test_compaction_folds_history_and_writes_the_per_session_file(tmp_path: Path
     mason = Mason(session, client=client)
     result = mason.run_turn("inspect")
     assert result.stop_reason == "answer"
+    # The summarizer thinks little and answers short, whatever the session's
+    # dial: one real compaction ran to 14,000 tokens of a dead end's state.
+    assert client.options[5] == {"effort": "low", "max_tokens": 4_096}
+    assert all(options == {} for i, options in enumerate(client.options) if i != 5)
     # The lab notebook is untouched by compaction — nothing here got written
     # by the agent, and the machinery stops pretending otherwise.
     assert not (tmp_path / "NOTEBOOK.md").exists()
@@ -1023,3 +1033,44 @@ def test_the_same_content_fetched_a_third_time_is_named(tmp_path: Path) -> None:
     assert "3 times in this session" in results[4]
     assert "stop fetching it" in results[4]
     assert all("[note" not in r for r in (results[1], results[3]))
+
+
+def test_an_empty_reply_is_nudged_once_before_it_counts_as_the_answer(tmp_path: Path) -> None:
+    """A reply with no text and no tool call is a fault: one real campaign
+    closed on exactly that after two and a half hours of work."""
+    session = _session(tmp_path)
+    empty = ChatReply(content=None, prompt_tokens=100, completion_tokens=20_000)
+    client = FakeClient([empty, _text_reply("the answer")])
+    result = Mason(session, client=client).run_turn("go")
+    assert result.stop_reason == "answer"
+    assert result.text == "the answer"
+    assert len(client.requests) == 2
+    nudge = client.requests[1][0][-2]  # the budget hint is last; the nudge sits before it
+    assert nudge["role"] == "user" and "your reply was empty" in nudge["content"]
+
+
+def test_a_second_empty_reply_ends_the_turn_marked_truncated_when_the_server_says_so(
+    tmp_path: Path,
+) -> None:
+    session = _session(tmp_path)
+    empty = ChatReply(content=None, prompt_tokens=100, completion_tokens=20_000)
+    cut = ChatReply(content="", finish_reason="max_tokens", prompt_tokens=100, completion_tokens=1)
+    result = Mason(session, client=FakeClient([empty, cut])).run_turn("go")
+    assert result.stop_reason == "answer"
+    assert result.text.startswith("\n\n[truncated:")
+
+
+def test_the_transcript_carries_effort_version_and_finish_reason(tmp_path: Path) -> None:
+    """A review that blames a bloated or a truncated turn needs the dial and
+    the server's word in the record, not in a config that has since changed."""
+    session = _session(tmp_path, effort="low")
+    stop = ChatReply(content="done", finish_reason="stop", prompt_tokens=100, completion_tokens=3)
+    Mason(session, client=FakeClient([stop])).run_turn("go")
+    events = [
+        json.loads(line) for line in session.transcript_path.read_text().splitlines()
+    ]
+    header = next(e for e in events if e["type"] == "session")
+    assert header["effort"] == "low"
+    assert header["version"] == __version__
+    usage = [e for e in events if e["type"] == "usage"]
+    assert usage and usage[-1]["finish_reason"] == "stop"

@@ -512,3 +512,14 @@ def test_endpoint_defaults_are_per_provider() -> None:
         {"agent": {"provider": "anthropic", "endpoint": "http://proxy/v1"}}
     ).agent
     assert override.resolved_endpoint == "http://proxy/v1"
+
+
+def test_a_call_may_override_effort_and_reply_budget(llm_server: tuple[str, LlmScript]) -> None:
+    url, script = llm_server
+    script.responses.append((200, _message([{"type": "text", "text": "ok"}])))
+    AnthropicClient("claude-opus-5", "sk-ant-test", endpoint=url, effort="high").chat(
+        [{"role": "user", "content": "hello"}], effort="low", max_tokens=512
+    )
+    sent = script.requests[0]
+    assert sent["output_config"] == {"effort": "low"}
+    assert sent["max_tokens"] == 512
