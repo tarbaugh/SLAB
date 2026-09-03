@@ -262,7 +262,7 @@ def test_compaction_folds_history_and_writes_the_per_session_file(tmp_path: Path
     # The summarizer thinks little and answers short, whatever the session's
     # dial: one real compaction ran to 14,000 tokens of a dead end's state.
     assert client.options[5] == {"effort": "low", "max_tokens": 4_096}
-    assert all(options == {} for i, options in enumerate(client.options) if i != 5)
+    assert all("effort" not in options for i, options in enumerate(client.options) if i != 5)
     # The lab notebook is untouched by compaction — nothing here got written
     # by the agent, and the machinery stops pretending otherwise.
     assert not (tmp_path / "NOTEBOOK.md").exists()
@@ -871,9 +871,14 @@ def test_old_tool_results_are_cleared_in_batches_and_skills_kept(tmp_path: Path)
             prompt_tokens=100,
             completion_tokens=10,
         ),
-        *(_tool_reply("read_file", prompt_tokens=100, path="big.txt") for _ in range(4)),
+        # Distinct windows, so each read is a body of its own and not a
+        # pointer to the copy above (see the identical-read test).
+        *(
+            _tool_reply("read_file", prompt_tokens=100, path="big.txt", limit=limit)
+            for limit in (40, 39, 38, 37)
+        ),
         # The fifth read's answer reports a large prompt: the next step clears.
-        _tool_reply("read_file", prompt_tokens=25_000, path="big.txt"),
+        _tool_reply("read_file", prompt_tokens=25_000, path="big.txt", limit=36),
         _text_reply("read enough"),
     ]
     client = FakeClient(replies)
@@ -1074,3 +1079,105 @@ def test_the_transcript_carries_effort_version_and_finish_reason(tmp_path: Path)
     assert header["version"] == __version__
     usage = [e for e in events if e["type"] == "usage"]
     assert usage and usage[-1]["finish_reason"] == "stop"
+
+
+def test_a_run_of_look_only_steps_earns_a_step_back_hint(tmp_path: Path) -> None:
+    """One real campaign spent 72 minutes in shell calls that launched,
+    planned, noted, briefed, and finished nothing; the budget line now says
+    so at fifteen, and every five after."""
+    session = _session(tmp_path)
+    replies: list[ChatReply | Exception] = [_tool_reply("list_dir") for _ in range(21)]
+    replies.append(_text_reply("done"))
+    client = FakeClient(replies)
+    Mason(session, client=client).run_turn("look around")
+    hints = [request[0][-1]["content"] for request in client.requests]
+    assert all("consecutive steps" not in hint for hint in hints[:15])
+    assert hints[15].startswith("[step 16 of ")
+    assert "[15 consecutive steps have only read" in hints[15]
+    assert all("consecutive steps" not in hint for hint in hints[16:20])
+    assert "[20 consecutive steps" in hints[20]
+    # A plan update in the middle resets the count.
+    replies = [*(_tool_reply("list_dir") for _ in range(10)), _tool_reply("plan", content="# p")]
+    replies += [*(_tool_reply("list_dir") for _ in range(10)), _text_reply("done")]
+    client = FakeClient(replies)
+    second = tmp_path / "second"  # its own project directory: the first still holds the lock
+    second.mkdir()
+    Mason(_session(second), client=client).run_turn("look around")
+    assert all("consecutive steps" not in r[0][-1]["content"] for r in client.requests)
+
+
+def test_only_the_newest_plan_echo_stays_verbatim(tmp_path: Path) -> None:
+    """Three copies of a growing plan rode every prompt of one real campaign."""
+    session = _session(tmp_path)
+    plans = [_tool_reply("plan", content=f"# plan v{n}\n" + "step\n" * 40) for n in (1, 2, 3)]
+    client = FakeClient([*plans, _text_reply("planned")])
+    mason = Mason(session, client=client)
+    mason.run_turn("plan it")
+    echoes = [m["content"] for m in mason.messages if m.get("role") == "tool"]
+    assert len(echoes) == 3
+    assert echoes[0] == echoes[1] == (
+        "[cleared: plan result superseded by the update at a later step; PLAN.md "
+        "holds the current plan]"
+    )
+    assert echoes[2].startswith("PLAN.md updated:\n# plan v3")
+    sent = client.requests[-1][0]
+    assert sum(1 for m in sent if str(m.get("content", "")).startswith("PLAN.md updated:")) == 1
+    events = [json.loads(line) for line in session.transcript_path.read_text().splitlines()]
+    recorded = [
+        e["message"]["content"] for e in events
+        if e["type"] == "message" and e["message"].get("role") == "tool"
+    ]
+    assert all(c.startswith("PLAN.md updated:") for c in recorded)  # the record keeps every copy
+    clearings = [e for e in events if e["type"] == "clearing"]
+    assert [c["why"] for c in clearings] == ["plan superseded", "plan superseded"]
+
+
+def test_every_step_carries_a_reply_budget_bounded_by_the_room_left(tmp_path: Path) -> None:
+    """The last step of one real campaign ran to 20,086 completion tokens of
+    pure reasoning. Unset, the cap is the harness default; near the window
+    it shrinks to what fits, because vLLM refuses prompt + max_tokens
+    beyond the model length."""
+    client = FakeClient([_tool_reply("list_dir", prompt_tokens=100), _text_reply("ok")])
+    Mason(_session(tmp_path), client=client).run_turn("go")
+    assert client.options[0]["max_tokens"] == 16_000
+    client = FakeClient([_tool_reply("list_dir", prompt_tokens=15_000), _text_reply("ok")])
+    Mason(_session(tmp_path, context_window=20_000, compact_at=0.99), client=client).run_turn("go")
+    assert client.options[1]["max_tokens"] == 20_000 - 15_000 - 1_024
+    client = FakeClient([_text_reply("ok")])
+    Mason(_session(tmp_path, max_reply_tokens=2_000), client=client).run_turn("go")
+    assert client.options[0]["max_tokens"] == 2_000
+
+
+def test_a_second_identical_read_points_at_the_copy_still_in_context(tmp_path: Path) -> None:
+    """A real session read the same config and the same template twice, at
+    3,000 characters a time, with the first copy still in its context."""
+    session = _session(
+        tmp_path,
+        context_window=40_000,
+        clear_tool_results_at=0.5,  # 20,000 tokens
+        keep_tool_results=1,
+        memory=False,
+        software_notes=False,
+    )
+    (tmp_path / "big.txt").write_text(("x" * 80 + "\n") * 100)  # ~8,800 chars: one clearing's worth
+    (tmp_path / "small.txt").write_text("tiny\n")
+    replies: list[ChatReply | Exception] = [
+        _tool_reply("read_file", path="big.txt"),
+        _tool_reply("read_file", path="big.txt"),  # the copy is right above: a pointer
+        _tool_reply("read_file", prompt_tokens=25_000, path="small.txt"),  # forces clearing
+        _tool_reply("read_file", path="big.txt"),  # the copy was cleared: the body again
+        _tool_reply("shell", command="printf 'a%.0s' $(seq 500)"),
+        _tool_reply("shell", command="printf 'a%.0s' $(seq 500)"),  # shell is exempt
+        _text_reply("done"),
+    ]
+    mason = Mason(session, client=FakeClient(replies))
+    mason.run_turn("read things")
+    results = [str(m["content"]) for m in mason.messages if m.get("role") == "tool"]
+    assert results[0].startswith("[cleared:")  # the first copy went in the clearing
+    assert results[1].startswith(
+        "[unchanged: identical to this call's result at step 1, still in your context; "
+    )
+    assert "[note: this is the same call as the previous step" in results[1]
+    assert results[3].startswith("     1\tx")  # the copy was gone, so the body returns
+    assert results[4].startswith("exit 0\n" + "a" * 500)
+    assert results[5].startswith("exit 0\n" + "a" * 500)  # a re-run command keeps its output

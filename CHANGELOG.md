@@ -5,6 +5,16 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- Context economy in the loop. After fifteen consecutive steps made only
+  of looking tools, the per-step budget line tells the model to step
+  back, and again every five steps. Only the newest plan echo stays
+  verbatim; older ones become a one-line marker when a newer one lands. A
+  second identical fetch whose first copy is still in context returns a
+  pointer to it instead of the body (shell results exempt). Every request
+  carries `max_tokens`: `[agent] max_reply_tokens` or 16,000, bounded by
+  the room the window has left. One campaign spent 72 minutes in a
+  look-only run, carried three plan copies in every prompt, re-read the
+  same files, and ended on a 20,086-token reply.
 - The test suite sleeps for real again. The fixture that skips the model
   client's retry backoff patched `time.sleep` on the shared module, so every
   wait in the suite became a no-op: the run-id ordering test compared ids

@@ -208,9 +208,10 @@ class AgentConfig(BaseModel):
     # The second layer: once the prompt passes clear_tool_results_at x
     # context_window, tool results older than the newest keep_tool_results
     # are replaced by a one-line placeholder (the call and its arguments
-    # stay, so the model can call again). Errors, skill texts, and plan
-    # updates are never cleared. Compaction, the third layer, then fires
-    # rarely.
+    # stay, so the model can call again). Errors and skill texts are never
+    # cleared; the newest plan update is kept verbatim, and an older one is
+    # replaced as soon as a newer one arrives. Compaction, the third layer,
+    # then fires rarely.
     clear_tool_results: bool = True
     keep_tool_results: int = Field(default=6, ge=1)
     clear_tool_results_at: float = Field(default=0.25, gt=0.0, le=1.0)

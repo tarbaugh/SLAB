@@ -59,7 +59,7 @@ from mason.roster import (
 )
 from mason.session import MasonSession
 from mason.skills import Skill, discover_skills
-from mason.tools import TOOL_VOCABULARY, Toolbox, build_toolbox
+from mason.tools import LOOKING_TOOLS, TOOL_VOCABULARY, Toolbox, build_toolbox
 from slab._version import __version__
 
 _ERROR_STREAK_LIMIT = 5
@@ -70,6 +70,27 @@ _ERROR_STREAK_LIMIT = 5
 _REFETCH_NOTE_AT = 3
 #: How much of a cleared result its placeholder quotes back.
 _CLEAR_HEAD_CHARS = 120
+#: This many consecutive steps made only of looking tools, and the turn's
+#: hint says so; it says so again every few steps after. One real campaign
+#: spent 72 minutes and 80 % of its completion tokens in two such runs
+#: with nothing in the loop to make it step back.
+_LOOKING_HINT_AT = 15
+_LOOKING_HINT_EVERY = 5
+#: One step's reply budget when [agent] max_reply_tokens is unset, the
+#: same as the Anthropic client's default. A thinking model's think block
+#: counts toward it, so it caps one step's spend, not the campaign's; a
+#: cut reply is marked and nudged once. Bounded below by the room the
+#: window has left, because vLLM refuses prompt + max_tokens beyond it.
+_DEFAULT_REPLY_TOKENS = 16_000
+_REPLY_MARGIN_TOKENS = 1_024
+_MIN_REPLY_TOKENS = 1_024
+#: What replaces an older plan echo once a newer one arrives. The newest
+#: stays verbatim (the recitation that keeps the goal in view); three
+#: copies of a growing plan rode every prompt of one real campaign.
+_PLAN_SUPERSEDED = (
+    "[cleared: plan result superseded by the update at a later step; PLAN.md "
+    "holds the current plan]"
+)
 _COMPACTION_KEEP_MESSAGES = 6
 #: The summarizer's reply budget. A summary is a working state, not a
 #: transcript: one real compaction ran to 14,000 tokens carrying the
@@ -108,6 +129,33 @@ _TRUNCATION_MIN_TOKENS = 3_000
 _BUDGET_LAST_STRETCH = 0.9
 
 StopReason = Literal["answer", "finish", "max_turns", "error_streak", "error"]
+
+
+def _looking_hint(looking: int) -> str:
+    """The step-back sentence after a run of steps that only looked, or empty.
+
+    Examples:
+        >>> _looking_hint(14)
+        ''
+        >>> _looking_hint(15).startswith(' [15 consecutive steps have only read')
+        True
+        >>> _looking_hint(17)
+        ''
+        >>> _looking_hint(20).startswith(' [20 consecutive')
+        True
+    """
+    if looking < _LOOKING_HINT_AT or (looking - _LOOKING_HINT_AT) % _LOOKING_HINT_EVERY:
+        return ""
+    return (
+        f" [{looking} consecutive steps have only read and listed: nothing launched, "
+        f"planned, noted, briefed, or finished. Step back: re-read PLAN.md, write what "
+        f"you learned in the notebook, load the skill that covers this, or delegate.]"
+    )
+
+
+def _turn_hint(step: int, max_turns: int, looking: int = 0) -> str:
+    """The ephemeral line each request ends with: the budget, and the step-back."""
+    return _budget_hint(step, max_turns) + _looking_hint(looking)
 
 
 def _budget_hint(step: int, max_turns: int) -> str:
@@ -404,7 +452,12 @@ class Mason:
         self._repeat_streak = 0
         # Session-wide: (tool, arguments) -> (digest of its result, times seen
         # with that same result), so a re-fetch of cleared content is named.
-        self._seen_results: dict[tuple[str, str], tuple[str, int]] = {}
+        # ... and where the last full copy of that result sits in the
+        # messages (index, step), or None once compaction rebuilt them, so a
+        # repeat whose copy is still in context can point at it.
+        self._seen_results: dict[tuple[str, str], tuple[str, int, int | None, int]] = {}
+        # Consecutive steps whose calls were all looking tools.
+        self._looking_streak = 0
         if depth == 0:
             # The transcript says which model answered it, so a later reader
             # (a report, a benchmark score) trusts the record, not the config
@@ -468,7 +521,7 @@ class Mason:
             self.steps_taken = step
             self._clear_tool_results()
             self._maybe_compact()
-            reply = self._call_model(hint=_budget_hint(step, max_turns))
+            reply = self._call_model(hint=_turn_hint(step, max_turns, self._looking_streak))
             calls = list(reply.tool_calls)
             from_text = False
             if not calls:
@@ -568,6 +621,8 @@ class Mason:
                     raise
                 result = self._note_repetition(call, result)
                 self._append_tool_result(call, result, as_text=from_text)
+                if call.name == "plan" and result.startswith("PLAN.md updated:"):
+                    self._supersede_plan_echoes()
                 error_streak = 0 if ok else error_streak + 1
                 if error_streak >= _ERROR_STREAK_LIMIT:
                     self._answer_unrun(calls[position + 1 :], from_text=from_text)
@@ -580,6 +635,8 @@ class Mason:
                         stop_reason="error_streak",
                         steps=step,
                     )
+            looked = all(call.name in LOOKING_TOOLS for call in calls)
+            self._looking_streak = self._looking_streak + 1 if looked else 0
         return TurnResult(
             text=(
                 f"stopped at the {self.session.agent.max_turns}-call budget for one "
@@ -614,27 +671,107 @@ class Mason:
             self._repeat_streak = 1
         digest = hashlib.sha256(result.encode("utf-8")).hexdigest()
         seen = self._seen_results.get((call.name, call.arguments_raw))
-        times = seen[1] + 1 if seen is not None and seen[0] == digest else 1
-        self._seen_results[(call.name, call.arguments_raw)] = (digest, times)
+        same = seen is not None and seen[0] == digest
+        times = seen[1] + 1 if same and seen is not None else 1
+        # A second identical body while the first is still in context is
+        # pure cost: point at the copy instead. Shell results are exempt (a
+        # command legitimately re-runs, and its first line is its exit
+        # status). A cleared copy means the re-fetch is the design.
+        shown = result
+        if same and seen is not None:
+            copy_index, copy_step = seen[2], seen[3]
+            if (
+                call.name != "shell"
+                and len(result) >= _CLEAR_FLOOR_CHARS
+                and copy_index is not None
+                and self._result_intact(copy_index)
+            ):
+                shown = (
+                    f"[unchanged: identical to this call's result at step {copy_step}, "
+                    f"still in your context; {len(result)} characters not repeated]"
+                )
+                self._seen_results[(call.name, call.arguments_raw)] = (
+                    digest, times, copy_index, copy_step
+                )
+            else:
+                self._seen_results[(call.name, call.arguments_raw)] = (
+                    digest, times, len(self.messages), self.steps_taken
+                )
+        else:
+            self._seen_results[(call.name, call.arguments_raw)] = (
+                digest, times, len(self.messages), self.steps_taken
+            )
         if self._repeat_streak == 2:
             return (
-                f"{result}\n[note: this is the same call as the previous step, "
+                f"{shown}\n[note: this is the same call as the previous step, "
                 f"and the result is identical]"
             )
         if self._repeat_streak > 2:
             return (
-                f"{result}\n[note: this exact call has now returned this exact result "
+                f"{shown}\n[note: this exact call has now returned this exact result "
                 f"{self._repeat_streak} times in a row. Repeating it cannot produce new "
                 f"information. Record what you learned in the notebook, change the "
                 f"approach, or finish with a report naming the blocker.]"
             )
         if times >= _REFETCH_NOTE_AT:
             return (
-                f"{result}\n[note: this call has returned this same content {times} "
+                f"{shown}\n[note: this call has returned this same content {times} "
                 f"times in this session. Each copy costs context: write what you need "
                 f"from it into the notebook or the plan now, and stop fetching it.]"
             )
-        return result
+        return shown
+
+    def _result_intact(self, index: int) -> bool:
+        """Whether the tool result at *index* still carries its body."""
+        if index >= len(self.messages):
+            return False
+        message = self.messages[index]
+        if message.get("role") not in ("tool", "user"):
+            return False
+        content = str(message.get("content") or "")
+        return _CLEARED_MARK not in content[:200] and not content.startswith("[unchanged:")
+
+    def _supersede_plan_echoes(self) -> None:
+        """Replace every plan echo but the newest with a one-line marker.
+
+        The plan tool echoes the whole plan back so the goal stays in view;
+        once a newer echo exists, the older ones are only cost. Runs when a
+        plan result lands, whatever the prompt size.
+        """
+        names_by_id: dict[str, str] = {}
+        echoes: list[int] = []
+        for index, message in enumerate(self.messages):
+            role = message.get("role")
+            if role == "assistant":
+                for call in message.get("tool_calls") or ():
+                    names_by_id[str(call.get("id"))] = str(call["function"]["name"])
+                continue
+            content = message.get("content")
+            if not isinstance(content, str):
+                continue
+            by_id = role == "tool" and names_by_id.get(str(message.get("tool_call_id"))) == "plan"
+            by_text = role == "user" and content.startswith(f"{_TEXT_RESULT_PREFIX}plan]")
+            if by_id or by_text:
+                echoes.append(index)
+        freed = 0
+        cleared = 0
+        for index in echoes[:-1]:
+            message = self.messages[index]
+            content = str(message["content"])
+            if _CLEARED_MARK in content[:200]:
+                continue
+            prefix = ""
+            if message.get("role") == "user":
+                head, _, _ = content.partition("\n")
+                prefix = head + "\n"
+            message["content"] = f"{prefix}{_PLAN_SUPERSEDED}"
+            freed += len(content)
+            cleared += 1
+        if cleared:
+            self._last_prompt_tokens = None
+            self.session.record(
+                {"type": "clearing", "cleared": cleared, "chars": freed, "why": "plan superseded"}
+            )
 
     def _answer_unrun(self, calls: list[Any], *, from_text: bool) -> None:
         """Answer tool calls we short-circuited past.
@@ -679,7 +816,7 @@ class Mason:
         if hint is not None:
             messages = [*messages, {"role": "user", "content": hint}]
         try:
-            reply = self.client.chat(messages, tools)
+            reply = self.client.chat(messages, tools, max_tokens=self._reply_budget())
         except ContextOverflowError as e:
             # The server knows the window better than our estimate: compact
             # once and retry. If there was nothing left to fold, retrying
@@ -693,7 +830,7 @@ class Mason:
             messages = self.messages
             if hint is not None:
                 messages = [*messages, {"role": "user", "content": hint}]
-            reply = self.client.chat(messages, tools)
+            reply = self.client.chat(messages, tools, max_tokens=self._reply_budget())
         self.session.count_usage(
             reply.prompt_tokens, reply.completion_tokens, reply.cached_prompt_tokens
         )
@@ -709,6 +846,14 @@ class Mason:
             }
         )
         return reply
+
+    def _reply_budget(self) -> int:
+        """One step's ``max_tokens``: the configured or default cap, bounded by
+        the room the window has left after the prompt."""
+        agent = self.session.agent
+        budget = agent.max_reply_tokens or _DEFAULT_REPLY_TOKENS
+        room = agent.context_window - self._estimated_prompt_tokens() - _REPLY_MARGIN_TOKENS
+        return max(_MIN_REPLY_TOKENS, min(budget, room))
 
     def _warn_if_truncated(
         self,
@@ -980,6 +1125,11 @@ class Mason:
         ]
         self._last_prompt_tokens = None
         self._messages_at_last_compaction = len(self.messages)
+        # The messages were rebuilt: no earlier result copy is where it was.
+        self._seen_results = {
+            key: (digest, times, None, step)
+            for key, (digest, times, _index, step) in self._seen_results.items()
+        }
         self.session.record({"type": "compaction", "summary": summary})
         return True
 

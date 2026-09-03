@@ -479,6 +479,14 @@ def test_the_vocabulary_matches_an_all_features_toolbox(tmp_path: Path) -> None:
     assert set(box.tools) == TOOL_VOCABULARY
 
 
+def test_the_looking_tools_are_real_tools_that_never_act() -> None:
+    from mason.tools import LOOKING_TOOLS, READ_ONLY_TOOLS, TOOL_VOCABULARY
+
+    assert LOOKING_TOOLS <= TOOL_VOCABULARY
+    assert READ_ONLY_TOOLS - {"finish"} <= LOOKING_TOOLS
+    assert not LOOKING_TOOLS & {"launch_workflow", "submit_job", "plan", "notebook", "write_file"}
+
+
 # -- the file fence ----------------------------------------------------------
 
 

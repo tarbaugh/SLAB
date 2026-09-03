@@ -84,6 +84,32 @@ TOOL_VOCABULARY = frozenset(
     }
 )
 
+#: The tools that only look: shell, files, listings, lookups. A step made of
+#: these alone changes nothing the workspace records: no run, no plan, no
+#: note, no brief, no report. The loop counts consecutive such steps and
+#: says so to the model; the science review flags a long run of them.
+LOOKING_TOOLS = frozenset(
+    {
+        "shell",
+        "read_file",
+        "read_artifact",
+        "list_dir",
+        "search",
+        "list_runs",
+        "show_run",
+        "job_status",
+        "wait_for_run",
+        "describe_task",
+        "list_tasks",
+        "list_engines",
+        "get_material",
+        "search_materials",
+        "query_materials",
+        "recall",
+        "skill",
+    }
+)
+
 #: The tools that observe and never act: no file write, no launch, no shell,
 #: no entry in the notebook, the plan, or machine memory. A card that
 #: ``reviews`` gets exactly this slice of the session, whatever its

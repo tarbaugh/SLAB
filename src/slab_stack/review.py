@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Any
 
 from foundation.errors import SessionNotFoundError
 from mason.skills import Skill, discover_skills
+from mason.tools import LOOKING_TOOLS
 
 if TYPE_CHECKING:
     from foundation.runtime import Workspace
@@ -125,7 +126,7 @@ class Step:
     @property
     def looking(self) -> bool:
         """True when every call only reads: shell, files, listings, lookups."""
-        return bool(self.calls) and all(name in _LOOKING_TOOLS for name, _ in self.calls)
+        return bool(self.calls) and all(name in LOOKING_TOOLS for name, _ in self.calls)
 
 
 @dataclass
@@ -284,28 +285,6 @@ def session_runs(ws: Workspace, session: str) -> list[dict[str, Any]]:
 
 # -- the rules ----------------------------------------------------------------
 
-#: Tools that only look. A step made of these alone changes nothing the
-#: workspace records: no run, no plan, no note, no brief, no report.
-_LOOKING_TOOLS = frozenset(
-    {
-        "shell",
-        "read_file",
-        "list_dir",
-        "search",
-        "list_runs",
-        "show_run",
-        "job_status",
-        "wait_for_run",
-        "describe_task",
-        "list_tasks",
-        "list_engines",
-        "get_material",
-        "search_materials",
-        "query_materials",
-        "recall",
-        "skill",
-    }
-)
 #: This many consecutive looking steps is a loop, not reconnaissance. One
 #: real campaign spent 72 minutes and 80 % of its completion tokens in two
 #: such windows, rewriting a potential file that one keyword would have
