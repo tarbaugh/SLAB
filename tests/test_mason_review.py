@@ -503,3 +503,47 @@ def test_a_critic_killed_by_the_server_returns_a_result_not_an_exception(tmp_pat
     (event,) = [e for e in events if e["type"] == "review"]
     assert event["stop"] == "error" and event["steps"] == 1
     assert not mason.session.plan_approved
+
+
+def test_the_review_brief_carries_the_leads_lookups_newest_first(tmp_path: Path) -> None:
+    """Two real critic passes spent five steps each re-running list_engines,
+    get_material, and describe_task before reaching the plan's substance;
+    the lead had all three in its own context."""
+    (tmp_path / "PLAN.md").write_text(PLAN)
+
+    def describe(task: str) -> ChatReply:  # _call's own 'name' parameter is the tool's
+        call = ToolCall(
+            id=f"c_describe_{task}",
+            name="describe_task",
+            arguments={"name": task},
+            arguments_raw=json.dumps({"name": task}),
+        )
+        return ChatReply(content=None, tool_calls=(call,), prompt_tokens=100, completion_tokens=10)
+
+    client = FakeClient(
+        [
+            _call("list_engines"),
+            describe("relax_cell"),
+            describe("no-such-task"),
+            _call("review", subject="plan"),
+            _call("finish", report="1. advisory: fine.", verdict="approve"),
+            _text("noted"),
+        ]
+    )
+    roster = discover_roster(tmp_path)
+    mason = Mason(_session(tmp_path), client=client, spec=roster["planner"], roster=roster)
+    mason.run_turn("plan the campaign")
+    assert set(mason.session.facts) == {"list_engines()", "describe_task(name=relax_cell)"}
+    brief = client.requests[4][1]["content"]  # the critic's first request: system, then the brief
+    assert "--- evidence the lead gathered this session (re-check what you doubt) ---" in brief
+    assert "## describe_task(name=relax_cell)" in brief and "## list_engines()" in brief
+    assert brief.index("describe_task(name=relax_cell)") < brief.index("## list_engines()")
+    assert '"emt"' in brief and "no-such-task" not in brief
+    evidence_end = brief.index("--- end of the lead's evidence ---")
+    assert evidence_end < brief.index("--- the plan (PLAN.md) ---")
+
+
+def test_a_review_with_no_lookups_carries_no_evidence_block(tmp_path: Path) -> None:
+    _, client = _reviewed(tmp_path, "approve")
+    brief = client.requests[1][1]["content"]
+    assert "evidence the lead gathered" not in brief

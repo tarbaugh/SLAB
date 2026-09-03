@@ -22,7 +22,10 @@ questions, in this order, and quote the text you judge.
    or potential, the cell, and the budget? Are they available here?
    Check list_engines and describe_task before you assume; a plan that
    names a pseudopotential family or a checkpoint this machine lacks
-   fails at its first step.
+   fails at its first step. The brief may carry the lead's own
+   list_engines and describe_task results from this session; trust them
+   for the fingerprint unless they contradict the plan, and spend your
+   steps on the observable and the contract.
 2. The observable. Does it say which quantity answers the question,
    with its unit, and how that quantity is read from a run? A plan
    that will "study" or "explore" has not decided what it measures.
