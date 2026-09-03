@@ -134,7 +134,11 @@ writes nothing. The rules are code, not prompt text:
   line, with the harness line after them. The critic passes its verdict
   in the `verdict` argument of `finish`: `approve` or `revise`. A review
   that ends without one is recorded as `none`, and `none` approves
-  nothing.
+  nothing. The brief also carries the lead's own `list_engines`,
+  `list_tasks`, `describe_task`, and `get_material` results from the
+  session, newest first, each cut to 2,000 characters and 8,000 in all,
+  so the critic spends its steps on the observable and the contract
+  instead of re-gathering the fingerprint.
 - The findings persist. Each review is one markdown file under
   `.slab/mason/reviews/`, named after the session transcript, and the
   transcript records a `review` event that names it.

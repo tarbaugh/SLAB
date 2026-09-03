@@ -5,6 +5,11 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- The review brief carries the lead's own catalog and material lookups
+  (`list_engines`, `list_tasks`, `describe_task`, `get_material`) from the
+  session, newest first, within a 2,000-character cap each and 8,000 in
+  all. Two real critic passes spent five steps each re-running those
+  lookups before reaching the plan's substance.
 - Context economy in the loop. After fifteen consecutive steps made only
   of looking tools, the per-step budget line tells the model to step
   back, and again every five steps. Only the newest plan echo stays

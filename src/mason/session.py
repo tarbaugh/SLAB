@@ -286,6 +286,9 @@ class MasonSession:
         self.notebook_path = self.cwd / "NOTEBOOK.md"
         self.plan_path = self.cwd / "PLAN.md"
         self.read_files: set[Path] = set()
+        # The newest answer to each catalog and material lookup this session
+        # (mason.tools.FACT_TOOLS), handed to the critic with a review brief.
+        self.facts: dict[str, str] = {}
         # Whether a critic has approved the plan, for a card that spends no
         # compute before one has (review_first). The loop sets it from the
         # persisted reviews at start; the review tool sets it on approval.

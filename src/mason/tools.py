@@ -110,6 +110,16 @@ LOOKING_TOOLS = frozenset(
     }
 )
 
+#: Lookups whose answer holds for the session: what the machine has, what a
+#: task takes, what a material is. The session keeps the newest answer to
+#: each, and the review tool hands them to the critic, so it spends its
+#: steps on the observable and the contract instead of re-gathering the
+#: fingerprint (two real critic passes re-ran all of these).
+FACT_TOOLS = frozenset({"list_engines", "list_tasks", "describe_task", "get_material"})
+#: One fact in the critic's brief, and all of them together.
+_FACT_CHARS = 2_000
+_FACTS_CHARS = 8_000
+
 #: The tools that observe and never act: no file write, no launch, no shell,
 #: no entry in the notebook, the plan, or machine memory. A card that
 #: ``reviews`` gets exactly this slice of the session, whatever its
@@ -249,7 +259,29 @@ class Toolbox:
             result = tool.handler(call.arguments)
         except Exception as e:  # evidence for the model, never a dead loop
             result = f"tool {call.name} failed: {type(e).__name__}: {e}"
-        return _truncate_middle(result, self.session.agent.max_tool_output_chars)
+        shown = _truncate_middle(result, self.session.agent.max_tool_output_chars)
+        if call.name in FACT_TOOLS and not _is_refusal(shown):
+            self.session.facts[_fact_key(call)] = shown
+        return shown
+
+
+def _fact_key(call: ToolCall) -> str:
+    """``describe_task(name=relax_cell)``: the call as the critic will read it.
+
+    Examples:
+        >>> _fact_key(ToolCall(id="c", name="list_engines"))
+        'list_engines()'
+        >>> _fact_key(ToolCall(id="c", name="describe_task", arguments={"name": "relax_cell"}))
+        'describe_task(name=relax_cell)'
+    """
+    inner = ", ".join(f"{key}={value}" for key, value in sorted(call.arguments.items()))
+    return f"{call.name}({inner})"
+
+
+def _is_refusal(result: str) -> bool:
+    """A result that answered nothing: a failure, a refusal, an unknown name."""
+    head = result.lstrip()[:40].lower()
+    return head.startswith(("tool ", "refused", "unknown", "no such", "no task", "no run"))
 
 
 def _preview(call: ToolCall) -> str:
@@ -1990,8 +2022,16 @@ def _add_delegate_tool(
 # -- review: a critic before compute -----------------------------------------
 
 
-def _review_brief(label: str, text: str, focus: object) -> str:
-    """The critic's brief: what to judge, how to report, and the text itself."""
+def _review_brief(
+    label: str, text: str, focus: object, facts: dict[str, str] | None = None
+) -> str:
+    """The critic's brief: what to judge, how to report, the lead's facts, the text.
+
+    *facts* are the lead's own catalog and material lookups this session,
+    newest first, each cut to ``_FACT_CHARS`` and all of them to
+    ``_FACTS_CHARS``, so the critic can check the fingerprint without
+    re-running the lookups.
+    """
     parts = [
         f"Review {label} before compute is spent on it. Judge it by the questions "
         f"in your card, quote what you judge, and number every finding as blocking "
@@ -2003,8 +2043,33 @@ def _review_brief(label: str, text: str, focus: object) -> str:
         "Then call finish alone, with the verdict in its `verdict` argument: approve "
         "when no finding is blocking, revise when one is."
     )
+    if facts:
+        parts.append(_facts_block(facts))
     parts.append(f"--- {label} ---\n{text.rstrip()}\n--- end ---")
     return "\n\n".join(parts)
+
+
+def _facts_block(facts: dict[str, str]) -> str:
+    """The lead's lookups as one block, newest first, within the budgets.
+
+    Examples:
+        >>> facts = {"list_engines()": "emt", "describe_task(name=relax)": "relax(...)"}
+        >>> block = _facts_block(facts)
+        >>> block.splitlines()[0]
+        '--- evidence the lead gathered this session (re-check what you doubt) ---'
+        >>> block.index("describe_task") < block.index("list_engines")
+        True
+    """
+    lines = ["--- evidence the lead gathered this session (re-check what you doubt) ---"]
+    used = 0
+    for key, body in reversed(list(facts.items())):
+        entry = f"## {key}\n{_truncate_middle(body.rstrip(), _FACT_CHARS)}"
+        if used + len(entry) > _FACTS_CHARS:
+            break
+        lines.append(entry)
+        used += len(entry)
+    lines.append("--- end of the lead's evidence ---")
+    return "\n".join(lines)
 
 
 _VERDICT_HEAD = {
@@ -2063,7 +2128,7 @@ def _add_review_tool(
             except UnicodeDecodeError:
                 return f"refused: {path} is not a text file"
             label = f"the file {path}"
-        brief = _review_brief(label, text, arguments.get("focus"))
+        brief = _review_brief(label, text, arguments.get("focus"), session.facts)
         result, child_session = _run_child(session, roster, skills, parent_client, target, brief)
         verdict: Verdict = (
             result.verdict
