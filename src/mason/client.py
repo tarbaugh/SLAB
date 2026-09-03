@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import random
 import re
 import time
 import urllib.error
@@ -35,8 +36,38 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from mason.errors import MasonError
 
-_RETRIES = 3
-_BACKOFF_S = (1.0, 4.0)  # between attempts 1->2 and 2->3
+#: A server that answers 5xx is weather: five attempts, about 80 s in all.
+_RETRIES = 5
+_BACKOFF_CAP_S = 60.0
+#: A connection that cannot be made is not weather (a dead server, a wrong
+#: node, a firewall): three quick attempts, as before, so 'slab doctor' and a
+#: mistyped endpoint fail in seconds rather than minutes.
+_REACH_RETRIES = 3
+_REACH_BACKOFF_S = (1.0, 4.0)
+
+
+def _backoff_s(attempt: int, *, server_error: bool) -> float:
+    """Seconds to wait after the 0-based *attempt* failed.
+
+    After a 5xx: 2, 6, 18, 54 s nominal, jittered by x0.5 to x1.5 so
+    concurrent agents do not retry in step. Three attempts with 1 s and 4 s
+    between them burned every retry inside five seconds, and a gateway that
+    answered 502 for a minute took a critic's whole review down with it.
+    After a connection failure: the old 1 s then 4 s.
+
+    Examples:
+        >>> 1.0 <= _backoff_s(0, server_error=True) <= 3.0
+        True
+        >>> 27.0 <= _backoff_s(3, server_error=True) <= 81.0
+        True
+        >>> _backoff_s(1, server_error=False)
+        4.0
+    """
+    if not server_error:
+        return _REACH_BACKOFF_S[min(attempt, len(_REACH_BACKOFF_S) - 1)]
+    nominal = min(_BACKOFF_CAP_S, 2.0 * 3.0**attempt)
+    return nominal * random.uniform(0.5, 1.5)
+
 _CONTEXT_OVERFLOW_HINTS = (
     "context length",
     "context window",
@@ -154,10 +185,10 @@ class ChatClient:
     ) -> ChatReply:
         """One chat-completions round trip; retries transport-level failures.
 
-        Connection failures and 5xx answers are retried up to 3 attempts
-        with backoff; HTTP 4xx are the server telling us something and are
-        never retried (a context-window 400 raises
-        :class:`ContextOverflowError` instead).
+        A 5xx answer is retried up to 5 attempts with exponential backoff
+        (about 80 s in all), a connection failure 3 attempts inside 5 s;
+        HTTP 4xx are the server telling us something and are never retried
+        (a context-window 400 raises :class:`ContextOverflowError` instead).
 
         *effort* and *max_tokens* override the instance's settings for this
         one call: the compaction summarizer is a model call that should
@@ -213,12 +244,14 @@ def request_json(
 ) -> dict[str, Any]:
     """One JSON round trip with the retry discipline both providers share.
 
-    GET when *body* is None, POST otherwise. Connection failures and 5xx
-    answers are retried up to 3 attempts with backoff; 4xx answers are the
-    server telling us something and are never retried.
+    GET when *body* is None, POST otherwise. A 5xx answer is retried up to
+    5 attempts with exponential backoff, a connection failure 3 attempts
+    with short waits; 4xx answers are the server telling us something and
+    are never retried.
     """
     data = None if body is None else json.dumps(body).encode()
     last_error: LlmError | None = None
+    server_error = False
     for attempt in range(_RETRIES):
         request = urllib.request.Request(
             url, data=data, headers=headers, method="GET" if body is None else "POST"
@@ -231,6 +264,7 @@ def request_json(
             if e.code < 500:
                 raise parsed from e  # a 4xx is the server's answer, not weather
             last_error = parsed  # 5xx: retry as promised
+            server_error = True
         except TimeoutError as e:
             raise LlmError(
                 f"no answer from {url} within {timeout_s:.0f}s — slow inference "
@@ -248,13 +282,17 @@ def request_json(
                     f"node?) — {unreachable_hint}"
                 ) from e
             last_error = LlmError(f"cannot reach {url}: {e.reason} — {unreachable_hint}")
+            server_error = False
         except (OSError, http.client.HTTPException) as e:
             # A connection dying mid-request/mid-read surfaces raw
             # (ConnectionResetError, RemoteDisconnected, IncompleteRead);
             # wrap and retry like any transport failure.
             last_error = LlmError(f"connection to {url} failed mid-request: {e!r}")
-        if attempt < _RETRIES - 1:
-            time.sleep(_BACKOFF_S[min(attempt, len(_BACKOFF_S) - 1)])
+            server_error = False
+        limit = _RETRIES if server_error else _REACH_RETRIES
+        if attempt >= limit - 1:
+            break
+        time.sleep(_backoff_s(attempt, server_error=server_error))
     assert last_error is not None
     raise last_error
 

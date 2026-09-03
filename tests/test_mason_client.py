@@ -156,7 +156,7 @@ def test_unreachable_endpoint_teaches_and_bounds_retries(
     client = ChatClient("http://127.0.0.1:9", "m", timeout_s=2)
     with pytest.raises(LlmError, match="is the model server running"):
         client.chat([])
-    assert len(sleeps) == 2  # 3 attempts, 2 backoffs
+    assert sleeps == [1.0, 4.0]  # a refused connection is not weather: 3 quick attempts
 
 
 def test_non_json_answer_is_a_loud_error(llm_server: tuple[str, LlmScript]) -> None:
@@ -245,14 +245,34 @@ def test_loose_calls_never_execute_quoted_examples() -> None:
 def test_5xx_answers_are_retried_then_surfaced(
     llm_server: tuple[str, LlmScript], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The waits grow: a gateway that answers 502 for a minute is outlasted,
+    where 1 s and 4 s burned every attempt inside five seconds."""
     url, script = llm_server
-    monkeypatch.setattr("mason.client.time.sleep", lambda s: None)
-    script.responses.append((503, {"error": {"message": "overloaded"}}))
+    sleeps: list[float] = []
+    monkeypatch.setattr("mason.client.time.sleep", sleeps.append)
+    monkeypatch.setattr("mason.client.random.uniform", lambda a, b: 1.0)
+    script.responses.append((502, {"error": {"message": "bad gateway"}}))
     script.responses.append((503, {"error": {"message": "overloaded"}}))
     script.responses.append((200, _reply({"content": "recovered"})))
     reply = ChatClient(url, "m").chat([])
     assert reply.content == "recovered"
     assert len(script.requests) == 3
+    assert sleeps == [2.0, 6.0]
+
+
+def test_five_5xx_answers_exhaust_the_retries(
+    llm_server: tuple[str, LlmScript], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    url, script = llm_server
+    sleeps: list[float] = []
+    monkeypatch.setattr("mason.client.time.sleep", sleeps.append)
+    monkeypatch.setattr("mason.client.random.uniform", lambda a, b: 1.0)
+    for _ in range(5):
+        script.responses.append((502, {"error": {"message": "bad gateway"}}))
+    with pytest.raises(LlmError, match="502"):
+        ChatClient(url, "m").chat([])
+    assert len(script.requests) == 5
+    assert sleeps == [2.0, 6.0, 18.0, 54.0]  # nominal; capped at 60 s, jittered in life
 
 
 def test_loose_calls_surface_hallucinated_tool_names_for_teaching() -> None:
