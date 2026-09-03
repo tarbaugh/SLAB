@@ -308,3 +308,27 @@ def test_effort_rides_as_reasoning_effort(llm_server: tuple[str, LlmScript]) -> 
     ChatClient(url, "m").chat([{"role": "user", "content": "hi"}])
     sent = [r.get("reasoning_effort") for r in script.requests]
     assert sent == ["none", "low", "xhigh", "xhigh", None]
+
+
+def test_a_length_finish_reason_is_the_loops_max_tokens(llm_server: tuple[str, LlmScript]) -> None:
+    """OpenAI-compatible servers say ``length``; the loop tests for
+    ``max_tokens``, so a truncated reply used to pass as a finished answer."""
+    url, script = llm_server
+    payload = _reply({"content": "cut off mid"})
+    payload["choices"][0]["finish_reason"] = "length"
+    script.responses.append((200, payload))
+    reply = ChatClient(url, "m").chat([{"role": "user", "content": "hi"}])
+    assert reply.finish_reason == "max_tokens"
+
+
+def test_a_call_may_override_effort_and_reply_budget(llm_server: tuple[str, LlmScript]) -> None:
+    url, script = llm_server
+    script.responses.append((200, _reply({"content": "ok"})))
+    script.responses.append((200, _reply({"content": "ok"})))
+    client = ChatClient(url, "m", effort="xhigh", max_reply_tokens=16_000)
+    client.chat([{"role": "user", "content": "hi"}])
+    client.chat([{"role": "user", "content": "hi"}], effort="low", max_tokens=4_096)
+    assert script.requests[0]["reasoning_effort"] == "xhigh"
+    assert script.requests[0]["max_tokens"] == 16_000
+    assert script.requests[1]["reasoning_effort"] == "low"
+    assert script.requests[1]["max_tokens"] == 4_096

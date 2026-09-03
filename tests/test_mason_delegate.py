@@ -22,7 +22,10 @@ class FakeClient:
         self.requests: list[list[dict[str, Any]]] = []
 
     def chat(
-        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        **options: Any,
     ) -> ChatReply:
         self.requests.append([dict(m) for m in messages])
         answer = self.replies.pop(0)

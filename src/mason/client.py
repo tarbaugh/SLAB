@@ -148,6 +148,9 @@ class ChatClient:
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        *,
+        effort: str | None = None,
+        max_tokens: int | None = None,
     ) -> ChatReply:
         """One chat-completions round trip; retries transport-level failures.
 
@@ -155,6 +158,10 @@ class ChatClient:
         with backoff; HTTP 4xx are the server telling us something and are
         never retried (a context-window 400 raises
         :class:`ContextOverflowError` instead).
+
+        *effort* and *max_tokens* override the instance's settings for this
+        one call: the compaction summarizer is a model call that should
+        think little and answer short, whatever the session's dial says.
         """
         body: dict[str, Any] = {
             "model": self.model,
@@ -163,10 +170,12 @@ class ChatClient:
         }
         if tools:
             body["tools"] = tools
-        if self.max_reply_tokens is not None:
-            body["max_tokens"] = self.max_reply_tokens
-        if self.effort is not None:
-            body["reasoning_effort"] = _REASONING_EFFORT.get(self.effort, self.effort)
+        reply_tokens = self.max_reply_tokens if max_tokens is None else max_tokens
+        if reply_tokens is not None:
+            body["max_tokens"] = reply_tokens
+        wanted = self.effort if effort is None else effort
+        if wanted is not None:
+            body["reasoning_effort"] = _REASONING_EFFORT.get(wanted, wanted)
         payload = self._request("/chat/completions", body)
         return _parse_reply(payload)
 
@@ -303,6 +312,27 @@ def _error_message(raw: bytes) -> str | None:
     return None
 
 
+def _finish_reason(raw: object) -> str | None:
+    """The server's finish reason in the loop's one vocabulary.
+
+    OpenAI-compatible servers say ``length`` where the Messages API says
+    ``max_tokens``; the loop tests for the latter, so a truncated reply on
+    vLLM or the gateway was passed off as a finished answer before this.
+
+    Examples:
+        >>> _finish_reason("length")
+        'max_tokens'
+        >>> _finish_reason("stop")
+        'stop'
+        >>> _finish_reason(None) is None
+        True
+    """
+    if raw is None:
+        return None
+    word = str(raw)
+    return "max_tokens" if word == "length" else word
+
+
 def _parse_reply(payload: dict[str, Any]) -> ChatReply:
     choices = payload.get("choices")
     if not isinstance(choices, list) or not choices:
@@ -318,7 +348,7 @@ def _parse_reply(payload: dict[str, Any]) -> ChatReply:
         content=None if content is None else str(content),
         tool_calls=_parse_tool_calls(message.get("tool_calls")),
         reasoning=None if reasoning is None else str(reasoning),
-        finish_reason=choices[0].get("finish_reason"),
+        finish_reason=_finish_reason(choices[0].get("finish_reason")),
         prompt_tokens=_int_or_none(usage.get("prompt_tokens")),
         completion_tokens=_int_or_none(usage.get("completion_tokens")),
         cached_prompt_tokens=_cached_prompt_tokens(usage),

@@ -635,7 +635,12 @@ under version control, readable by humans:
   understanding changes. The tool echoes the full plan back into context,
   which is the "recitation" trick that holds long goals stable.
 * **`.slab/mason/sessions/*.jsonl`** are append-only transcripts of every
-  message, tool result, reasoning trace, compaction, and token count, and
+  message, tool result, reasoning trace, compaction, and token count. The
+  header records the effort and the SLAB version, and each token count
+  carries the server's finish reason, so a review can tell a truncated
+  turn from a finished one. A reply with no text and no tool call is a
+  fault, not an answer: the loop asks once more, and a second empty reply
+  ends the turn marked truncated when the server says so. Also,
   `slab mason chat --resume` replays the newest one. Read one with
   `slab mason read`: without a path it lists the workspace's sessions
   newest first, each by the directory it was launched from and the launch

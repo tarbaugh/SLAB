@@ -32,7 +32,10 @@ class FakeClient:
         self.tools: list[list[str]] = []
 
     def chat(
-        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        **options: Any,
     ) -> ChatReply:
         self.requests.append([dict(m) for m in messages])
         self.tools.append([t["function"]["name"] for t in tools or []])
@@ -177,7 +180,7 @@ def test_a_reviewing_card_may_narrow_its_readers(tmp_path: Path) -> None:
 
 
 class _Idle:
-    def chat(self, messages: object, tools: object = None) -> ChatReply:
+    def chat(self, messages: object, tools: object = None, **options: object) -> ChatReply:
         raise AssertionError("the model was called during construction")
 
 
