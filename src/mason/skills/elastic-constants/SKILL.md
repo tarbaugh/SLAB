@@ -1,9 +1,10 @@
 ---
 name: elastic-constants
 description: Compute elastic constants from energy-strain scans and average
-  them into bulk and shear moduli, Young's modulus, and the Poisson ratio.
-  Use when asked for C_ij, a stiffness, E, nu, or mechanical stability of a
-  crystal or a glass.
+  them into bulk and shear moduli, Young's modulus, and the Poisson ratio,
+  with a fit-window spread as the uncertainty and the Born stability
+  conditions checked. Use when asked for C_ij, a stiffness, E, nu, or
+  mechanical stability of a crystal or a glass.
 license: MIT
 metadata:
   mason-agents: "dft-expert analysis-expert"
@@ -12,29 +13,45 @@ metadata:
 
 The procedure has two parts. A workflow computes energy ladders along a
 small set of strain patterns. A bundled script fits the ladders and
-assembles C_ij, the Voigt-Reuss-Hill moduli, E, and nu.
+assembles C_ij, the Voigt-Reuss-Hill moduli, E, and nu, with an
+uncertainty from the spread of three fits per ladder.
 
 ## 1. Compute the energy-strain ladders
 
 Copy `assets/strain_scan.py` into the project directory and adapt the
 constants at the top:
 
-- `STRUCTURE`: the cell at the engine's own equilibrium — positions AND
+- `STRUCTURE`: the cell at the engine's own equilibrium, positions AND
   cell relaxed to zero force and near-zero stress. Use
-  `foundation.tasks.relax_cell` with the symmetry that matches the crystal
-  (`isotropic` for cubic, `orthorhombic` for Pnma/Cmcm, `triclinic`
-  otherwise). An unrelaxed reference leaves a linear term in every ladder,
-  and the fit script warns about exactly that.
+  `foundation.tasks.relax_cell(..., fmax=0.005, smax=0.001)` with the
+  symmetry that matches the crystal (`isotropic` for cubic,
+  `orthorhombic` for Pnma/Cmcm, `triclinic` otherwise). The default
+  `smax` of 0.005 eV/Å^3 is 0.8 GPa of residual stress, and the fit
+  script's linear-term warning trips near 0.3 GPa. An unrelaxed
+  reference leaves a linear term in every ladder.
 - `ENGINE`: the engine for the energies. The template runs as-is under
   `emt` as a shakeout.
-- `SYMMETRY`: `isotropic` (2 modes; use for glasses and amorphous cells),
-  `cubic` (3 modes), or `orthorhombic` (9 modes).
+- `SYMMETRY`: `isotropic` (six modes averaged; use for glasses and
+  amorphous cells), `cubic` (3 modes), `hexagonal` or `orthorhombic`
+  (9 modes). Tetragonal-II, trigonal, monoclinic, and triclinic cells
+  have C14-type terms these mode sets do not reach; the script refuses
+  them rather than reporting a matrix with terms silently dropped.
 - `DELTAS`: strain amplitudes. Seven points over +/-1.5% suit most
   solids. Keep 0.0 in the list and keep the range symmetric.
 - `RELAX_INTERNAL`: set `True` for materials with internal degrees of
   freedom (layered, molecular, or ribboned crystals). The plain
   single-point ladder holds the ions to affine positions and overstates
   their stiffness; the relaxed ladder gives the physical constants.
+  `RELAX_FMAX` is 0.005 eV/Å because a strain energy is a few meV per
+  cell and the default 0.05 eV/Å leaves errors of the same size.
+
+Numerical conditions the energy method needs: an SCF threshold of
+1e-10 Ry or tighter, the same explicit k-mesh for every strained cell (a
+spacing rule regenerates the mesh as the symmetry drops), and a cutoff
+converged for energy differences (convergence-study skill). The stress
+tensor is not recorded by `single_point`, so this skill is the energy
+method only; a stress-strain fit needs a workflow that reads the
+calculator's stress.
 
 Run it with `launch_workflow` and give an intent. The workflow writes
 `elastic.json` and records one traced task per strained cell.
@@ -43,26 +60,34 @@ Run it with `launch_workflow` and give an intent. The workflow writes
 
     python <skill root>/scripts/fit_elastic.py elastic.json
 
-It prints the C_ij in GPa, the Voigt/Reuss/Hill bulk and shear moduli,
-and E and nu from the Hill averages; `--json` gives the same numbers
-machine-readable.
+It prints the C_ij in GPa, the largest spread between the quadratic,
+quartic, and inner-window fits of any ladder (the uncertainty), the Born
+stability margins, the Voigt/Reuss/Hill bulk and shear moduli, and E and
+nu from the Hill averages; `--json` gives the same numbers
+machine-readable with the warnings in a list.
 
 ## 3. Verify and report
 
 - The template's checks gate the run: energies finite, every ladder's
   minimum interior. A minimum at a ladder's edge means the reference is
-  strained; re-run `relax_cell` (tighten `smax` if needed) and repeat the
+  strained; re-run `relax_cell` with the tolerances above and repeat the
   scan against the fresh equilibrium.
 - Heed the script's warnings. A large linear term means the reference is
-  not at its minimum. A non-positive-definite matrix means the structure
-  is mechanically unstable or a ladder is noise; do not report averages
-  from it.
+  not at its minimum. A fit spread above 15% means the ladder is noisy
+  or the range is too wide. A Born margin at or below zero means the
+  structure is mechanically unstable; a margin under 10% means the sign
+  is within the fit's precision. A Reuss modulus under 2 GPa means the
+  matrix is nearly singular. Do not report averages through any of
+  these.
 - Sanity-check against the bulk modulus of an equation-of-state fit on
-  the same engine; B_Hill and B(EOS) should agree within a few GPa.
-- Report the C_ij with the symmetry, the strain range, whether internal
-  relaxation was on, the engine, and the run id. For an amorphous cell,
-  report E and nu as averages over at least two independent glasses and
-  state the spread.
+  the same engine. For a cubic crystal B = (C11 + 2 C12)/3 exactly, and
+  B_Hill and B(EOS) should agree within about 5%.
+- Expect about 5% numerical precision at converged settings and about
+  15% against experiment; PBE softens most constants, PBEsol less so.
+- Report the C_ij with the symmetry, the strain range, the fit spread,
+  whether internal relaxation was on, the engine, and the run id. For an
+  amorphous cell, report E and nu as averages over at least two
+  independent glasses and state the spread.
 
 ## When not to use this
 

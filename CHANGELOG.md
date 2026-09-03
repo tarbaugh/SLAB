@@ -5,6 +5,31 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- Every bundled skill was checked against the method literature and the
+  tool documentation, and fixed one commit per skill. Wrong as written:
+  the atomsk lattice name, `--merge`/`-cell` forms, and gap advice; the
+  equation-of-state range (linear factors, three times the Delta range
+  in volume) and its stiffness caveat; the surface-energy thickness rule
+  (a separate bulk energy drifts linearly); the adhesion wetting formula
+  (a vacuum work over a solid-liquid energy); the same-species g(r)
+  normalisation; the melt-quench "tail" (a ramp, not a hold) and rate
+  floor; the thermal ramp's per-cell latent heat and target-temperature
+  fit; the two-phase isotropic barostat; the NEMD fit through a
+  sawtooth; the CNT mean gamma; the gracemaker fine-tuning key and the
+  frame-level test split. Every script now reports an uncertainty where
+  one exists (block errors, fit covariances, bootstraps, replica
+  spreads), the MD templates sample under the isotropic
+  Martyna-Tobias-Klein integrator, and the skills state the numeric
+  conditions (tolerances, windows, thresholds, sizes) a reportable number
+  needs. New: `--quantity` on the convergence table, B' and residuals on
+  the EOS fit, Born margins and a fit spread on the elastic fit, the
+  interface energy and the solid-liquid wetting relation on adhesion,
+  beta and the Yeh-Hummer correction on the MSD, the coordination number
+  on the RDF, weighted Arrhenius with errors, MYEGA, and a windowed
+  melting crossing, hold-averaged densities with a log-rate law,
+  per-atom c_p with hysteresis, a folded NEMD fit with conductance, a
+  cluster-count gamma(T) with a rate mode, and an interface-velocity
+  script for coexistence runs.
 - `slab mason read` and `slab mason report` find the workspace the
   current directory is inside. Without `--workspace`, the resolution
   used to fall to the project's `./.slab`, so running the viewer from a

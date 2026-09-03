@@ -216,7 +216,7 @@ nucleation-cnt             built-in  analysis-expert md-expert    1 script(s)
 radial-distribution        built-in  analysis-expert md-expert    1 script(s)
 surface-energy             built-in  dft-expert                   0 script(s)
 thermal-response           built-in  analysis-expert md-expert    1 script(s)
-two-phase-melting          built-in  md-expert                    0 script(s)
+two-phase-melting          built-in  md-expert                    1 script(s)
 ```
 
 The catalog covers structure building (the atomsk skills: crystals and
@@ -249,7 +249,7 @@ nemd-transport             built-in  analysis-expert md-expert    1 script(s)
 nucleation-cnt             built-in  analysis-expert md-expert    1 script(s)
 radial-distribution        built-in  analysis-expert md-expert    1 script(s)
 thermal-response           built-in  analysis-expert md-expert    1 script(s)
-two-phase-melting          built-in  md-expert                    0 script(s)
+two-phase-melting          built-in  md-expert                    1 script(s)
 ```
 
 Skills load progressively. The system prompt carries one line per

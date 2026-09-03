@@ -15,15 +15,23 @@ from foundation import check
 from foundation.tasks import relax, single_point
 
 # The shakeout lattice constant is EMT's own equilibrium: the fit script
-# checks for a linear term, and a strained reference would trip it.
+# checks for a linear term, and a strained reference would trip it. For a
+# real engine, take STRUCTURE from relax_cell(..., fmax=0.005, smax=0.001):
+# the default smax of 0.005 eV/A^3 is 0.8 GPa of residual stress, more
+# than the linear-term warning allows.
 STRUCTURE = bulk("Cu", "fcc", a=3.5898, cubic=True)
 ENGINE = "emt"
-SYMMETRY = "cubic"  # "isotropic" | "cubic" | "orthorhombic"
+# "isotropic" (glasses; six modes averaged), "cubic", "hexagonal", or
+# "orthorhombic". Lower symmetries are not covered: their C14, C15, C16
+# terms would be lost silently.
+SYMMETRY = "cubic"
 DELTAS = [-0.015, -0.010, -0.005, 0.0, 0.005, 0.010, 0.015]
 # Materials with internal degrees of freedom (layered, molecular, ribboned
 # crystals) need the ions relaxed at each fixed strained cell; the plain
-# single-point ladder overstates their stiffness.
+# single-point ladder overstates their stiffness. Strain energies are a
+# few meV per cell, so the residual force must be far below the default.
 RELAX_INTERNAL = False
+RELAX_FMAX = 0.005
 
 PATTERNS = {
     "e1": (1, 0, 0, 0, 0, 0),
@@ -37,8 +45,9 @@ PATTERNS = {
     "e23": (0, 1, 1, 0, 0, 0),
 }
 MODES = {
-    "isotropic": ("e1", "e4"),
+    "isotropic": ("e1", "e2", "e3", "e4", "e5", "e6"),
     "cubic": ("e1", "e4", "e12"),
+    "hexagonal": ("e1", "e2", "e3", "e4", "e5", "e6", "e12", "e13", "e23"),
     "orthorhombic": ("e1", "e2", "e3", "e4", "e5", "e6", "e12", "e13", "e23"),
 }[SYMMETRY]
 
@@ -67,7 +76,7 @@ for mode in MODES:
         atoms = strained(STRUCTURE, PATTERNS[mode], delta)
         label = f"{mode}{delta:+.3f}"
         if RELAX_INTERNAL:
-            _, info = relax(atoms, engine=ENGINE, label=label)
+            _, info = relax(atoms, engine=ENGINE, fmax=RELAX_FMAX, label=label)
         else:
             _, info = single_point(atoms, engine=ENGINE, label=label)
         rows.append({"delta": delta, "energy": info["energy"]})
