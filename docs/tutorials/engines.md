@@ -820,7 +820,27 @@ root = "/scratch/me/rootstock-install"   # a local install: the path form
 
 Checkpoint ids then work as engine names with no per-call options. Because
 resolution tries the registry first, a maintainer's alias always beats a
-bare id. The explicit `engine="rootstock"` form remains for full control,
+bare id.
+
+A served worker inherits the environment of the process that spawns it.
+When the worker's stack needs something the host provides through
+modules, such as the CUDA toolkit for a MACE worker's torch build, put the
+lines in `setup`:
+
+```toml
+[engines.rootstock]
+root = "/scratch/me/rootstock-install"
+setup = ["module load cuda", "source ~/rootstock-env/bin/activate"]
+```
+
+SLAB runs the lines once in a login shell when it builds a rootstock
+calculator, applies the variables they add or change to its own process,
+and records them so that job submission restores the environment it
+started from. `slab doctor` runs the lines and reports how many variables
+they applied, so a setup that fails on this node fails in the doctor
+before it fails a campaign. The sandbox render snapshots the lines on the
+host, exactly as for the other engines, so the container sees what the
+setup did without a module system. The explicit `engine="rootstock"` form remains for full control,
 for example
 `calculator_options={"checkpoint": "uma:custom", "weights": ..., "cluster": "delta"}`
 with your own weights, and `relax` closes the worker subprocess when the

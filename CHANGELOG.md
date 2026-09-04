@@ -5,6 +5,16 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- `[engines.rootstock]` takes `setup` lines. They run once in a login
+  shell when a rootstock calculator is built, and the variables they add
+  or change are applied to the process before the worker is spawned, so
+  the worker inherits them; job submission still restores the environment
+  it started from. `slab doctor` runs the lines and counts what they
+  applied. The sandbox render snapshots them like the other engines'
+  setup, binding the interpreter the setup puts on PATH. One sandboxed
+  campaign found every MACE checkpoint dead of a torchvision import that
+  worked on the node, because the container had only the install root and
+  none of the CUDA environment the user's shell carried.
 - The review brief writes the scope a lead had to learn to write by hand.
   It says not to re-run the recorded lookups it carries, and a second
   review of the same subject in one session carries the prior findings and

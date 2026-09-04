@@ -108,6 +108,10 @@ schema_version = 1
 # cluster = "delta"                    # OR a site-maintained install rootstock
 #                                      # knows by name — this is rootstock's label,
 #                                      # nothing to do with [hpc] cluster below
+# setup = [                            # what a served worker's environment needs
+#   "module load cuda",                # from the host: run once when a rootstock
+#   "source ~/rootstock-env/bin/activate",  # calculator is built, applied to this
+# ]                                    # process, inherited by the worker
 
 [hpc]
 # cluster = "delta"                    # THIS SLURM cluster's name: run provenance and

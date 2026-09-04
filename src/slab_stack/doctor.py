@@ -170,6 +170,30 @@ def _mp_rows(slab_cfg: SlabConfig | None) -> tuple[list[tuple[str, str]], Path |
     )
 
 
+def _rootstock_setup_row(slab_cfg: SlabConfig | None) -> tuple[str, str] | None:
+    """The ``[engines.rootstock] setup`` lines run end to end, or nothing.
+
+    A served worker inherits what these lines produce, so running them is
+    the health check: a setup that exits non-zero on this node fails every
+    served checkpoint the same way. No setup configured means no row.
+    """
+    engines = getattr(slab_cfg, "engines", None)
+    rootstock = getattr(engines, "rootstock", None)
+    if rootstock is None or not rootstock.setup:
+        return None
+    from slab.backends import rootstock_setup_env
+
+    try:
+        env = rootstock_setup_env()
+    except _ERRORS as e:
+        return ("x", f"rootstock setup: {e}")
+    return (
+        "+",
+        f"rootstock setup: {len(rootstock.setup)} line(s) ran; "
+        f"{len(env)} variable(s) applied before a worker is spawned",
+    )
+
+
 def _gracemaker_row(slab_cfg: SlabConfig | None) -> tuple[str, str]:
     """The gracemaker trainer as one row.
 
@@ -398,6 +422,9 @@ def run(
     mp_rows, mp_root_path = _mp_rows(slab_cfg)
     rows.extend(mp_rows)
     rows.append(_gracemaker_row(slab_cfg))
+    setup_row = _rootstock_setup_row(slab_cfg)
+    if setup_row is not None:
+        rows.append(setup_row)
     failures = 0
     for mark, message in rows:
         emit(f"[{mark}] {message}")

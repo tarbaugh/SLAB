@@ -877,7 +877,16 @@ _BASE_IMAGE_LIBS = ("/lib", "/lib64", "/usr/lib", "/usr/lib64")
 
 #: What binary to resolve per engine or builder when the command does not
 #: name one.
-_DEFAULT_PAYLOAD = {"qe": "pw.x", "lammps": "lmp", "atomsk": "atomsk", "gracemaker": "gracemaker"}
+_DEFAULT_PAYLOAD = {
+    "qe": "pw.x",
+    "lammps": "lmp",
+    "atomsk": "atomsk",
+    "gracemaker": "gracemaker",
+    # Rootstock is reached in-process; its setup typically activates the
+    # environment that holds the client, so the interpreter it puts on PATH
+    # is the binary whose install and library closure must be bound.
+    "rootstock": "python",
+}
 
 #: The builders whose install must exist inside the container. ``mp`` is a
 #: data root, bound separately; these two are executables with their own
@@ -1201,11 +1210,12 @@ def snapshot_engines(slab_cfg: SlabConfig) -> dict[str, SetupSnapshot]:
     the command dies inside the container at its first token.
     """
     snapshots: dict[str, SetupSnapshot] = {}
-    for engine in ("qe", "lammps"):
+    for engine in ("qe", "lammps", "rootstock"):
         table = getattr(slab_cfg.engines, engine)
         if not table.setup:
             continue
-        tokens = shlex.split(table.command) if table.command else []
+        command = getattr(table, "command", None)
+        tokens = shlex.split(command) if command else []
         extras = tuple(t for t in tokens if t in ("mpirun", "mpiexec"))
         if engine == "qe" and getattr(table, "bin", None):
             # The bin form keeps pw.x off PATH on purpose; the setup lines
@@ -1217,7 +1227,7 @@ def snapshot_engines(slab_cfg: SlabConfig) -> dict[str, SetupSnapshot]:
             if not (Path(table.bin) / "mpirun").is_file():
                 extras = ("mpirun",)
         else:
-            payload = payload_name(engine, table.command)
+            payload = payload_name(engine, command)
         snapshots[engine] = snapshot_setup(engine, table.setup, payload, extras=extras)
     # Builders are executables too, and gracemaker's is a whole python
     # installation reached through setup lines the container cannot run.

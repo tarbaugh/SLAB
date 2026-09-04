@@ -66,6 +66,7 @@ import os
 import subprocess
 import tempfile
 import warnings
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 
@@ -366,7 +367,21 @@ def build_engine(name: str, spec: EngineSpec, **options: Any) -> Any:
         'EMT'
     """
     factory = _import_dotted(name, spec.calculator)
-    for key, value in spec.env.items():
+    apply_env(name, spec.env)
+    merged = {**spec.options, **options}
+    return factory(**merged)
+
+
+def apply_env(name: str, env: Mapping[str, str]) -> None:
+    """Apply *env* to this process for engine *name*, recorded for restoration.
+
+    Shared by registry entries (their declared ``env``) and the built-in
+    rootstock engine (the variables its ``setup`` lines produce). Every
+    change is recorded in :func:`applied_env`, so job submission hands
+    sbatch the environment as it was before any engine changed it, and a
+    variable slab's own resolution consults draws a warning.
+    """
+    for key, value in env.items():
         previous = os.environ.get(key)
         if key in _BUILTIN_STEERING_ENV and previous != value:
             was = f" (was {previous!r})" if previous is not None else ""
@@ -387,8 +402,6 @@ def build_engine(name: str, spec: EngineSpec, **options: Any) -> Any:
             original = _APPLIED_ENV.get(key, (previous, value))[0]
             _APPLIED_ENV[key] = (original, value)
         os.environ[key] = value
-    merged = {**spec.options, **options}
-    return factory(**merged)
 
 
 def verify_engines(registry: EngineRegistry) -> list[ProbeResult]:

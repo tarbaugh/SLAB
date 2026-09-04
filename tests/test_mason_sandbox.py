@@ -1667,3 +1667,31 @@ def test_launch_reuses_the_recorded_agent(
     result = runner.invoke(app, ["sandbox", "launch", "-w", str(tmp_path / "ws")])
     assert result.exit_code == 0, result.output
     assert "--agent planner" in str(submitted[0]["script"])
+
+
+def test_snapshot_engines_covers_a_rootstock_setup(tmp_path: Path) -> None:
+    """Rootstock is reached in-process, so its setup has no command to
+    resolve; the interpreter the setup puts on PATH stands in, and its
+    install is what the container must see. A real sandboxed campaign
+    found the MACE worker dead of a torchvision import that worked on the
+    node, because only the install root had been bound."""
+    from mason.sandbox import snapshot_engines
+
+    env_bin = tmp_path / "rs-env" / "bin"
+    env_bin.mkdir(parents=True)
+    python = env_bin / "python"
+    python.write_text("#!/bin/sh\n")
+    python.chmod(0o755)
+    cfg = _slab_cfg(
+        engines={
+            "rootstock": {
+                "root": str(tmp_path),
+                "setup": [f'export PATH="{env_bin}:$PATH"', "export CUDA_HOME=/opt/cuda"],
+            }
+        }
+    )
+    snapshots = snapshot_engines(cfg)
+    assert set(snapshots) == {"rootstock"}
+    assert snapshots["rootstock"].error is None
+    assert snapshots["rootstock"].payload == str(python)
+    assert "export CUDA_HOME=/opt/cuda" in snapshots["rootstock"].setup_lines()
