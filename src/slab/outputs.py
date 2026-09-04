@@ -49,6 +49,7 @@ def digest(name: str, text: str) -> str | None:
         atoms per frame: 1; species: Cu
         energy: present on 1 frame(s), -1.5 to -1.5
         forces: absent; lattice: present
+        spacing: n/a (no frame holds two atoms)
     """
     head = text[:_SNIFF_CHARS]
     if "Program PWSCF" in head:
@@ -438,4 +439,70 @@ def extxyz_digest(name: str, text: str) -> str:
         f"forces: {'present' if forces else 'absent'}; "
         f"lattice: {'present' if lattice else 'absent'}"
     )
+    if frames:
+        out.append(_spacing_line(text))
     return "\n".join(out)
+
+
+#: Pair distances are O(N^2) per frame; past this many pair evaluations the
+#: spacing check samples frames evenly instead of reading every one.
+_SPACING_PAIR_BUDGET = 50_000_000
+#: A pair closer than this fraction of the sum of covalent radii is flagged.
+_SPACING_SUSPECT_FRACTION = 0.6
+
+
+def _spacing_line(text: str) -> str:
+    """The closest pair of atoms in the file, with periodic images, and a flag.
+
+    A dataset with two atoms 0.3 Å apart trains a potential on a
+    configuration no engine could have labelled honestly; the number a
+    reader wants is the smallest distance anywhere in the file, which
+    frame it sits in, and whether it is short against the covalent radii.
+    Best-effort: a file ASE cannot parse yields a line saying so.
+    """
+    import io
+
+    import numpy as np
+    from ase.data import atomic_numbers, covalent_radii
+    from ase.io import read
+
+    try:
+        frames = read(io.StringIO(text), index=":", format="extxyz")
+    except Exception as e:
+        return f"spacing: not computed (ASE could not parse the file: {e})"
+    if not isinstance(frames, list):
+        frames = [frames]
+    pairs = sum(len(a) * (len(a) - 1) // 2 for a in frames)
+    step = max(1, -(-pairs // _SPACING_PAIR_BUDGET))
+    sampled = frames[::step]
+    best: tuple[float, int, str, str] | None = None
+    nearest: list[float] = []
+    for index, atoms in enumerate(frames):
+        if index % step or len(atoms) < 2:
+            continue
+        distances = np.asarray(
+            atoms.get_all_distances(mic=bool(atoms.pbc.any()))  # type: ignore[no-untyped-call]
+        )
+        np.fill_diagonal(distances, np.inf)
+        nearest.append(float(distances.min(axis=1).mean()))
+        i, j = np.unravel_index(int(distances.argmin()), distances.shape)
+        d = float(distances[i, j])
+        if best is None or d < best[0]:
+            best = (d, index, atoms[i].symbol, atoms[j].symbol)
+    if best is None:
+        return "spacing: n/a (no frame holds two atoms)"
+    d, index, a, b = best
+    radii = covalent_radii[atomic_numbers[a]] + covalent_radii[atomic_numbers[b]]
+    verdict = (
+        f"SUSPECT: under {_SPACING_SUSPECT_FRACTION:.0%} of the covalent-radii sum {radii:.2f} Å"
+        if d < _SPACING_SUSPECT_FRACTION * radii
+        else f"plausible against the covalent-radii sum {radii:.2f} Å"
+    )
+    if step == 1:
+        scope = f"all {len(frames)} frames"
+    else:
+        scope = f"{len(sampled)} of {len(frames)} frames sampled"
+    return (
+        f"spacing: closest pair {d:.3f} Å ({a}-{b}, frame {index}), {verdict}; "
+        f"mean nearest-neighbour distance {sum(nearest) / len(nearest):.3f} Å over {scope}"
+    )

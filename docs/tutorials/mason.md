@@ -297,7 +297,7 @@ more than model choice.
 
 | tool | contract |
 |---|---|
-| `read_file` | line-numbered, windowed; refuses binary; a file must be read before it may be edited. A recognised engine output (a pw.x `.pwo`, a LAMMPS log, an extended XYZ file) comes back as a digest first: the system, the SCF trace, the final numbers, the warnings, and whether the job finished. `raw=true`, or `offset`/`limit`, reads the text |
+| `read_file` | line-numbered, windowed; refuses binary; a file must be read before it may be edited. A recognised engine output (a pw.x `.pwo`, a LAMMPS log, an extended XYZ file) comes back as a digest first: the system, the SCF trace, the final numbers, the warnings, and whether the job finished; a dataset also reports its closest interatomic pair against the covalent radii. `raw=true`, or `offset`/`limit`, reads the text |
 | `write_file` / `edit_file` | edit is exact-string replacement, unique match or `replace_all`; Python files get an immediate syntax check after every write |
 | `list_dir`, `search` | listing and recursive regex search, output-capped |
 | `shell` | one command, merged output + exit code, timeout-capped; the timeout kills the whole process group, so nothing backgrounded survives it; **not** for long calculations |
