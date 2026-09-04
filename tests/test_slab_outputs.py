@@ -126,7 +126,30 @@ def test_extxyz_digest_counts_frames_and_labels(tmp_path: Path) -> None:
     assert "atoms per frame: 2; species: Cu" in shown
     assert "energy: present on 3 frame(s)" in shown
     assert "forces: present; lattice: present" in shown
+    # fcc nearest neighbour is a/sqrt(2): 3.5/1.41421 = 2.475 Å, through the periodic images
+    assert "spacing: closest pair 2.475 Å (Cu-Cu, frame 0), plausible" in shown
+    assert "covalent-radii sum 2.64 Å" in shown
+    assert "over all 3 frames" in shown
     assert digest("cu.extxyz", text) == shown
+
+
+def test_extxyz_digest_flags_an_unphysical_pair(tmp_path: Path) -> None:
+    """A training set with two atoms 0.4 Å apart cannot have been labelled
+    honestly; the digest names the pair and the frame before anyone fits to it."""
+    good = bulk("Cu", "fcc", a=3.6) * (2, 2, 2)
+    bad = good.copy()
+    bad.positions[1] = bad.positions[0] + (0.4, 0.0, 0.0)
+    path = tmp_path / "set.extxyz"
+    write(path, [good, bad, good], format="extxyz")
+    shown = extxyz_digest("set.extxyz", path.read_text())
+    assert "spacing: closest pair 0.400 Å (Cu-Cu, frame 1), SUSPECT: under 60% of" in shown
+    assert "mean nearest-neighbour distance" in shown
+
+
+def test_extxyz_digest_survives_a_file_ase_rejects() -> None:
+    text = "2\nLattice=\"3 0 0 0 3 0 0 0 3\" Properties=species:S:1:pos:R:3\nCu 0 0 0\nCu 1.5 x 0\n"
+    shown = extxyz_digest("odd.extxyz", text)
+    assert "spacing: not computed (ASE could not parse the file" in shown
 
 
 def test_digest_declines_what_it_does_not_recognise() -> None:

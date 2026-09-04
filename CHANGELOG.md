@@ -5,6 +5,10 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- The extended XYZ digest reports the closest pair of atoms in the file,
+  through the periodic images, with its frame and species, a flag when it
+  is under 60 % of the covalent-radii sum, and the mean nearest-neighbour
+  distance. Large files are sampled evenly to bound the pair count.
 - The compaction brief asks for evidence behind every failure it records,
   and keeps a reading the agent revised or retracted under OPEN with both
   readings. One summary recorded a misreading of a pw.x output as a
