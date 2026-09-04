@@ -5,6 +5,20 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- Engine outputs come back digested. `read_file` and `read_artifact` return a
+  digest of a pw.x output, a LAMMPS log, or an extended XYZ file: the
+  system, the SCF trace with its convergence line, the final energy, the
+  largest force, the pressure, the warnings, the error block, the wall
+  time, and whether the job finished. Band eigenvalue lists never appear.
+  `raw=true`, or a window, reads the text as before. The parsers live in
+  `slab.outputs` and are tested on the real captures under `tests/data`.
+  One session read a 305 KB pw.x output in 400-line windows, took a band
+  block in eV for a diverging SCF energy in Ry, and compacted six times in
+  sixteen minutes arguing with itself about it.
+- The workflow script is kept as the run's `input` artifact under its own
+  name, so `show_run` lists it and `read_artifact` reads it. One lead
+  searched the project, the workspace, and scratch for a script the run
+  record could have shown.
 - `[engines.rootstock]` takes `setup` lines. They run once in a login
   shell when a rootstock calculator is built, and the variables they add
   or change are applied to the process before the worker is spawned, so

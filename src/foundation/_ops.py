@@ -29,7 +29,7 @@ from foundation.errors import (
     StorageError,
 )
 from foundation.lifecycle import ExecutionStatus, LifecycleState
-from foundation.models import Run
+from foundation.models import ArtifactRole, Run
 from foundation.retention import DEFAULT_POLICY, RetentionPolicy
 from foundation.runtime import Workspace
 
@@ -406,6 +406,11 @@ def launch_script(
                     name=name or script_path.stem, intent=intent, session=session
                 ) as active:
                     run_id = active.id
+                    # The script is the run's recompute root and its own
+                    # best explanation. Kept by name, so show_run lists it
+                    # and read_artifact reads it: one real lead searched
+                    # three filesystems for a script the run record held.
+                    active.keep(script_path.name, script_path, role=ArtifactRole.INPUT)
                     _execute_script(script_path)
         except NestedRunError:
             raise FoundationError(
