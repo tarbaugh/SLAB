@@ -92,6 +92,7 @@ from typing import Any, Protocol
 from slab.engines import (
     EngineRegistry,
     applied_env,
+    apply_env,
     build_engine,
     load_registry,
     registry_engine_names,
@@ -2066,6 +2067,87 @@ def _with_rootstock_defaults(options: dict[str, Any]) -> dict[str, Any]:
     return options
 
 
+#: Variables a login shell changes on its own; never part of a setup's effect.
+_SETUP_ENV_NOISE = frozenset({"PWD", "OLDPWD", "SHLVL", "_", "PS1", "PS2", "PROMPT_COMMAND"})
+_SETUP_ENV_TIMEOUT_S = 120.0
+
+
+@functools.lru_cache(maxsize=16)
+def _setup_environment(setup: tuple[str, ...]) -> dict[str, str]:
+    """The variables *setup* adds or changes, from one login-shell run.
+
+    Rootstock is reached in-process, so its setup cannot wrap a subprocess
+    the way the QE and LAMMPS wrappers do. Instead the lines run once and
+    their environment delta is applied to this process, which the worker
+    then inherits. Memoized per setup tuple: a session builds many
+    calculators, and module loads are slow.
+
+    Raises:
+        EngineNotAvailableError: The setup exited non-zero or timed out.
+    """
+    import subprocess
+
+    with tempfile.TemporaryDirectory(prefix="slab-rootstock-setup-") as scratch:
+        before = Path(scratch) / "before"
+        after = Path(scratch) / "after"
+        script = "\n".join(
+            [
+                f"env -0 > {shlex.quote(str(before))}",
+                "set -e",
+                *setup,
+                f"env -0 > {shlex.quote(str(after))}",
+            ]
+        )
+        try:
+            completed = subprocess.run(
+                ["/bin/bash", "-l", "-c", script],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=_SETUP_ENV_TIMEOUT_S,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise EngineNotAvailableError(
+                f"[engines.rootstock] setup did not finish within "
+                f"{_SETUP_ENV_TIMEOUT_S:.0f}s"
+            ) from e
+        if completed.returncode != 0 or not after.exists():
+            tail = " | ".join(completed.stderr.strip().splitlines()[-3:])
+            detail = f": {tail}" if tail else ""
+            raise EngineNotAvailableError(
+                f"[engines.rootstock] setup exited {completed.returncode}{detail}"
+            )
+        was = _env_entries(before.read_bytes())
+        now = _env_entries(after.read_bytes())
+    return {key: value for key, value in now.items() if was.get(key) != value}
+
+
+def _env_entries(raw: bytes) -> dict[str, str]:
+    entries: dict[str, str] = {}
+    for chunk in raw.split(b"\0"):
+        if not chunk:
+            continue
+        key, _sep, value = chunk.decode("utf-8", errors="replace").partition("=")
+        if key in _SETUP_ENV_NOISE or key.startswith("BASH_FUNC_"):
+            continue
+        entries[key] = value
+    return entries
+
+
+def rootstock_setup_env(setup: tuple[str, ...] | None = None) -> dict[str, str]:
+    """The environment ``[engines.rootstock] setup`` produces, or empty.
+
+    *setup* overrides the configured lines (a per-call ``setup`` option).
+    The doctor calls this to prove the lines run; the calculator builder
+    calls it to apply them.
+    """
+    lines = _engine_setup(setup, "rootstock")
+    if not lines:
+        return {}
+    return dict(_setup_environment(lines))
+
+
 def _rootstock_calculator(**options: Any) -> Any:
     try:
         from rootstock import RootstockCalculator
@@ -2078,6 +2160,14 @@ def _rootstock_calculator(**options: Any) -> Any:
             "engine 'rootstock' requires a checkpoint id, e.g. "
             "calculator_options={'checkpoint': 'mace-mp-0-medium', 'cluster': 'delta'}"
         )
+    # The worker inherits this process's environment, so the setup lines
+    # must have acted before the calculator spawns it. A real cluster's MACE
+    # worker died importing torchvision inside the sandbox container, where
+    # nothing had run the CUDA module the user's own shell had loaded.
+    setup = options.pop("setup", None)
+    env = rootstock_setup_env(tuple(setup) if isinstance(setup, list | tuple) else setup)
+    if env:
+        apply_env("rootstock", env)
     return RootstockCalculator(**_with_rootstock_defaults(options))
 
 

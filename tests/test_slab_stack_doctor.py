@@ -279,3 +279,28 @@ def test_the_doctor_notes_effort_that_does_not_reach_the_agents_that_run(tmp_pat
         {"agent": {"model": "m", "effort": "medium", "roster": {"worker": {"effort": "none"}}}}
     ).agent
     assert effort_notes(dialed, roster) == []
+
+
+def test_doctor_runs_the_rootstock_setup_lines(project: Path) -> None:
+    """A served worker inherits what [engines.rootstock] setup produces, so
+    the doctor runs the lines: a setup that fails here fails every served
+    checkpoint the same way, and the row must say so before a campaign
+    discovers it at 03:00."""
+    from slab.backends import _setup_environment
+
+    _setup_environment.cache_clear()
+    (project / "slab.toml").write_text(
+        '[agent]\nmodel = "m"\n[hpc]\ndefault_partition = "cpu"\n[hpc.partitions.cpu]\n'
+        f'[engines.rootstock]\nroot = "{project}"\n'
+        'setup = ["export SLAB_DOCTOR_PROBE_A=1", "export SLAB_DOCTOR_PROBE_B=2"]\n'
+    )
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert "[+] rootstock setup: 2 line(s) ran; 2 variable(s) applied" in result.output
+
+    (project / "slab.toml").write_text(
+        '[agent]\nmodel = "m"\n[hpc]\ndefault_partition = "cpu"\n[hpc.partitions.cpu]\n'
+        f'[engines.rootstock]\nroot = "{project}"\nsetup = ["module load no-such-thing"]\n'
+    )
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert "[x] rootstock setup: [engines.rootstock] setup exited" in result.output
+    assert result.exit_code != 0

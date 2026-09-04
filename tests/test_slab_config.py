@@ -576,3 +576,17 @@ def test_qe_bin_and_command_are_exclusive() -> None:
         QeEngineConfig(command="mpirun -np 1 /x/pw.x", bin="/x")
     assert QeEngineConfig(bin="/shared/qe/bin").bin == "/shared/qe/bin"
     assert QeEngineConfig(command="pw.x").bin is None
+
+
+def test_rootstock_setup_lines_are_kept_verbatim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """[engines.rootstock] setup is shell for the node that spawns the worker,
+    like the other engines' setup lines; nothing is expanded at load."""
+    (tmp_path / "slab.toml").write_text(
+        '[engines.rootstock]\nroot = "/opt/rootstock"\n'
+        'setup = ["module load cuda", "source $HOME/rs/bin/activate"]\n'
+    )
+    monkeypatch.chdir(tmp_path)
+    config = load_config(tmp_path)
+    assert config.engines.rootstock.setup == ("module load cuda", "source $HOME/rs/bin/activate")

@@ -189,12 +189,23 @@ class RootstockEngineConfig(BaseModel):
     The install location deliberately never enters cache identity:
     rootstock's contract is that canonical checkpoint ids are stable
     identities wherever they are served from.
+
+    ``setup`` lines (module loads, an environment activation, exports) run
+    once in a login shell when a rootstock calculator is built, and the
+    variables they add or change are applied to this process before the
+    worker is spawned, so the worker inherits them. Rootstock's own
+    environments are self-contained python installs, but a MACE worker's
+    torch stack still needs the CUDA toolkit or a compiler runtime the
+    host provides through modules. The sandbox render runs the lines on
+    the host and freezes what they did, exactly as for the other engines.
+    Shell for the node that runs the engine; nothing is expanded at load.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     root: ExpandedPath | None = None
     cluster: str | None = None
+    setup: tuple[str, ...] = ()
 
 
 class EnginesConfig(BaseModel):
@@ -781,6 +792,10 @@ schema_version = 1
 # cluster = "delta"                    # OR a site-maintained install rootstock
 #                                      # knows by name — this is rootstock's label,
 #                                      # nothing to do with [hpc] cluster below
+# setup = [                            # what a served worker's environment needs
+#   "module load cuda",                # from the host: run once when a rootstock
+#   "source ~/rootstock-env/bin/activate",  # calculator is built, applied to this
+# ]                                    # process, inherited by the worker
 
 [hpc]
 # cluster = "delta"                    # THIS SLURM cluster's name: run provenance and

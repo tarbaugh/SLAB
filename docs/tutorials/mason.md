@@ -513,7 +513,10 @@ job before the first turn.
 The render derives the bind mounts from the configuration it already has:
 the project directory and the workspace read-write, the scratch root
 read-write, the pseudopotential root, the engine registry, the rootstock
-install, and the Python environment read-only. `[agent.sandbox]` holds
+install, and the Python environment read-only. Every `setup` an engine or
+a builder declares, `[engines.rootstock]` included, runs once on the host
+at render time, and what it did becomes binds and `export` lines in the
+rendered config. `[agent.sandbox]` holds
 only what derivation cannot see: the container `image`, and extra `binds`
 for engine installs and their library closures (run `ldd` on the engine
 binary to find them). Because everything specific to a machine comes from
