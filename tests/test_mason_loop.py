@@ -278,6 +278,13 @@ def test_compaction_folds_history_and_writes_the_per_session_file(tmp_path: Path
     )
     # And the summarizer was called without tools:
     assert client.requests[5][1] is None
+    # The summarizer's brief asks for evidence behind every failure and
+    # keeps a retracted reading under OPEN: one real summary recorded the
+    # agent's misreading of a .pwo as a failure, and the next six passes
+    # argued with the summary instead of re-reading the file.
+    brief = str(client.requests[5][0][0]["content"])
+    assert "A failure needs evidence behind it" in brief
+    assert "carry it under OPEN" in brief
 
 
 def test_context_overflow_from_server_forces_compaction(tmp_path: Path) -> None:

@@ -692,7 +692,12 @@ layers, cheapest first.
 3. **Compaction.** When the conversation still approaches the budget
    (`compact_at` × `context_window`, default 70%), the middle of the
    history is folded into a structured summary of state, verified
-   results, failures observed, decisions, and open questions. The system
+   results, failures observed, decisions, and open questions. A failure
+   in the summary needs evidence behind it, such as a run id, a check, or
+   an error text. A reading the agent revised or retracted goes under
+   open questions with both readings, because one summary that recorded a
+   misreading as a failure made the next pass argue with it for six
+   compactions. The system
    context is rebuilt fresh so the current plan and notebook re-enter
    updated. A context-overflow answer from the server forces the same
    compaction immediately.

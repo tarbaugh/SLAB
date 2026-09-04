@@ -255,8 +255,12 @@ OPEN: the immediate next steps and unresolved questions.
 
 Do not invent anything not in the transcript. Do not soften failures. Keep \
 FAILURES OBSERVED to one line per failure: what failed, and what must not be \
-repeated. Do not carry a dead end's working state forward. The whole summary \
-fits in about 1500 words.
+repeated. A failure needs evidence behind it: a run id, a check name, a failure \
+record, or an error text. A reading of a file the agent itself later revised, \
+or a claim it retracted, is not a failure and not a result; carry it under OPEN \
+as unresolved, with both readings, so the next pass re-checks the evidence \
+instead of arguing with this summary. Do not carry a dead end's working state \
+forward. The whole summary fits in about 1500 words.
 """
 
 

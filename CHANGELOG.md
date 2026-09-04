@@ -5,6 +5,11 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- The compaction brief asks for evidence behind every failure it records,
+  and keeps a reading the agent revised or retracted under OPEN with both
+  readings. One summary recorded a misreading of a pw.x output as a
+  failure, and the next six compactions carried the argument instead of
+  the file.
 - Engine outputs come back digested. `read_file` and `read_artifact` return a
   digest of a pw.x output, a LAMMPS log, or an extended XYZ file: the
   system, the SCF trace with its convergence line, the final energy, the
