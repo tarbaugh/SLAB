@@ -828,6 +828,9 @@ def _add_file_tools(
             return f"{path} looks binary ({len(raw)} bytes); read_file only reads text"
         text = raw.decode("utf-8", errors="replace")
         lines = text.splitlines()
+        if digested := _digest_unless_raw(arguments, path.name, text, len(lines)):
+            session.read_files.add(path)
+            return digested
         window = lines[max(offset - 1, 0) : max(offset - 1, 0) + limit]
         numbered = []
         for i, line in enumerate(window, start=max(offset, 1)):
@@ -847,13 +850,21 @@ def _add_file_tools(
             name="read_file",
             description=(
                 "Read a text file with line numbers. Use offset/limit to window "
-                "large files. You must read a file before you may edit it."
+                "large files. You must read a file before you may edit it. A "
+                "recognised engine output (a pw.x .pwo, a LAMMPS log, an extended "
+                "XYZ file) comes back as a digest first: system, convergence trace, "
+                "final numbers, warnings, and whether the job finished. Pass "
+                "raw=true, or offset/limit, to read the text itself."
             ),
             parameters=_schema(
                 {
                     "path": {"type": "string"},
                     "offset": {"type": "integer", "description": "1-based first line"},
                     "limit": {"type": "integer"},
+                    "raw": {
+                        "type": "boolean",
+                        "description": "the text itself, not the digest of an engine output",
+                    },
                 },
                 ["path"],
             ),
@@ -1290,7 +1301,10 @@ def _add_workflow_tools(
         )
         if b"\x00" in raw[:8192]:
             return f"{head}\nlooks binary; read_artifact only reads text"
-        lines = raw.decode("utf-8", errors="replace").splitlines()
+        text = raw.decode("utf-8", errors="replace")
+        lines = text.splitlines()
+        if digested := _digest_unless_raw(arguments, artifact["name"], text, len(lines)):
+            return f"{head}\n{digested}"
         window = lines[offset - 1 : offset - 1 + limit]
         numbered = []
         for i, line in enumerate(window, start=offset):
@@ -1337,11 +1351,14 @@ def _add_workflow_tools(
         Tool(
             name="read_artifact",
             description=(
-                "Read one of a run's artifacts as text, line-numbered and windowed like "
-                "read_file (offset, limit). name is the artifact's name from show_run "
+                "Read one of a run's artifacts. name is the artifact's name from show_run "
                 "(or a hash prefix); run_id as for show_run. This is how to read an "
                 "engine's output file (a .pwo, a LAMMPS log) after the run: the store "
-                "is content-addressed, so do not go looking for the path by hand."
+                "is content-addressed, so do not go looking for the path by hand. A "
+                "recognised engine output comes back as a digest first: system, "
+                "convergence trace, final numbers, warnings, and whether the job "
+                "finished. Pass raw=true, or offset/limit, for the line-numbered text "
+                "itself, windowed like read_file."
             ),
             parameters=_schema(
                 {
@@ -1349,6 +1366,10 @@ def _add_workflow_tools(
                     "name": {"type": "string"},
                     "offset": {"type": "integer", "description": "first line, 1-based"},
                     "limit": {"type": "integer", "description": "lines to show (default 400)"},
+                    "raw": {
+                        "type": "boolean",
+                        "description": "the text itself, not the digest of an engine output",
+                    },
                 },
                 ["run_id", "name"],
             ),
@@ -1936,6 +1957,26 @@ def _run_child(
             steps=child.steps_taken,
         )
     return result, child_session
+
+
+def _digest_unless_raw(arguments: dict[str, Any], name: str, text: str, n_lines: int) -> str | None:
+    """The digest of an engine output, unless the caller asked for the text.
+
+    A window (``offset`` or ``limit``) or ``raw=true`` is a request for the
+    text. Anything the digest module does not recognise returns ``None``,
+    and the caller shows the text as it always did. One real session read
+    a 305 KB pw.x output in 400-line windows, mistook a block of band
+    eigenvalues in eV for a diverging SCF energy in Ry, and compacted six
+    times in sixteen minutes arguing with itself about it.
+    """
+    if arguments.get("raw") or "offset" in arguments or "limit" in arguments:
+        return None
+    from slab.outputs import digest
+
+    digested = digest(name, text)
+    if digested is None:
+        return None
+    return f"{digested}\n[digest of {n_lines} lines; pass raw=true, or offset/limit, for the text]"
 
 
 def _harness_footer(name: str, result: Any, child_session: MasonSession) -> str:

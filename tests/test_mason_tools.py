@@ -90,7 +90,7 @@ def test_specs_and_catalog_render_every_tool(box: Toolbox) -> None:
     names = {spec["function"]["name"] for spec in specs}
     assert {"read_file", "edit_file", "shell", "launch_workflow", "finish"} <= names
     catalog = box.catalog_text()
-    assert "- read_file(path: string, offset?: integer, limit?: integer)" in catalog
+    assert "- read_file(path: string, offset?: integer, limit?: integer, raw?: boolean)" in catalog
 
 
 # -- file primitives ---------------------------------------------------------
@@ -1079,3 +1079,69 @@ def test_background_launches_write_their_log_line_by_line(
     assert "pid 4242" in answer
     env = seen["env"]
     assert isinstance(env, dict) and env["PYTHONUNBUFFERED"] == "1"
+
+
+# -- digests of engine outputs -------------------------------------------------
+
+_PWO = Path(__file__).parent / "data" / "qe-si-relax-final.pwo"
+
+
+def test_read_file_digests_an_engine_output_unless_asked_for_the_text(
+    box: Toolbox, tmp_path: Path
+) -> None:
+    """A real session read a 305 KB pw.x output in 400-line windows and took
+    a band-eigenvalue block for a diverging SCF energy. The digest comes
+    first; the text is one argument away."""
+    target = tmp_path / "si.pwo"
+    target.write_text(_PWO.read_text())
+    shown = box.dispatch(_call("read_file", path="si.pwo"))
+    assert shown.startswith(
+        "pw.x output digest: si.pwo (248 lines, PWSCF v.7.4.1, finished: JOB DONE)"
+    )
+    assert "final ! -15.64003672 Ry" in shown
+    assert shown.endswith("[digest of 248 lines; pass raw=true, or offset/limit, for the text]")
+    assert "\n     1\t" not in shown
+    raw = box.dispatch(_call("read_file", path="si.pwo", raw=True))
+    assert "\n     2\t     Program PWSCF v.7.4.1 starts on" in raw and "digest" not in raw
+    windowed = box.dispatch(_call("read_file", path="si.pwo", offset=183, limit=1))
+    assert windowed.startswith("   183\t!    total energy")
+    plain = box.dispatch(_call("read_file", path="wf.py")) if (tmp_path / "wf.py").exists() else ""
+    assert "digest" not in plain
+
+
+def test_read_artifact_digests_a_kept_engine_output(box: Toolbox, tmp_path: Path) -> None:
+    (tmp_path / "si.pwo").write_text(_PWO.read_text())
+    (tmp_path / "keep.py").write_text(
+        "from pathlib import Path\nfrom foundation import current_run\n"
+        f"current_run().keep('si.pwo', Path({str(tmp_path / 'si.pwo')!r}))\n"
+    )
+    launched = box.dispatch(_call("launch_workflow", script="keep.py", intent="digest"))
+    run_id = launched.split()[1].rstrip(":")
+
+    def read(**arguments: object) -> str:
+        call = ToolCall(id="ra", name="read_artifact", arguments=arguments, arguments_raw="{}")
+        return box.dispatch(call)
+
+    shown = read(run_id=run_id, name="si.pwo")
+    assert shown.startswith("si.pwo (")
+    assert "\npw.x output digest: si.pwo (248 lines" in shown
+    assert "converged in 4 iterations" in shown
+    raw = read(run_id=run_id, name="si.pwo", raw=True)
+    assert "\n     2\t     Program PWSCF" in raw
+    assert "[artifact has 248 lines; showing 1-248]" not in raw  # the whole file fit the window
+
+
+def test_the_workflow_script_is_kept_as_the_runs_input_artifact(
+    box: Toolbox, tmp_path: Path
+) -> None:
+    """One real lead searched the project, the workspace, and scratch for the
+    script behind a run; the run record now holds it by name."""
+    (tmp_path / "wf.py").write_text(_RELAX_SCRIPT)
+    launched = box.dispatch(_call("launch_workflow", script="wf.py", intent="script kept"))
+    run_id = launched.split()[1].rstrip(":")
+    record = json.loads(box.dispatch(_call("show_run", run_id=run_id)))
+    scripts = [a for a in record["artifacts"] if a["name"] == "wf.py"]
+    assert scripts and scripts[0]["role"] == "input"
+    arguments = {"run_id": run_id, "name": "wf.py"}
+    call = ToolCall(id="ra", name="read_artifact", arguments=arguments, arguments_raw="{}")
+    assert "relax(atoms, engine='emt'" in box.dispatch(call)
