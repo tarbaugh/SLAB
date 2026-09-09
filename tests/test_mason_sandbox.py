@@ -1651,6 +1651,37 @@ def test_render_names_the_entry_agent(tmp_path: Path, monkeypatch: pytest.Monkey
     assert "no agent named 'plannr'" in result.output
 
 
+def test_render_names_the_condition_and_its_ablations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _minimal_project(tmp_path)
+    result = runner.invoke(
+        app,
+        ["sandbox", "render", "measure a0", "-w", str(tmp_path / "ws"), "--condition", "slab",
+         "--without", "budget-hint", "--without", "skills"],
+    )
+    assert result.exit_code == 0, result.output
+    script = (tmp_path / "sandbox" / "mason-sandbox.sbatch").read_text()
+    assert "mason run --auto --condition slab --without budget-hint --without skills" in script
+    record = json.loads((tmp_path / "sandbox" / "render.json").read_text())
+    assert record["condition"] == "slab" and record["without"] == ["budget-hint", "skills"]
+    # A condition's card is validated like --agent; an unknown switch fails on the host.
+    result = runner.invoke(
+        app,
+        ["sandbox", "render", "measure a0", "-w", str(tmp_path / "ws"), "--without", "budget"],
+    )
+    assert result.exit_code != 0 and "no mechanism named 'budget'" in result.output
+    # Without a goal, launch reuses the recorded condition and ablations.
+    submitted: list[dict[str, object]] = []
+    _fake_launch_plumbing(monkeypatch, submitted)
+    result = runner.invoke(app, ["sandbox", "launch", "-w", str(tmp_path / "ws")])
+    assert result.exit_code == 0, result.output
+    assert "--condition slab --without budget-hint --without skills" in str(
+        submitted[0]["script"]
+    )
+
+
 def test_launch_reuses_the_recorded_agent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

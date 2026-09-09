@@ -823,7 +823,7 @@ def ledger(
     from slab_stack.benchmark import latest_by_cell
 
     rows: list[dict[str, Any]] = []
-    for (model, machine, key), record in latest_by_cell(records).items():
+    for (model, machine, harness, key), record in latest_by_cell(records).items():
         for flag in flags_of(record):
             rows.append(
                 {
@@ -834,10 +834,13 @@ def ledger(
                     "key": key,
                     "model": model,
                     "machine": machine,
+                    "harness": harness,
                     "session": record.get("session"),
                 }
             )
-    rows.sort(key=lambda r: (r["target"], r["rule"], r["key"], r["model"], r["machine"]))
+    rows.sort(
+        key=lambda r: (r["target"], r["rule"], r["key"], r["model"], r["machine"], r["harness"])
+    )
     return rows
 
 

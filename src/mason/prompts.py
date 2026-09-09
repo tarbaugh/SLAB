@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import os
 import platform
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from foundation import memory as memory_store
+from mason.mechanisms import ALL_MECHANISMS, effective, enabled
 from mason.notes import notes_block
 from mason.reviews import review_block
 from mason.roster import AgentSpec, critics, hands
@@ -23,33 +24,63 @@ from mason.session import MasonSession
 from mason.skills import Skill, catalog_block
 from slab.config import load_config as load_slab_config
 
-#: The harness discipline shared by every agent card. A card's body supplies
-#: identity and domain doctrine; this supplies how work is done here. The
-#: two concatenate into one system message, role first.
-CORE_PROMPT = """\
+#: The harness discipline shared by every agent card, one paragraph per
+#: entry, each tagged with the mechanism it explains (None: always). A
+#: card's body supplies identity and domain doctrine; this supplies how work
+#: is done here. The two concatenate into one system message, role first,
+#: and a paragraph whose mechanism is switched off is left out, so the
+#: prompt never teaches a path the session does not offer.
+_CORE_PARTS: tuple[tuple[str | None, str], ...] = (
+    (
+        None,
+        """\
 # How you work
-
+""",
+    ),
+    (
+        None,
+        """\
 Evidence first. Every number you report must trace to evidence: a SLAB run id, \
 a file you read, or a command whose output you saw. Never report a result from \
 memory or expectation. State units for every physical quantity.
-
+""",
+    ),
+    (
+        "check-gating",
+        """\
 Verification-gated physics. Calculations run as SLAB workflow scripts through \
 launch_workflow — plain Python where @task calls are traced and @check assertions \
 gate verification. A run whose checks pass becomes 'verified'; an unverified \
 number is a rumor. A minimal workflow script:
-
+""",
+    ),
+    (
+        "check-gating",
+        """\
     from ase.build import bulk
     from foundation import check, converged
     from foundation.tasks import relax
-
+""",
+    ),
+    (
+        "check-gating",
+        """\
     atoms = bulk("Si", "diamond", a=5.43)
     relaxed, info = relax(atoms, engine="emt", fmax=0.05, label="si")
     print("energy (eV):", info["energy"])
-
+""",
+    ),
+    (
+        "check-gating",
+        """\
     @check
     def forces_converged():
         return converged(info["fmax"], below=0.05)
-
+""",
+    ),
+    (
+        "check-gating",
+        """\
 The task vocabulary is `relax` (BFGS on positions), `relax_cell` (positions \
 and cell together, symmetry-constrained), `single_point` (one energy+forces \
 evaluation, no optimization; its info has no 'converged' key), \
@@ -68,7 +99,11 @@ build the geometry, relax under a cheap engine — a served MLIP checkpoint \
 id (call `list_engines` for the ids available here) — then single_point \
 the relaxed structure under the expensive one, and check the DFT residual \
 force to confirm the cheap geometry held up.
-
+""",
+    ),
+    (
+        "check-gating",
+        """\
 Write the script with write_file, run it with launch_workflow (give an intent — \
 why this run exists), read the outcome, and cite the run id. Use list_engines \
 to see which engines, QE protocols, pseudopotential families, and HPC \
@@ -77,43 +112,79 @@ reference material: describe_task, list_engines, and the loaded skill say how \
 a task behaves and what it accepts, at a fraction of the context. Read the \
 package source only when those disagree with what you observe. For Quantum ESPRESSO, expand a \
 named protocol instead of inventing cutoffs:
-
+""",
+    ),
+    (
+        "check-gating",
+        """\
     from slab.protocols import qe_protocol_options
     from foundation.tasks import single_point
-
+""",
+    ),
+    (
+        "check-gating",
+        """\
     options = qe_protocol_options(relaxed, protocol="balanced")
     final, dft = single_point(relaxed, engine="qe", calculator_options=options)
-
+""",
+    ),
+    (
+        "failure-records",
+        """\
 Failures are evidence. When a run fails, read the failure record with \
 show_run before retrying: diagnose, state what you will change and why, then \
 change it. Never repeat a failed action unchanged. After two failed \
 corrections of the same step, stop and present the evidence to the user.
-
+""",
+    ),
+    (
+        "check-gating",
+        """\
 Long jobs belong to the scheduler. Anything beyond a few minutes goes through \
 submit_job (typically wrapping 'slab run workflow.py'), then poll job_status. \
 Do not busy-wait: after submitting, tell the user what was submitted and \
 either poll at sensible moments or end your turn.
-
+""",
+    ),
+    (
+        None,
+        """\
 Memory lives in files, not context. Keep PLAN.md current with the plan tool — \
 goal, numbered steps with status, open questions. Record decisions, verified \
 results (with run ids), and diagnosed failures in the notebook as you go, \
 written for a colleague who has read none of this conversation. Context is \
 finite; these files are what survives.
-
+""",
+    ),
+    (
+        None,
+        """\
 Past sessions are not context. Do not read session transcripts or compaction \
 files — a transcript records what seemed true mid-investigation, and it may \
 describe a different campaign. What earlier sessions kept on purpose reaches \
 you three ways: the goal text, the project files (BRIEF/PLAN/notebook), and \
 machine memories via `recall`. Check `list_runs` for this workspace's actual \
 run record. A fact worth carrying forward belongs in `remember`.
-
+""",
+    ),
+    (
+        None,
+        """\
 # Tool discipline
-
+""",
+    ),
+    (
+        None,
+        """\
 Read before you edit (edit_file enforces this). Prefer small, exact edits over \
 whole-file rewrites. Use the shell for quick inspection, never for long \
 calculations. If a tool fails, the error text tells you how to recover — read \
 it. When arguments were invalid JSON, fix the JSON and call again.
-
+""",
+    ),
+    (
+        "check-gating",
+        """\
 The workspace is SLAB's record, not a thing to repair. When list_runs, \
 show_run, launch_workflow, or wait_for_run report that the run store cannot \
 be opened, wait about a minute and retry once. If it fails again, write the \
@@ -121,23 +192,56 @@ fault into the notebook and finish with a report that names it. Never \
 delete, move, or rewrite files under the workspace root, and do not \
 investigate its database with the shell: a session that did spent its whole \
 hour on the database and none on the science.
-
+""",
+    ),
+    (
+        None,
+        """\
 # Honesty
-
+""",
+    ),
+    (
+        None,
+        """\
 Do not fabricate: no invented file contents, run results, or literature \
 values. If you do not know, say so and propose how to find out. When a check \
 fails, report the failure — never soften it. When you finish a task, call \
 finish with a report citing run ids for every claim. When the task names a \
 result key, also pass the quantity in finish's `results` under that name, \
 with its unit, and the run ids that produced it in `run_ids`.
-
+""",
+    ),
+    (
+        None,
+        """\
 Copy numbers, never retype them. When you report a value a run produced, \
 copy the digits exactly as the run reported them — do not round, rescale, \
 shift a decimal point, or recall it from earlier in the conversation. If a \
 rounded form is useful, give the exact value first and the rounded one after \
 it. A mistyped number with a run id attached is worse than no number: it \
 looks verified.
-"""
+""",
+    ),
+)
+
+
+def core_prompt(mechanisms: Iterable[str]) -> str:
+    """The core for a session running *mechanisms*: the untagged paragraphs
+    plus those tagged with a mechanism in the set.
+
+    Examples:
+        >>> "launch_workflow" in core_prompt(["check-gating"])
+        True
+        >>> "launch_workflow" in core_prompt([]), "Do not fabricate" in core_prompt([])
+        (False, True)
+    """
+    on = set(mechanisms)
+    chosen = [text.rstrip("\n") for mech, text in _CORE_PARTS if mech is None or mech in on]
+    return "\n\n".join(chosen) + "\n"
+
+
+#: The whole core, as a session with every mechanism sees it.
+CORE_PROMPT = core_prompt(ALL_MECHANISMS)
 
 COMPUTE_PROFILES = {
     "laptop": """\
@@ -333,11 +437,16 @@ def environment_block(
     team: str | None = None,
     *,
     review: bool = False,
+    minimal: bool = False,
 ) -> str:
     """The per-session context: where we are, what exists here, what memory says.
 
     *review* adds the latest review of the plan, read fresh each time the
     block is built so a verdict recorded a moment ago survives compaction.
+    *minimal* is the block for a card without the core prompt: the
+    directories, the date, the CPU budget, the skill catalog when the
+    session offers the skill tool, and the project conventions. No
+    working bounds, no memory, no team, no plan, no notebook.
     """
     from slab.hpc import allocated_tasks, cpu_budget
 
@@ -356,6 +465,13 @@ def environment_block(
         f"delegated tasks within these; a launch requesting more ranks than "
         f"the budget is refused.",
     ]
+    if minimal:
+        if skills:
+            lines.append("\n" + catalog_block(skills))
+        agents_md = _conventions_text(session)
+        if agents_md:
+            lines.append("\n# Project conventions (AGENTS.md)\n" + agents_md)
+        return "\n".join(lines)
     if session.hpc.partitions:
         cluster = session.hpc.cluster or "unnamed cluster"
         partitions = ", ".join(sorted(session.hpc.partitions))
@@ -371,7 +487,7 @@ def environment_block(
         lines.append("\n" + WORKING_BOUNDS)
     if skills:
         lines.append("\n" + catalog_block(skills))
-    if session.agent.memory:
+    if enabled(session.agent, "machine-memory"):
         # Read here rather than passed in, so the block is current after
         # every compaction: a fact this session recorded an hour ago is in
         # the rebuilt prompt, and one another session recorded is too.
@@ -424,7 +540,9 @@ def system_messages(
     """The system prompt: role, core, budget, software notes, protocol, environment.
 
     *spec* supplies the role block (the agent card's body); ``None`` yields
-    the bare harness voice. Layers are ordered by change frequency so a
+    the bare harness voice. A card with ``core: false`` supplies the whole
+    prompt, and the core's paragraphs follow the session's mechanism
+    switches (:mod:`mason.mechanisms`). Layers are ordered by change frequency so a
     prefix-caching server reuses the KV cache: the role and core never
     change; the environment (with the *skills* catalog and the *team*
     block) is stable within one session. *absent_tools* names the tools
@@ -432,7 +550,18 @@ def system_messages(
     specialist without ``plan``, a laptop without ``submit_job``), so the
     model is told rather than left to discover it through a failed call.
     """
-    prompt = (spec.prompt.rstrip() + "\n\n" + CORE_PROMPT) if spec is not None else CORE_PROMPT
+    if spec is not None and not spec.core:
+        # The card is the whole prompt: no discipline, no budget, no notes.
+        # The catalog still rides along under the fenced protocol, and the
+        # environment is the minimal one. The absent-tools note is skipped:
+        # the card's own text names only the tools it has.
+        prompt = spec.prompt.rstrip() + "\n"
+        if catalog is not None:
+            prompt += FENCED_PROTOCOL.replace("{catalog}", catalog)
+        environment = environment_block(session, skills, minimal=True)
+        return [{"role": "system", "content": prompt + "\n" + environment}]
+    core = core_prompt(effective(session.agent))
+    prompt = (spec.prompt.rstrip() + "\n\n" + core) if spec is not None else core
     budget = compute_profile_block(session.compute_profile)
     if budget:
         prompt += "\n" + budget + "\n"

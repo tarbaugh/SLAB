@@ -1698,6 +1698,8 @@ def render_record(
     engine_tasks: int | None,
     out_dir: Path,
     agent: str | None = None,
+    condition: str | None = None,
+    without: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """The arguments and provenance of one render, for ``render.json``.
 
@@ -1712,6 +1714,8 @@ def render_record(
     return {
         "goal": goal,
         "agent": agent,
+        "condition": condition,
+        "without": list(without),
         "partition": partition,
         "time_limit": time_limit,
         "engine_tasks": engine_tasks,
@@ -1746,6 +1750,8 @@ def render_sandbox_script(
     snapshots: dict[str, SetupSnapshot] | None = None,
     engine_tasks: int | None = None,
     entry_agent: str | None = None,
+    entry_condition: str | None = None,
+    ablated: tuple[str, ...] = (),
 ) -> tuple[str, list[str], str]:
     """The batch script for one autonomous, network-dark session.
 
@@ -1760,7 +1766,8 @@ def render_sandbox_script(
     destination. Container side: forward the socket to loopback, prove
     darkness and reachability with ``slab mason sandbox verify`` (either failing
     aborts the job), then run the goal with ``slab mason run --auto``, as
-    *entry_agent* when one is named (``--agent``).
+    *entry_agent* when one is named (``--agent``), under *entry_condition*
+    with the *ablated* mechanisms off (``--condition``, ``--without``).
 
     A gateway upstream authenticates with the key named by ``[agent]
     api_key_env``, read on the host at job start. The container is launched
@@ -1832,6 +1839,8 @@ def render_sandbox_script(
             f"cd {shlex.quote(str(project))}",
             f"{slab} mason run --auto"
             + (f" --agent {shlex.quote(entry_agent)}" if entry_agent else "")
+            + (f" --condition {shlex.quote(entry_condition)}" if entry_condition else "")
+            + "".join(f" --without {shlex.quote(name)}" for name in ablated)
             + f" --endpoint http://127.0.0.1:{BRIDGE_PORT}/v1 {shlex.quote(goal)}",
         ]
     )

@@ -147,6 +147,8 @@ def _tally(transcript: Path) -> dict[str, Any]:
         "endpoint_origin": header.get("endpoint_origin"),
         "compute_profile": header.get("compute_profile"),
         "agent": header.get("agent"),
+        "condition": header.get("condition"),
+        "mechanisms": header.get("mechanisms"),
         "steps": steps,
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,

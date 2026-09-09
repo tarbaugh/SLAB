@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 from foundation import memory as memory_store
 from foundation.errors import MemoryStoreError
 from mason.client import ToolCall
+from mason.mechanisms import enabled
 from mason.session import MasonSession
 from mason.skills import Skill, discover_skills, listing, visible_catalog
 
@@ -367,7 +368,9 @@ def build_toolbox(
     switch for a card that delegates or reviews first, when the roster
     holds a critic. A card that ``reviews`` keeps only the read-only tools.
     A card that reviews first has its compute-spending tools refused until
-    the plan is approved.
+    the plan is approved. Every mechanism the box embodies (the traced-run
+    tools, the skill tool, memory, delegation, the critic) is added only
+    when its switch is on (:mod:`mason.mechanisms`).
     """
     if skills is None:
         skills = discover_skills(session.cwd)
@@ -391,23 +394,29 @@ def build_toolbox(
     )
     _add_file_tools(box, session, read_roots, write_roots)
     _add_shell_tool(box, session)
-    _add_workflow_tools(box, session, read_roots)
+    if enabled(session.agent, "check-gating"):
+        _add_workflow_tools(box, session, read_roots)
     _add_engine_tools(box, session)
     if snapshot_root is not None:
         _add_mp_tools(box, snapshot_root)
     if session.hpc.partitions:
         _add_hpc_tools(box, session)
     _add_memory_tools(box, session)
-    if session.agent.memory:
+    if enabled(session.agent, "machine-memory"):
         _add_machine_memory_tools(box, session)
-    if visible:
+    if visible and enabled(session.agent, "skills"):
         _add_skill_tool(box, session, visible)
-    if spec is not None and depth == 0 and session.agent.delegation and roster is not None:
+    on_team = enabled(session.agent, "delegation")
+    if spec is not None and depth == 0 and on_team and roster is not None:
         from mason.roster import critics, hands
 
         if spec.delegates and hands(spec, roster):
             _add_delegate_tool(box, session, spec, roster, skills, parent_client)
-        if (spec.delegates or spec.review_first) and critics(roster):
+        if (
+            (spec.delegates or spec.review_first)
+            and critics(roster)
+            and enabled(session.agent, "critic-gate")
+        ):
             _add_review_tool(box, session, spec, roster, skills, parent_client, read_roots)
     if spec is not None and spec.tools is not None:
         for name in [n for n in box.tools if n not in spec.tools and n != "finish"]:
@@ -463,7 +472,8 @@ def build_toolbox(
             handler=lambda arguments: str(arguments.get("report", "")),
         )
     )
-    if spec is not None and spec.review_first and depth == 0:
+    gate_on = enabled(session.agent, "critic-gate")
+    if spec is not None and spec.review_first and depth == 0 and gate_on:
         _gate_until_reviewed(box, session)
     return box
 
@@ -704,6 +714,32 @@ def _compact_details(details: dict[str, Any]) -> dict[str, Any]:
         "or seq> for one task's recipe, inputs, and outputs, or full=true for all"
     )
     return compact
+
+
+def _without_failure_records(details: dict[str, Any]) -> dict[str, Any]:
+    """*details* with every structured failure record removed.
+
+    The ``failure-records`` switch off: a failed run and a failed task keep
+    their status and one-line error, and lose the trimmed traceback and
+    diagnostic notes the record carries.
+
+    Examples:
+        >>> stripped = _without_failure_records({"run": {"id": "r", "failure": {"m": 1}},
+        ...     "tasks": [{"seq": 1, "error": "boom", "failure": {"message": "boom"}}]})
+        >>> stripped["run"], stripped["tasks"]
+        ({'id': 'r'}, [{'seq': 1, 'error': 'boom'}])
+    """
+    stripped = dict(details)
+    run = stripped.get("run")
+    if isinstance(run, dict):
+        stripped["run"] = {k: v for k, v in run.items() if k != "failure"}
+    tasks = stripped.get("tasks")
+    if isinstance(tasks, list):
+        stripped["tasks"] = [
+            {k: v for k, v in task.items() if k != "failure"} if isinstance(task, dict) else task
+            for task in tasks
+        ]
+    return stripped
 
 
 def _one_task(details: dict[str, Any], wanted: object) -> dict[str, Any]:
@@ -1273,6 +1309,8 @@ def _add_workflow_tools(
             details = _one_task(details, arguments["task"])
         elif not arguments.get("full"):
             details = _compact_details(details)
+        if not enabled(session.agent, "failure-records"):
+            details = _without_failure_records(details)
         return note + json.dumps(details, indent=1, ensure_ascii=False)
 
     def read_artifact(arguments: dict[str, Any]) -> str:
@@ -1444,8 +1482,9 @@ def _add_workflow_tools(
             f"tasks={result['tasks_recorded']}"
         ]
         if result.get("failure"):
-            lines.append("failure record:")
-            lines.append(json.dumps(result["failure"], indent=1, ensure_ascii=False))
+            if enabled(session.agent, "failure-records"):
+                lines.append("failure record:")
+                lines.append(json.dumps(result["failure"], indent=1, ensure_ascii=False))
         elif result.get("traceback"):
             lines.append(str(result["traceback"]))
         output = str(result.get("output") or "").rstrip()
