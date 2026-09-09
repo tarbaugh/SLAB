@@ -81,10 +81,18 @@ MECHANISMS: tuple[Mechanism, ...] = (
     ),
     Mechanism(
         "budget-hint",
-        "An ephemeral step-of-budget line follows every request, stricter "
-        "near the ceiling, with a note when the last steps only looked.",
+        "An ephemeral step-of-budget line follows every request, stricter near the ceiling.",
         "Transcripts stopped at the call budget mid-inquiry with nothing "
         "written down; the hint moved the finish earlier.",
+    ),
+    Mechanism(
+        "looking-hint",
+        "After fifteen consecutive steps that only read and listed, the "
+        "budget line tells the model to step back, and again every five "
+        "steps. Off, a look-only loop runs to the turn budget.",
+        "One campaign on 2026-09-03 spent 72 minutes and about a hundred "
+        "model calls in a look-only run; the science review's "
+        "no-progress-loop rule reads the same shape afterwards.",
     ),
     Mechanism(
         "skills",

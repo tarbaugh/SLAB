@@ -81,7 +81,7 @@ record carries it. The table is rendered from the code.
 <!-- benchmark:conditions:start -->
 | Condition | Card | Mechanisms on | What it is |
 | --- | --- | --- | --- |
-| `slab` | `pi` | `adaptive-effort`, `budget-hint`, `check-gating`, `context-hygiene`, `critic-gate`, `delegation`, `failure-records`, `identical-result-annotation`, `machine-memory`, `skills` | Mason as it is: the PI card, every mechanism on, verification gated in code. |
+| `slab` | `pi` | `adaptive-effort`, `budget-hint`, `check-gating`, `context-hygiene`, `critic-gate`, `delegation`, `failure-records`, `identical-result-annotation`, `looking-hint`, `machine-memory`, `skills` | Mason as it is: the PI card, every mechanism on, verification gated in code. |
 | `protocol` | `protocol` | `adaptive-effort`, `budget-hint`, `context-hygiene`, `identical-result-annotation`, `skills` | The skill collection with a file protocol: scripts run with the shell, an append-only provenance log in the project, verification is what the agent writes down. No run tools, no failure records, no critic, no memory. |
 | `bare` | `bare` | none | The model with read, write, shell, and finish, a one-paragraph prompt, and no mechanism at all. |
 <!-- benchmark:conditions:end -->
@@ -141,7 +141,8 @@ page when the grid has run.
 | `machine-memory` | Facts a session learned about this machine persist through remember and enter later prompts through recall and the memory catalog. | MemGPT (arXiv:2310.08560); an overnight job that trips on a quirk at 03:00 should not trip on it twice. |
 | `context-hygiene` | Old tool results are cleared to placeholders once the prompt is large, and superseded plan echoes are folded, before compaction. | SWE-agent and OpenHands: masking old observations matches summarization at half the cost; Anthropic's clear_tool_uses. |
 | `identical-result-annotation` | A tool result identical to the same call's previous result carries a note the model reads as evidence, escalating with the repeat count. | A real 240-call session spent 82 calls on one byte-identical readelf pipeline. |
-| `budget-hint` | An ephemeral step-of-budget line follows every request, stricter near the ceiling, with a note when the last steps only looked. | Transcripts stopped at the call budget mid-inquiry with nothing written down; the hint moved the finish earlier. |
+| `budget-hint` | An ephemeral step-of-budget line follows every request, stricter near the ceiling. | Transcripts stopped at the call budget mid-inquiry with nothing written down; the hint moved the finish earlier. |
+| `looking-hint` | After fifteen consecutive steps that only read and listed, the budget line tells the model to step back, and again every five steps. Off, a look-only loop runs to the turn budget. | One campaign on 2026-09-03 spent 72 minutes and about a hundred model calls in a look-only run; the science review's no-progress-loop rule reads the same shape afterwards. |
 | `skills` | The skill tool loads procedures and tested scripts from the catalog in the Agent Skills format, one line per skill until loaded. | Anthropic, Agent Skills; the skills audit of 2026-09-03. |
 | `delegation` | A lead hands a separable task to a specialist card that runs its own loop one level down and returns a report. | Anthropic's multi-agent research system: context isolation pays for separable subtasks only. |
 | `adaptive-effort` | A reply cut at the token budget is retried once at lower effort with a request for brevity before the turn ends. | Transcripts where a high-effort reply was cut twice and the turn ended with no report. |

@@ -21,7 +21,8 @@ All notable changes to SLAB, newest first. Dates are commit dates on
   submitting. Every harness mechanism is now a switch in `[agent]
   mechanisms` (check gating, failure records, the critic gate, machine
   memory, context hygiene, identical-result annotation, the budget hint,
-  skills, delegation, adaptive effort), the loop, the toolbox, and the
+  the looking hint, skills, delegation, adaptive effort), the loop, the
+  toolbox, and the
   prompt consult it, and the benchmark page keeps the ledger. Agent cards
   take `core: false` to supply their whole prompt.
 - The extended XYZ digest reports the closest pair of atoms in the file,

@@ -102,7 +102,7 @@ def _call(tool: str, **arguments: object) -> ToolCall:
 
 def test_every_mechanism_is_a_named_switch_with_evidence() -> None:
     names = [m.name for m in MECHANISMS]
-    assert len(names) == len(set(names)) == 10
+    assert len(names) == len(set(names)) == 11
     assert all(n == n.lower() and " " not in n for n in names)
     assert all(m.does and m.evidence for m in MECHANISMS)
     assert set(names) == ALL_MECHANISMS
@@ -313,6 +313,25 @@ def test_the_budget_hint_is_absent_when_switched_off(tmp_path: Path) -> None:
     on = FakeClient([_text("ok")])
     Mason(_session(tmp_path), client=on).run_turn("go")
     assert [m["role"] for m in on.requests[0]] == ["system", "user", "user"]
+
+
+def test_the_looking_hint_has_its_own_switch(tmp_path: Path) -> None:
+    from mason.loop import _turn_hint
+
+    assert _turn_hint(3, 10, 15, step_back=False) == "[step 3 of 10]"
+    assert _turn_hint(3, 10, 15, budget=False).startswith("[15 consecutive steps")
+    assert _turn_hint(3, 10, 15, budget=False, step_back=False) == ""
+    # A look-only run under the switch: the sixteenth request carries no hint.
+    (tmp_path / "f.txt").write_text("x\n")
+    replies = [_tool_reply("read_file", path="f.txt")] * 16 + [_text("done")]
+    client = FakeClient(list(replies))
+    session = _session(
+        tmp_path,
+        mechanisms=sorted(ALL_MECHANISMS - {"looking-hint", "identical-result-annotation"}),
+    )
+    Mason(session, client=client).run_turn("look")
+    hints = [m["content"] for m in client.requests[15] if m["role"] == "user"][-1]
+    assert hints.startswith("[step 16 of") and "consecutive" not in hints
 
 
 def test_the_identical_result_note_is_absent_when_switched_off(tmp_path: Path) -> None:
