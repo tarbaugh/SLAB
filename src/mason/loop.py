@@ -47,6 +47,7 @@ from mason.client import (
 )
 from mason.config import AgentConfig, override_agent, roster_agent_config
 from mason.errors import MasonError
+from mason.mechanisms import effective, enabled
 from mason.prompts import COMPACTION_PROMPT, system_messages, team_block
 from mason.reviews import plan_is_approved
 from mason.roster import (
@@ -278,7 +279,7 @@ def _check_lead_can_delegate(
     """
     if spec.tools is None or "delegate" not in spec.tools:
         return
-    if not agent.delegation:
+    if not enabled(agent, "delegation"):
         raise MasonError(
             f"the {spec.name} card hands every step to its team, but [agent] "
             f"delegation is off; set delegation = true or run another card"
@@ -301,9 +302,11 @@ def _check_review_first(
     the roster, that approval can never arrive, and the card would sit
     with every compute tool refusing. Say so before the model is called.
     """
-    if not spec.review_first:
+    if not spec.review_first or not enabled(agent, "critic-gate"):
+        # With the critic gate switched off (an ablation), the card runs
+        # ungated: there is nothing a critic would be needed for.
         return
-    if not agent.delegation:
+    if not enabled(agent, "delegation"):
         raise MasonError(
             f"the {spec.name} card spends no compute before a critic approves the plan, "
             f"but [agent] delegation is off, so no critic can run; set delegation = "
@@ -509,6 +512,11 @@ class Mason:
                     # can attribute a bloated or a truncated turn.
                     "effort": session.agent.effort,
                     "version": __version__,
+                    # The harness arm and its switches, so a benchmark record
+                    # says which mechanisms the campaign ran with.
+                    "condition": session.condition,
+                    "mechanisms": list(effective(session.agent)),
+                    "ablated": list(session.ablated),
                 }
             )
         if resume_from:
@@ -552,7 +560,12 @@ class Mason:
             self.steps_taken = step
             self._clear_tool_results()
             self._maybe_compact()
-            reply = self._call_model(hint=_turn_hint(step, max_turns, self._looking_streak))
+            hint = (
+                _turn_hint(step, max_turns, self._looking_streak)
+                if enabled(self.session.agent, "budget-hint")
+                else None
+            )
+            reply = self._call_model(hint=hint)
             calls = list(reply.tool_calls)
             from_text = False
             if not calls:
@@ -574,7 +587,8 @@ class Mason:
                     # answer at low effort; a second cut ends the turn below.
                     cut_nudged = True
                     self._append({"role": "user", "content": _CUT_REPLY_NUDGE})
-                    self._effort_override = _retry_effort(self.session.agent.effort)
+                    if enabled(self.session.agent, "adaptive-effort"):
+                        self._effort_override = _retry_effort(self.session.agent.effort)
                     continue
                 if not text.strip() and not empty_nudged and reply.finish_reason != "max_tokens":
                     # No text and no call is a fault, not an answer. Ask once;
@@ -656,9 +670,14 @@ class Mason:
                     # protocol-invalid history, and --resume would replay it.
                     self._answer_unrun(calls[position:], from_text=from_text)
                     raise
-                result = self._note_repetition(call, result)
+                if enabled(self.session.agent, "identical-result-annotation"):
+                    result = self._note_repetition(call, result)
                 self._append_tool_result(call, result, as_text=from_text)
-                if call.name == "plan" and result.startswith("PLAN.md updated:"):
+                if (
+                    call.name == "plan"
+                    and result.startswith("PLAN.md updated:")
+                    and enabled(self.session.agent, "context-hygiene")
+                ):
                     self._supersede_plan_echoes()
                 error_streak = 0 if ok else error_streak + 1
                 if error_streak >= _ERROR_STREAK_LIMIT:
@@ -1008,7 +1027,7 @@ class Mason:
         record of what went wrong is what stops a model repeating it.
         """
         agent = self.session.agent
-        if not agent.clear_tool_results:
+        if not enabled(agent, "context-hygiene"):
             return
         if self._estimated_prompt_tokens() < int(
             agent.context_window * agent.clear_tool_results_at

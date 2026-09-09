@@ -5,6 +5,25 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- The benchmark runs one question under three harness conditions, so the
+  reliability claim is measured, not asserted. `slab` is Mason as it is.
+  `protocol` is a skill collection with a file protocol: a `protocol`
+  card with file tools, a shell, and the skill catalog, running scripts as
+  `python script.py` and keeping an append-only provenance log in the
+  project, the shape of the AICC control plane. `bare` is the model with
+  read, write, shell, and finish and a one-paragraph prompt. `--condition`
+  on `slab benchmark run`, `launch`, and `render` selects one; the
+  transcript header and the record carry it, and the results table keys
+  its rows by condition. The scorer's verification rule is the same for
+  every arm, so a protocol or bare campaign passes only by producing a
+  verified run. `slab benchmark matrix` renders the launch grid of
+  conditions by questions by an optional ablation list without
+  submitting. Every harness mechanism is now a switch in `[agent]
+  mechanisms` (check gating, failure records, the critic gate, machine
+  memory, context hygiene, identical-result annotation, the budget hint,
+  skills, delegation, adaptive effort), the loop, the toolbox, and the
+  prompt consult it, and the benchmark page keeps the ledger. Agent cards
+  take `core: false` to supply their whole prompt.
 - The extended XYZ digest reports the closest pair of atoms in the file,
   through the periodic images, with its frame and species, a flag when it
   is under 60 % of the covalent-radii sum, and the mean nearest-neighbour

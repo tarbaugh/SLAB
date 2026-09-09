@@ -15,6 +15,14 @@ evidence and raises flags: attributable defects, each naming the skill,
 card, or tool a revision would edit. The flags travel in the record
 beside ``passed`` and ``reason``.
 
+Every campaign runs under a harness *condition* (:mod:`mason.mechanisms`):
+``slab`` is Mason as it is, ``protocol`` a skill collection with a file
+protocol and no runtime gates, ``bare`` the model with a shell. The
+record carries the condition and the mechanisms the session ran with. The
+verification condition above applies to all three, so an arm without run
+tools can pass only by producing a verified run some other way: that
+asymmetry is the measurement.
+
 Records are JSON lines in ``benchmarks/results.jsonl`` in the project
 directory, so they travel from the cluster into the repository by an
 ordinary commit. ``render`` rewrites marker regions in the docs page and
@@ -40,8 +48,18 @@ from foundation.errors import (
 )
 from foundation.runtime import Workspace
 from foundation.serialize import loads
+from mason.mechanisms import (
+    ALL_MECHANISMS,
+    CONDITIONS,
+    ConditionError,
+    check_mechanisms,
+    harness_label,
+    resolve,
+)
+from mason.mechanisms import conditions_table as _conditions_table
+from mason.mechanisms import mechanisms_table as _mechanisms_table
 from mason.report import summarize
-from mason.session import transcript_for, transcript_groups
+from mason.session import session_header, transcript_for, transcript_groups
 from slab._version import __version__
 from slab_stack import review
 
@@ -401,6 +419,11 @@ def score_session(
         [],
     )
     summary = summarize(transcript, siblings)
+    header = session_header(transcript)
+    listed = header.get("mechanisms")
+    mechanisms = (
+        sorted(str(m) for m in listed) if isinstance(listed, list) else sorted(ALL_MECHANISMS)
+    )
     asked = question or question_for(transcript)
     if asked is None:
         raise BenchmarkError(
@@ -417,6 +440,11 @@ def score_session(
         "endpoint_origin": summary.get("endpoint_origin"),
         "machine": machine or summary.get("compute_profile") or "unknown",
         "agent": summary.get("agent") or "pi",
+        # The harness arm, its switches, and what was switched off from it.
+        # A transcript from before the switches existed ran as Mason is.
+        "condition": str(header.get("condition") or "slab"),
+        "ablated": [str(m) for m in header.get("ablated") or []],
+        "mechanisms": mechanisms,
         "engine_class": None,
         "engines": [],
         "skills": review.loaded_skills(transcript),
@@ -516,13 +544,33 @@ def recorded_sessions(records: Iterable[dict[str, Any]]) -> set[str]:
     return {str(r.get("session")) for r in records}
 
 
-def latest_by_cell(records: Iterable[dict[str, Any]]) -> dict[tuple[str, str, str], dict[str, Any]]:
-    """The newest record per (model, machine, question key); a re-score wins."""
-    cells: dict[tuple[str, str, str], dict[str, Any]] = {}
+#: A results cell: (model, machine, harness label, question key).
+Cell = tuple[str, str, str, str]
+
+
+def cell_of(record: dict[str, Any]) -> Cell:
+    """The cell a record belongs to; the harness label folds condition and ablation.
+
+    Examples:
+        >>> cell_of({"model": "m", "machine": "hpc", "key": "a0"})
+        ('m', 'hpc', 'slab', 'a0')
+        >>> cell_of({"model": "m", "machine": "hpc", "key": "a0",
+        ...          "condition": "slab", "ablated": ["budget-hint"]})
+        ('m', 'hpc', 'slab -budget-hint', 'a0')
+    """
+    return (
+        str(record.get("model")),
+        str(record.get("machine")),
+        harness_label(record.get("condition"), record.get("ablated") or ()),
+        str(record.get("key")),
+    )
+
+
+def latest_by_cell(records: Iterable[dict[str, Any]]) -> dict[Cell, dict[str, Any]]:
+    """The newest record per (model, machine, harness, question key); a re-score wins."""
+    cells: dict[Cell, dict[str, Any]] = {}
     for record in records:  # file order is chronological
-        cells[(str(record.get("model")), str(record.get("machine")), str(record.get("key")))] = (
-            record
-        )
+        cells[cell_of(record)] = record
     return cells
 
 
@@ -538,14 +586,19 @@ def run_campaign(
     endpoint: str | None = None,
     max_turns: int | None = None,
     agent: str | None = None,
+    condition: str | None = None,
+    without: Iterable[str] = (),
 ) -> tuple[str, Any]:
     """Run one campaign in this process and return ``(session_id, TurnResult)``.
 
     The same composition ``slab mason run --auto`` uses, so the campaign
-    is exactly what a person would have started by hand.
+    is exactly what a person would have started by hand. *condition*
+    names the harness arm (``slab`` when omitted) and *without* the
+    mechanisms switched off from it; *agent* overrides the arm's card.
     """
     from mason import Mason
     from mason.cli import open_session, resolve_spec
+    from mason.mechanisms import entry_card
 
     session = open_session(
         workspace,
@@ -555,14 +608,74 @@ def run_campaign(
         provider=provider,
         max_turns=max_turns,
         interactive=False,
+        condition=condition,
+        without=tuple(without),
     )
-    spec, roster = resolve_spec(agent)
+    spec, roster = resolve_spec(entry_card(condition, agent))
     mason = Mason(session, spec=spec, roster=roster)
     try:
         result = mason.run_turn(question.instruction)
     finally:
         session.release_session_lock()
     return session.session_id, result
+
+
+# -- the matrix ---------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class MatrixCell:
+    """One job of the launch grid: a question under an arm, minus *without*."""
+
+    condition: str
+    question: Question
+    without: tuple[str, ...] = ()
+
+    @property
+    def label(self) -> str:
+        """The arm as the results table names it: ``slab``, ``slab -budget-hint``."""
+        return harness_label(self.condition, self.without)
+
+    @property
+    def subdir(self) -> str:
+        """Where the cell's job files land under the grid's directory.
+
+        Examples:
+            >>> MatrixCell("slab", QUESTIONS[0], ("budget-hint",)).subdir
+            'slab-without-budget-hint/q1-a0'
+        """
+        arm = self.condition + "".join(f"-without-{m}" for m in self.without)
+        return f"{arm}/q{self.question.number}-{self.question.key}"
+
+
+def matrix_cells(
+    conditions: Iterable[str], questions: Iterable[Question], without: Iterable[str] = ()
+) -> list[MatrixCell]:
+    """The launch grid: every condition for every question, then every
+    ablation from the ``slab`` condition, one mechanism off at a time, for
+    every question.
+
+    Raises:
+        BenchmarkError: An unknown condition or mechanism, named.
+
+    Examples:
+        >>> cells = matrix_cells(["slab", "bare"], QUESTIONS[:2], ["budget-hint"])
+        >>> [c.label for c in cells]
+        ['slab', 'slab', 'bare', 'bare', 'slab -budget-hint', 'slab -budget-hint']
+    """
+    arms = list(conditions)
+    asked = list(questions)
+    try:
+        for arm in arms:
+            resolve(arm)
+        ablated = check_mechanisms(without)
+        for name in ablated:
+            resolve("slab", [name])
+    except ConditionError as e:
+        raise BenchmarkError(str(e)) from None
+    cells = [MatrixCell(arm, q) for arm in arms for q in asked]
+    cells += [MatrixCell("slab", q, (name,)) for name in ablated for q in asked]
+    return cells
 
 
 # -- rendering ----------------------------------------------------------------
@@ -629,23 +742,37 @@ def _cell(record: dict[str, Any] | None, question: Question) -> str:
 
 def results_table(records: Iterable[dict[str, Any]]) -> str:
     cells = latest_by_cell(records)
-    rows = sorted({(model, machine) for model, machine, _ in cells})
+    rows = sorted({(model, machine, harness) for model, machine, harness, _ in cells})
     if not rows:
         return "No campaign has been scored yet."
-    header = "| Model | Machine | " + " | ".join(f"Q{q.number} {q.key}" for q in QUESTIONS)
-    rule = "| --- | --- | " + " | ".join("---" for _ in QUESTIONS) + " | --- |"
+    header = "| Model | Machine | Condition | " + " | ".join(
+        f"Q{q.number} {q.key}" for q in QUESTIONS
+    )
+    rule = "| --- | --- | --- | " + " | ".join("---" for _ in QUESTIONS) + " | --- |"
     lines = [header + " | Passed |", rule]
-    for model, machine in rows:
+    for model, machine, harness in rows:
         passed = 0
         cols = []
         for q in QUESTIONS:
-            record = cells.get((model, machine, q.key))
+            record = cells.get((model, machine, harness, q.key))
             passed += 1 if record is not None and record.get("passed") else 0
             cols.append(_cell(record, q))
         lines.append(
-            f"| {model} | {machine} | " + " | ".join(cols) + f" | {passed}/{len(QUESTIONS)} |"
+            f"| {model} | {machine} | {harness} | "
+            + " | ".join(cols)
+            + f" | {passed}/{len(QUESTIONS)} |"
         )
     return "\n".join(lines)
+
+
+def conditions_table() -> str:
+    """The three harness conditions, rendered from :mod:`mason.mechanisms`."""
+    return _conditions_table()
+
+
+def mechanisms_table() -> str:
+    """The mechanism ledger: one row per switch, from :mod:`mason.mechanisms`."""
+    return _mechanisms_table()
 
 
 def flags_table(records: Iterable[dict[str, Any]], catalog: dict[str, Skill] | None = None) -> str:
@@ -656,14 +783,15 @@ def flags_table(records: Iterable[dict[str, Any]], catalog: dict[str, Skill] | N
     if not rows:
         return "No flag has been raised on a recorded campaign."
     lines = [
-        "| Target | Rule | Status | Revision | Q | Model | Machine | Raised by | Evidence | Note |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| Target | Rule | Status | Revision | Q | Model | Machine | Condition | Raised by "
+        "| Evidence | Note |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for row in rows:
         cells = [
             row["target"], row["rule"], row["status"], row["against"] or "—",
-            f"Q{row['question']}", row["model"], row["machine"], row["raised_by"],
-            row["evidence"], row["note"],
+            f"Q{row['question']}", row["model"], row["machine"], row["harness"],
+            row["raised_by"], row["evidence"], row["note"],
         ]
         lines.append("| " + " | ".join(str(c).replace("|", "\\|") for c in cells) + " |")
     return "\n".join(lines)
@@ -671,17 +799,18 @@ def flags_table(records: Iterable[dict[str, Any]], catalog: dict[str, Skill] | N
 
 def readme_summary(records: Iterable[dict[str, Any]], link: str) -> str:
     cells = latest_by_cell(records)
-    rows = sorted({(model, machine) for model, machine, _ in cells})
+    rows = sorted({(model, machine, harness) for model, machine, harness, _ in cells})
     if not rows:
         return f"No campaign has been scored yet. See [the benchmark]({link})."
-    lines = ["| Model | Machine | Passed |", "| --- | --- | --- |"]
-    for model, machine in rows:
+    lines = ["| Model | Machine | Condition | Passed |", "| --- | --- | --- | --- |"]
+    for model, machine, harness in rows:
         passed = sum(
             1
             for q in QUESTIONS
-            if (r := cells.get((model, machine, q.key))) is not None and r.get("passed")
+            if (r := cells.get((model, machine, harness, q.key))) is not None
+            and r.get("passed")
         )
-        lines.append(f"| {model} | {machine} | {passed}/{len(QUESTIONS)} |")
+        lines.append(f"| {model} | {machine} | {harness} | {passed}/{len(QUESTIONS)} |")
     lines.append("")
     lines.append(f"Five copper questions with known answers; [the benchmark]({link}) has the rule.")
     return "\n".join(lines)
@@ -719,14 +848,17 @@ def render(
 ) -> list[Path]:
     """Rewrite the marker regions; return the files that changed.
 
-    The docs page carries three regions (``questions``, ``results``,
-    ``flags``) and the README one (``summary``). *catalog* decides each
-    flag's status; the working directory's catalog when omitted.
+    The docs page carries five regions (``questions``, ``conditions``,
+    ``mechanisms``, ``results``, ``flags``) and the README one
+    (``summary``). *catalog* decides each flag's status; the working
+    directory's catalog when omitted.
     """
     records = list(records)
     changed: list[Path] = []
     if docs is not None:
         touched = rewrite_region(docs, "questions", questions_table())
+        touched = rewrite_region(docs, "conditions", conditions_table()) or touched
+        touched = rewrite_region(docs, "mechanisms", mechanisms_table()) or touched
         touched = rewrite_region(docs, "results", results_table(records)) or touched
         touched = rewrite_region(docs, "flags", flags_table(records, catalog)) or touched
         if touched:
@@ -738,6 +870,7 @@ def render(
 
 __all__ = [
     "CLASSES",
+    "CONDITIONS",
     "DFT_CLASSES",
     "MLIP",
     "PASSING_STATES",
@@ -746,13 +879,20 @@ __all__ = [
     "QUESTIONS",
     "RECORDS_FILE",
     "BenchmarkError",
+    "Cell",
+    "MatrixCell",
     "Question",
     "append_record",
+    "cell_of",
+    "conditions_table",
     "find_question",
     "flags_table",
     "functional_of",
+    "harness_label",
     "latest_by_cell",
     "load_records",
+    "matrix_cells",
+    "mechanisms_table",
     "question_for",
     "questions_table",
     "readme_summary",

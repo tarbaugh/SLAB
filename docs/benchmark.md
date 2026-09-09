@@ -70,6 +70,90 @@ drift from this page.
 | 5 | Fine-tune a GRACE potential on DFT labels for strained fcc Cu and validate it against held-out DFT single points. Finish with results key `energy_rmse` in meV/atom, `force_rmse` in eV/Å, and the run ids that produced them. | internal to the campaign | internal to the campaign | — | energy_rmse ≤ 5 meV/atom; force_rmse ≤ 0.1 eV/Å | mlip-training |
 <!-- benchmark:questions:end -->
 
+## Three harness conditions
+
+The same question runs under three harnesses on the same model, so the
+gain from runtime-enforced verification is a measured number. A
+condition is an agent card plus a set of mechanism switches.
+`--condition` on `run`, `launch`, and `render` selects one, and the
+record carries it. The table is rendered from the code.
+
+<!-- benchmark:conditions:start -->
+| Condition | Card | Mechanisms on | What it is |
+| --- | --- | --- | --- |
+| `slab` | `pi` | `adaptive-effort`, `budget-hint`, `check-gating`, `context-hygiene`, `critic-gate`, `delegation`, `failure-records`, `identical-result-annotation`, `machine-memory`, `skills` | Mason as it is: the PI card, every mechanism on, verification gated in code. |
+| `protocol` | `protocol` | `adaptive-effort`, `budget-hint`, `context-hygiene`, `identical-result-annotation`, `skills` | The skill collection with a file protocol: scripts run with the shell, an append-only provenance log in the project, verification is what the agent writes down. No run tools, no failure records, no critic, no memory. |
+| `bare` | `bare` | none | The model with read, write, shell, and finish, a one-paragraph prompt, and no mechanism at all. |
+<!-- benchmark:conditions:end -->
+
+The `slab` condition is Mason as it is. The `protocol` condition has the
+shape of a skill collection with a file protocol, the shape of the AICC
+control plane. The agent has the skill catalog, the file tools, and a
+shell. It runs a calculation as `python script.py` with no run context,
+and it keeps an append-only provenance log in the project. Verification
+is what the agent writes down. The `bare` condition is the model with
+read, write, shell, and finish, and a one-paragraph prompt.
+
+The scorer does not change with the condition. A campaign passes only
+when the finish call cites runs that reached `verified`. The `protocol`
+and `bare` harnesses create no runs, so a campaign under them passes only
+when the agent finds the traced path on its own, for example by running
+its script with `slab run` and declaring a check. That asymmetry is the
+measurement. A correct number in a provenance log fails, because nothing
+but the agent's own note stands behind it. The record says which
+condition ran and which mechanisms were on, so a table row never mixes
+harnesses.
+
+Run one question under one condition:
+
+```bash
+slab benchmark run 1 --condition protocol --machine laptop
+```
+
+Render the whole grid for a cluster without submitting anything:
+
+```bash
+slab benchmark matrix --partition gpu
+```
+
+`matrix` writes one directory per cell under `sandbox/matrix/`, three
+conditions by five questions by default, and lists the cells in
+`matrix.json`. `--condition` and `--question` narrow the grid. Each
+`--without <mechanism>` adds one row of the `slab` condition with that
+mechanism switched off, for every question in the grid. Submit each
+script with `sbatch`, and score the campaigns when the jobs end. The
+results table keys its rows by model, machine, and condition, and an
+ablated row reads `slab -budget-hint`.
+
+## The mechanism ledger
+
+Every mechanism the harness runs is a switch, so the ablation grid can
+measure it. The table is rendered from the code. The evidence column
+names what the mechanism rests on now. The measured effect enters this
+page when the grid has run.
+
+<!-- benchmark:mechanisms:start -->
+| Switch | What it does | Evidence |
+| --- | --- | --- |
+| `check-gating` | Calculations run as traced workflow scripts through launch_workflow, wait_for_run, list_runs, show_run, and read_artifact; a run whose checks pass is verified, and the prompt teaches that path. Off, the shell is the only way to run a script. | SLAB's verification gate (ARCHITECTURE.md); a number without a verified run is a rumor. |
+| `failure-records` | A failed run's structured failure record (trimmed traceback and diagnostic notes) is returned with the run, and the prompt asks for a diagnosis before a retry. Off, a failed run reports its status only. | Reflexion (arXiv:2303.11366); Manus, keep failures in context. |
+| `critic-gate` | The review tool reaches a read-only critic, and a card that reviews first spends no compute before the critic approves the plan. | Agent Laboratory (arXiv:2501.04227): fixed tool libraries with checkpoints beat full autonomy. |
+| `machine-memory` | Facts a session learned about this machine persist through remember and enter later prompts through recall and the memory catalog. | MemGPT (arXiv:2310.08560); an overnight job that trips on a quirk at 03:00 should not trip on it twice. |
+| `context-hygiene` | Old tool results are cleared to placeholders once the prompt is large, and superseded plan echoes are folded, before compaction. | SWE-agent and OpenHands: masking old observations matches summarization at half the cost; Anthropic's clear_tool_uses. |
+| `identical-result-annotation` | A tool result identical to the same call's previous result carries a note the model reads as evidence, escalating with the repeat count. | A real 240-call session spent 82 calls on one byte-identical readelf pipeline. |
+| `budget-hint` | An ephemeral step-of-budget line follows every request, stricter near the ceiling, with a note when the last steps only looked. | Transcripts stopped at the call budget mid-inquiry with nothing written down; the hint moved the finish earlier. |
+| `skills` | The skill tool loads procedures and tested scripts from the catalog in the Agent Skills format, one line per skill until loaded. | Anthropic, Agent Skills; the skills audit of 2026-09-03. |
+| `delegation` | A lead hands a separable task to a specialist card that runs its own loop one level down and returns a report. | Anthropic's multi-agent research system: context isolation pays for separable subtasks only. |
+| `adaptive-effort` | A reply cut at the token budget is retried once at lower effort with a request for brevity before the turn ends. | Transcripts where a high-effort reply was cut twice and the turn ended with no report. |
+<!-- benchmark:mechanisms:end -->
+
+`[agent] mechanisms` in `slab.toml` lists the switches a session runs
+with, and unset means every one. A name outside the ledger is refused.
+The older flags `memory`, `delegation`, and `clear_tool_results` still
+apply to their mechanisms. Plumbing has no switch: JSON repair,
+truncation detection, and the effort field are necessary, and they are
+not findings.
+
 ## How to run a campaign
 
 Off-cluster, on a laptop or an interactive node, one command runs a
@@ -122,6 +206,9 @@ Rules for the record:
 - `--machine` is a label you choose for the machine, such as `laptop` or
   `cluster-a`. Never a hostname. The default is the compute profile the
   session ran under.
+- `--condition` names the harness arm: `slab`, `protocol`, or `bare`.
+  The default is `slab`. `score` reads the condition from the transcript,
+  and a transcript from before the switches existed scores as `slab`.
 - The model comes from the transcript, which names the model that
   answered. `--model` overrides it for transcripts written before that
   header existed.
@@ -133,8 +220,9 @@ Rules for the record:
   again; the renderer keeps the latest record per model, machine, and
   question.
 
-Then rewrite the tables on this page (the questions, the results, and
-the flags) and the summary in the README:
+Then rewrite the tables on this page (the questions, the conditions, the
+mechanism ledger, the results, and the flags) and the summary in the
+README:
 
 ```bash
 slab benchmark tables
@@ -143,14 +231,15 @@ slab benchmark tables
 ## Results
 
 <!-- benchmark:results:start -->
-| Model | Machine | Q1 a0 | Q2 surface | Q3 vacancy | Q4 melting | Q5 finetune | Passed |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| llama3.1:8b | laptop | fail (no finish report) | — | — | — | — | 0/5 |
-| llama3.1:8b-32k | laptop | fail (the finish carried no structured results) | — | — | — | — | 0/5 |
+| Model | Machine | Condition | Q1 a0 | Q2 surface | Q3 vacancy | Q4 melting | Q5 finetune | Passed |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| llama3.1:8b | laptop | slab | fail (no finish report) | — | — | — | — | 0/5 |
+| llama3.1:8b-32k | laptop | slab | fail (the finish carried no structured results) | — | — | — | — | 0/5 |
 <!-- benchmark:results:end -->
 
-A cell shows the reported value beside the verdict, a failure names its
-reason, and a reviewed campaign shows how many flags it raised. Score the
+A row is one model on one machine under one condition. A cell shows
+the reported value beside the verdict, a failure names its reason, and a
+reviewed campaign shows how many flags it raised. Score the
 same five questions again after every change to the prompt, the tools,
 the roster, or the skills. A change that lowers a model's total is a
 regression, whatever else it improves.

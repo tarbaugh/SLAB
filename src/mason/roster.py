@@ -28,13 +28,18 @@ critic: read-only by construction (the toolbox keeps only
 through the ``review`` tool rather than ``delegate``, its findings kept as
 a review record. ``review_first`` makes the card spend no compute before a
 critic has approved the plan: ``delegate``, ``launch_workflow``, and
-``submit_job`` refuse until then.
+``submit_job`` refuse until then. ``core: false`` makes the body the whole
+system prompt: no shared harness discipline, no compute budget, no software
+notes, a minimal environment. Such a card is the entry card of a benchmark
+condition (:mod:`mason.mechanisms`), is never on a team, and neither
+delegates nor reviews.
 
 Cards are discovered like skills, and a name in a higher layer shadows the
 lower ones whole: project ``<cwd>/agents/*.md``, then user
 ``~/.config/slab/agents/*.md``, then the built-ins shipped in the package
 (``pi``, ``planner``, ``worker``, ``critic``, ``dft-expert``,
-``md-expert``, ``analysis-expert``). A project card named ``pi.md``
+``md-expert``, ``analysis-expert``, and the two condition cards ``protocol``
+and ``bare``). A project card named ``pi.md``
 therefore replaces the default agent entirely.
 
 Two cards lead: ``pi`` runs what is small and delegates what is separable,
@@ -67,7 +72,7 @@ from slab.config import user_config_path
 Source = Literal["built-in", "user", "project"]
 
 _KNOWN_KEYS = frozenset(
-    {"name", "description", "tools", "skills", "delegates", "reviews", "review_first"}
+    {"name", "description", "tools", "skills", "delegates", "reviews", "review_first", "core"}
 )
 
 
@@ -87,6 +92,7 @@ class AgentSpec:
     delegates: bool
     reviews: bool  # a critic: read-only, reached with the review tool
     review_first: bool  # spends no compute before a critic approves the plan
+    core: bool  # False: the body is the whole prompt; a harness condition's entry card
     source: Source
     path: Path
 
@@ -162,6 +168,14 @@ def parse_agent_card(path: Path, source: Source) -> AgentSpec:
         delegates = _flag(meta, "delegates")
         reviews = _flag(meta, "reviews")
         review_first = _flag(meta, "review_first")
+        core = meta.get("core", True)
+        if not isinstance(core, bool):
+            raise RosterError("frontmatter 'core' must be true or false")
+        if not core and (delegates or reviews or review_first):
+            raise RosterError(
+                "a card without the core prompt runs alone: 'core: false' cannot be "
+                "combined with 'delegates', 'reviews', or 'review_first'"
+            )
         if reviews and delegates:
             raise RosterError(
                 "a card that reviews leads nothing: 'reviews' and 'delegates' cannot both be true"
@@ -195,6 +209,7 @@ def parse_agent_card(path: Path, source: Source) -> AgentSpec:
             delegates=delegates,
             reviews=reviews,
             review_first=review_first,
+            core=core,
             source=source,
             path=path.resolve(),
         )
@@ -245,14 +260,16 @@ def hands(spec: AgentSpec, roster: dict[str, AgentSpec]) -> dict[str, AgentSpec]
     level down, so a lead handed a task would run as an executor stripped
     of its one distinguishing tool, which the worker already is by design.
     A card that reviews takes reviews, not briefs: it reaches the roster
-    through the ``review`` tool, so its findings are always recorded.
+    through the ``review`` tool, so its findings are always recorded. A
+    card without the core prompt (``core: false``) is a harness
+    condition's entry card and takes no briefs either.
     *spec* itself is excluded. Name order, so the team list and the
     delegate tool's refusals read the same.
     """
     return {
         name: card
         for name, card in sorted(roster.items())
-        if name != spec.name and not card.delegates and not card.reviews
+        if name != spec.name and not card.delegates and not card.reviews and card.core
     }
 
 

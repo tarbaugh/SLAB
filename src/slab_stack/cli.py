@@ -490,6 +490,17 @@ _RecordsOpt = Annotated[
     Path | None,
     typer.Option("--records", help="The records file (default benchmarks/results.jsonl)."),
 ]
+_ConditionOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--condition",
+        help="Harness condition: slab (default), protocol, or bare. The record carries it.",
+    ),
+]
+_WithoutOpt = Annotated[
+    list[str] | None,
+    typer.Option("--without", help="Switch one mechanism off (repeatable); see 'matrix'."),
+]
 _RefereeOpt = Annotated[
     bool,
     typer.Option(
@@ -522,9 +533,10 @@ def _record_line(record: dict[str, Any]) -> str:
     verdict = "pass" if record["passed"] else f"fail: {record['reason']}"
     raised = len(record.get("flags") or [])
     flagged = f"  [{raised} flag{'s' if raised != 1 else ''}]" if raised else ""
+    arm = benchmark.harness_label(record.get("condition"), record.get("ablated") or ())
     return (
         f"Q{record['question']} {record['key']:<9} {record['model']:<24} "
-        f"{record['machine']:<12} {verdict}{flagged}"
+        f"{record['machine']:<12} {arm:<9} {verdict}{flagged}"
     )
 
 
@@ -561,7 +573,11 @@ def benchmark_run(
     provider: Annotated[str | None, typer.Option("--provider")] = None,
     endpoint: Annotated[str | None, typer.Option("--endpoint")] = None,
     max_turns: Annotated[int | None, typer.Option("--max-turns", min=1)] = None,
-    agent: Annotated[str | None, typer.Option("--agent", help="Entry card (default pi).")] = None,
+    agent: Annotated[
+        str | None, typer.Option("--agent", help="Entry card (default: the condition's).")
+    ] = None,
+    condition: _ConditionOpt = None,
+    without: _WithoutOpt = None,
     machine: _MachineOpt = None,
     records: _RecordsOpt = None,
     referee: _RefereeOpt = False,
@@ -573,6 +589,8 @@ def benchmark_run(
 
     For a laptop or an interactive node. On a cluster, prefer 'launch',
     which runs the campaign as a sandbox job, then 'score' after it ends.
+    --condition picks the harness arm; the scorer's verification rule is
+    the same for every arm.
     """
     try:
         asked = benchmark.find_question(question)
@@ -584,6 +602,8 @@ def benchmark_run(
             endpoint=endpoint,
             max_turns=max_turns,
             agent=agent,
+            condition=condition,
+            without=tuple(without or ()),
         )
         typer.echo(
             f"session {session_id}: stopped by {result.stop_reason} "
@@ -618,8 +638,10 @@ def benchmark_launch(
     ] = None,
     agent: Annotated[
         str | None,
-        typer.Option("--agent", help="Agent card the job runs as (default pi)."),
+        typer.Option("--agent", help="Agent card the job runs as (default: the condition's)."),
     ] = None,
+    condition: _ConditionOpt = None,
+    without: _WithoutOpt = None,
 ) -> None:
     """Submit one campaign as a sandbox job; score it with 'score' after it ends."""
     from mason.cli import launch_sandbox
@@ -636,6 +658,8 @@ def benchmark_launch(
             engine_tasks=None,
             emit=typer.echo,
             agent=agent,
+            condition=condition,
+            without=tuple(without or ()),
         )
     except _BENCH_ERRORS as e:
         _fail(str(e))
@@ -747,8 +771,10 @@ def benchmark_render(
     ] = None,
     agent: Annotated[
         str | None,
-        typer.Option("--agent", help="Agent card the job runs as (default pi)."),
+        typer.Option("--agent", help="Agent card the job runs as (default: the condition's)."),
     ] = None,
+    condition: _ConditionOpt = None,
+    without: _WithoutOpt = None,
 ) -> None:
     """Write the campaign's sandbox job files without submitting them.
 
@@ -768,6 +794,8 @@ def benchmark_render(
             out=out,
             engine_tasks=None,
             agent=agent,
+            condition=condition,
+            without=tuple(without or ()),
         )
     except _BENCH_ERRORS as e:
         _fail(str(e))
@@ -775,6 +803,85 @@ def benchmark_render(
         f"rendered Q{asked.number} ({asked.key}); edit if needed, then: sbatch {script_path}"
     )
     typer.echo("after the job ends: slab benchmark score")
+
+
+@benchmark_app.command("matrix")
+def benchmark_matrix(
+    workspace: _WorkspaceOpt = None,
+    condition: Annotated[
+        list[str] | None,
+        typer.Option("--condition", help="A condition to include (repeatable; default all)."),
+    ] = None,
+    question: Annotated[
+        list[str] | None,
+        typer.Option("--question", help="A question number or key (repeatable; default all)."),
+    ] = None,
+    without: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--without",
+            help="A mechanism to switch off from the slab condition, one job per "
+            "mechanism (repeatable).",
+        ),
+    ] = None,
+    partition: Annotated[
+        str | None, typer.Option("--partition", "-p", help="Partition for the engine legs.")
+    ] = None,
+    time_limit: Annotated[str | None, typer.Option("--time-limit")] = None,
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", help="Directory for the grid (default: ./sandbox/matrix)."),
+    ] = None,
+) -> None:
+    """Render the launch grid, conditions x questions x ablations, without submitting.
+
+    Every cell gets its own directory with the four sandbox files, and
+    matrix.json lists them. Submit each script with sbatch; when the jobs
+    end, 'score' records every campaign with its condition.
+    """
+    from mason.cli import render_sandbox_files
+
+    out_dir = (out if out is not None else Path.cwd() / "sandbox" / "matrix").resolve()
+    try:
+        arms = list(condition) if condition else list(benchmark.CONDITIONS)
+        asked = (
+            [benchmark.find_question(q) for q in question]
+            if question
+            else list(benchmark.QUESTIONS)
+        )
+        cells = benchmark.matrix_cells(arms, asked, tuple(without or ()))
+        manifest: list[dict[str, Any]] = []
+        for cell in cells:
+            script_path, _script = render_sandbox_files(
+                cell.question.instruction,
+                workspace=workspace,
+                partition=partition,
+                time_limit=time_limit,
+                out=out_dir / cell.subdir,
+                engine_tasks=None,
+                condition=cell.condition,
+                without=cell.without,
+            )
+            manifest.append(
+                {
+                    "condition": cell.condition,
+                    "without": list(cell.without),
+                    "harness": cell.label,
+                    "question": cell.question.number,
+                    "key": cell.question.key,
+                    "script": str(script_path),
+                }
+            )
+            typer.echo(
+                f"{cell.label:<32} Q{cell.question.number} {cell.question.key:<9} {script_path}"
+            )
+        (out_dir / "matrix.json").write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+    except _BENCH_ERRORS as e:
+        _fail(str(e))
+    typer.echo(f"{len(cells)} job(s) rendered under {out_dir}; nothing submitted")
+    typer.echo("submit each with sbatch <script>; after the jobs end: slab benchmark score")
 
 
 @benchmark_app.command("flags")

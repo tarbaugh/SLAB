@@ -13,8 +13,9 @@ are exact captures from real executions against a local Ollama.
 
 ## The roster
 
-Seven cards ship built in: two leads, `pi` and `planner`, three
-specialists, a `worker`, and a `critic`. `slab mason roster` lists what is visible
+Nine cards ship built in: two leads, `pi` and `planner`, three
+specialists, a `worker`, a `critic`, and two condition cards, `protocol`
+and `bare`, that [the benchmark](../benchmark.md) runs as harness arms. `slab mason roster` lists what is visible
 from the current project, with the layer each card came from and the
 model it would use:
 
@@ -23,13 +24,15 @@ slab mason roster
 ```
 
 ```text
-pi                 built-in  llama3.1:8b                  18 skill(s)  [delegates]
+pi                 built-in  llama3.1:8b                  19 skill(s)  [delegates]
 analysis-expert    built-in  llama3.1:8b                  9 skill(s)
-critic             built-in  llama3.1:8b                  18 skill(s)  [reviews]
+bare               built-in  llama3.1:8b                  0 skill(s)  [own prompt]
+critic             built-in  llama3.1:8b                  19 skill(s)  [reviews]
 dft-expert         built-in  llama3.1:8b                  10 skill(s)
-md-expert          built-in  llama3.1:8b                  13 skill(s)
-planner            built-in  llama3.1:8b                  18 skill(s)  [delegates, review first]
-worker             built-in  llama3.1:8b                  18 skill(s)
+md-expert          built-in  llama3.1:8b                  14 skill(s)
+planner            built-in  llama3.1:8b                  19 skill(s)  [delegates, review first]
+protocol           built-in  llama3.1:8b                  19 skill(s)  [own prompt]
+worker             built-in  llama3.1:8b                  19 skill(s)
 ```
 
 Each agent runs the same harness with a different role prompt, its own
@@ -424,10 +427,15 @@ every claim. You do not compute and you do not speculate.
 - `review_first: true` refuses the card's `delegate`, `launch_workflow`,
   and `submit_job` until a critic has approved the plan. A `tools`
   allowlist on such a card must name `review`.
+- `core: false` makes the body the whole system prompt: no shared
+  discipline, no compute budget, no software notes, and a minimal
+  environment block. Such a card is never on a team and cannot delegate
+  or review. The two condition cards use it.
 
 The shared harness discipline (evidence, verification, honesty, tool
-rules) is appended to every card automatically. A card states identity
-and domain doctrine, nothing else, so 20 to 60 lines is the normal size.
+rules) is appended to every card automatically, unless the card sets
+`core: false`. A card states identity and domain doctrine, nothing else,
+so 20 to 60 lines is the normal size.
 
 ## A planner and a worker
 

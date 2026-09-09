@@ -271,6 +271,11 @@ class MasonSession:
         # CLI flag overrides, kept so they can be re-asserted over
         # [agent.roster.<name>] tables: a flag outranks config.
         self.flag_updates: dict[str, object] = {}
+        # The benchmark condition this session runs under (mason.mechanisms)
+        # and the mechanisms switched off from it, for the transcript
+        # header; None is Mason as configured.
+        self.condition: str | None = None
+        self.ablated: tuple[str, ...] = ()
         self._parent: MasonSession | None = None
         self._children_spawned = 0
         # Unset compute_profile derives from the machine: a config that declares
