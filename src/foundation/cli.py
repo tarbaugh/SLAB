@@ -456,7 +456,7 @@ def mcp(
         root = _ops.resolve_root(workspace)
     except (FoundationError, SlabError) as e:
         _fail(str(e))
-    serve(root)  # pragma: no cover - blocks on stdio
+    serve(root, project=Path.cwd())  # pragma: no cover - blocks on stdio
 
 
 if __name__ == "__main__":  # pragma: no cover - module execution convenience

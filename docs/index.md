@@ -50,14 +50,15 @@ SLAB does not require its own agent.
 
 - **Python.** Workflows are ordinary scripts. Any harness that can run
   Python can hold a workspace.
-- **MCP.** `slab mcp` serves a workspace as a set of MCP tools, so
-  Claude Code, Cursor, or any MCP client can start, inspect, and promote
-  runs. See [Agents over MCP](tutorials/agents-mcp.md).
+- **MCP.** `slab mcp` serves a workspace as the tools the resident agent
+  uses, so Claude Code, Cursor, or any MCP client can start, inspect, and
+  promote runs, load the same skills, and be scored on the same benchmark.
+  See [Agents over MCP](tutorials/agents-mcp.md).
 - **Mason.** The distribution includes a resident research agent for long
   campaigns on a cluster, with its model server started as a batch job. It
   is optional. See [Mason, the resident agent](tutorials/mason.md).
 
-Mason's skills follow the Agent Skills specification exactly, and skills
+The skills follow the Agent Skills specification exactly, and skills
 written for other consumers load unmodified from a project or user skills
 directory. So you can bring an external skill pack and keep the SLAB
 lifecycle under it. See [The roster & skills](tutorials/roster-and-skills.md).

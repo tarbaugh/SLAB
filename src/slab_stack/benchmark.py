@@ -10,6 +10,13 @@ structured result, a cited run that never verified, or a value outside
 the band. The score is the answer to one question: was a correct answer
 achieved?
 
+An external harness driving the workspace over MCP is scored the same
+way. It has no Mason transcript; its answer is the ``report_results``
+record in :mod:`foundation.session_record`, and the question is named
+with ``--question`` because the record holds no opening instruction. The
+science review reads Mason transcripts, so a harness record is scored
+but not reviewed.
+
 After the verdict, the review (:mod:`slab_stack.review`) reads the same
 evidence and raises flags: attributable defects, each naming the skill,
 card, or tool a revision would edit. The flags travel in the record
@@ -37,11 +44,13 @@ from foundation.errors import (
     ArtifactNotFoundError,
     RunNotFoundError,
     SerializationError,
+    SessionNotFoundError,
 )
 from foundation.runtime import Workspace
 from foundation.serialize import loads
+from foundation.session_record import SessionRecord, find_session_record
 from mason.report import summarize
-from mason.session import transcript_for, transcript_groups
+from mason.session import SessionError, transcript_for, transcript_groups
 from slab._version import __version__
 from slab_stack import review
 
@@ -394,24 +403,55 @@ def score_session(
 
     Raises :class:`BenchmarkError` only when there is nothing to score: no
     such session, or a session that is not a benchmark campaign.
+
+    *session* names a Mason transcript or a harness session record. A
+    harness record carries no instruction, so *question* is required for
+    one, and the science review does not run on it.
     """
-    transcript = transcript_for(root, session)
-    siblings = next(
-        (group for conversation, group in transcript_groups(root) if conversation == transcript),
-        [],
-    )
-    summary = summarize(transcript, siblings)
-    asked = question or question_for(transcript)
-    if asked is None:
-        raise BenchmarkError(
-            f"session {transcript.stem} did not open with a benchmark instruction; "
-            "pass --question to score it as one anyway"
+    transcript: Path | None
+    try:
+        transcript = transcript_for(root, session)
+    except SessionError as no_transcript:
+        transcript = None
+        try:
+            harness = find_session_record(root, session)
+        except SessionNotFoundError:
+            # Neither kind of session: the transcript lookup's own refusal is
+            # the one a person reads, naming the workspace searched.
+            raise no_transcript from None
+    if transcript is not None:
+        siblings = next(
+            (
+                group
+                for conversation, group in transcript_groups(root)
+                if conversation == transcript
+            ),
+            [],
         )
+        summary = summarize(transcript, siblings)
+        asked = question or question_for(transcript)
+        if asked is None:
+            raise BenchmarkError(
+                f"session {transcript.stem} did not open with a benchmark instruction; "
+                "pass --question to score it as one anyway"
+            )
+        stem = transcript.stem
+        skills = review.loaded_skills(transcript)
+    else:
+        if question is None:
+            raise BenchmarkError(
+                f"harness session {harness.session_id} records no benchmark instruction; "
+                "pass --question to say which question it answered"
+            )
+        asked = question
+        summary = _harness_summary(harness)
+        stem = harness.session_id
+        skills = harness.skills()
     finish = summary["finish"]
     record: dict[str, Any] = {
         "question": asked.number,
         "key": asked.key,
-        "session": transcript.stem,
+        "session": stem,
         "model": model or summary.get("model") or "unknown",
         "provider": summary.get("provider"),
         "endpoint_origin": summary.get("endpoint_origin"),
@@ -419,7 +459,7 @@ def score_session(
         "agent": summary.get("agent") or "pi",
         "engine_class": None,
         "engines": [],
-        "skills": review.loaded_skills(transcript),
+        "skills": skills,
         "run_ids": list(finish.get("run_ids") or []),
         "results": dict(finish.get("results") or {}),
         "reference": {},
@@ -436,10 +476,38 @@ def score_session(
     }
     with Workspace(root) as ws:
         _judge_campaign(ws, asked, finish, record)  # may refuse: no reference
-        review.review(
-            root, transcript, asked, record, ws=ws, catalog=catalog, referee_client=referee
-        )
+        if transcript is not None:
+            review.review(
+                root, transcript, asked, record, ws=ws, catalog=catalog, referee_client=referee
+            )
+        else:
+            # The evaluators walk a Mason transcript; a harness keeps its
+            # own elsewhere. The record says so instead of pretending.
+            record["referee_model"] = None
+            record["referee_error"] = None
     return record
+
+
+def _harness_summary(harness: SessionRecord) -> dict[str, Any]:
+    """What the scorer reads from a harness record, in the transcript summary's shape."""
+    header = harness.header()
+    results = harness.results()
+    finish = {
+        "reported": results is not None,
+        "results": dict((results or {}).get("results") or {}),
+        "run_ids": list((results or {}).get("run_ids") or []),
+    }
+    return {
+        "model": None,
+        "provider": None,
+        "endpoint_origin": None,
+        "compute_profile": None,
+        "agent": header.get("client") or "harness",
+        "finish": finish,
+        "total_steps": None,
+        "total_prompt_tokens": None,
+        "total_completion_tokens": None,
+    }
 
 
 def _judge_campaign(

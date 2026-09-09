@@ -28,10 +28,8 @@ from __future__ import annotations
 import json
 import os
 import re
-import shlex
 import sqlite3
 import subprocess
-from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -41,8 +39,10 @@ if TYPE_CHECKING:
     from foundation.runtime import Workspace
     from mason.roster import AgentSpec
 
+from foundation import _ops
 from foundation import memory as memory_store
 from foundation.errors import MemoryStoreError
+from foundation.project import plan_write
 from mason.client import ToolCall
 from mason.session import MasonSession
 from mason.skills import Skill, discover_skills, listing, visible_catalog
@@ -621,30 +621,6 @@ def _store_mutation(command: str, workspace_root: Path) -> str | None:
     )
 
 
-def _tally_line(statuses: list[str], hits: int) -> str:
-    """``3 completed, 1 running (2 cache hits)`` from a run's task statuses."""
-    tally = Counter(statuses)
-    order = ("completed", "running", "failed")
-    parts = [f"{tally[status]} {status}" for status in order if tally.get(status)]
-    parts += [f"{n} {status}" for status, n in sorted(tally.items()) if status not in order]
-    line = ", ".join(parts) or "no tasks"
-    if hits:
-        line += f" ({hits} cache hit{'s' if hits != 1 else ''})"
-    return line
-
-
-def _progress(ws: Workspace, run_id: str) -> str:
-    """One line of what a run has done so far: its task tally and its checks."""
-    tasks = ws.runs.list_tasks(run_id)
-    line = "tasks: " + _tally_line(
-        [task.status.value for task in tasks], sum(1 for task in tasks if task.cache_hit)
-    )
-    checks = ws.runs.list_check_results(run_id)
-    if checks:
-        line += f"; checks: {sum(1 for c in checks if c.passed)}/{len(checks)} passed"
-    return line
-
-
 def _compact_details(details: dict[str, Any]) -> dict[str, Any]:
     """The run record with its finished tasks folded to one line each.
 
@@ -688,7 +664,7 @@ def _compact_details(details: dict[str, Any]) -> dict[str, Any]:
         if label:
             line["label"] = label
         folded.append(line)
-    summary = _tally_line(
+    summary = _ops.tally_line(
         [str(task.get("status")) for task in tasks],
         sum(1 for task in tasks if task.get("cache_hit")),
     )
@@ -1239,29 +1215,8 @@ def _add_workflow_tools(
     )
 
     def _resolve_run(ws: Workspace, value: str) -> tuple[str, str]:
-        """A run id or unique prefix, else this session's newest run of that name.
-
-        The name is what the model remembers (a real transcript passed the
-        script's name twice and was told no run matched), so it resolves
-        too, with a note saying which run was taken.
-        """
-        from foundation.errors import RunNotFoundError, SessionNotFoundError
-
-        try:
-            return ws.runs.resolve(value), ""
-        except RunNotFoundError as not_found:
-            try:
-                runs = ws.runs.list_runs(session=session.session_id, limit=200)
-            except SessionNotFoundError:
-                runs = []
-            named = [run for run in runs if run.name == value]
-            if not named:
-                raise not_found from None
-            run = named[0]  # newest first
-            return run.id, (
-                f"(resolved {value!r} by name to run {run.id[:10]}, this session's "
-                f"newest run of that name)\n"
-            )
+        """A run id, a unique prefix, or this session's newest run of that name."""
+        return _ops.resolve_run(ws, value, session=session.session_id)
 
     def show_run(arguments: dict[str, Any]) -> str:
         from foundation._ops import run_details
@@ -1489,60 +1444,44 @@ def _add_workflow_tools(
     )
 
     def wait_for_run(arguments: dict[str, Any]) -> str:
-        import time
-
-        from foundation.errors import SessionNotFoundError
-
         wanted = arguments.get("run_id")
         timeout = min(float(arguments.get("timeout_s", 900.0)), _MAX_WAIT_TIMEOUT_S)
-        deadline = time.monotonic() + timeout
-        # A background launch takes a moment to register its run, so an
-        # empty workspace gets a grace window before "nothing is running"
-        # counts as an answer.
-        grace_until = time.monotonic() + min(_WAIT_GRACE_S, timeout)
-        run_id: str | None = None
-        note = ""
-        while True:
-            with _open_workspace(session) as ws:
-                if wanted:
-                    if run_id is None:
-                        run_id, note = _resolve_run(ws, str(wanted))
-                    run = ws.runs.get(run_id)
-                    if run.status.value != "running":
-                        return (
-                            f"{note}run {run.id}: state={run.state.value} "
-                            f"status={run.status.value}; {_progress(ws, run.id)}; "
-                            f"read it with show_run"
-                        )
-                    running = [run]
-                else:
-                    try:
-                        runs = ws.runs.list_runs(session=session.session_id, limit=50)
-                    except SessionNotFoundError:
-                        runs = []
-                    running = [r for r in runs if r.status.value == "running"]
-                    if not running and time.monotonic() >= grace_until:
-                        if not runs:
-                            return (
-                                "this session has no runs yet; launch one first "
-                                "(a fresh background launch needs a few seconds "
-                                "to register)"
-                            )
-                        finished = "\n".join(_run_line(r) for r in runs[:10])
-                        return f"no run of this session is running; the record:\n{finished}"
-                if time.monotonic() >= deadline:
-                    # The tally answers "is it moving?" without a show_run
-                    # of the whole record: a real session queried the
-                    # database by hand for exactly this count.
-                    lines = "\n".join(
-                        f"{r.id[:10]}  {r.name}  running; {_progress(ws, r.id)}"
-                        for r in running
-                    ) or "(none registered yet)"
-                    return (
-                        f"{note}still running after {timeout:.0f}s:\n{lines}\n"
-                        f"call wait_for_run again to keep waiting"
-                    )
-            time.sleep(min(_WAIT_POLL_S, max(0.05, deadline - time.monotonic())))
+        with _open_workspace(session):
+            pass  # a store that cannot be opened is named here, with the recovery
+        waited = _ops.wait_for_run(
+            session.workspace_root,
+            run_id=str(wanted) if wanted else None,
+            session=session.session_id,
+            timeout_s=timeout,
+            poll_s=_WAIT_POLL_S,
+            grace_s=_WAIT_GRACE_S,
+        )
+        note = waited["note"]
+        outcome = waited["outcome"]
+        if outcome == "finished":
+            run = waited["run"]
+            return (
+                f"{note}run {run.id}: state={run.state.value} "
+                f"status={run.status.value}; {waited['progress']}; "
+                f"read it with show_run"
+            )
+        if outcome == "no_runs":
+            return (
+                "this session has no runs yet; launch one first "
+                "(a fresh background launch needs a few seconds to register)"
+            )
+        if outcome == "none_running":
+            finished = "\n".join(_run_line(r) for r in waited["runs"])
+            return f"no run of this session is running; the record:\n{finished}"
+        # The tally answers "is it moving?" without a show_run of the whole
+        # record: a real session queried the database by hand for this count.
+        lines = "\n".join(
+            f"{r.id[:10]}  {r.name}  running; {progress}" for r, progress in waited["running"]
+        ) or "(none registered yet)"
+        return (
+            f"{note}still running after {timeout:.0f}s:\n{lines}\n"
+            f"call wait_for_run again to keep waiting"
+        )
 
     box.add(
         Tool(
@@ -1599,7 +1538,9 @@ def _add_engine_tools(box: Toolbox, session: MasonSession) -> None:
     )
 
     def list_tasks(arguments: dict[str, Any]) -> str:
-        entries = [f"{name}({sig}) — {summary}" for name, sig, summary in _catalog_tasks()]
+        entries = [
+            f"{t['name']}({t['signature']}) — {t['summary']}" for t in _ops.task_catalog()
+        ]
         return "\n".join(entries)
 
     box.add(
@@ -1616,18 +1557,8 @@ def _add_engine_tools(box: Toolbox, session: MasonSession) -> None:
     )
 
     def describe_task(arguments: dict[str, Any]) -> str:
-        name = str(arguments.get("name", "")).strip()
-        if not name:
-            raise ValueError("describe_task requires 'name' — call list_tasks to see them")
-        catalog = {entry[0]: entry for entry in _catalog_tasks()}
-        if name not in catalog:
-            raise ValueError(f"no task {name!r}; known: {', '.join(sorted(catalog))}")
-        from foundation import tasks as _tasks
-
-        function = getattr(_tasks, name)
-        _, signature, _ = catalog[name]
-        doc = (function.__doc__ or "").strip() or "(no docstring)"
-        return f"{name}({signature})\n\n{doc}"
+        task = _ops.describe_task(str(arguments.get("name", "")))
+        return f"{task['name']}({task['signature']})\n\n{task['doc']}"
 
     box.add(
         Tool(
@@ -1758,89 +1689,24 @@ def _add_mp_tools(box: Toolbox, snapshot_root: Path) -> None:
     )
 
 
-def _catalog_tasks() -> list[tuple[str, str, str]]:
-    """(name, signature, first-line summary) for every public foundation task.
-
-    Public = not underscore-prefixed and callable with `@task` applied, i.e.
-    every symbol foundation.tasks exports that a workflow script may name.
-    """
-    import inspect
-
-    from foundation import tasks as _tasks
-
-    entries: list[tuple[str, str, str]] = []
-    for name in sorted(vars(_tasks)):
-        if name.startswith("_"):
-            continue
-        obj = getattr(_tasks, name)
-        if not callable(obj) or not getattr(obj, "__doc__", None):
-            continue
-        try:
-            sig = inspect.signature(obj)
-        except (TypeError, ValueError):
-            continue
-        # A traced task decorated with @task wraps the underlying function;
-        # signature() correctly returns the wrapped signature. Skip helpers
-        # by requiring the function be defined in the tasks module itself.
-        if getattr(obj, "__module__", "") != _tasks.__name__:
-            continue
-        summary = (obj.__doc__ or "").strip().splitlines()[0]
-        entries.append((name, _short_signature(sig), summary))
-    return entries
-
-
-def _short_signature(sig: Any) -> str:
-    """Signature rendering the agent can read: drop annotations, keep names."""
-    parts: list[str] = []
-    for param in sig.parameters.values():
-        kind = param.kind
-        if kind is param.VAR_POSITIONAL:
-            parts.append(f"*{param.name}")
-            continue
-        if kind is param.VAR_KEYWORD:
-            parts.append(f"**{param.name}")
-            continue
-        if kind is param.KEYWORD_ONLY and "*" not in parts:
-            parts.append("*")
-        default = "" if param.default is param.empty else f"={param.default!r}"
-        parts.append(f"{param.name}{default}")
-    return ", ".join(parts)
-
-
 # -- hpc ---------------------------------------------------------------------
 
 
 def _add_hpc_tools(box: Toolbox, session: MasonSession) -> None:
     def submit_job(arguments: dict[str, Any]) -> str:
-        from slab.hpc import render_sbatch, submit
-
-        name = str(arguments["name"])
-        command = str(arguments["command"])
-        partition, _spec = session.hpc.resolve_partition(arguments.get("partition"))
-        # Scripts and SLURM .out files live under the workspace so
-        # 'slab purge' can sweep them; the prologue cd keeps the
-        # payload running in the project directory as before (the .out is
-        # opened before the cd, so it stays in jobs/).
-        script = render_sbatch(
-            command,
-            job_name=name,
-            partition=partition,
-            config=session.hpc,
+        job = _ops.submit_job(
+            session.workspace_root,
+            hpc=session.hpc,
+            command=str(arguments["command"]),
+            name=str(arguments["name"]),
+            partition=arguments.get("partition"),
             time_limit=arguments.get("time_limit"),
-            # The exported session id stamps every run the job launches, so a
-            # batch result joins the chat that asked for it. The export is
-            # explicit rather than inherited: a cluster may submit with
-            # --export=NONE.
-            prologue=(
-                f"export SLAB_SESSION={shlex.quote(session.session_id)}",
-                f"cd {shlex.quote(str(session.cwd))}",
-            ),
+            session=session.session_id,
+            project=session.cwd,
         )
-        jobs_dir = session.workspace_root / "jobs"
-        job = submit(script, job_name=name, partition=partition, directory=jobs_dir)
         return (
-            f"submitted job {job.job_id} ({job.job_name}) to partition {job.partition}; "
-            f"script kept at {job.script_path}; poll with job_status"
+            f"submitted job {job['job_id']} ({job['job_name']}) to partition "
+            f"{job['partition']}; script kept at {job['script_path']}; poll with job_status"
         )
 
     box.add(
@@ -2381,7 +2247,7 @@ def _add_memory_tools(box: Toolbox, session: MasonSession) -> None:
 
     def plan(arguments: dict[str, Any]) -> str:
         content = str(arguments["content"]).rstrip() + "\n"
-        session.plan_path.write_text(content, encoding="utf-8")
+        plan_write(session.cwd, content)
         return f"PLAN.md updated:\n{content}"
 
     box.add(

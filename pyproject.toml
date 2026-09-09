@@ -100,7 +100,7 @@ disallow_untyped_calls = false
 # (whose script imports the pre-split module paths on purpose) is skipped, and
 # so are the built-in skills: their scripts are argparse programs with
 # repeating shapes across skill directories, exercised through runpy instead.
-addopts = "-q --doctest-modules --ignore=tests/data --ignore=src/mason/skills --cov=slab --cov=foundation --cov=mason --cov=slab_stack --cov-report=term-missing"
+addopts = "-q --doctest-modules --ignore=tests/data --ignore=src/foundation/skills --cov=slab --cov=foundation --cov=mason --cov=slab_stack --cov-report=term-missing"
 testpaths = ["tests", "src"]
 filterwarnings = [
     # ASE-internal numpy 2.5 deprecations; not ours to fix

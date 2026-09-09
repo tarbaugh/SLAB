@@ -50,7 +50,9 @@ content-addressed store, and one command, `slab`, drives everything.
 - **HPC.** One layered TOML file per cluster declares paths, engines, and
   SLURM partitions, and `slab hpc` renders, submits, and polls jobs.
   [HPC configuration & SLURM](https://tarbaugh.github.io/SLAB/tutorials/hpc-config/)
-- **Agents.** `slab mcp` serves a workspace to any MCP client as tools.
+- **Agents.** `slab mcp` serves a workspace to any MCP client as the
+  tools the resident agent uses, skills and memory included, so any
+  harness can run the benchmark.
   [Agents over MCP](https://tarbaugh.github.io/SLAB/tutorials/agents-mcp/)
 - **Mason.** The resident research agent for long campaigns, with a roster
   of specialists, Agent Skills, machine memory, and its model served as a

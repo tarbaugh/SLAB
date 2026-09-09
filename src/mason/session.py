@@ -29,6 +29,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from foundation import project as project_files
 from mason.config import AgentConfig, load_config
 from mason.errors import MasonError
 from slab.config import HpcConfig
@@ -283,8 +284,8 @@ class MasonSession:
         self.endpoint = ""
         self.endpoint_origin = ""
         self.resolve_endpoint()
-        self.notebook_path = self.cwd / "NOTEBOOK.md"
-        self.plan_path = self.cwd / "PLAN.md"
+        self.notebook_path = project_files.notebook_path(self.cwd)
+        self.plan_path = project_files.plan_path(self.cwd)
         self.read_files: set[Path] = set()
         # The newest answer to each catalog and material lookup this session
         # (mason.tools.FACT_TOOLS), handed to the critic with a review brief.
@@ -516,16 +517,16 @@ class MasonSession:
         The notebook is a curated record: entries only land here when an
         agent (or a person) calls it a result. Machinery like context
         compaction writes elsewhere — see :meth:`compactions_append`."""
-        stamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
-        title = f" — {heading}" if heading else ""
         # The notebook is shared across the whole session (it is the group's
-        # blackboard), so a delegated agent's entries carry its name.
-        label = f" [{self.agent_name}]" if self._parent is not None else ""
-        block = f"\n## {stamp}{title}{label}\n\n{entry.rstrip()}\n"
-        if not self.notebook_path.exists():
-            block = "# Lab notebook\n" + block
-        with open(self.notebook_path, "a", encoding="utf-8") as handle:
-            handle.write(block)
+        # blackboard), so a delegated agent's entries carry its name. The
+        # file itself is the project's: foundation writes it the same way
+        # for every client.
+        project_files.notebook_append(
+            self.cwd,
+            entry,
+            heading=heading,
+            author=self.agent_name if self._parent is not None else None,
+        )
 
     @property
     def compactions_path(self) -> Path:
@@ -551,18 +552,11 @@ class MasonSession:
 
     def notebook_tail(self, max_chars: int = 3_000) -> str:
         """The notebook's last entries, budget-capped for the context."""
-        if not self.notebook_path.exists():
-            return ""
-        text = self.notebook_path.read_text(encoding="utf-8")
-        if len(text) <= max_chars:
-            return text
-        return f"[... earlier notebook entries omitted ...]\n{text[-max_chars:]}"
+        return project_files.notebook_tail(self.cwd, max_chars)
 
     def plan_text(self) -> str:
         """The current plan, or empty when none has been written yet."""
-        if not self.plan_path.exists():
-            return ""
-        return self.plan_path.read_text(encoding="utf-8")
+        return project_files.plan_read(self.cwd)
 
     # -- transcript -----------------------------------------------------------
 

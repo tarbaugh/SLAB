@@ -198,9 +198,10 @@ def test_importing_slab_stays_light() -> None:
 
 
 def test_builtin_cards_and_skills_ship_inside_the_package() -> None:
-    """The roster's built-ins are package data: they must live under src/mason
-    (hatchling ships whole package directories, the py.typed precedent), and
-    every built-in skill must carry its manifest."""
+    """The built-ins are package data (hatchling ships whole package
+    directories, the py.typed precedent): the cards under src/mason, the
+    skills under src/foundation so an MCP client loads the same catalog,
+    and every built-in skill must carry its manifest."""
     cards = sorted(p.name for p in (SRC / "mason" / "agents").glob("*.md"))
     assert cards == [
         "analysis-expert.md",
@@ -212,7 +213,7 @@ def test_builtin_cards_and_skills_ship_inside_the_package() -> None:
         "worker.md",
     ]
     skills = sorted(
-        p.name for p in (SRC / "mason" / "skills").iterdir() if p.is_dir()
+        p.name for p in (SRC / "foundation" / "skills").iterdir() if p.is_dir()
     )
     assert skills == [
         "atomsk-defects",
@@ -236,4 +237,4 @@ def test_builtin_cards_and_skills_ship_inside_the_package() -> None:
         "two-phase-melting",
     ]
     for name in skills:
-        assert (SRC / "mason" / "skills" / name / "SKILL.md").is_file()
+        assert (SRC / "foundation" / "skills" / name / "SKILL.md").is_file()
