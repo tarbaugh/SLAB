@@ -475,6 +475,9 @@ def test_mason_read_renders_a_transcript_for_humans(tmp_path: Path) -> None:
         {"at": "2026-08-27T10:00:06+00:00", "type": "message",
          "message": {"role": "tool", "tool_call_id": "t1", "content": "exit 0\nfiles"}},
         {"at": "2026-08-27T10:00:09+00:00", "type": "finish", "report": "done, run r1"},
+        {"at": "2026-08-27T10:00:10+00:00", "type": "retire", "mode": "expire",
+         "runs_promoted": 1, "runs_expired": 2, "runs_total": 3,
+         "bytes_promoted": 10, "bytes_total": 40, "kept": [], "expired": []},
     ]
     lines = [json.dumps(e) for e in events]
     lines.insert(3, "{broken")
@@ -489,6 +492,9 @@ def test_mason_read_renders_a_transcript_for_humans(tmp_path: Path) -> None:
     assert '-> shell {"command": "ls"}' in result.output
     assert "exit 0" in result.output
     assert "=== final report @ 10:00:09" in result.output
+    assert "[10:00:10] retire: 1 promoted, 2 expired of 3 run(s); bytes 10 of 40 kept" in (
+        result.output
+    )
     assert "[line 4: not valid JSON; skipped]" in result.output
     assert "[1 model call(s); tokens 100+20]" in result.output
 

@@ -20,7 +20,7 @@ from slab_stack.cli import _command_name, app
 
 runner = CliRunner()
 
-LIFECYCLE = {"run", "list", "show", "promote", "sessions"}
+LIFECYCLE = {"run", "list", "show", "promote", "retire", "sessions"}
 HOUSEKEEPING_COMMANDS = {"expire", "gc", "fast-forward", "purge"}
 GROUPS = {
     "memory", "mason", "benchmark", "engines", "pseudos", "protocols", "mp", "hpc", "config",

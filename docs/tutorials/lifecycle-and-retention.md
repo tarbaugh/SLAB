@@ -310,9 +310,117 @@ slab promote 01m13035ys 01m12zww7j 01m12ztp0f
 
 `slab mason chat --resume` opens a new session with a new id, so the runs of a resumed chat promote as their own session.
 
+## Retire a session at finish
+
+A session promote takes every verified run. A campaign's answer rests on fewer than that. The report cites the runs behind its numbers, and the shakeouts and probes around them served their purpose the moment the report was written. `slab retire` acts on that distinction. It promotes the cited runs, and it expires the session's other runs.
+
+Mason runs it for you. When the resident agent calls `finish`, the harness passes the `run_ids` of that call to the same operation, so a campaign promotes what it cited and lets the rest go. The transcript records the outcome as a `retire` event. Over MCP, a harness calls the `retire_session` tool last, after `report_results`. The verb below is for a session whose finish never ran, and for checking one first.
+
+The example creates the same four runs as above, in a fresh workspace and under a new session id. The report cites the two ladders:
+
+```python
+import time
+
+from foundation import Workspace, check, converged
+
+chat_ws = Workspace("retire-demo")
+chat = "20260910-142200-51233"
+ladders = [
+    ("nb-smoke", "one balanced-protocol single point", 0.0004),
+    ("nb-kmesh-ladder", "k-point ladder at 40 Ry", 0.0002),
+    ("nb-cutoff-ladder", "cutoff ladder at a dense mesh", 0.0005),
+]
+
+for name, intent, residual in ladders:
+    with chat_ws.start_run(name=name, intent=intent, session=chat) as run:
+        run.keep("energies", {"name": name, "residual": residual})
+        @check
+        def converged_to_1_meV(residual=residual):
+            return converged(residual, below=0.001, label="meV/atom")
+    time.sleep(1.1)
+
+with chat_ws.start_run(name="nb-probe", intent="eyeball one rung; no checks", session=chat):
+    pass
+
+for run in chat_ws.runs.list_runs(session=chat):
+    print(f"{run.name:17s} {run.state.value:12s} {run.id}")
+chat_ws.close()
+```
+
+```text
+nb-probe          quarantined  01m26fnvcz9mrpt86tjp2yk4g4
+nb-cutoff-ladder  verified     01m26fnta716afsj8xv00z5y87
+nb-kmesh-ladder   verified     01m26fns7jjfdhxwqeh0phz65t
+nb-smoke          verified     01m26fnr525t15w2b4vwwyt0xk
+```
+
+Pass the session and the cited runs. `--dry-run` reports what the command would do and writes nothing:
+
+```bash
+slab retire --session 20260910 --keep 01m26fns7j --keep 01m26fnta7 --dry-run -w retire-demo
+```
+
+```text
+  [+] 01m26fns7j  nb-kmesh-ladder      promoted checks passed
+  [+] 01m26fnta7  nb-cutoff-ladder     promoted checks passed
+  [x] 01m26fnr52  nb-smoke             expired  would be uncited by the finish
+  [x] 01m26fnvcz  nb-probe             expired  would be uncited by the finish
+session 20260910-142200-51233: 2 promoted, 2 expired, 0 skipped of 4 run(s); bytes 93 promoted, 39 expired, 132 in the session (dry run)
+```
+
+The marks are the ones `slab promote --session` uses, plus `[x]` for a run the command expires. The last line carries the numbers a benchmark records: how many runs the finish kept of how many the session made, and how many bytes stay reachable from the kept runs. Run it for real with a reason, which lands in each promoted run's history:
+
+```bash
+slab retire --session 20260910 --keep 01m26fns7j --keep 01m26fnta7 --reason "the two ladders the report cites" -w retire-demo
+```
+
+```text
+  [+] 01m26fns7j  nb-kmesh-ladder      promoted checks passed
+  [+] 01m26fnta7  nb-cutoff-ladder     promoted checks passed
+  [x] 01m26fnr52  nb-smoke             expired  uncited by the finish
+  [x] 01m26fnvcz  nb-probe             expired  uncited by the finish
+session 20260910-142200-51233: 2 promoted, 2 expired, 0 skipped of 4 run(s); bytes 93 promoted, 39 expired, 132 in the session
+```
+
+Every outcome is idempotent. A second call reports the kept runs as already permanent and the others as already expired, and it changes nothing:
+
+```bash
+slab retire --session 20260910 --keep 01m26fns7j --keep 01m26fnta7 -w retire-demo
+```
+
+```text
+  [=] 01m26fns7j  nb-kmesh-ladder      already  already permanent
+  [=] 01m26fnta7  nb-cutoff-ladder     already  already permanent
+  [-] 01m26fnr52  nb-smoke             skipped  already expired
+  [-] 01m26fnvcz  nb-probe             skipped  already expired
+session 20260910-142200-51233: 0 promoted, 0 expired, 2 skipped of 4 run(s); bytes 93 promoted, 0 expired, 132 in the session
+```
+
+The table states what a retire does with each run:
+
+| Run is | Cited with `--keep` | Not cited |
+|---|---|---|
+| verified | promoted | expired |
+| never verified, not failed | skipped, reported as not verified | expired |
+| failed | skipped, reported as failed | expired |
+| promoted or archived | reported as already permanent | reported as already permanent |
+| expired | skipped, reported as expired | reported as already expired |
+| status running | skipped, reported as running | skipped: a live process owns it |
+| unknown id | skipped, reported as unknown | |
+
+A cited run is never forced. An unverified run the report leans on is a finding, not something to promote past its checks, so the command reports it and exits 1. A cited run may belong to an earlier session. A campaign that builds on an equation of state from last week cites that run, and the retire promotes it under this session's finish.
+
+`--uncited` chooses what happens to the session's other runs: `expire` is the default, `keep` leaves them to the TTL sweep, and `purge` also deletes their rows and the bytes no surviving run references. The default comes from the retention policy's `finish` rule:
+
+```json
+{"finish": {"promote_cited": true, "uncited": "expire"}}
+```
+
+Set `promote_cited` to `false` and `uncited` to `keep` to switch the finish hook off. Expiry is a state change, so an expired shakeout keeps its row, its history, and its bytes until `gc` and `purge` take them. The science review reads the history, so a verified run that expired at finish is not counted as a failure.
+
 ## Fast-forward, then purge
 
-The two phases above respect the retention policy. Two verbs override it: `slab fast-forward` and `slab purge`. Use them when a line of work is finished and you have promoted everything you intend to keep.
+The two phases above respect the retention policy. Two verbs override it: `slab fast-forward` and `slab purge`. Use them when a line of work is finished and you have promoted everything you intend to keep. A finished campaign has already promoted what its report cited, so these two verbs clear what no finish kept.
 
 `slab fast-forward` moves every unpromoted run to `expired`, now. It is a state change only, like `expire`. Promoted and archived runs are not touched. Runs stuck at status `running` are skipped unless you pass `--include-running`.
 

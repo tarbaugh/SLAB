@@ -231,6 +231,76 @@ def test_promote_needs_ids_or_a_session(root: Path, argv: list[str]) -> None:
     assert "not both" in result.output
 
 
+# -- retire ----------------------------------------------------------------------------
+
+
+def test_retire_promotes_the_kept_and_expires_the_rest(root: Path) -> None:
+    ids = _seed_session(root)
+    result = runner.invoke(
+        app, ["retire", "--session", "chat-1", "--keep", ids["verified"], "-w", str(root)]
+    )
+    assert result.exit_code == 0, result.output
+    assert f"[+] {ids['verified'][:10]}  good" in result.output
+    assert f"[x] {ids['unverified'][:10]}  meh" in result.output
+    assert f"[x] {ids['failed'][:10]}  boom" in result.output
+    assert f"[-] {ids['expired'][:10]}  old" in result.output and "already expired" in result.output
+    assert "1 promoted, 2 expired, 1 skipped of 4 run(s)" in result.output
+    with Workspace(root) as ws:
+        assert ws.runs.get(ids["verified"]).state.value == "promoted"
+        assert ws.runs.get(ids["unverified"]).state.value == "expired"
+        assert ws.runs.get(ids["failed"]).state.value == "expired"
+        assert ws.runs.history(ids["verified"])[-1].actor == "user"
+        # The other session and the unstamped run are untouched.
+        assert [r.name for r in ws.runs.list_runs(state="verified")] == ["unstamped", "elsewhere"]
+
+
+def test_retire_exits_one_when_a_kept_run_was_skipped_and_never_forces(root: Path) -> None:
+    ids = _seed_session(root)
+    result = runner.invoke(
+        app, ["retire", "--session", "chat-1", "--keep", ids["unverified"], "-w", str(root)]
+    )
+    assert result.exit_code == 1
+    assert "skipped  not verified" in result.output
+    with Workspace(root) as ws:
+        assert ws.runs.get(ids["unverified"]).state.value == "quarantined"
+
+
+def test_retire_dry_run_and_uncited_modes(root: Path) -> None:
+    ids = _seed_session(root)
+    dry = runner.invoke(
+        app,
+        ["retire", "--session", "chat-1", "--keep", ids["verified"], "--dry-run", "-w", str(root)],
+    )
+    assert dry.exit_code == 0, dry.output
+    assert "would be uncited by the finish" in dry.output and "(dry run)" in dry.output
+    with Workspace(root) as ws:
+        assert ws.runs.get(ids["verified"]).state.value == "verified"
+    kept = runner.invoke(
+        app, ["retire", "--session", "chat-1", "--uncited", "keep", "-w", str(root)]
+    )
+    assert kept.exit_code == 0 and "0 promoted, 0 expired, 0 skipped" in kept.output
+    purged = runner.invoke(
+        app, ["retire", "--session", "chat-1", "--uncited", "purge", "-w", str(root)]
+    )
+    assert purged.exit_code == 0, purged.output
+    assert "purged 3 run(s)" in purged.output
+    with Workspace(root) as ws:
+        assert {r.name for r in ws.runs.list_runs(session="chat-1")} == {"old"}
+    bad = runner.invoke(
+        app, ["retire", "--session", "chat-1", "--uncited", "drop", "-w", str(root)]
+    )
+    assert bad.exit_code == 1 and "keep, expire, or purge" in bad.output
+
+
+def test_retire_uses_the_workspace_policy_and_refuses_an_unknown_session(root: Path) -> None:
+    _seed_session(root)
+    (root / "policy.json").write_text('{"finish": {"uncited": "keep"}}')
+    result = runner.invoke(app, ["retire", "--session", "chat-1", "-w", str(root)])
+    assert result.exit_code == 0 and "0 expired" in result.output
+    missing = runner.invoke(app, ["retire", "--session", "nope", "-w", str(root)])
+    assert missing.exit_code == 1 and "no run carries session 'nope'" in missing.output
+
+
 # -- promote --session -----------------------------------------------------------------
 
 

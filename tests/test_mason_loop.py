@@ -1244,3 +1244,114 @@ def test_session_start_reaps_the_runs_whose_process_is_gone(tmp_path: Path) -> N
     assert after.error == (
         f"process {child.pid} on {this_host()} is gone; marked failed by session start"
     )
+
+
+# -- retire at finish ----------------------------------------------------------------
+
+
+def _stamped_run(session: MasonSession, name: str, *, verified: bool = True) -> str:
+    """A run this session made, as the toolbox would stamp it."""
+    from foundation import Workspace
+
+    with Workspace(session.workspace_root) as ws, ws.start_run(
+        name=name, session=session.session_id
+    ) as run:
+        run.check(lambda: verified, name="gate")
+    return run.id
+
+
+def _events(session: MasonSession) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in session.transcript_path.read_text().splitlines()]
+
+
+def test_a_root_finish_promotes_the_cited_and_expires_the_rest(tmp_path: Path) -> None:
+    from foundation import Workspace
+
+    session = _session(tmp_path)
+    cited = _stamped_run(session, "eos")
+    shakeout = _stamped_run(session, "smoke")
+    client = FakeClient(
+        [
+            _tool_reply(
+                "finish",
+                report=f"a0 = 3.615 A (run {cited})",
+                results={"a0": {"value": 3.615, "unit": "A"}},
+                run_ids=[cited],
+            )
+        ]
+    )
+    result = Mason(session, client=client).run_turn("measure a0")
+    assert result.finished and result.run_ids == (cited,)
+    with Workspace(session.workspace_root) as ws:
+        assert ws.runs.get(cited).state.value == "promoted"
+        assert ws.runs.history(cited)[-1].actor == "finish"
+        assert ws.runs.get(shakeout).state.value == "expired"
+    kinds = [e["type"] for e in _events(session)]
+    assert kinds.index("retire") == kinds.index("finish") + 1
+    retire = next(e for e in _events(session) if e["type"] == "retire")
+    assert (retire["runs_promoted"], retire["runs_expired"], retire["runs_total"]) == (1, 1, 2)
+    assert retire["mode"] == "expire" and "error" not in retire
+
+
+def test_a_delegated_childs_finish_retires_nothing(tmp_path: Path) -> None:
+    from foundation import Workspace
+
+    session = _session(tmp_path)
+    Mason(session, client=FakeClient([]))
+    child = session.spawn("dft-expert", session.base_agent)
+    cited = _stamped_run(child, "eos")  # the child's runs carry the chat's id
+    result = Mason(
+        child, client=FakeClient([_tool_reply("finish", report="done", run_ids=[cited])]), depth=1
+    ).run_turn("measure a0")
+    assert result.finished
+    with Workspace(session.workspace_root) as ws:
+        assert ws.runs.get(cited).state.value == "verified"
+    assert "retire" not in [e["type"] for e in _events(child)]
+    assert "retire" not in [e["type"] for e in _events(session)]
+
+
+def test_a_policy_that_keeps_everything_records_no_retire(tmp_path: Path) -> None:
+    from foundation import Workspace
+
+    session = _session(tmp_path)
+    (session.workspace_root).mkdir(parents=True, exist_ok=True)
+    (session.workspace_root / "policy.json").write_text(
+        '{"finish": {"promote_cited": false, "uncited": "keep"}}'
+    )
+    cited = _stamped_run(session, "eos")
+    other = _stamped_run(session, "smoke")
+    client = FakeClient([_tool_reply("finish", report="done", run_ids=[cited])])
+    assert Mason(session, client=client).run_turn("go").finished
+    with Workspace(session.workspace_root) as ws:
+        assert ws.runs.get(cited).state.value == "verified"
+        assert ws.runs.get(other).state.value == "verified"
+    assert "retire" not in [e["type"] for e in _events(session)]
+
+
+def test_a_retire_error_never_changes_the_finish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from foundation import FoundationError, _ops
+
+    def broken(*args: object, **kwargs: object) -> dict[str, object]:
+        raise FoundationError("the store is locked")
+
+    monkeypatch.setattr(_ops, "retire_session", broken)
+    session = _session(tmp_path)
+    _stamped_run(session, "eos")
+    client = FakeClient([_tool_reply("finish", report="a0 = 3.615 A", run_ids=["01abc"])])
+    result = Mason(session, client=client).run_turn("go")
+    assert result.finished and result.text == "a0 = 3.615 A" and result.run_ids == ("01abc",)
+    retire = next(e for e in _events(session) if e["type"] == "retire")
+    assert retire == {"at": retire["at"], "type": "retire", "error": "the store is locked"}
+
+
+def test_a_finish_that_cites_nothing_retires_nothing_when_nothing_ran(tmp_path: Path) -> None:
+    """The bare and protocol arms cite no run ids and launch no runs: the
+    retire event says so with zeros, and nothing is promoted or expired."""
+    session = _session(tmp_path)
+    client = FakeClient([_tool_reply("finish", report="a0 = 3.61 A", results={})])
+    assert Mason(session, client=client).run_turn("go").finished
+    retire = next(e for e in _events(session) if e["type"] == "retire")
+    assert (retire["runs_total"], retire["runs_promoted"], retire["runs_expired"]) == (0, 0, 0)
+    assert retire["kept"] == [] and retire["expired"] == []

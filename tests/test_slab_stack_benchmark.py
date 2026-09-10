@@ -404,6 +404,26 @@ def test_render_rewrites_only_the_marker_regions(tmp_path: Path) -> None:
     assert bare.read_text() == "no markers\n"
 
 
+def test_the_retention_table_reads_each_records_numbers() -> None:
+    table = benchmark.retention_table(
+        [
+            _record(),
+            _record(session="s2", retention={"error": "locked"}),
+            _record(
+                session="s3",
+                retention={"mode": "purge", "runs_total": 4, "runs_promoted": 1,
+                           "runs_expired": 3, "bytes_total": 0, "bytes_promoted": 0,
+                           "bytes_expired": 0},
+            ),
+        ]
+    )
+    lines = table.splitlines()
+    assert lines[2].endswith("| not recorded | not recorded | not recorded |")
+    assert "retire failed: locked" in lines[3]
+    assert lines[4].endswith("| 1/4 (25 %) | 0/0 | purge |")
+    assert benchmark.retention_table([]) == "No campaign has been scored yet."
+
+
 def test_render_with_no_records_says_so(tmp_path: Path) -> None:
     readme = tmp_path / "README.md"
     readme.write_text("<!-- benchmark:summary:start -->\n<!-- benchmark:summary:end -->\n")
@@ -423,7 +443,10 @@ def test_cli_list_score_and_render(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         root,
         session,
         [_events_header("big-70b", "cluster"), _user(Q1.instruction),
-         _finish({"a0": {"value": 3.61, "unit": "Å"}}, [run_id])],
+         _finish({"a0": {"value": 3.61, "unit": "Å"}}, [run_id]),
+         {"at": "2026-09-01T10:05:01+00:00", "type": "retire", "mode": "expire",
+          "runs_total": 2, "runs_promoted": 1, "runs_expired": 1,
+          "bytes_total": 40, "bytes_promoted": 10, "bytes_expired": 30}],
     )
     _transcript(root, "20260901-100000-8", [_events_header(), _user("unrelated chat")])
 
@@ -466,6 +489,14 @@ def test_cli_list_score_and_render(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert rendered.exit_code == 0, rendered.output
     assert "rewrote docs/benchmark.md" in rendered.output and "rewrote README.md" in rendered.output
     assert "| big-70b | hpc-a | slab | 1/5 |" in (tmp_path / "README.md").read_text()
+
+    retention = runner.invoke(app, ["benchmark", "tables", "--retention"])
+    assert retention.exit_code == 0, retention.output
+    assert (
+        "| 20260901-100000-7 | big-70b | hpc-a | slab | Q1 | 1/2 (50 %) | 10/40 (25 %) | expire |"
+        in retention.output
+    )
+    assert records[0]["retention"]["runs_promoted"] == 1
 
     unknown = runner.invoke(app, ["benchmark", "score", "--session", "1999"])
     assert unknown.exit_code == 1 and "no session transcript matches" in unknown.output
@@ -674,6 +705,12 @@ def test_the_slab_condition_passes_with_a_verified_run(
     assert record["condition"] == "slab" and record["ablated"] == []
     assert set(record["mechanisms"]) == ALL_MECHANISMS
     assert record["agent"] == "pi" and record["engines"] == ["emt"]
+    # The finish promoted the run it cited; the record carries the numbers.
+    retention = record["retention"]
+    assert (retention["runs_total"], retention["runs_promoted"], retention["runs_expired"]) == (
+        1, 1, 0
+    )
+    assert retention["mode"] == "expire" and retention["bytes_promoted"] > 0
 
 
 def test_the_protocol_condition_logs_its_provenance_and_still_fails_unverified(
@@ -729,6 +766,9 @@ def test_the_bare_condition_runs_a_shell_and_fails_unverified(
     assert record["reason"] == "the finish cited no run ids"
     assert record["condition"] == "bare" and record["agent"] == "bare"
     assert record["mechanisms"] == []
+    # No run tools, no runs: the finish retired nothing, and the record says so.
+    assert record["retention"]["runs_total"] == 0
+    assert record["retention"]["runs_promoted"] == 0
 
 
 def test_a_protocol_campaign_passes_only_through_a_verified_run(tmp_path: Path) -> None:

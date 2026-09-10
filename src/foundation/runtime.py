@@ -683,7 +683,9 @@ class Workspace:
         """
         return gc(self.runs, self.artifacts, policy, dry_run=dry_run)
 
-    def purge_expired(self, *, dry_run: bool = False) -> PurgeReport:
+    def purge_expired(
+        self, *, dry_run: bool = False, only: Iterable[str] | None = None
+    ) -> PurgeReport:
         """Delete expired runs outright (see :func:`foundation.retention.purge_expired`).
 
         Examples:
@@ -693,4 +695,4 @@ class Workspace:
             []
             >>> ws.close()
         """
-        return purge_expired(self.runs, self.artifacts, dry_run=dry_run)
+        return purge_expired(self.runs, self.artifacts, dry_run=dry_run, only=only)

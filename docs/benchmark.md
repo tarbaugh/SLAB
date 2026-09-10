@@ -224,6 +224,13 @@ Rules for the record:
   bands. `slab benchmark score --rescore` scores a recorded session
   again; the renderer keeps the latest record per model, machine, and
   question.
+- A record carries `retention`: the numbers of the `retire` event the
+  finish wrote. `runs_promoted` of `runs_total` is what the finish kept,
+  `runs_expired` is what it let go, and the three `bytes_` fields are
+  the bytes reachable from each group. A campaign scored before the
+  finish retired sessions carries `null`. `slab benchmark tables
+  --retention` prints one row per record from these fields and
+  rewrites nothing.
 
 Then rewrite the tables on this page (the questions, the conditions, the
 mechanism ledger, the results, and the flags) and the summary in the

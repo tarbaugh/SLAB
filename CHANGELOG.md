@@ -5,6 +5,20 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- A session retires at finish. Mason passes the `run_ids` of a root
+  session's `finish` to the new `retire_session` operation, which
+  promotes the cited runs that passed their checks, anchors from earlier
+  sessions included, and expires the session's other runs. A cited run
+  that never verified is reported and left alone. The transcript records
+  a `retire` event with the numbers, `slab mason report` and `slab mason
+  read` show it, and the benchmark record carries them as `retention`;
+  `slab benchmark tables --retention` prints them. `slab retire` and the
+  MCP tool `retire_session` run the same operation by hand, `--dry-run`
+  reports without writing, and the retention policy's new `finish` rule
+  sets the default for the uncited runs (`keep`, `expire`, or `purge`).
+  `purge_expired` takes `only=` to restrict a purge to named runs. The
+  science review reads a run's history, so a verified run that expired
+  at finish is not a failure.
 - LAMMPS runs whole input scripts as a traced task. `run_lammps` takes
   the script as text, stages potential files and a structure beside it,
   runs `lmp -in` in slab-managed scratch, and keeps the script, the log,

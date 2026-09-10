@@ -508,6 +508,7 @@ def score_session(
         "steps": summary.get("total_steps"),
         "prompt_tokens": summary.get("total_prompt_tokens"),
         "completion_tokens": summary.get("total_completion_tokens"),
+        "retention": retention_of(summary.get("retire")),
         "scored_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "slab_version": __version__,
     }
@@ -525,10 +526,44 @@ def score_session(
     return record
 
 
+RETENTION_KEYS = (
+    "mode",
+    "runs_total",
+    "runs_promoted",
+    "runs_expired",
+    "bytes_total",
+    "bytes_promoted",
+    "bytes_expired",
+)
+
+
+def retention_of(retire: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The retention numbers of a session's retire event, or None without one.
+
+    A retire that failed carries its error and no numbers.
+
+    Examples:
+        >>> retention_of(None) is None
+        True
+        >>> retention_of({"error": "locked"})
+        {'error': 'locked'}
+        >>> retention_of({"mode": "expire", "runs_total": 3, "runs_promoted": 1,
+        ...               "runs_expired": 2, "bytes_total": 40, "bytes_promoted": 10,
+        ...               "bytes_expired": 30, "kept": []})["runs_promoted"]
+        1
+    """
+    if not retire:
+        return None
+    if "error" in retire:
+        return {"error": str(retire["error"])}
+    return {key: retire.get(key) for key in RETENTION_KEYS}
+
+
 def _harness_summary(harness: SessionRecord) -> dict[str, Any]:
     """What the scorer reads from a harness record, in the transcript summary's shape."""
     header = harness.header()
     results = harness.results()
+    retires = [e for e in harness.events() if e.get("type") == "retire"]
     finish = {
         "reported": results is not None,
         "results": dict((results or {}).get("results") or {}),
@@ -541,6 +576,7 @@ def _harness_summary(harness: SessionRecord) -> dict[str, Any]:
         "compute_profile": None,
         "agent": header.get("client") or "harness",
         "finish": finish,
+        "retire": retires[-1] if retires else None,
         "total_steps": None,
         "total_prompt_tokens": None,
         "total_completion_tokens": None,
@@ -842,6 +878,47 @@ def results_table(records: Iterable[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def retention_table(records: Iterable[dict[str, Any]]) -> str:
+    """One row per record: what its finish kept of what the session produced.
+
+    The promotion rate is promoted runs over the session's runs, and the
+    bytes are those reachable from the promoted runs over those reachable
+    from every run of the session. A record scored before retire existed,
+    or whose retire failed, says so instead of showing zeros.
+    """
+    rows = list(records)
+    if not rows:
+        return "No campaign has been scored yet."
+    lines = [
+        "| Session | Model | Machine | Condition | Q | Runs promoted | Bytes retained | Uncited |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for record in rows:
+        retention = record.get("retention")
+        session = str(record.get("session") or "")[:20]
+        head = (
+            f"| {session} | {record.get('model')} | {record.get('machine')} | "
+            f"{harness_label(record.get('condition'), record.get('ablated') or ())} | "
+            f"Q{record.get('question')} | "
+        )
+        if not retention:
+            lines.append(head + "not recorded | not recorded | not recorded |")
+            continue
+        if "error" in retention:
+            lines.append(head + f"retire failed: {retention['error']} | | |")
+            continue
+        total = int(retention.get("runs_total") or 0)
+        promoted = int(retention.get("runs_promoted") or 0)
+        bytes_total = int(retention.get("bytes_total") or 0)
+        bytes_kept = int(retention.get("bytes_promoted") or 0)
+        rate = f"{promoted}/{total}" + (f" ({100 * promoted / total:.0f} %)" if total else "")
+        kept = f"{bytes_kept}/{bytes_total}" + (
+            f" ({100 * bytes_kept / bytes_total:.0f} %)" if bytes_total else ""
+        )
+        lines.append(head + f"{rate} | {kept} | {retention.get('mode')} |")
+    return "\n".join(lines)
+
+
 def conditions_table() -> str:
     """The three harness conditions, rendered from :mod:`mason.mechanisms`."""
     return _conditions_table()
@@ -977,6 +1054,8 @@ __all__ = [
     "records_path",
     "render",
     "results_table",
+    "retention_of",
+    "retention_table",
     "rewrite_region",
     "run_campaign",
     "score_session",

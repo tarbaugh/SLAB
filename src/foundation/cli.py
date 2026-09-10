@@ -353,6 +353,102 @@ def _promote_session(ws: Workspace, session: str, *, reason: str | None, force: 
 
 
 @app.command()
+def retire(
+    session: Annotated[
+        str,
+        typer.Option("--session", help="The session to retire (id or unique prefix)."),
+    ],
+    workspace: _WorkspaceOpt = None,
+    keep: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--keep",
+            help="A run the session's answer rests on (id or unique prefix); repeatable. "
+            "Verified ones are promoted; the rest are reported.",
+        ),
+    ] = None,
+    uncited: Annotated[
+        str | None,
+        typer.Option(
+            "--uncited",
+            help="What happens to the session's other runs: keep, expire, or purge "
+            "(default: the retention policy's finish rule, expire).",
+        ),
+    ] = None,
+    reason: Annotated[
+        str | None, typer.Option(help="Why the kept runs are worth keeping.")
+    ] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Report what would happen; write nothing.")
+    ] = False,
+) -> None:
+    """Promote the runs a session's answer cites; expire the session's other runs.
+
+    This is what Mason does after a campaign's finish. Run it by hand for a
+    session whose finish never ran, or to check one with ``--dry-run``.
+    A kept run is never forced: an unverified one is reported and left as
+    it is. The exit code is 1 while any kept run was skipped.
+    """
+    try:
+        root = _ops.resolve_root(workspace)
+        mode = uncited if uncited is not None else _ops.load_policy(root).finish.uncited
+        if mode not in _ops.RETIRE_MODES:
+            raise ValueError(f"--uncited must be keep, expire, or purge, not {mode!r}")
+    except (FoundationError, SlabError, ValueError, OSError) as e:
+        _fail(str(e))
+    try:
+        with Workspace(root) as ws:
+            result = _ops.retire_session(
+                ws,
+                session,
+                keep=keep or [],
+                mode=mode,
+                reason=reason,
+                actor="user",
+                dry_run=dry_run,
+            )
+    except (FoundationError, SlabError, OSError) as e:
+        _fail(str(e))
+    if not result["runs_total"] and not keep:
+        _fail(f"no run carries session {session!r}; list the sessions with 'slab sessions'")
+    _echo_retire(result)
+    if not result["complete"]:
+        raise typer.Exit(code=1)
+
+
+def _echo_retire(result: dict[str, object]) -> None:
+    """One line per run, then the numbers; the marks are ``slab promote``'s."""
+    marks = {"promoted": "+", "already": "=", "skipped": "-"}
+    would = "would be " if result["dry_run"] else ""
+    for item in result["kept"]:  # type: ignore[attr-defined]
+        typer.echo(
+            f"  [{marks[item['outcome']]}] {item['id'][:10]}  {str(item['name'])[:20]:<20} "
+            f"{item['outcome']:<8} {item['detail']}"
+        )
+    for item in result["expired"]:  # type: ignore[attr-defined]
+        typer.echo(
+            f"  [x] {item['id'][:10]}  {item['name'][:20]:<20} expired  "
+            f"{would}uncited by the finish"
+        )
+    for item in result["skipped"]:  # type: ignore[attr-defined]
+        typer.echo(f"  [-] {item['id'][:10]}  {item['name'][:20]:<20} skipped  {item['detail']}")
+    purged = result["purged"]
+    if purged:
+        typer.echo(
+            f"  purged {len(purged['deleted'])} run(s), "  # type: ignore[index]
+            f"{purged['freed_bytes']} bytes freed"  # type: ignore[index]
+        )
+    typer.echo(
+        f"session {result['session']}: {result['runs_promoted']} promoted, "
+        f"{result['runs_expired']} expired, {len(result['skipped'])} skipped "  # type: ignore[arg-type]
+        f"of {result['runs_total']} run(s); "
+        f"bytes {result['bytes_promoted']} promoted, {result['bytes_expired']} expired, "
+        f"{result['bytes_total']} in the session"
+        + (" (dry run)" if result["dry_run"] else "")
+    )
+
+
+@app.command()
 def sessions(
     workspace: _WorkspaceOpt = None,
     limit: Annotated[int, typer.Option(help="Maximum rows.")] = 20,

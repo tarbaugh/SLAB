@@ -77,6 +77,7 @@ from foundation.models import (
 )
 from foundation.retention import (
     DEFAULT_POLICY,
+    FinishRule,
     GcReport,
     PurgeReport,
     RetentionPolicy,
@@ -115,6 +116,7 @@ __all__ = [
     "Assertion",
     "CheckResult",
     "ExecutionStatus",
+    "FinishRule",
     "FoundationError",
     "GcReport",
     "IllegalStatusChangeError",

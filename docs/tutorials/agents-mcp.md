@@ -25,7 +25,7 @@ The workspace is resolved exactly as for the CLI: `-w/--workspace` flag > `$SLAB
 
 ## The toolbox
 
-Twenty-three tools, each a thin wrapper over the operations layer, and three more on a cluster:
+Twenty-four tools, each a thin wrapper over the operations layer, and three more on a cluster:
 
 | Tool | What it does |
 | --- | --- |
@@ -50,6 +50,7 @@ Twenty-three tools, each a thin wrapper over the operations layer, and three mor
 | `list_memories`, `recall`, `remember` | The machine's memory: what earlier sessions on this machine recorded about its software. See [Machine memory](memory.md). |
 | `list_skills`, `skill` | The skill catalog, and one skill's instructions with its bundled files. The catalog is the one the resident agent loads. |
 | `report_results` | Record the session's answer: results with units, and the run ids that produced them. |
+| `retire_session` | Call it last. Promote the verified runs the answer rests on, anchors from earlier sessions included, and expire this session's other runs. A cited run that is not verified is reported, never forced. `uncited` is `keep`, `expire`, or `purge`; `dry_run=True` only reports. |
 
 The server holds one session id for its lifetime, `mcp-<stamp>-<pid>`, and states it in its instructions. Every run it launches carries that id, so `list_runs(session=...)` and `promote_session` see the session whole. The project directory is the one the server was started in: its `slab.toml`, its notebook and plan, and its `skills/` directory apply.
 
@@ -167,20 +168,25 @@ a0 = float(launched["output"].split("a0 = ")[1].split()[0])
 call("notebook", {"entry": f"a0 = {a0} Å (run {launched['run_id'][:10]})", "heading": "Q1"})
 reported = call("report_results", {"results": {"a0": {"value": a0, "unit": "Å"}}, "run_ids": [launched["run_id"]]})
 print("reported for session", reported["session"], "->", Path(reported["recorded"]).name)
+retired = call("retire_session", {"run_ids": [launched["run_id"]]})
+print("retired:", retired["runs_promoted"], "promoted,", retired["runs_expired"], "expired of", retired["runs_total"], "run(s)")
 
 record = benchmark.score_session(Path("agent-ws"), "mcp-demo", question=benchmark.find_question("1"))
 print("scored:", record["passed"], record["engine_class"], record["engines"], record["reviewed_by"])
 ```
 
 ```text
-23 tools: describe_task, expire_runs, gc, get_material, launch_workflow, list_engines, list_memories, list_runs, list_sessions, list_skills, list_tasks, notebook, plan, promote_run, promote_session, query_materials, recall, remember, report_results, search_materials, show_run, skill, wait_for_run
+24 tools: describe_task, expire_runs, gc, get_material, launch_workflow, list_engines, list_memories, list_runs, list_sessions, list_skills, list_tasks, notebook, plan, promote_run, promote_session, query_materials, recall, remember, report_results, retire_session, search_materials, show_run, skill, wait_for_run
 skill: equation-of-state files: ['SKILL.md', 'assets/eos_scan.py', 'scripts/fit_eos.py']
 verified 1/1 checks passed; a0 = 3.5907 Å
 reported for session mcp-demo -> mcp-demo.jsonl
+retired: 1 promoted, 0 expired of 1 run(s)
 scored: True mlip ['emt'] []
 ```
 
-The record is one JSON lines file under `<workspace>/sessions/`, with the skills the session loaded and the results it reported. `slab benchmark score --session mcp-demo --question 1` scores it from the command line. The question must be named, because a harness record holds no opening instruction, and the last field printed is the empty list of reviewers: the science review reads Mason transcripts only.
+The record is one JSON lines file under `<workspace>/sessions/`, with the skills the session loaded, the results it reported, and the retire outcome. `slab benchmark score --session mcp-demo --question 1` scores it from the command line. The question must be named, because a harness record holds no opening instruction, and the last field printed is the empty list of reviewers: the science review reads Mason transcripts only.
+
+`retire_session` is the last call of a session. It promotes the verified runs the answer cites and expires the session's other runs, which cannot be undone, so report first and retire once. The default for the uncited runs comes from the workspace's retention policy. See [Lifecycle & retention](lifecycle-and-retention.md).
 
 ## Intent, and lifecycle hygiene for agents
 
@@ -190,6 +196,7 @@ The lifecycle guidance follows from SLAB's one asymmetry ([Lifecycle & retention
 
 - Promote only what deserves keeping, always with a reason.
 - Let everything else expire, and run `expire_runs` + `gc` periodically to reclaim it.
+- End a session with `retire_session`: cite the runs the answer rests on, and let the session's other runs expire.
 
 Promotion is the only path to permanence, so an agent that never promotes leaves nothing behind, and an agent that promotes indiscriminately recreates the archive-of-failures problem that SLAB exists to avoid.
 
