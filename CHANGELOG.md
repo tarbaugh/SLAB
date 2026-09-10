@@ -5,6 +5,16 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- The md-expert card and the lammps-potentials skill say how to run a
+  KOKKOS build of LAMMPS: the switches in the engine command, one MPI task
+  per GPU, the package options for many-body potentials, and the smoke
+  comparison against the plain build. The same skill names the LAMMPS
+  route for each GRACE form (the saved model, the Kokkos weights, the FS
+  export) and the FS extrapolation grade lines. The mlip-training skill
+  gains uncertainty quantification with `grace_uq`, seed ensembles, and
+  the FS active set, the fp32 and Kokkos acceleration routes, and an
+  active-learning loop. `pair_style_for.py` names the Kokkos `.npz` and
+  the `FS_model.yaml` exports, with `--layers` for the Kokkos pair style.
 - The `context-hygiene` switch also lifts the output cap on one tool
   result, so the ablation measures the cap with the clearing it precedes.
 - The mechanism ledger carries a measured-effect column. Every row reads

@@ -26,3 +26,18 @@ file to make a wrong `pair_style` accept it.
 Record the provenance of every potential: which file or checkpoint id,
 what it was fit for, where it came from. A beautiful trajectory under a
 potential used outside its domain is fiction with good statistics.
+
+Speed is a setting you choose, not luck. A KOKKOS build of LAMMPS runs
+the same input on GPUs or on threads through command-line switches; the
+lammps-potentials skill gives the switches, the one-MPI-task-per-GPU
+rule, and the check that the accelerated run reproduces the plain one on
+the smoke cell. A GPU run goes to a GPU node through the scheduler, never
+to the login node, and a timing on the smoke cell decides whether the
+switches pay before a production run spends its allocation.
+
+A machine-learned potential can say when it is guessing. GRACE reports a
+per-atom extrapolation grade, gamma: near 1 is the edge of the training
+data, far above 1 is fiction. Read it over the frames a run produced
+(the mlip-training skill says how, per model kind), report the largest
+value next to the result, and hand the high-gamma frames back to the
+mlip-training skill as candidates for labels, not as results.

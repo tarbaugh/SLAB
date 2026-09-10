@@ -208,6 +208,15 @@ The details that keep runs honest and directories clean:
   timeout. The version and the resolved command go into provenance and the
   cache key. Potential file contents are not hashed, because their paths,
   which ride in the traced options, are the identity.
+- **Accelerated builds ride in the command.** A KOKKOS build of LAMMPS
+  takes its switches on the command line, so put them in `command`.
+  `mpirun -np 1 lmp -k on g 1 -sf kk -pk kokkos newton on neigh half`
+  runs on one GPU with one MPI task, and `lmp -k on t 8 -sf kk` runs on
+  eight threads. ASE appends its own flags after them. The switches enter
+  the cache identity with the command. The version probe runs the payload
+  with `-h`, and a GPU switch on a node without a GPU makes that probe
+  record no version, so a GPU command belongs in a job on a GPU node. The
+  `lammps-potentials` skill carries the rules for the agent.
 - **Units come back converted.** Whatever `units=` the potential requires
   (`metal`, `real`, ...), ASE converts results to eV and eV/Å, so `relax`'s
   `energy_unit` stays `"eV"`.
@@ -643,7 +652,9 @@ environment activation the compute node needs. On a laptop, keep fits
 to FS-preset smoke tests like the one above.
 
 The trained model is deployed, not imported. Use it through LAMMPS
-(`pair_style grace`, or `grace/fs` with the `export_fs=True` export), a
+(`pair_style grace`, the Kokkos styles on the weights that
+`grace_utils export_kokkos` writes, or `grace/fs` with the
+`export_fs=True` export), a
 registry engine entry pointing at
 `tensorpotential.calculator.TPCalculator`, or ask the site to serve it
 through rootstock. The `mlip-training` skill carries the full recipe

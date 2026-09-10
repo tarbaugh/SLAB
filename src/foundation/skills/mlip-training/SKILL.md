@@ -79,8 +79,8 @@ past it:
   balanced: a set that is 90 % relaxation frames fits the equilibrium
   beautifully and fails at the first hot snapshot.
 - Run one round of active learning before you trust the fit: run MD
-  with the potential (or with two seeds of it), harvest the frames with
-  the largest extrapolation grade or seed disagreement, label them with
+  with the potential, grade the frames (section 5), harvest those with
+  the largest gamma or seed disagreement, label them with
   `single_point`, and refit. This closes the gaps a hand-built set
   always leaves.
 - `reference_energy: auto` fits one E0 per element by least squares.
@@ -203,6 +203,7 @@ A real fit is a GPU batch job, never login-node work:
    the final metrics, and the exported `saved_model` tar as run
    artifacts, and copies the exports into `{label}/` in the project.
    Pass `export_fs=True` for FS-preset fits that LAMMPS should read.
+   A Kokkos LAMMPS run needs the weights export of section 5.
 
 A failed fit keeps its log tail, partial metrics, and checkpoints as
 run evidence — read them with `show_run`, change something, and state
@@ -220,7 +221,8 @@ failure: judge it.
   model, compute what the study needs against DFT: lattice constants
   and an equation of state, elastic constants, a phonon or a rattled
   cell's forces, and an MD run at the target temperature that stays
-  stable and keeps its extrapolation grades low.
+  stable and whose largest gamma (section 5) stays inside the training
+  distribution.
 - Report the run id, the artifact names, the final train and test
   metrics, the split (which runs were held out), and the dataset
   provenance (which runs, which engine, how many structures) together.
@@ -230,12 +232,123 @@ failure: judge it.
   lives. It lives in gracemaker's own environment, never in SLAB's, so
   a registry entry pointing at `tensorpotential.calculator.TPCalculator`
   cannot import here; do not spend steps trying. The routes that work:
-  LAMMPS `pair_style grace` (or `grace/fs` with the FS export) when the
-  site's LAMMPS was built with the ML-GRACE package, or asking the site
+  LAMMPS with `pair_style grace` on the saved model (a TensorFlow
+  build), the `/kk` styles on the Kokkos weights of section 5 (a KOKKOS
+  build, no TensorFlow), or `grace/fs` on the FS export, with the lines
+  and the switches in the lammps-potentials skill; or asking the site
   to serve the checkpoint through rootstock. When neither exists on this
   machine, report the trained artifact and its metrics, and name the
   missing route as a machine fact. The trained model is never an
   `engine=` name by itself.
+
+## 5. Uncertainty, acceleration, and active learning
+
+Everything here runs in gracemaker's environment, as a shell step under
+the same setup lines as the fit, inside the job that trains or after
+it. `train_potential` runs gracemaker only, so these commands ride in
+the workflow's job script, and their outputs enter the record as
+artifacts of a run or as files the report names by path. Nothing here
+is imported into SLAB's environment.
+
+### The extrapolation grade
+
+GRACE's uncertainty signal is gamma, one value per atom: the
+Mahalanobis distance of the atom's environment to the nearest cluster
+in the model's own latent space, divided by a calibrated per-cluster
+threshold. Gamma below about 1 is inside the training distribution,
+near 1 is the boundary, and far above 1 is extrapolation, where the
+forces are not to be trusted.
+
+- 1L, 2L, and 3L models get gamma from an artifact built once, after
+  the fit, from the training data. The command from the gracemaker
+  documentation:
+
+      grace_uq build --model-yaml model.yaml \
+                     --checkpoint checkpoints/checkpoint.best_test_loss.index \
+                     --train-data training_set.pkl.gz \
+                     --artifact-path UQ/gmm_artifacts.npz
+
+  `--train-data` takes `.pkl.gz` datasets; convert an extended-XYZ file
+  with `extxyz2df` first. `--n-workers 4` and `--gpus 0,1` spread the
+  work, `--n-clusters 1 2 4 8 16` lets the elbow method choose the
+  cluster count, and `grace_uq info UQ/gmm_artifacts.npz` inspects the
+  result. The build also exports a saved model with a `compute_uq`
+  signature, so `TPCalculator` returns `gamma` and `atomic_sigma` in its
+  results. Foundation models with a tick in the UQ column of
+  `grace_models list` ship the artifact with their checkpoint.
+- GRACE/FS has no such artifact. Build an active set with D-optimality
+  instead (python-ace must be installed in the same environment; when
+  it is not, that is a machine fact to report):
+
+      cd seed/1
+      pace_activeset -d training_set.pkl.gz FS_model.yaml
+
+  The result, `FS_model.asi`, sits next to the export. LAMMPS reads it
+  through `pair_style grace/fs extrapolation`, and `PyGRACEFSCalculator`
+  through `set_active_set`; the lammps-potentials skill has the lines.
+  This gamma is on the PACE scale: above 5 is outside the training set,
+  above 25 far outside.
+- An ensemble is the third signal, and the only one that needs no
+  artifact: fit the same input.yaml under two or more seeds, then
+  evaluate with `TPCalculator(model=[...])` over the saved models. The
+  results carry `energy_std`, `forces_std`, and `stress_std` next to
+  the ensemble means. Use it when the artifact cannot be built, or to
+  confirm what gamma says.
+
+Report the largest gamma over the frames a study used next to every
+number that depends on the potential. A trajectory that spent time at
+gamma far above 1 is not evidence; it is a list of frames to label.
+
+### Acceleration
+
+- Precision. Foundation models resolve to fp32 by default, about twice
+  the speed and half the memory of fp64 at a negligible accuracy cost.
+  The `-fp64` suffix on the name selects full precision, and
+  `grace_utils cast_model_param` converts a fit. The `-mx` models are
+  natively mixed precision, and the 3L models exist only in fp32.
+- Kokkos weights for LAMMPS. Export once after the fit:
+
+      grace_utils -p model.yaml -c checkpoints/checkpoint.index export_kokkos -o grace_weights.npz
+
+  Add `--uq-artifacts UQ/gmm_artifacts.npz` to bake the gamma thresholds
+  into the weights. A foundation model's weights come from
+  `grace_models download NAME --kokkos`. The `/kk` pair styles read the
+  file without TensorFlow, and the lammps-potentials skill gives the
+  `-k on g 1 -sf kk -pk kokkos newton on neigh half` switches that run
+  them on a GPU. This is the fast route for MD with a 1L, 2L, or 3L
+  model.
+- The FS preset. Choose it when the campaign needs millions of atoms,
+  CPU-only nodes, or MPI across nodes: `grace/fs` is a C++
+  implementation with MPI parallelisation and no TensorFlow, at lower
+  accuracy than the GRACE presets. `export_fs=True` on `train_potential`
+  writes `FS_model.yaml`.
+- Padding. The TensorFlow calculator compiles the model for each new
+  input shape. `TPCalculator` pads adaptively by default, and
+  `pair_style grace padding 0.05` does the same in LAMMPS; large cells
+  use the chunk variants. A log line saying that adaptive padding grew
+  its margins is normal, not an error.
+
+### One round of active learning
+
+1. Run MD with the potential at the study's conditions as a recorded
+   run, with frames written often enough to catch the excursions (every
+   few hundred femtoseconds).
+2. Grade the frames. For a 1L, 2L, or 3L model,
+   `grace_uq predict --model-yaml model.yaml --checkpoint checkpoints/checkpoint.index --artifact-path UQ/gmm_artifacts.npz --data frames.pkl.gz --output graded.pkl.gz`
+   writes energies, forces, and per-atom gamma for every frame. For FS,
+   `PyGRACEFSCalculator` with the `.asi` gives the same per frame.
+3. Select what to label:
+   `grace_uq select --artifact-path UQ/gmm_artifacts.npz --candidate-data frames.pkl.gz --n-select 100 --strategy extrapolation`
+   picks frames by extrapolation and diversity. Without an artifact,
+   take the frames with the largest seed disagreement.
+4. Label the selection with `single_point` under the dataset's
+   protocol, append the labels to the training file, and refit with the
+   same input.yaml. The graded MD frames are training data now, so keep
+   them out of the test set.
+5. Stop when a production-length MD keeps its largest gamma inside the
+   training distribution and the transfer-set error stops falling.
+   Report the number of rounds, the frames labelled per round, and the
+   largest gamma before and after.
 
 ## When not to use this
 
