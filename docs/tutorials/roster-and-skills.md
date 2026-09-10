@@ -244,7 +244,7 @@ supercells, defects and dislocations, interfaces and polycrystals),
 screening from the offline Materials Project snapshot (mp-screening),
 potential training and fine-tuning with gracemaker, with the dataset
 rules for each (mlip-training), LAMMPS potential
-files and their pair styles (lammps-potentials), the
+files, their pair styles, and the KOKKOS switches (lammps-potentials), the
 static side (equations of state, convergence, surfaces, elastic
 constants, interface adhesion), and the dynamic side (melt-quench
 glasses, thermal response, two-phase melting, NEMD transport, diffusion,

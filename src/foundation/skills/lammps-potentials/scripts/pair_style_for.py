@@ -3,6 +3,7 @@
     pair_style_for.py W_zhou.eam.alloy
     pair_style_for.py W_zhou.eam.alloy --json
     pair_style_for.py W.yace --elements W
+    pair_style_for.py grace_weights.npz --elements W --layers 2
 
 The header decides the format, and the extension is checked against it.
 A setfl file (DYNAMO 86, ``.eam.alloy``) opens with three comment lines,
@@ -11,6 +12,12 @@ funcfl file (``.eam``) opens with one comment line, then ``Z mass a
 lattice``, then the grid line. ``.eam.fs`` files share the setfl layout
 under ``eam/fs``. ACE (``.yace``, ``.ace``) and GRACE checkpoints carry no
 element symbols in a form worth parsing, so ``--elements`` names them.
+GRACE has three deployable forms: a saved-model directory (``pair_style
+grace``, a TensorFlow build of LAMMPS), Kokkos weights (``.npz`` from
+``grace_utils export_kokkos`` or ``grace_models download --kokkos``,
+``pair_style grace/<N>l/kk`` with ``N`` the model's layer count, which
+``--layers`` names), and the GRACE/FS export (``FS_model.yaml``,
+``pair_style grace/fs``).
 
 The output is the ``pair_style`` and ``pair_coeff`` lines to paste into
 the input, and the format name. Exit code 2 means the file matched no
@@ -21,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -70,12 +78,56 @@ def _element_line(tokens: list[str]) -> bool:
     )
 
 
-def classify(path: Path, elements: list[str] | None = None) -> dict[str, Any]:
+def _is_fs_export(name: str) -> bool:
+    """``FS_model.yaml`` and its renamings: a YAML whose name has an ``fs`` word."""
+    if not name.endswith((".yaml", ".yml")):
+        return False
+    return "fs" in re.split(r"[^a-z0-9]+", name)
+
+
+def classify(
+    path: Path, elements: list[str] | None = None, layers: int | None = None
+) -> dict[str, Any]:
     """The format, the pair lines, and any mismatch between header and name."""
     name = path.name.lower()
     suffixes = "".join(path.suffixes).lower()
+    if suffixes.endswith(".npz"):
+        kokkos_warnings: list[str] = []
+        if layers is None:
+            style = "grace/Nl/kk"
+            kokkos_warnings.append(
+                "pass --layers 1, 2, or 3 (the model's message-passing layers; "
+                "`grace_models info NAME` or the fit's preset says) to fix the pair_style"
+            )
+        else:
+            style = f"grace/{layers}l/kk"
+        result = _result(
+            "grace-kokkos",
+            style,
+            path,
+            elements or [],
+            header_elements=False,
+            warnings=kokkos_warnings,
+        )
+        result["note"] = (
+            "Kokkos weights: run LAMMPS with -k on -sf kk (a KOKKOS build, no TensorFlow "
+            "needed); /kk/fp32 and /kk/mixed suffixes select the precision"
+        )
+        return result
+    if _is_fs_export(name):
+        result = _result("grace-fs", "grace/fs", path, elements or [], header_elements=False)
+        result["note"] = (
+            "grace/fs/kk under KOKKOS; `pair_style grace/fs extrapolation` with the .asi "
+            "active set after the file name reports the extrapolation grade gamma"
+        )
+        return result
     if path.is_dir() or "grace" in name:
-        return _result("grace", "grace", path, elements or [], header_elements=False)
+        result = _result("grace", "grace", path, elements or [], header_elements=False)
+        result["note"] = (
+            "a TensorFlow build of LAMMPS; add `padding 0.05` to limit recompilation and "
+            "`pair_forces` when the run needs stress"
+        )
+        return result
     if suffixes.endswith((".yace", ".ace")):
         return _result("ace", "pace", path, elements or [], header_elements=False)
     if suffixes.endswith(".meam") or name == "library.meam":
@@ -153,12 +205,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--elements", nargs="+", help="element symbols in atom-type order (overrides the header)"
     )
+    parser.add_argument(
+        "--layers",
+        type=int,
+        choices=(1, 2, 3),
+        help="a GRACE model's message-passing layers (names the Kokkos pair_style)",
+    )
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     args = parser.parse_args(argv)
     if not args.file.exists():
         print(f"error: {args.file} does not exist", file=sys.stderr)
         return 2
-    result = classify(args.file, args.elements)
+    result = classify(args.file, args.elements, args.layers)
     if result.get("format") is None:
         if args.json:
             print(json.dumps(result, indent=1))

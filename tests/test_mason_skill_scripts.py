@@ -1787,6 +1787,46 @@ def test_pair_style_for_needs_elements_for_ace_and_grace(
     assert code == 0 and "pair_style grace" in out and f"pair_coeff * * {grace} W Re" in out
 
 
+def test_pair_style_for_names_the_kokkos_and_fs_exports_of_grace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The three deployable forms of one GRACE fit: the Kokkos weights need
+    the layer count for their pair_style, and the FS export is its own style."""
+    weights = tmp_path / "grace_weights.npz"
+    weights.write_bytes(b"PK")
+    code, out = _run(
+        PAIR_STYLE, str(weights), "--elements", "W", monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert code == 0
+    assert "format: grace-kokkos" in out
+    assert "pair_style grace/Nl/kk" in out and "pass --layers" in out
+    code, out = _run(
+        PAIR_STYLE, str(weights), "--elements", "W", "--layers", "2", "--json",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    result = json.loads(out)
+    assert result["format"] == "grace-kokkos"
+    assert result["pair_style"] == "grace/2l/kk"
+    assert result["pair_coeff"] == f"pair_coeff * * {weights} W"
+    assert result["warnings"] == []
+    assert "-k on -sf kk" in result["note"]
+    fs = tmp_path / "FS_model.yaml"
+    fs.write_text("elements: [W]\n")
+    code, out = _run(PAIR_STYLE, str(fs), "--elements", "W", monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 0
+    assert "format: grace-fs" in out and "pair_style grace/fs\n" in out
+    assert f"pair_coeff * * {fs} W" in out and "extrapolation" in out
+    # A saved-model directory is still the TensorFlow style, never a Kokkos one.
+    saved = tmp_path / "grace-1l-oam"
+    saved.mkdir()
+    code, out = _run(
+        PAIR_STYLE, str(saved), "--elements", "W", "--layers", "1",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0 and "pair_style grace\n" in out and "TensorFlow" in out
+
+
 def test_pair_style_for_refuses_what_it_cannot_classify(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
