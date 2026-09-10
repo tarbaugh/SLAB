@@ -18,7 +18,7 @@ from ase.io import write as ase_write
 
 from mason.skills import discover_skills
 
-SKILLS = Path(__file__).parent.parent / "src" / "mason" / "skills"
+SKILLS = Path(__file__).parent.parent / "src" / "foundation" / "skills"
 FIT_EOS = SKILLS / "equation-of-state" / "scripts" / "fit_eos.py"
 CONV = SKILLS / "convergence-study" / "scripts" / "convergence_table.py"
 RDF = SKILLS / "radial-distribution" / "scripts" / "rdf.py"

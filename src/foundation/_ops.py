@@ -455,3 +455,279 @@ def _execute_script(script_path: Path) -> None:
     except SystemExit as e:
         if e.code not in (None, 0):
             raise ScriptExitError(f"script called sys.exit({e.code!r})") from None
+
+
+# -- the task vocabulary ------------------------------------------------------
+
+
+def _short_signature(sig: Any) -> str:
+    """A signature a reader can scan: names and defaults, no annotations."""
+    parts: list[str] = []
+    for param in sig.parameters.values():
+        kind = param.kind
+        if kind is param.VAR_POSITIONAL:
+            parts.append(f"*{param.name}")
+            continue
+        if kind is param.VAR_KEYWORD:
+            parts.append(f"**{param.name}")
+            continue
+        if kind is param.KEYWORD_ONLY and "*" not in parts:
+            parts.append("*")
+        default = "" if param.default is param.empty else f"={param.default!r}"
+        parts.append(f"{param.name}{default}")
+    return ", ".join(parts)
+
+
+def task_catalog() -> list[dict[str, str]]:
+    """Name, signature, and one-line summary of every public foundation task.
+
+    Public means not underscore-prefixed, defined in :mod:`foundation.tasks`
+    itself, and documented: every symbol a workflow script may name. This
+    is the ``list_tasks`` tool of the resident agent and of the MCP server.
+
+    Examples:
+        >>> names = [entry["name"] for entry in task_catalog()]
+        >>> "relax" in names and "single_point" in names
+        True
+    """
+    import inspect
+
+    from foundation import tasks as _tasks
+
+    entries: list[dict[str, str]] = []
+    for name in sorted(vars(_tasks)):
+        if name.startswith("_"):
+            continue
+        obj = getattr(_tasks, name)
+        if not callable(obj) or not getattr(obj, "__doc__", None):
+            continue
+        try:
+            sig = inspect.signature(obj)
+        except (TypeError, ValueError):
+            continue
+        # A traced task decorated with @task wraps the underlying function;
+        # signature() returns the wrapped signature. Helpers imported into
+        # the module are skipped by requiring the module of definition.
+        if getattr(obj, "__module__", "") != _tasks.__name__:
+            continue
+        summary = (obj.__doc__ or "").strip().splitlines()[0]
+        entries.append({"name": name, "signature": _short_signature(sig), "summary": summary})
+    return entries
+
+
+def describe_task(name: str) -> dict[str, str]:
+    """The full signature and docstring of one task, or a ValueError naming the known ones."""
+    name = name.strip()
+    if not name:
+        raise ValueError("describe_task requires 'name' — call list_tasks to see them")
+    catalog = {entry["name"]: entry for entry in task_catalog()}
+    if name not in catalog:
+        raise ValueError(f"no task {name!r}; known: {', '.join(sorted(catalog))}")
+    from foundation import tasks as _tasks
+
+    function = getattr(_tasks, name)
+    doc = (function.__doc__ or "").strip() or "(no docstring)"
+    return {"name": name, "signature": catalog[name]["signature"], "doc": doc}
+
+
+# -- progress, and waiting for a run ------------------------------------------
+
+
+def tally_line(statuses: list[str], hits: int) -> str:
+    """``3 completed, 1 running (2 cache hits)`` from a run's task statuses.
+
+    Examples:
+        >>> tally_line(["completed", "completed", "running"], 1)
+        '2 completed, 1 running (1 cache hit)'
+        >>> tally_line([], 0)
+        'no tasks'
+    """
+    from collections import Counter
+
+    tally = Counter(statuses)
+    order = ("completed", "running", "failed")
+    parts = [f"{tally[status]} {status}" for status in order if tally.get(status)]
+    parts += [f"{n} {status}" for status, n in sorted(tally.items()) if status not in order]
+    line = ", ".join(parts) or "no tasks"
+    if hits:
+        line += f" ({hits} cache hit{'s' if hits != 1 else ''})"
+    return line
+
+
+def run_progress(ws: Workspace, run_id: str) -> str:
+    """One line of what a run has done so far: its task tally and its checks."""
+    tasks = ws.runs.list_tasks(run_id)
+    line = "tasks: " + tally_line(
+        [task.status.value for task in tasks], sum(1 for task in tasks if task.cache_hit)
+    )
+    checks = ws.runs.list_check_results(run_id)
+    if checks:
+        line += f"; checks: {sum(1 for c in checks if c.passed)}/{len(checks)} passed"
+    return line
+
+
+def resolve_run(ws: Workspace, value: str, *, session: str | None = None) -> tuple[str, str]:
+    """A run id or unique prefix, else the session's newest run of that name.
+
+    The name is what a client remembers (a real transcript passed the
+    script's name twice and was told no run matched), so it resolves too,
+    with a note saying which run was taken. Without a session, only ids
+    and prefixes resolve.
+    """
+    from foundation.errors import RunNotFoundError, SessionNotFoundError
+
+    try:
+        return ws.runs.resolve(value), ""
+    except RunNotFoundError as not_found:
+        if session is None:
+            raise
+        try:
+            runs = ws.runs.list_runs(session=session, limit=200)
+        except SessionNotFoundError:
+            runs = []
+        named = [run for run in runs if run.name == value]
+        if not named:
+            raise not_found from None
+        run = named[0]  # newest first
+        return run.id, (
+            f"(resolved {value!r} by name to run {run.id[:10]}, this session's "
+            f"newest run of that name)\n"
+        )
+
+
+def wait_for_run(
+    root: Path,
+    *,
+    run_id: str | None = None,
+    session: str | None = None,
+    timeout_s: float = 900.0,
+    poll_s: float = 5.0,
+    grace_s: float = 10.0,
+) -> dict[str, Any]:
+    """Block until a run finishes or the timeout passes; report where it stands.
+
+    With *run_id* (an id, a unique prefix, or a run name the session
+    created), waits for that run; without it, waits for every running run
+    the *session* created, or every running run when there is no session.
+    A background launch takes a moment to register its run, so an empty
+    record gets *grace_s* before "nothing is running" counts as an answer.
+
+    The result's ``outcome`` is one of ``finished`` (``run`` holds the
+    :class:`Run` and ``progress`` its tally), ``still_running`` (``running``
+    holds ``(Run, progress)`` pairs), ``none_running`` (``runs`` holds the
+    session's finished runs), or ``no_runs``. ``note`` says when a name was
+    resolved to a run id. Callers format the text; the MCP server converts
+    the runs with :func:`run_summary`.
+    """
+    import time
+
+    from foundation.errors import SessionNotFoundError
+
+    timeout = max(0.0, float(timeout_s))
+    deadline = time.monotonic() + timeout
+    grace_until = time.monotonic() + min(grace_s, timeout)
+    resolved: str | None = None
+    note = ""
+    while True:
+        with Workspace(root) as ws:
+            if run_id:
+                if resolved is None:
+                    resolved, note = resolve_run(ws, run_id, session=session)
+                run = ws.runs.get(resolved)
+                if run.status.value != "running":
+                    return {
+                        "outcome": "finished",
+                        "note": note,
+                        "run": run,
+                        "progress": run_progress(ws, run.id),
+                    }
+                running = [run]
+            else:
+                try:
+                    runs = ws.runs.list_runs(session=session, limit=50)
+                except SessionNotFoundError:
+                    runs = []
+                running = [r for r in runs if r.status.value == "running"]
+                if not running and time.monotonic() >= grace_until:
+                    if not runs:
+                        return {"outcome": "no_runs", "note": note, "runs": []}
+                    return {"outcome": "none_running", "note": note, "runs": runs[:10]}
+            if time.monotonic() >= deadline:
+                return {
+                    "outcome": "still_running",
+                    "note": note,
+                    "timeout_s": timeout,
+                    "running": [(r, run_progress(ws, r.id)) for r in running],
+                }
+        time.sleep(min(poll_s, max(0.05, deadline - time.monotonic())))
+
+
+# -- the scheduler ------------------------------------------------------------
+
+
+def submit_job(
+    root: Path,
+    *,
+    hpc: Any,
+    command: str,
+    name: str,
+    partition: str | None = None,
+    time_limit: str | None = None,
+    session: str | None = None,
+    project: Path | None = None,
+) -> dict[str, Any]:
+    """Submit *command* as a SLURM batch job under the workspace's ``jobs/``.
+
+    *hpc* is the ``[hpc]`` config (:class:`slab.config.HpcConfig`). The
+    exported *session* stamps every run the job launches, so a batch
+    result joins the session that asked for it; the export is explicit
+    because a cluster may submit with ``--export=NONE``. The prologue
+    changes into *project* so the payload runs where the client works,
+    while the job files stay under the workspace for ``slab purge``.
+    """
+    import shlex
+
+    from slab.hpc import render_sbatch, submit
+
+    chosen, _spec = hpc.resolve_partition(partition)
+    prologue: list[str] = []
+    if session:
+        prologue.append(f"export SLAB_SESSION={shlex.quote(session)}")
+    if project is not None:
+        prologue.append(f"cd {shlex.quote(str(project))}")
+    script = render_sbatch(
+        command,
+        job_name=name,
+        partition=chosen,
+        config=hpc,
+        time_limit=time_limit,
+        prologue=tuple(prologue),
+    )
+    job = submit(script, job_name=name, partition=chosen, directory=Path(root) / "jobs")
+    return {
+        "job_id": job.job_id,
+        "job_name": job.job_name,
+        "partition": job.partition,
+        "script_path": str(job.script_path),
+    }
+
+
+def job_status(job_id: str) -> dict[str, Any]:
+    """The scheduler's state of one job: pending, running, completed, failed, ..."""
+    from slab.hpc import job_state
+
+    status = job_state(job_id)
+    return {
+        "job_id": status.job_id,
+        "state": status.state.value,
+        "raw": status.raw,
+        "detail": status.detail,
+    }
+
+
+def cancel_job(job_id: str) -> dict[str, Any]:
+    """Ask the scheduler to cancel one job (a no-op once it has finished)."""
+    from slab.hpc import cancel
+
+    cancel(job_id)
+    return {"job_id": job_id, "cancel": "requested"}

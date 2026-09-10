@@ -492,6 +492,81 @@ def test_cli_render_writes_the_job_files_without_submitting(
     assert not (tmp_path / "benchmarks").exists()  # nothing scored, nothing recorded
 
 
+# -- a harness over MCP -------------------------------------------------------
+
+
+def test_a_harness_session_over_mcp_is_scored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Question 1 driven through the MCP tools by a scripted client, the way
+    an external harness would drive it, and scored from the record it leaves."""
+    pytest.importorskip("mcp", reason="mcp extra not installed")
+    import asyncio
+
+    from foundation.mcp_server import build_server
+
+    monkeypatch.chdir(tmp_path)
+    root = tmp_path / ".slab"
+    server = build_server(root, project=tmp_path, session="mcp-q1")
+
+    def call(tool: str, args: dict[str, Any] | None = None) -> Any:
+        result = asyncio.run(server.call_tool(tool, args or {}))
+        structured = getattr(result, "structured_content", None)
+        if isinstance(result, tuple):
+            structured = result[1]
+        if isinstance(structured, dict) and set(structured) == {"result"}:
+            return structured["result"]
+        return structured
+
+    # The client looks before it computes, the way the instruction expects.
+    assert "emt" in json.dumps(call("list_engines"))
+    assert "equation-of-state" in {s["name"] for s in call("list_skills")}
+    call("skill", {"name": "equation-of-state"})
+    (tmp_path / "a0.py").write_text(
+        "from ase.build import bulk\n"
+        "from foundation import check, converged\n"
+        "from foundation.tasks import relax_cell\n"
+        "atoms = bulk('Cu', 'fcc', a=3.6)\n"
+        "relaxed, info = relax_cell(atoms, engine='emt', fmax=0.01)\n"
+        "a0 = (4 * relaxed.get_volume()) ** (1 / 3)\n"
+        "print(f'a0 = {a0:.6f} Å')\n"
+        "@check\n"
+        "def forces_converged():\n"
+        "    return converged(info['fmax'], below=0.01)\n"
+    )
+    launched = call(
+        "launch_workflow", {"script_path": "a0.py", "intent": "Q1: a0 of fcc Cu under emt"}
+    )
+    assert launched["state"] == "verified", launched
+    a0 = float(launched["output"].split("a0 = ")[1].split()[0])
+    call("notebook", {"entry": f"a0 = {a0} Å (run {launched['run_id'][:10]})", "heading": "Q1"})
+    reported = call(
+        "report_results",
+        {"results": {"a0": {"value": a0, "unit": "Å"}}, "run_ids": [launched["run_id"]]},
+    )
+    assert reported["session"] == "mcp-q1"
+
+    with pytest.raises(benchmark.BenchmarkError, match="pass --question"):
+        benchmark.score_session(root, "mcp-q1")
+    record = benchmark.score_session(root, "mcp-q1", question=Q1)
+    assert record["passed"] is True and record["reason"] is None, record
+    assert record["session"] == "mcp-q1" and record["agent"] == "mcp"
+    assert record["engine_class"] == "mlip" and record["engines"] == ["emt"]
+    assert record["run_ids"] == [launched["run_id"]]
+    from foundation.skills import discover_skills
+
+    eos = discover_skills(tmp_path)["equation-of-state"]
+    assert record["skills"] == {"equation-of-state": eos.digest}
+    assert record["reviewed_by"] == [] and record["flags"] == []
+    assert record["model"] == "unknown" and record["steps"] is None
+
+    scored = runner.invoke(
+        app, ["benchmark", "score", "--session", "mcp-q1", "--question", "1", "--model", "claude"]
+    )
+    assert scored.exit_code == 0, scored.output
+    assert "pass" in scored.output
+    (row,) = benchmark.load_records(tmp_path / "benchmarks" / "results.jsonl")
+    assert row["session"] == "mcp-q1" and row["model"] == "claude"
 # -- the conditions -----------------------------------------------------------
 
 SLAB_TOML = (

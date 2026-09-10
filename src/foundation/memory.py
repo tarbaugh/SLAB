@@ -22,7 +22,7 @@ all three may import.
 Layout is a directory of markdown files, one per memory, at
 ``~/.config/slab/memory/`` (``$XDG_CONFIG_HOME`` honored, ``$SLAB_MEMORY_DIR``
 overriding both). The format follows the Agent Skills frontmatter shape that
-``mason.skills`` already teaches, minus the parts a single file does not
+``foundation.skills`` already teaches, minus the parts a single file does not
 need::
 
     ---
@@ -186,7 +186,7 @@ def valid_name(name: str) -> bool:
 def split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     """Split a memory file into (frontmatter mapping, body).
 
-    A deliberate copy of :func:`mason.skills.split_frontmatter`: Foundation
+    A deliberate copy of :func:`foundation.skills.split_frontmatter`: Foundation
     sits below Mason and may not import it, and the two files answer to
     different rules below the frontmatter anyway.
 

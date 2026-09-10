@@ -2,7 +2,7 @@
 
 LLM agents are SLAB's primary user, so the workspace speaks their native protocol. `slab mcp` serves the same operations as the CLI as MCP tools over stdio, with one shared code path in `foundation._ops` and two skins, and the tools return structured JSON instead of formatted text.
 
-This page is for *external* agents such as Claude. The *resident* agent is Mason, with its own [roster of specialists and skills](roster-and-skills.md); both drive the same workspace.
+This page is for *external* agents such as Claude. The *resident* agent is Mason, with its own [roster of specialists and skills](roster-and-skills.md); both drive the same workspace. The tool set is the resident agent's, so a harness that drives Foundation over MCP can be measured on the same [benchmark](../benchmark.md).
 
 ## Setup
 
@@ -25,11 +25,12 @@ The workspace is resolved exactly as for the CLI: `-w/--workspace` flag > `$SLAB
 
 ## The toolbox
 
-Eleven tools, each a thin wrapper over the operations layer:
+Twenty-three tools, each a thin wrapper over the operations layer, and three more on a cluster:
 
 | Tool | What it does |
 | --- | --- |
-| `launch_workflow` | Execute a plain-Python workflow script in a fresh traced run. |
+| `launch_workflow` | Execute a plain-Python workflow script in a fresh traced run that carries this server's session id. |
+| `wait_for_run` | Block until a run finishes or the timeout passes. Takes an id, a prefix, or a run name; without one, waits for every running run of this session. |
 | `list_runs` | Runs newest first, filterable by lifecycle `state`, execution `status`, and the `session` that created them. |
 | `show_run` | Everything about one run: checks, tasks, artifacts, history, failure evidence. |
 | `promote_run` | Make a run permanent (`verified -> promoted`), with a recorded reason. |
@@ -38,8 +39,29 @@ Eleven tools, each a thin wrapper over the operations layer:
 | `expire_runs` | Expire unpromoted runs past their TTL. `older_than="0d"` means everything, now. |
 | `gc` | Drop artifact bytes no retention rule demands. `dry_run=True` only reports. |
 | `list_engines` | Built-in engines, the cluster registry's declarations, rootstock checkpoint ids, QE protocols, installed pseudo families, the configured builders. |
+| `list_tasks` | The traced tasks a workflow script may call: name, signature, and a one-line summary each. |
+| `describe_task` | One task's full signature and docstring. |
 | `search_materials` | Filtered search over the offline Materials Project snapshot (`[builders.mp]`): elements, ranges, ordering, a row cap. |
 | `get_material` | One snapshot record by material id, with its elements and the resolved CIF path. Absence is reported as absence; there is no online fallback. |
+| `query_materials` | One read-only `SELECT` over the snapshot's metadata database, for what the filters cannot express. |
+| `submit_job`, `job_status`, `cancel_job` | SLURM batch jobs, with the scripts kept under the workspace's `jobs/` directory. Present only when `slab.toml` configures `[hpc]` partitions. |
+| `notebook` | Append a dated entry to the project's `NOTEBOOK.md`, or read its latest entries. |
+| `plan` | Rewrite the project's `PLAN.md`, or read it. |
+| `list_memories`, `recall`, `remember` | The machine's memory: what earlier sessions on this machine recorded about its software. See [Machine memory](memory.md). |
+| `list_skills`, `skill` | The skill catalog, and one skill's instructions with its bundled files. The catalog is the one the resident agent loads. |
+| `report_results` | Record the session's answer: results with units, and the run ids that produced them. |
+
+The server holds one session id for its lifetime, `mcp-<stamp>-<pid>`, and states it in its instructions. Every run it launches carries that id, so `list_runs(session=...)` and `promote_session` see the session whole. The project directory is the one the server was started in: its `slab.toml`, its notebook and plan, and its `skills/` directory apply.
+
+## What stays in Mason
+
+Three of the resident agent's tools are not offered over MCP, because they are mechanisms of one agent loop and not surfaces of the workspace:
+
+- `delegate` hands a brief to a specialist's own loop. A harness has its own way to spawn agents.
+- `review` hands the plan to the critic and gates compute on the verdict. A harness reviews its own plans.
+- `finish` ends the loop with a report. Over MCP the session stays open, and `report_results` records the answer without ending anything.
+
+Files and a shell are not offered either. A harness brings its own. The science review that flags a campaign reads Mason transcripts, so a harness session is scored but not reviewed.
 
 **`launch_workflow(script_path, name=None, intent=None)`** runs a zero-ceremony script inside a fresh run that lands in quarantine. A zero-ceremony script has bare `@task` calls and `@check` declarations, with no `Workspace` or `start_run` of its own. The result carries the `run_id`, the final `state` (`verified` if all checks passed), the check counts, and the captured `output`. On failure, it includes the structured `failure` record, and if even recording the failure failed (storage died mid-crash), a raw `traceback` string appears instead. Always pass `intent`, which says why this run exists.
 
@@ -97,6 +119,68 @@ promote_run({"run_id": "01k4q9", "reason": "converged baseline after correcting 
 ```
 
 The failed probe stays in quarantine, partial trajectory and all, until its TTL, so diagnostics self-clean instead of accumulating. See [Debugging failures](debugging-failures.md) for the full evidence contract.
+
+## A benchmark question, scripted
+
+The MCP tools are the whole surface a campaign needs. The script below drives question 1 of the benchmark through the server in one process, the way a harness would drive it over stdio, and then scores the session it left. Question 1 asks for the lattice constant of fcc copper. The client loads a skill, launches a workflow, writes the notebook, reports the result against the run, and the scorer reads the record:
+
+```python
+import asyncio
+from pathlib import Path
+
+from foundation.mcp_server import build_server
+from slab_stack import benchmark
+
+project = Path("project")
+project.mkdir(exist_ok=True)
+server = build_server(Path("agent-ws"), project=project, session="mcp-demo")
+
+
+def call(tool, args=None):
+    result = asyncio.run(server.call_tool(tool, args or {}))
+    structured = result[1] if isinstance(result, tuple) else result.structured_content
+    return structured["result"] if set(structured) == {"result"} else structured
+
+
+tools = sorted(t.name for t in asyncio.run(server.list_tools()))
+print(len(tools), "tools:", ", ".join(tools))
+
+(project / "a0.py").write_text('''\
+from ase.build import bulk
+from foundation import check, converged
+from foundation.tasks import relax_cell
+
+atoms = bulk("Cu", "fcc", a=3.6)
+relaxed, info = relax_cell(atoms, engine="emt", fmax=0.01)
+a0 = (4 * relaxed.get_volume()) ** (1 / 3)
+print(f"a0 = {a0:.4f} Å")
+
+@check
+def forces_converged():
+    return converged(info["fmax"], below=0.01)
+''')
+loaded = call("skill", {"name": "equation-of-state"})
+print("skill:", loaded["name"], "files:", loaded["files"])
+launched = call("launch_workflow", {"script_path": "project/a0.py", "intent": "Q1: a0 of fcc Cu under emt"})
+print(launched["state"], f'{launched["checks_passed"]}/{launched["checks_total"]} checks passed;', launched["output"].strip())
+a0 = float(launched["output"].split("a0 = ")[1].split()[0])
+call("notebook", {"entry": f"a0 = {a0} Å (run {launched['run_id'][:10]})", "heading": "Q1"})
+reported = call("report_results", {"results": {"a0": {"value": a0, "unit": "Å"}}, "run_ids": [launched["run_id"]]})
+print("reported for session", reported["session"], "->", Path(reported["recorded"]).name)
+
+record = benchmark.score_session(Path("agent-ws"), "mcp-demo", question=benchmark.find_question("1"))
+print("scored:", record["passed"], record["engine_class"], record["engines"], record["reviewed_by"])
+```
+
+```text
+23 tools: describe_task, expire_runs, gc, get_material, launch_workflow, list_engines, list_memories, list_runs, list_sessions, list_skills, list_tasks, notebook, plan, promote_run, promote_session, query_materials, recall, remember, report_results, search_materials, show_run, skill, wait_for_run
+skill: equation-of-state files: ['SKILL.md', 'assets/eos_scan.py', 'scripts/fit_eos.py']
+verified 1/1 checks passed; a0 = 3.5907 Å
+reported for session mcp-demo -> mcp-demo.jsonl
+scored: True mlip ['emt'] []
+```
+
+The record is one JSON lines file under `<workspace>/sessions/`, with the skills the session loaded and the results it reported. `slab benchmark score --session mcp-demo --question 1` scores it from the command line. The question must be named, because a harness record holds no opening instruction, and the last field printed is the empty list of reviewers: the science review reads Mason transcripts only.
 
 ## Intent, and lifecycle hygiene for agents
 

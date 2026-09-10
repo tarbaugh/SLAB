@@ -11,6 +11,7 @@ pytest.importorskip("mcp", reason="mcp extra not installed")
 
 from foundation import Workspace
 from foundation.mcp_server import build_server
+from foundation.session_record import find_session_record
 
 EXPECTED_TOOLS = {
     "list_runs",
@@ -21,10 +22,23 @@ EXPECTED_TOOLS = {
     "expire_runs",
     "gc",
     "launch_workflow",
+    "wait_for_run",
     "list_engines",
+    "list_tasks",
+    "describe_task",
     "search_materials",
     "get_material",
+    "query_materials",
+    "notebook",
+    "plan",
+    "list_memories",
+    "recall",
+    "remember",
+    "list_skills",
+    "skill",
+    "report_results",
 }
+HPC_TOOLS = {"submit_job", "job_status", "cancel_job"}
 
 
 @pytest.fixture()
@@ -245,3 +259,152 @@ def test_materials_tools_unconfigured_surface_the_fix(
         _call(server, "search_materials", {})
     with pytest.raises(Exception, match=r"\[builders.mp\] root"):
         _call(server, "get_material", {"material_id": "mp-149"})
+
+
+# -- parity with the resident agent -------------------------------------------
+
+
+def test_hpc_tools_appear_only_with_partitions(root: Path, tmp_path: Path) -> None:
+    server = build_server(root, project=tmp_path)
+    assert not HPC_TOOLS & {t.name for t in asyncio.run(server.list_tools())}
+    (tmp_path / "slab.toml").write_text(
+        '[hpc]\ndefault_partition = "cpu"\n[hpc.partitions.cpu]\n'
+    )
+    server = build_server(root, project=tmp_path)
+    assert {t.name for t in asyncio.run(server.list_tools())} >= HPC_TOOLS
+    # Off a cluster the scheduler refuses loudly, through the same error path.
+    with pytest.raises(Exception, match="not on PATH"):
+        _call(server, "job_status", {"job_id": "1"})
+
+
+def test_tasks_are_listed_and_described(root: Path) -> None:
+    server = build_server(root)
+    names = {entry["name"] for entry in _call(server, "list_tasks")}
+    assert {"relax", "relax_cell", "single_point"} <= names
+    described = _call(server, "describe_task", {"name": "relax"})
+    assert described["name"] == "relax" and "engine" in described["signature"]
+    assert described["doc"]
+    with pytest.raises(Exception, match="no task 'relox'; known:"):
+        _call(server, "describe_task", {"name": "relox"})
+
+
+def test_launched_runs_carry_the_server_session_and_wait_reports_them(
+    root: Path, tmp_path: Path
+) -> None:
+    script = tmp_path / "wf.py"
+    script.write_text("from foundation import check\n@check\ndef ok():\n    return True\n")
+    server = build_server(root, project=tmp_path, session="mcp-test-1")
+    launched = _call(server, "launch_workflow", {"script_path": str(script), "intent": "x"})
+    assert launched["session"] == "mcp-test-1"
+    waited = _call(server, "wait_for_run", {"run_id": launched["run_id"][:8]})
+    assert waited["outcome"] == "finished"
+    assert waited["run"]["id"] == launched["run_id"]
+    assert waited["run"]["progress"].startswith("tasks:")
+    by_name = _call(server, "wait_for_run", {"run_id": "wf"})
+    assert by_name["outcome"] == "finished" and "resolved 'wf' by name" in by_name["note"]
+    idle = _call(server, "wait_for_run", {"timeout_s": 0.5})
+    assert idle["outcome"] == "none_running"
+    assert [r["id"] for r in idle["runs"]] == [launched["run_id"]]
+    empty = _call(build_server(root, project=tmp_path, session="mcp-test-2"),
+                  "wait_for_run", {"timeout_s": 0.5})
+    assert empty["outcome"] == "no_runs"
+
+
+def test_notebook_and_plan_are_the_project_files(root: Path, tmp_path: Path) -> None:
+    server = build_server(root, project=tmp_path)
+    assert _call(server, "plan")["text"] == ""
+    written = _call(server, "plan", {"content": "1. relax Cu"})
+    assert written["text"] == "1. relax Cu\n"
+    assert (tmp_path / "PLAN.md").read_text() == "1. relax Cu\n"
+    noted = _call(server, "notebook", {"entry": "a0 = 3.60 Å (run ab12)", "heading": "lattice"})
+    assert noted["recorded"] is True and noted["path"] == str(tmp_path / "NOTEBOOK.md")
+    tail = _call(server, "notebook")["text"]
+    assert tail.startswith("# Lab notebook") and " — lattice\n" in tail
+    assert "(run ab12)" in tail
+
+
+def test_machine_memory_round_trip(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SLAB_MEMORY_DIR", str(tmp_path / "memory"))
+    server = build_server(root, project=tmp_path)
+    assert _call(server, "list_memories") == []
+    with pytest.raises(Exception, match="no memory named 'vllm-cache'"):
+        _call(server, "recall", {"name": "vllm-cache"})
+    written = _call(
+        server,
+        "remember",
+        {"name": "vllm-cache", "description": "the vllm cache flag matters", "body": "Set it."},
+    )
+    assert written["name"] == "vllm-cache" and Path(written["path"]).is_file()
+    listed = _call(server, "list_memories")
+    assert [m["name"] for m in listed] == ["vllm-cache"]
+    recalled = _call(server, "recall", {"name": "vllm-cache"})
+    assert recalled["body"] == "Set it." and "mcp" in recalled["provenance"]
+    assert recalled["changed_since"] == []
+    with pytest.raises(Exception, match="name"):
+        _call(server, "remember", {"name": "Bad Name", "description": "d", "body": "b"})
+
+
+def test_skills_are_cataloged_loaded_and_recorded(root: Path, tmp_path: Path) -> None:
+    (tmp_path / "skills" / "xrd").mkdir(parents=True)
+    (tmp_path / "skills" / "xrd" / "SKILL.md").write_text(
+        "---\nname: xrd\ndescription: Simulate a pattern.\n---\n# XRD\n\nRun it.\n"
+    )
+    (tmp_path / "skills" / "xrd" / "scripts").mkdir()
+    (tmp_path / "skills" / "xrd" / "scripts" / "sim.py").write_text("print(1)\n")
+    server = build_server(root, project=tmp_path, session="mcp-skills")
+    catalog = {s["name"]: s for s in _call(server, "list_skills")}
+    assert catalog["equation-of-state"]["source"] == "built-in"
+    assert catalog["xrd"]["source"] == "project"
+    loaded = _call(server, "skill", {"name": "xrd"})
+    assert loaded["body"].startswith("# XRD") and loaded["files"] == ["SKILL.md", "scripts/sim.py"]
+    assert loaded["digest"] == catalog["xrd"]["digest"]
+    with pytest.raises(Exception, match="no skill named 'xrdd'; available skills: "):
+        _call(server, "skill", {"name": "xrdd"})
+    assert find_session_record(root, "mcp-skills").skills() == {"xrd": loaded["digest"]}
+
+
+def test_query_materials_answers_from_the_snapshot(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from conftest import build_mp_snapshot
+
+    snapshot = build_mp_snapshot(tmp_path / "mp-snapshot")
+    (tmp_path / "slab.toml").write_text(f'[builders.mp]\nroot = "{snapshot}"\n')
+    monkeypatch.chdir(tmp_path)
+    server = build_server(root, project=tmp_path)
+    answer = _call(
+        server,
+        "query_materials",
+        {"sql": "SELECT material_id FROM materials ORDER BY material_id LIMIT 2"},
+    )
+    assert len(answer["rows"]) == 2
+    with pytest.raises(Exception, match="SELECT"):
+        _call(server, "query_materials", {"sql": "DELETE FROM materials"})
+
+
+def test_report_results_validates_then_records_the_answer(root: Path, tmp_path: Path) -> None:
+    run_id = _seed(root, session="mcp-answer")
+    server = build_server(root, project=tmp_path, session="mcp-answer")
+    with pytest.raises(Exception, match="no numeric value"):
+        _call(server, "report_results",
+              {"results": {"a0": {"value": "3.6", "unit": "Å"}}, "run_ids": [run_id]})
+    with pytest.raises(Exception, match="no run matches"):
+        _call(server, "report_results",
+              {"results": {"a0": {"value": 3.6, "unit": "Å"}}, "run_ids": ["zzzz"]})
+    answer = _call(
+        server,
+        "report_results",
+        {
+            "results": {"a0": {"value": 3.6, "unit": "Å"}},
+            "run_ids": [run_id[:8]],
+            "summary": "done",
+        },
+    )
+    assert answer["session"] == "mcp-answer" and answer["run_ids"] == [run_id]
+    record = find_session_record(root, "mcp-ans")
+    assert record.header()["client"] == "mcp"
+    assert record.results()["results"] == {"a0": {"value": 3.6, "unit": "Å"}}
+    assert record.results()["run_ids"] == [run_id]
+    assert Path(answer["recorded"]) == root / "sessions" / "mcp-answer.jsonl"

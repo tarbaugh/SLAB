@@ -1,10 +1,17 @@
-"""The agent surface: Foundation's CLI verbs exposed as MCP tools over stdio.
+"""The agent surface: Foundation's operations exposed as MCP tools over stdio.
 
 LLM agents are SLAB's primary user, so the workspace speaks their native
-protocol. Every tool is a thin wrapper over :mod:`foundation._ops` — exactly
-the code the CLI runs — returning structured dicts instead of formatted text.
-The one exception is ``list_engines``, which reports what SLAB can compute and
-so wraps :func:`slab._ops.engines_overview`.
+protocol. Every tool is a thin wrapper over :mod:`foundation._ops` — the
+code the CLI runs — returning structured dicts instead of formatted text.
+The exceptions wrap the neighbours ``_ops`` itself calls: ``list_engines``
+reports what SLAB can compute (:func:`slab._ops.engines_overview`), and the
+materials tools read the offline snapshot (:mod:`slab.mp`).
+
+The tool set is the resident agent's, minus what an external harness has
+of its own (files, a shell) and minus the harness mechanisms that belong
+to one agent loop: ``delegate``, ``review``, and ``finish`` stay Mason's.
+A harness reports what it found with ``report_results``, which records the
+session's answer in the workspace, where the benchmark scorer reads it.
 
 Start it with ``slab mcp`` (or configure your agent to do so):
 
@@ -35,10 +42,15 @@ except ImportError:  # pragma: no cover - mcp 1.x fallback
     ToolError = import_module("mcp.server.fastmcp.exceptions").ToolError  # type: ignore[misc]
 
 from foundation import _ops
-from foundation.errors import FoundationError
+from foundation import memory as memory_store
+from foundation import project as project_files
+from foundation.errors import FoundationError, MemoryStoreError
 from foundation.lifecycle import LifecycleState
 from foundation.runtime import Workspace
+from foundation.session_record import SessionRecord, new_session_id, validate_results
+from foundation.skills import SkillError, bundled_files, discover_skills
 from slab._ops import engines_overview
+from slab.config import load_config as load_slab_config
 from slab.errors import SlabError
 
 _F = TypeVar("_F", bound=Callable[..., Any])
@@ -75,12 +87,42 @@ what deserves keeping (promotion is the ONLY thing that makes data permanent);
 expire_runs + gc reclaim everything else. Prefixes of run ids are accepted.
 Runs carry the client session that created them: list_sessions shows which
 conversation produced which runs, and promote_session promotes a whole one.
+This server's session id is {session}. Every run it launches carries it, and
+report_results records the session's answer (results with units, and the run
+ids that produced them) where a benchmark scorer reads it.
+The project directory is {project}: its NOTEBOOK.md and PLAN.md are the notebook
+and plan tools' files, and its skills/ directory adds to the skill catalog.
 """
 
 
-def build_server(root: Path) -> MCPServer:
-    """Build the MCP server for the workspace at *root* (does not start it)."""
-    server = MCPServer("foundation", instructions=_INSTRUCTIONS)
+def build_server(
+    root: Path, *, project: Path | None = None, session: str | None = None
+) -> MCPServer:
+    """Build the MCP server for the workspace at *root* (does not start it).
+
+    *project* is the directory whose ``slab.toml``, notebook, plan, and
+    skills apply; the current directory when omitted, as for the CLI.
+    *session* is the id every run this server launches carries; a fresh
+    ``mcp-<stamp>-<pid>`` when omitted.
+    """
+    project_dir = Path(project if project is not None else Path.cwd()).resolve()
+    session_id = session or new_session_id("mcp")
+    record = SessionRecord(root, session_id, client="mcp")
+    hpc = load_slab_config(project_dir).hpc
+    versions: dict[str, dict[str, str]] = {}
+
+    def software_versions() -> dict[str, str]:
+        # Probed once per server: the version checks run engines and builders.
+        if "live" not in versions:
+            from slab._ops import software_versions as probe
+
+            versions["live"] = probe()
+        return versions["live"]
+
+    server = MCPServer(
+        "foundation",
+        instructions=_INSTRUCTIONS.format(session=session_id, project=project_dir),
+    )
 
     @server.tool()
     @_surfaced
@@ -184,15 +226,40 @@ def build_server(root: Path) -> MCPServer:
     def launch_workflow(
         script_path: str, name: str | None = None, intent: str | None = None
     ) -> dict[str, Any]:
-        """Execute a plain-Python workflow script in a fresh traced run.
-        Always pass intent — why this run exists. The result includes the run
-        id, final state (verified if all checks passed), and captured output;
-        on failure it includes the structured 'failure' record (traceback and
-        diagnostic notes). If recording the failure itself failed (storage
-        died mid-crash), a raw 'traceback' string appears instead and the run
-        may be left at status 'running'. Use show_run for per-task failure
-        evidence."""
-        return _ops.launch_script(root, script_path, name=name, intent=intent, capture_output=True)
+        """Execute a plain-Python workflow script in a fresh traced run that
+        carries this server's session id. Always pass intent — why this run
+        exists. The result includes the run id, final state (verified if all
+        checks passed), and captured output; on failure it includes the
+        structured 'failure' record (traceback and diagnostic notes). If
+        recording the failure itself failed (storage died mid-crash), a raw
+        'traceback' string appears instead and the run may be left at status
+        'running'. Use show_run for per-task failure evidence."""
+        return _ops.launch_script(
+            root, script_path, name=name, intent=intent, session=session_id, capture_output=True
+        )
+
+    @server.tool()
+    @_surfaced
+    def wait_for_run(run_id: str | None = None, timeout_s: float = 900.0) -> dict[str, Any]:
+        """Block until a run finishes or the timeout passes, then report
+        where it stands. run_id takes an id, a unique prefix, or the name of
+        a run this session created; without it, waits for every running run
+        this session created. 'outcome' is finished (with the run and its
+        task tally), still_running (call again to keep waiting), none_running
+        (the session's finished runs), or no_runs."""
+        waited = _ops.wait_for_run(
+            root, run_id=run_id, session=session_id, timeout_s=min(timeout_s, 1800.0)
+        )
+        answer: dict[str, Any] = {"outcome": waited["outcome"], "note": waited["note"]}
+        if "run" in waited:
+            answer["run"] = _ops.run_summary(waited["run"]) | {"progress": waited["progress"]}
+        if "runs" in waited:
+            answer["runs"] = [_ops.run_summary(r) for r in waited["runs"]]
+        if "running" in waited:
+            answer["running"] = [
+                _ops.run_summary(r) | {"progress": progress} for r, progress in waited["running"]
+            ]
+        return answer
 
     @server.tool()
     @_surfaced
@@ -212,10 +279,27 @@ def build_server(root: Path) -> MCPServer:
         workflow script), 'pseudo_families' (installed pseudopotential
         families, usable as calculator_options={'pseudo_family': ...}), and
         'hpc' (this machine's configured SLURM cluster and partitions, or
-        null off-cluster; jobs submit via 'slab hpc submit'). An 'mp' key
-        names the offline Materials Project snapshot when one is configured
-        (search it with search_materials / get_material)."""
+        null off-cluster; jobs submit via submit_job when partitions are
+        configured). An 'mp' key names the offline Materials Project snapshot
+        when one is configured (search it with search_materials /
+        get_material / query_materials)."""
         return engines_overview()
+
+    @server.tool()
+    @_surfaced
+    def list_tasks() -> list[dict[str, str]]:
+        """The traced tasks foundation.tasks exposes to workflow scripts: one
+        entry per task with its name, signature, and one-sentence summary.
+        Call describe_task for the full docstring."""
+        return _ops.task_catalog()
+
+    @server.tool()
+    @_surfaced
+    def describe_task(name: str) -> dict[str, str]:
+        """Full signature and docstring of one foundation.tasks task (e.g.
+        'relax'), so an agent consults the harness's own vocabulary instead
+        of reading its source."""
+        return _ops.describe_task(name)
 
     @server.tool()
     @_surfaced
@@ -254,9 +338,206 @@ def build_server(root: Path) -> MCPServer:
 
         return mp_get(material_id)
 
+    @server.tool()
+    @_surfaced
+    def query_materials(sql: str, limit: int = 200) -> dict[str, Any]:
+        """One read-only SELECT (or WITH) over the snapshot's metadata.sqlite,
+        for queries the search_materials filters cannot express. Tables:
+        materials (keyed by material_id), material_elements(material_id,
+        element), dataset_info, units (consult it instead of guessing units).
+        Rows are capped and the result says when it truncated — put LIMIT in
+        the query."""
+        from slab.mp import query_materials as mp_query
+
+        return mp_query(sql, limit=limit)
+
+    if hpc.partitions:
+
+        @server.tool()
+        @_surfaced
+        def submit_job(
+            command: str,
+            name: str,
+            partition: str | None = None,
+            time_limit: str | None = None,
+        ) -> dict[str, Any]:
+            """Submit a command as a SLURM batch job (typically 'slab run
+            workflow.py' so the result is still a traced, verified run). The
+            job exports this server's session id, so the runs it launches
+            join this session; the script is kept under the workspace's
+            jobs/ directory. time_limit is HH:MM:SS."""
+            return _ops.submit_job(
+                root,
+                hpc=hpc,
+                command=command,
+                name=name,
+                partition=partition,
+                time_limit=time_limit,
+                session=session_id,
+                project=project_dir,
+            )
+
+        @server.tool()
+        @_surfaced
+        def job_status(job_id: str) -> dict[str, Any]:
+            """State of one SLURM job (pending/running/completed/failed/...)."""
+            return _ops.job_status(job_id)
+
+        @server.tool()
+        @_surfaced
+        def cancel_job(job_id: str) -> dict[str, Any]:
+            """Cancel a SLURM job (a no-op if it already finished)."""
+            return _ops.cancel_job(job_id)
+
+    @server.tool()
+    @_surfaced
+    def notebook(entry: str | None = None, heading: str | None = None) -> dict[str, Any]:
+        """The project's lab notebook (NOTEBOOK.md). With entry, append a
+        dated entry — decisions, results with run ids, failures and their
+        diagnosis — written for a colleague who has read none of this
+        conversation. Without entry, return the latest entries."""
+        if entry is not None:
+            path = project_files.notebook_append(project_dir, entry, heading=heading)
+            return {"path": str(path), "recorded": True}
+        return {
+            "path": str(project_files.notebook_path(project_dir)),
+            "text": project_files.notebook_tail(project_dir),
+        }
+
+    @server.tool()
+    @_surfaced
+    def plan(content: str | None = None) -> dict[str, Any]:
+        """The project's living plan (PLAN.md): goal, steps with status, open
+        questions. With content, rewrite it whole; without, return the
+        current plan. Keep it current — it is what the next session reads."""
+        if content is not None:
+            path = project_files.plan_write(project_dir, content)
+            return {"path": str(path), "text": project_files.plan_read(project_dir)}
+        return {
+            "path": str(project_files.plan_path(project_dir)),
+            "text": project_files.plan_read(project_dir),
+        }
+
+    @server.tool()
+    @_surfaced
+    def list_memories() -> list[dict[str, Any]]:
+        """The machine's memories: what earlier sessions on this machine
+        recorded about its software (see recall/remember). One entry per
+        memory with its name, one-line description, and whether the software
+        it was stamped against has changed since."""
+        known = memory_store.discover()
+        live = software_versions() if any(m.against for m in known.values()) else {}
+        return [
+            {
+                "name": m.name,
+                "description": m.description,
+                "changed_since": m.drift(live) if m.against else [],
+            }
+            for _, m in sorted(known.items())
+        ]
+
+    @server.tool()
+    @_surfaced
+    def recall(name: str) -> dict[str, Any]:
+        """Read one machine memory in full by name: the fact, who recorded it
+        and when, and which of the software it names has changed since it was
+        written (confirm the fact before building on it in that case)."""
+        known = memory_store.discover()
+        found = known.get(name)
+        if found is None:
+            names = ", ".join(sorted(known)) or "none recorded yet"
+            raise MemoryStoreError(f"no memory named {name!r}; memories on this machine: {names}")
+        return {
+            "name": found.name,
+            "description": found.description,
+            "body": found.body().rstrip(),
+            "provenance": found.provenance(),
+            "changed_since": found.drift(software_versions()) if found.against else [],
+        }
+
+    @server.tool()
+    @_surfaced
+    def remember(name: str, description: str, body: str) -> dict[str, Any]:
+        """Record one confirmed fact about this machine or its software so
+        later sessions start knowing it: a package that behaves unlike its
+        documentation, a flag that matters, a workaround. name is
+        lowercase-with-hyphens; description is the one line a future session
+        reads to decide whether the fact applies. Re-using a name replaces
+        that memory. Not for results (they belong to runs), project decisions
+        (the notebook), or credentials (nowhere)."""
+        written = memory_store.write(
+            name,
+            description,
+            body,
+            agent="mcp",
+            against=memory_store.stamp(f"{description}\n{body}", software_versions()),
+        )
+        return {"name": written.name, "path": str(written.path), "against": dict(written.against)}
+
+    @server.tool()
+    @_surfaced
+    def list_skills() -> list[dict[str, str]]:
+        """The skill catalog: procedure packages in the Agent Skills format,
+        built in, in ~/.config/slab/skills, and in the project's skills/
+        directory. One entry per skill with its name, description, source
+        layer, and content digest. Load one with skill(name) before doing a
+        task it covers."""
+        return [
+            {
+                "name": s.name,
+                "description": s.description,
+                "source": s.source,
+                "digest": s.digest,
+                "root": str(s.root),
+            }
+            for _, s in sorted(discover_skills(project_dir).items())
+        ]
+
+    @server.tool()
+    @_surfaced
+    def skill(name: str) -> dict[str, Any]:
+        """Load a skill by name: its full instructions, its root path, and
+        its bundled files (scripts, references, assets) as paths relative to
+        the root. Prefer a skill's bundled scripts over writing your own; run
+        them with your own shell. The load is recorded in this session."""
+        catalog = discover_skills(project_dir)
+        found = catalog.get(name)
+        if found is None:
+            known = ", ".join(sorted(catalog))
+            raise SkillError(f"no skill named {name!r}; available skills: {known}")
+        record.record(
+            {"type": "skill", "name": name, "source": found.source, "digest": found.digest}
+        )
+        return {
+            "name": found.name,
+            "source": found.source,
+            "digest": found.digest,
+            "root": str(found.root),
+            "body": found.body(),
+            "files": bundled_files(found),
+        }
+
+    @server.tool()
+    @_surfaced
+    def report_results(
+        results: dict[str, Any], run_ids: list[str], summary: str = ""
+    ) -> dict[str, Any]:
+        """Record this session's answer in the workspace: results as
+        {name: {value, unit}} and the run ids that produced them (full ids or
+        unique prefixes; every one must exist). A benchmark scores the session
+        from this record, so report exactly the digits a run produced. The
+        session stays open; report again to replace the answer."""
+        clean, cited = validate_results(results, run_ids)
+        with Workspace(root) as ws:
+            resolved = [ws.runs.resolve(run_id) for run_id in cited]
+        path = record.record(
+            {"type": "results", "results": clean, "run_ids": resolved, "summary": summary}
+        )
+        return {"session": session_id, "recorded": str(path), "results": clean, "run_ids": resolved}
+
     return server
 
 
-def serve(root: Path) -> None:  # pragma: no cover - blocks on stdio
+def serve(root: Path, *, project: Path | None = None) -> None:  # pragma: no cover - blocks on stdio
     """Run the MCP server on stdio until the client disconnects."""
-    build_server(root).run()
+    build_server(root, project=project).run()
