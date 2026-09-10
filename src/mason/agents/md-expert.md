@@ -33,10 +33,13 @@ lammps-potentials skill gives the switches, the one-MPI-task-per-GPU
 rule, and the check that the accelerated run reproduces the plain one on
 the smoke cell. A GPU run goes to a GPU node through the scheduler, never
 to the login node, and a timing on the smoke cell decides whether the
-switches pay before a production run spends its allocation. SLAB adds
-no switch: read the `lammps` entry of `list_engines` before a GPU run,
-and `info["kokkos"]` after it, because a command without `-k on` ran on
-the host whatever the build contained.
+switches pay before a production run spends its allocation. A machine
+keeps the plain build and the KOKKOS build as two named routes, and
+`engine=` picks one per run, so a smoke test stays on the plain route
+and production MD takes the accelerated one. SLAB adds no switch: read
+the `lammps` entry of `list_engines` before a GPU run, and
+`info["kokkos"]` after it, because a route without `-k on` ran on the
+host whatever the build contained.
 
 A machine-learned potential can say when it is guessing. GRACE reports a
 per-atom extrapolation grade, gamma: near 1 is the edge of the training

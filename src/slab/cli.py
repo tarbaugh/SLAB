@@ -101,11 +101,13 @@ def engines_list(registry_path: _RegistryOpt = None) -> None:
             typer.echo(f"  {env_name}: {', '.join(ids)}")
     lammps = overview.get("lammps") or {}
     if lammps.get("error"):
-        typer.echo(f"lammps command: error — {lammps['error']}")
-    elif lammps:
-        typer.echo(f"lammps command: {lammps['command']}  ({_kokkos_text(lammps['kokkos'])})")
-        if lammps.get("setup"):
-            typer.echo(f"  setup: {'; '.join(lammps['setup'])}")
+        typer.echo(f"lammps routes: error — {lammps['error']}")
+    elif lammps.get("routes"):
+        typer.echo("lammps routes (engine= for relax, single_point, and run_lammps):")
+        for name, route in lammps["routes"].items():
+            typer.echo(f"  {name:<14} {route['command']}  ({_kokkos_text(route['kokkos'])})")
+            if route.get("setup"):
+                typer.echo(f"  {'':<14} setup: {'; '.join(route['setup'])}")
     typer.echo(f"qe protocols: {', '.join(overview['qe_protocols'])} ('slab protocols show')")
     families = overview["pseudo_families"]
     if overview.get("pseudo_families_error"):
