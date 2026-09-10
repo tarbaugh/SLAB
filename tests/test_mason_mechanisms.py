@@ -441,3 +441,25 @@ def test_critic_gate_off_ungates_a_review_first_card(tmp_path: Path) -> None:
     assert not free.toolbox.dispatch(_call("delegate", agent="worker", task="t")).startswith(
         "refused: this card spends no compute"
     )
+
+
+def test_context_hygiene_off_lifts_the_output_cap(tmp_path: Path) -> None:
+    """The cap is hygiene's first layer, so the switch removes it too: with
+    it off a long result reaches the model whole, and with it on the
+    middle is cut with a marker."""
+    from mason.tools import build_toolbox
+
+    (tmp_path / "big.txt").write_text(("y" * 80 + "\n") * 100)  # 8,100 characters
+    call = ToolCall(
+        id="r", name="read_file", arguments={"path": "big.txt", "raw": True}, arguments_raw="{}"
+    )
+    off = _session(
+        tmp_path,
+        max_tool_output_chars=1_000,
+        mechanisms=sorted(ALL_MECHANISMS - {"context-hygiene"}),
+    )
+    whole = build_toolbox(off).dispatch(call)
+    assert len(whole) > 8_000 and "truncated" not in whole
+    on = _session(tmp_path, max_tool_output_chars=1_000)
+    cut = build_toolbox(on).dispatch(call)
+    assert len(cut) < 1_200 and "characters truncated" in cut

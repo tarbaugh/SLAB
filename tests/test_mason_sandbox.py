@@ -1726,3 +1726,14 @@ def test_snapshot_engines_covers_a_rootstock_setup(tmp_path: Path) -> None:
     assert snapshots["rootstock"].error is None
     assert snapshots["rootstock"].payload == str(python)
     assert "export CUDA_HOME=/opt/cuda" in snapshots["rootstock"].setup_lines()
+
+
+def test_the_mechanism_list_travels_into_the_sandbox_toml(tmp_path: Path) -> None:
+    """A launched ablation runs inside the container from the rendered
+    config, so the switch list must be in it, or the job runs every
+    mechanism and the record lies about its condition."""
+    import tomllib
+
+    agent = _agent(mechanisms=["skills", "delegation"])
+    text, _warnings = sandbox_toml(_slab_cfg(), agent, tmp_path / "ws")
+    assert tomllib.loads(text)["agent"]["mechanisms"] == ["delegation", "skills"]
