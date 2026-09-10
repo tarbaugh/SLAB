@@ -139,6 +139,28 @@ def test_launch_workflow(root: Path, tmp_path: Path) -> None:
         assert ws.runs.get(result["run_id"]).intent == "launched by agent"
 
 
+def test_launch_workflow_records_the_commands_the_run_resolved(root: Path, tmp_path: Path) -> None:
+    """The harness session record says what ran, one command event per engine command."""
+    script = tmp_path / "wf.py"
+    script.write_text(
+        "from foundation import task\n"
+        "IDENTITY = {'engine': 'lammps', 'command': 'lmp -k on g 1 -sf kk'}\n"
+        "@task(cache_extra=lambda arguments: IDENTITY)\n"
+        "def probe(x):\n    return x\n"
+        "probe(1)\n"
+    )
+    server = build_server(root, session="chat-cmd")
+    launched = _call(server, "launch_workflow", {"script_path": str(script), "intent": "cmds"})
+    _call(server, "wait_for_run", {"run_id": launched["run_id"]})
+    events = find_session_record(root, "chat-cmd").events()
+    commands = [event for event in events if event.get("type") == "command"]
+    assert len(commands) == 1
+    (command,) = commands
+    assert command["kind"] == "engine" and command["tool"] == "launch_workflow"
+    assert command["run_id"] == launched["run_id"] and command["task"] == "probe"
+    assert command["command"] == "lmp -k on g 1 -sf kk" and command["kokkos"]["gpus"] == 1
+
+
 def test_tool_errors_surface_helpfully(root: Path) -> None:
     _seed(root)
     server = build_server(root)

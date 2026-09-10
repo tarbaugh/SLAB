@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated, NoReturn
+from typing import Annotated, Any, NoReturn
 
 import typer
 
@@ -33,6 +33,28 @@ app = typer.Typer(
 def _fail(message: str) -> NoReturn:
     typer.echo(f"error: {message}", err=True)
     raise typer.Exit(code=1)
+
+
+def _kokkos_text(switches: dict[str, Any]) -> str:
+    """One phrase for what a command asks of KOKKOS.
+
+    Examples:
+        >>> _kokkos_text({"enabled": False, "gpus": None, "threads": None, "suffix": False})
+        'KOKKOS off: the plain styles run on the host'
+        >>> _kokkos_text({"enabled": True, "gpus": 2, "threads": None, "suffix": True})
+        'KOKKOS on, 2 GPU(s) per node, -sf kk'
+        >>> _kokkos_text({"enabled": True, "gpus": None, "threads": 8, "suffix": False})
+        'KOKKOS on, 8 OpenMP thread(s) per task, no -sf kk'
+    """
+    if not switches.get("enabled"):
+        return "KOKKOS off: the plain styles run on the host"
+    parts = ["KOKKOS on"]
+    if switches.get("gpus") is not None:
+        parts.append(f"{switches['gpus']} GPU(s) per node")
+    if switches.get("threads") is not None:
+        parts.append(f"{switches['threads']} OpenMP thread(s) per task")
+    parts.append("-sf kk" if switches.get("suffix") else "no -sf kk")
+    return ", ".join(parts)
 
 
 engines_app = typer.Typer(
@@ -77,6 +99,13 @@ def engines_list(registry_path: _RegistryOpt = None) -> None:
             typer.echo(f"  error reading install: {rootstock['error']}")
         for env_name, ids in rootstock["checkpoints"].items():
             typer.echo(f"  {env_name}: {', '.join(ids)}")
+    lammps = overview.get("lammps") or {}
+    if lammps.get("error"):
+        typer.echo(f"lammps command: error — {lammps['error']}")
+    elif lammps:
+        typer.echo(f"lammps command: {lammps['command']}  ({_kokkos_text(lammps['kokkos'])})")
+        if lammps.get("setup"):
+            typer.echo(f"  setup: {'; '.join(lammps['setup'])}")
     typer.echo(f"qe protocols: {', '.join(overview['qe_protocols'])} ('slab protocols show')")
     families = overview["pseudo_families"]
     if overview.get("pseudo_families_error"):

@@ -5,6 +5,22 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- Transcripts record every command that ran. The `shell` tool records
+  its command line, `launch_workflow` the driver's command, `submit_job`
+  the payload with the job id and the kept script, and a finished run
+  the engine commands its tasks resolved, read from the run's recipes by
+  the new `run_commands` operation. Each `command` event names the agent
+  card that ran it. `slab mason read` prints one line per command and
+  `--full` the details; `slab mason report` counts them by kind. The MCP
+  server records the same events in the harness session record.
+- SLAB says what a LAMMPS run asks of KOKKOS, because it adds no switch
+  the command lacks. `slab engines list` and `list_engines` report the
+  resolved `lammps` command with the switches parsed from it, and
+  `run_lammps` returns `info["kokkos"]` with what the log reported
+  (KOKKOS mode, GPUs per node, threads per task, the `/kk` styles that
+  ran) and `info["argv"]`, the exact argument vector. The
+  lammps-scripting and lammps-potentials skills and the md-expert card
+  tell the agent to read both before and after a GPU run.
 - A session retires at finish. Mason passes the `run_ids` of a root
   session's `finish` to the new `retire_session` operation, which
   promotes the cited runs that passed their checks, anchors from earlier

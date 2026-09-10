@@ -15,6 +15,7 @@ from foundation._ops import (
     promote_session,
     resolve_root,
     retire_session,
+    run_commands,
     run_details,
     run_summary,
     sessions_summary,
@@ -683,3 +684,45 @@ def test_wait_for_run_names_a_run_on_another_host_instead_of_guessing(
     assert "not checked from here" in liveness
     with Workspace(root) as ws:
         assert ws.runs.get(run.id).status.value == "running"
+
+
+def test_run_commands_collects_the_engine_commands_a_run_resolved(tmp_path: Path) -> None:
+    """One entry per distinct command; tasks that share it are counted, cache hits too."""
+    from foundation import task
+
+    identity = {
+        "engine": "lammps",
+        "command": "mpirun -np 1 lmp -k on g 1 -sf kk",
+        "setup": ["module load lammps"],
+        "version": "22 Jul 2025",
+    }
+
+    @task(cache_extra=lambda arguments: identity)
+    def probe(x):
+        return x
+
+    @task(cache_extra=lambda arguments: {"builder": "atomsk", "command": "atomsk"})
+    def build(x):
+        return x
+
+    @task
+    def plain(x):
+        return x
+
+    with Workspace(tmp_path / "ws") as ws:
+        with ws.start_run(name="commands") as run:
+            probe(1)
+            probe(2)
+            probe(1)
+            build(3)
+            plain(4)
+        entries = run_commands(ws, run.id)
+        assert run_commands(ws, run.id) == entries
+    assert [e["engine"] for e in entries] == ["lammps", "atomsk"]
+    lammps, atomsk = entries
+    assert lammps["run_id"] == run.id and lammps["seq"] == 1 and lammps["task"] == "probe"
+    assert lammps["tasks"] == 3 and lammps["cache_hits"] == 1
+    assert lammps["command"] == identity["command"] and lammps["setup"] == ["module load lammps"]
+    assert lammps["version"] == "22 Jul 2025"
+    assert lammps["kokkos"]["enabled"] is True and lammps["kokkos"]["gpus"] == 1
+    assert atomsk["tasks"] == 1 and "kokkos" not in atomsk and atomsk["setup"] == []

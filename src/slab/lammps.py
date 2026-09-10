@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -161,6 +162,108 @@ def run_lammps_script(
             f"LAMMPS failed (exit {process.returncode}):\n  {evidence}", log=log, screen=screen
         )
     return LammpsOutcome(command=resolved, argv=tuple(run_argv), log=log, screen=screen)
+
+
+_KOKKOS_MODE = re.compile(r"^KOKKOS mode\b.*\bis enabled", re.MULTILINE)
+_KOKKOS_GPUS = re.compile(r"will use up to (\d+) GPU\(s\) per node")
+_KOKKOS_THREADS = re.compile(r"using (\d+) OpenMP thread\(s\) per MPI task")
+_KOKKOS_STYLE = re.compile(r"^\s*\(\d+\)\s+(?:pair|fix|compute)\s+(\S+/kk\S*)", re.MULTILINE)
+
+
+def kokkos_switches(command: str) -> dict[str, Any]:
+    """What a LAMMPS command line asks of the KOKKOS package.
+
+    SLAB never adds a switch: the command runs as written, plus ``-in``
+    and ``-log``. So this is the whole answer to "does this run use
+    KOKKOS": ``enabled`` is ``-k on`` (or ``-kokkos on``), ``gpus`` and
+    ``threads`` are its ``g N`` and ``t N`` arguments, ``suffix`` is
+    ``-sf kk`` (or ``-suffix kk``), and ``package`` is the text after
+    ``-pk kokkos`` (or ``-package kokkos``), or None. A command that
+    cannot be parsed reports nothing enabled.
+
+    Examples:
+        >>> kokkos_switches("mpirun -np 1 lmp -k on g 1 -sf kk -pk kokkos newton on neigh half"
+        ...                 )  # doctest: +NORMALIZE_WHITESPACE
+        {'enabled': True, 'gpus': 1, 'threads': None, 'suffix': True,
+         'package': 'newton on neigh half'}
+        >>> kokkos_switches("lmp -k on t 8 -sf kk")
+        {'enabled': True, 'gpus': None, 'threads': 8, 'suffix': True, 'package': None}
+        >>> kokkos_switches("lmp")
+        {'enabled': False, 'gpus': None, 'threads': None, 'suffix': False, 'package': None}
+    """
+    switches: dict[str, Any] = {
+        "enabled": False,
+        "gpus": None,
+        "threads": None,
+        "suffix": False,
+        "package": None,
+    }
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return switches
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in ("-k", "-kokkos") and index + 1 < len(tokens):
+            switches["enabled"] = tokens[index + 1] == "on"
+            index += 2
+            while index + 1 < len(tokens) and tokens[index] in ("g", "t"):
+                try:
+                    count = int(tokens[index + 1])
+                except ValueError:
+                    break
+                switches["gpus" if tokens[index] == "g" else "threads"] = count
+                index += 2
+            continue
+        if token in ("-sf", "-suffix") and index + 1 < len(tokens):
+            if tokens[index + 1] == "kk":
+                switches["suffix"] = True
+            index += 2
+            continue
+        is_package = token in ("-pk", "-package") and index + 1 < len(tokens)
+        if is_package and tokens[index + 1] == "kokkos":
+            index += 2
+            options: list[str] = []
+            while index < len(tokens) and not tokens[index].startswith("-"):
+                options.append(tokens[index])
+                index += 1
+            switches["package"] = " ".join(options) or None
+            continue
+        index += 1
+    return switches
+
+
+def kokkos_report(log: str) -> dict[str, Any]:
+    r"""What the log says KOKKOS did: the facts a GPU run has to show.
+
+    A KOKKOS run prints ``KOKKOS mode ... is enabled`` at startup, then
+    the GPUs per node and the OpenMP threads per MPI task it will use,
+    and the neighbor list info names every style that ran its ``/kk``
+    version. A run without those lines ran the plain styles on the host,
+    whatever the build contains.
+
+    Examples:
+        >>> log = ("LAMMPS (22 Jul 2025 - Update 4)\n"
+        ...        "KOKKOS mode with Kokkos version 4.6.1 is enabled (src/KOKKOS/kokkos.cpp:72)\n"
+        ...        "  will use up to 1 GPU(s) per node\n"
+        ...        "  using 1 OpenMP thread(s) per MPI task\n"
+        ...        "Neighbor list info ...\n"
+        ...        "  (1) pair eam/alloy/kk, perpetual\n")
+        >>> kokkos_report(log)
+        {'enabled': True, 'gpus': 1, 'threads': 1, 'styles': ['eam/alloy/kk']}
+        >>> kokkos_report("LAMMPS (22 Jul 2025)\nTotal wall time: 0:00:01\n")
+        {'enabled': False, 'gpus': None, 'threads': None, 'styles': []}
+    """
+    gpus = _KOKKOS_GPUS.search(log)
+    threads = _KOKKOS_THREADS.search(log)
+    styles = sorted({match.group(1).rstrip(",") for match in _KOKKOS_STYLE.finditer(log)})
+    return {
+        "enabled": _KOKKOS_MODE.search(log) is not None,
+        "gpus": int(gpus.group(1)) if gpus else None,
+        "threads": int(threads.group(1)) if threads else None,
+        "styles": styles,
+    }
 
 
 def error_lines(log: str, limit: int = _EVIDENCE_LIMIT) -> list[str]:

@@ -320,6 +320,55 @@ def _promote_one(
     }
 
 
+def run_commands(ws: Workspace, run_id: str) -> list[dict[str, Any]]:
+    """The external commands a run's tasks resolved, one entry per distinct command.
+
+    A traced task that drives a binary stamps the resolved command, the
+    setup lines, and the detected version into its recipe (``extra``):
+    the ``lammps`` and ``qe`` engines under ``relax`` and
+    ``single_point``, ``run_lammps``, ``build_structure`` for atomsk, and
+    ``train_potential`` for gracemaker. This collects them, so a
+    transcript can say what a run ran. Tasks that share one command
+    collapse into one entry: ``tasks`` counts them, ``cache_hits`` says
+    how many never executed it, and ``seq`` is the first. A LAMMPS entry
+    carries the KOKKOS switches the command asks for, because SLAB adds
+    none. The exact argument vector adds the runner's own flags (``-in``
+    and ``-log`` for a script, ASE's ``-echo``, ``-screen``, and ``-log``
+    for the engine).
+    """
+    from slab.lammps import kokkos_switches
+
+    entries: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for task in ws.runs.list_tasks(run_id):
+        extra = task.recipe.get("extra") if isinstance(task.recipe, dict) else None
+        if not isinstance(extra, dict) or not extra.get("command"):
+            continue
+        command = str(extra["command"])
+        setup = [str(line) for line in extra.get("setup") or []]
+        engine = extra.get("engine") or extra.get("builder")
+        key = (engine, command, tuple(setup))
+        entry = entries.get(key)
+        if entry is None:
+            entry = {
+                "run_id": run_id,
+                "seq": task.seq,
+                "task": task.name,
+                "tasks": 0,
+                "cache_hits": 0,
+                "engine": engine,
+                "command": command,
+                "setup": setup,
+                "version": extra.get("version"),
+            }
+            if engine == "lammps":
+                entry["kokkos"] = kokkos_switches(command)
+            entries[key] = entry
+        entry["tasks"] += 1
+        if task.cache_hit:
+            entry["cache_hits"] += 1
+    return list(entries.values())
+
+
 def _verdict(run: Run, *, force: bool) -> tuple[str, str]:
     """What a session promote does with one run, and why (pure).
 

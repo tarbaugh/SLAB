@@ -62,6 +62,8 @@ from slab.lammps import (
     LOG_NAME,
     SCREEN_NAME,
     describe_lammps,
+    kokkos_report,
+    kokkos_switches,
     run_lammps_script,
     script_scratch_dir,
 )
@@ -1044,10 +1046,12 @@ def run_lammps(
     The binary is the engine's: *command* overrides ``[engines.lammps]
     command`` (else ``$ASE_LAMMPSRUN_COMMAND``, else ``lmp``), and *setup*
     lines override ``[engines.lammps] setup``. A KOKKOS or MPI launch
-    rides in the command (``mpirun -np 4 lmp -k on g 4 -sf kk``). The
-    command, the detected version, the setup lines, and the content of
-    every staged file enter the cache identity, so a different binary,
-    switch, or potential file honestly recomputes.
+    rides in the command (``mpirun -np 4 lmp -k on g 4 -sf kk``), and
+    nothing adds a switch the command lacks: without ``-k on`` a KOKKOS
+    build runs its plain styles on the host. The command, the detected
+    version, the setup lines, and the content of every staged file enter
+    the cache identity, so a different binary, switch, or potential file
+    honestly recomputes.
 
     Kept with the run: the script as ``{label}.in``, the log as
     ``{label}.log``, the screen capture as ``{label}.screen``, the
@@ -1066,8 +1070,11 @@ def run_lammps(
     entry per table: columns, first and last row, row count, and the loop
     line's steps, atoms, and seconds), ``steps`` (the sum over loops),
     and ``wall_time`` (LAMMPS's own total). *info* is the machine side:
-    ``command``, ``version``, ``setup``, ``types``, ``files`` (the kept
-    names of what the script wrote), ``artifacts`` (name to hash),
+    ``command``, ``argv`` (the exact argument vector that ran),
+    ``version``, ``setup``, ``kokkos`` (what the log says KOKKOS did:
+    ``enabled``, ``gpus``, ``threads``, the ``/kk`` styles that ran, and
+    the ``switches`` the command asked for), ``types``, ``files`` (the
+    kept names of what the script wrote), ``artifacts`` (name to hash),
     ``warnings`` (the log's WARNING lines, deduplicated), and
     ``n_warnings``. A script that finishes with bad physics is not a
     failure here: judge ``result`` with a ``@check``.
@@ -1165,8 +1172,10 @@ def run_lammps(
     info: dict[str, Any] = {
         "engine": "lammps",
         "command": outcome.command,
+        "argv": list(outcome.argv),
         "version": described.get("version"),
         "setup": list(described.get("setup") or []),
+        "kokkos": {**kokkos_report(outcome.log), "switches": kokkos_switches(outcome.command)},
         "types": types,
         "files": kept_files,
         "artifacts": artifact_hashes,
