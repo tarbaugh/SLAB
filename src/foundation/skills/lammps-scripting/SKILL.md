@@ -52,12 +52,16 @@ result, info = run_lammps(SCRIPT, atoms=STRUCTURE, files=["W.eam.fs"], label="w-
 - `files=` stages potential files, data files, and restarts beside the
   script under their basenames. Name each by bare basename in the
   script; the task refuses a file the script never mentions.
-- `command=` and `setup=` override `[engines.lammps]`. A KOKKOS or MPI
-  launch is `command="mpirun -np 4 lmp -k on g 4 -sf kk"`; the command
-  enters the cache identity. Nothing adds a switch the command lacks:
-  the `lammps` entry of `list_engines` shows the configured command and
-  the switches parsed from it, and when `kokkos.enabled` is false there,
-  a run without `command=` is a host run whatever the build contains.
+- `engine=` names the LAMMPS route: `lammps` (the plain build under
+  `[engines.lammps]`, the default) or a registry alias such as
+  `lammps-gpu` whose options carry the KOKKOS command and its module.
+  The `lammps` entry of `list_engines` lists every route with its
+  command and the switches parsed from it. Pick the plain route for
+  smoke tests and small cells, and the accelerated route for production
+  MD on the GPU partition. Nothing adds a switch a route lacks: a route
+  whose `kokkos.enabled` is false is a host run whatever the build
+  contains. `command=` and `setup=` override the chosen route, and the
+  route and the command enter the cache identity.
 - `timeout_s` kills the process group; the job's time limit is the
   outer guard, and `timer timeout` inside the script (section 7) stops
   the run cleanly before either.
@@ -263,9 +267,11 @@ holds what MPI or the loader printed when LAMMPS never started.
 
 ## 10. KOKKOS and MPI
 
-The command carries the parallel launch; the script stays the same, and
-SLAB adds no switch. Read the `lammps` entry of `list_engines` before a
-GPU run, and `info["kokkos"]` after it.
+The route carries the parallel launch; the script stays the same, and
+SLAB adds no switch. A machine keeps a plain build and a KOKKOS build
+as two routes, so choose by name with `engine=` and never put the GPU
+switches on the plain route. Read the `lammps` entry of `list_engines`
+before a GPU run, and `info["kokkos"]` after it.
 `-sf kk` gives every style in the script its Kokkos version where one
 exists, and a fix or compute without one runs on the host and copies
 data back each step, so keep the script inside Kokkos-enabled styles

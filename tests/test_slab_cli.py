@@ -36,22 +36,33 @@ def test_engines_list_without_registry(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert "none configured" in result.output
 
 
-def test_engines_list_shows_the_lammps_command_and_its_kokkos_switches(
+def test_engines_list_shows_every_lammps_route_and_its_kokkos_switches(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The command runs as written, so the listing says what it asks of KOKKOS."""
-    monkeypatch.delenv("SLAB_ENGINES", raising=False)
+    """Each route runs its command as written, so the listing says what each asks of KOKKOS."""
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("ASE_LAMMPSRUN_COMMAND", "mpirun -np 2 lmp -k on g 2 -sf kk")
+    monkeypatch.setenv("ASE_LAMMPSRUN_COMMAND", "lmp")
+    gpu = {
+        "calculator": "slab.backends.lammps_calculator",
+        "options": {
+            "command": "mpirun -np 2 lmp -k on g 2 -sf kk",
+            "setup": ["module load lammps/kokkos"],
+        },
+        "version": "22 Jul 2025",
+    }
+    monkeypatch.setenv(
+        "SLAB_ENGINES", str(_write_engines(tmp_path, {"lammps-gpu": gpu, "emt-cluster": EMT_ENTRY}))
+    )
     result = runner.invoke(app, ["engines", "list"])
     assert result.exit_code == 0, result.output
+    assert "lammps routes (engine= for relax, single_point, and run_lammps):" in result.output
+    assert "  lammps         lmp  (KOKKOS off: the plain styles run on the host)" in result.output
     assert (
-        "lammps command: mpirun -np 2 lmp -k on g 2 -sf kk  "
+        "  lammps-gpu     mpirun -np 2 lmp -k on g 2 -sf kk  "
         "(KOKKOS on, 2 GPU(s) per node, -sf kk)"
     ) in result.output
-    monkeypatch.setenv("ASE_LAMMPSRUN_COMMAND", "lmp")
-    plain = runner.invoke(app, ["engines", "list"])
-    assert "lammps command: lmp  (KOKKOS off: the plain styles run on the host)" in plain.output
+    assert "                 setup: module load lammps/kokkos" in result.output
+    assert "emt-cluster" not in result.output.split("lammps routes")[1]
 
 
 def test_engines_list_with_registry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

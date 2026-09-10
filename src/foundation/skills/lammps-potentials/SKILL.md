@@ -93,15 +93,21 @@ installed packages, and KOKKOS must be among them. Module loads go in
 GPU run is a batch job on the GPU partition through `submit_job`, with
 one MPI task per GPU. Never start a GPU run on the login node.
 
-The switches ride in the engine's `command` (the `calculator_options`
-entry, or `[engines.lammps] command`). ASE appends its own flags after
-them. SLAB adds no switch: a command without `-k on` runs the plain
-styles on the host, silently, whatever the build contains. The `lammps`
-entry of `list_engines` shows the configured command and the switches
-parsed from it. Read it before a GPU run, and pass `command=` with the
-switches when the configured command has none.
+The switches ride in a route's `command`. A machine keeps more than one
+LAMMPS, so each build is a route with a name: `lammps` is the plain
+build under `[engines.lammps]`, and an accelerated build is a registry
+alias such as `lammps-gpu` whose options carry the KOKKOS command and
+its module. Choose the route by name, `engine="lammps-gpu"` on `relax`,
+`single_point`, and `run_lammps`, and keep the plain route plain, so a
+smoke test or a small EAM cell never queues for a GPU. ASE appends its
+own flags after the switches. SLAB adds no switch: a route without
+`-k on` runs the plain styles on the host, silently, whatever the build
+contains. The `lammps` entry of `list_engines` lists every route with
+its command and the switches parsed from it. Read it before a GPU run.
+When no accelerated route exists, pass `command=` with the switches on
+that call alone, and report the missing route as a machine fact.
 
-| Hardware | `command` | Meaning |
+| Hardware | the route's `command` | Meaning |
 | --- | --- | --- |
 | One GPU | `mpirun -np 1 lmp -k on g 1 -sf kk -pk kokkos newton on neigh half` | one MPI task, one GPU |
 | N GPUs on one node | `mpirun -np N lmp -k on g N -sf kk -pk kokkos newton on neigh half` | `-np` equals the number of GPUs on the node |

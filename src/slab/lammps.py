@@ -90,6 +90,90 @@ def describe_lammps(
     return {key: value for key, value in described.items() if key != "source"}
 
 
+LAMMPS_FACTORY = "slab.backends.lammps_calculator"
+
+
+def lammps_route(engine: str | None = None) -> dict[str, Any]:
+    """The LAMMPS a route name stands for: its command and setup lines.
+
+    A machine keeps more than one LAMMPS: a plain build for smoke tests
+    and small cells, a KOKKOS build for the GPU partition. Each is a
+    route with a name. ``lammps`` is the built-in route, and its command
+    and setup come from ``[engines.lammps]``. Every other route is a
+    registry alias whose calculator is ``slab.backends.lammps_calculator``,
+    and its command and setup come from the alias's ``options``. A name
+    that is neither is refused with the routes that exist, so a script
+    never runs under a binary nobody named. A route's ``command`` or
+    ``setup`` is None where the route leaves it to the engine's own
+    resolution.
+
+    Examples:
+        >>> import os
+        >>> os.environ.pop("SLAB_ENGINES", None) and None
+        >>> lammps_route()["engine"]
+        'lammps'
+        >>> lammps_route("lammps")["source"]
+        'builtin'
+    """
+    from slab.engines import load_registry
+
+    name = (engine or "lammps").strip()
+    if name.lower() == "lammps":
+        return {"engine": "lammps", "source": "builtin", "command": None, "setup": None}
+    registry = load_registry()
+    spec = registry.engines.get(name) if registry is not None else None
+    if spec is None or spec.calculator != LAMMPS_FACTORY:
+        known = ", ".join(lammps_routes())
+        what = "is not a LAMMPS route" if spec is not None else "names no engine here"
+        raise EngineNotAvailableError(
+            f"engine {name!r} {what}; the LAMMPS routes on this machine are: {known}. "
+            f"A route is the built-in 'lammps' or a registry alias with calculator "
+            f"{LAMMPS_FACTORY!r}"
+        )
+    cluster = registry.cluster if registry is not None else None
+    source = f"registry:{cluster}" if cluster else "registry"
+    return {
+        "engine": name,
+        "source": source,
+        "command": spec.options.get("command"),
+        "setup": spec.options.get("setup"),
+    }
+
+
+def lammps_routes() -> dict[str, dict[str, Any]]:
+    """Every LAMMPS route on this machine, resolved: command, setup, KOKKOS switches.
+
+    The built-in ``lammps`` first, then each registry alias that runs the
+    LAMMPS factory, in name order. The switches are parsed from each
+    resolved command because SLAB adds none. No binary is probed.
+
+    Examples:
+        >>> import os
+        >>> os.environ.pop("SLAB_ENGINES", None) and None
+        >>> list(lammps_routes())
+        ['lammps']
+    """
+    from slab.engines import load_registry
+
+    routes: dict[str, dict[str, Any]] = {}
+    names = ["lammps"]
+    registry = load_registry()
+    if registry is not None:
+        names += sorted(
+            name for name, spec in registry.engines.items() if spec.calculator == LAMMPS_FACTORY
+        )
+    for name in names:
+        route = lammps_route(name)
+        command = lammps_command(route["command"])
+        routes[name] = {
+            "source": route["source"],
+            "command": command,
+            "setup": list(lammps_setup(route["setup"])),
+            "kokkos": kokkos_switches(command),
+        }
+    return routes
+
+
 def script_scratch_dir() -> Path:
     """A fresh slab-managed scratch directory for one script (``[paths] scratch``)."""
     from slab.backends import _scratch_dir

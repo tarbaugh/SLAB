@@ -29,6 +29,8 @@ from slab.lammps import (
     error_lines,
     kokkos_report,
     kokkos_switches,
+    lammps_route,
+    lammps_routes,
     run_lammps_script,
 )
 from slab.outputs import lammps_thermo
@@ -404,6 +406,86 @@ def test_run_lammps_records_what_kokkos_did_and_the_exact_argv(
         _, plain = run_lammps(SCRIPT, atoms=_argon(), label="plain", command=fake_lmp)
     assert plain["kokkos"]["enabled"] is False and plain["kokkos"]["styles"] == []
     assert plain["kokkos"]["switches"]["enabled"] is False
+
+
+def _registry_with_routes(
+    tmp_path: Path, fake_lmp: str, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """A registry with a KOKKOS LAMMPS alias, a plain alias, and a non-LAMMPS alias."""
+    registry = tmp_path / "engines.json"
+    registry.write_text(json.dumps({
+        "cluster": "delta",
+        "engines": {
+            "lammps-gpu": {
+                "calculator": "slab.backends.lammps_calculator",
+                "options": {
+                    "command": f"{fake_lmp} -k on g 1 -sf kk",
+                    "setup": ["export FAKE_MARK=gpu"],
+                },
+                "version": "22 Jul 2025 - Update 4",
+            },
+            "lammps-plain": {
+                "calculator": "slab.backends.lammps_calculator",
+                "options": {"command": fake_lmp},
+            },
+            "emt-cluster": {"calculator": "ase.calculators.emt.EMT"},
+        },
+    }))
+    monkeypatch.setenv("SLAB_ENGINES", str(registry))
+    monkeypatch.setenv("ASE_LAMMPSRUN_COMMAND", fake_lmp)
+    return registry
+
+
+def test_lammps_routes_name_every_build_and_refuse_the_rest(
+    tmp_path: Path, fake_lmp: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plain build and a KOKKOS build coexist as routes; a run picks one by name."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("SLAB_ENGINES", raising=False)
+    monkeypatch.setenv("ASE_LAMMPSRUN_COMMAND", fake_lmp)
+    assert list(lammps_routes()) == ["lammps"]
+    _registry_with_routes(tmp_path, fake_lmp, monkeypatch)
+    routes = lammps_routes()
+    assert list(routes) == ["lammps", "lammps-gpu", "lammps-plain"]
+    assert routes["lammps"]["source"] == "builtin" and routes["lammps"]["command"] == fake_lmp
+    assert routes["lammps"]["kokkos"]["enabled"] is False
+    gpu = routes["lammps-gpu"]
+    assert gpu["source"] == "registry:delta" and gpu["setup"] == ["export FAKE_MARK=gpu"]
+    assert gpu["kokkos"] == {
+        "enabled": True, "gpus": 1, "threads": None, "suffix": True, "package": None,
+    }
+    assert lammps_route("lammps-gpu")["command"] == f"{fake_lmp} -k on g 1 -sf kk"
+    assert lammps_route(None) == lammps_route("lammps") == lammps_route(" LAMMPS ")
+    with pytest.raises(EngineNotAvailableError, match=r"names no engine here.*lammps-gpu"):
+        lammps_route("lammps-tpu")
+    with pytest.raises(EngineNotAvailableError, match="is not a LAMMPS route"):
+        lammps_route("emt-cluster")
+
+
+def test_run_lammps_takes_a_route_by_name_and_records_it(
+    ws: Workspace, tmp_path: Path, fake_lmp: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _registry_with_routes(tmp_path, fake_lmp, monkeypatch)
+    with ws.start_run(name="gpu") as run:
+        _, gpu = run_lammps(SCRIPT, atoms=_argon(), label="gpu", engine="lammps-gpu")
+    assert gpu["route"] == "lammps-gpu" and gpu["command"] == f"{fake_lmp} -k on g 1 -sf kk"
+    assert gpu["setup"] == ["export FAKE_MARK=gpu"] and gpu["kokkos"]["gpus"] == 1
+    assert "FAKE_MARK=gpu" in ws.artifacts.get(gpu["artifacts"]["gpu.log"]).read_text()
+    (task,) = ws.runs.list_tasks(run.id)
+    assert task.recipe["extra"]["route"] == "lammps-gpu"
+    assert task.recipe["extra"]["command"] == f"{fake_lmp} -k on g 1 -sf kk"
+    with ws.start_run(name="plain"):
+        _, plain = run_lammps(SCRIPT, atoms=_argon(), label="plain")
+    assert plain["route"] == "lammps" and plain["kokkos"]["enabled"] is False
+    with ws.start_run(name="override"):
+        _, over = run_lammps(
+            SCRIPT, atoms=_argon(), label="o", engine="lammps-gpu", command=fake_lmp
+        )
+    assert over["route"] == "lammps-gpu" and over["command"] == fake_lmp
+    assert over["setup"] == ["export FAKE_MARK=gpu"]
+    with pytest.raises(EngineNotAvailableError, match="is not a LAMMPS route"):
+        run_lammps(SCRIPT, atoms=_argon(), engine="emt-cluster")
 
 
 def test_run_lammps_types_follow_specorder_and_warnings_are_collected(

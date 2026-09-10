@@ -360,6 +360,8 @@ def run_commands(ws: Workspace, run_id: str) -> list[dict[str, Any]]:
                 "setup": setup,
                 "version": extra.get("version"),
             }
+            if extra.get("route"):
+                entry["route"] = extra["route"]
             if engine == "lammps":
                 entry["kokkos"] = kokkos_switches(command)
             entries[key] = entry

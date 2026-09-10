@@ -13,14 +13,20 @@ All notable changes to SLAB, newest first. Dates are commit dates on
   card that ran it. `slab mason read` prints one line per command and
   `--full` the details; `slab mason report` counts them by kind. The MCP
   server records the same events in the harness session record.
-- SLAB says what a LAMMPS run asks of KOKKOS, because it adds no switch
-  the command lacks. `slab engines list` and `list_engines` report the
-  resolved `lammps` command with the switches parsed from it, and
-  `run_lammps` returns `info["kokkos"]` with what the log reported
-  (KOKKOS mode, GPUs per node, threads per task, the `/kk` styles that
-  ran) and `info["argv"]`, the exact argument vector. The
-  lammps-scripting and lammps-potentials skills and the md-expert card
-  tell the agent to read both before and after a GPU run.
+- LAMMPS builds are named routes. `lammps` is the plain build under
+  `[engines.lammps]`, and a registry alias that runs the LAMMPS factory,
+  such as a `lammps-gpu` whose options carry the KOKKOS command and its
+  module, is another route. `run_lammps` takes `engine=` to pick one, as
+  `relax` and `single_point` already did, and `command=` and `setup=`
+  override the chosen route. The route enters the cache identity and the
+  transcript's command events. `slab engines list` and `list_engines`
+  list every route with its command and the KOKKOS switches parsed from
+  it, because SLAB adds no switch a route lacks. `run_lammps` returns
+  `info["kokkos"]` with what the log reported (KOKKOS mode, GPUs per
+  node, threads per task, the `/kk` styles that ran) and `info["argv"]`,
+  the exact argument vector. The lammps-scripting and lammps-potentials
+  skills and the md-expert card say to choose the route by name and to
+  read the listing before a GPU run and `info["kokkos"]` after it.
 - A session retires at finish. Mason passes the `run_ids` of a root
   session's `finish` to the new `retire_session` operation, which
   promotes the cited runs that passed their checks, anchors from earlier
