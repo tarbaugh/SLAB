@@ -159,7 +159,9 @@ launcher) still belongs in the registry below, under a distinct alias like
 through ASE's `lammpsrun` calculator, so it works wherever the executable
 exists, with no extra to install. One option locates the code, `command`,
 or you can set it once under `[engines.lammps]` in the slab config or export
-`$ASE_LAMMPSRUN_COMMAND`. Bare `lmp` is the default.
+`$ASE_LAMMPSRUN_COMMAND`. Bare `lmp` is the default. The same binary also
+runs whole input scripts through the `run_lammps` task, described
+[below](#running-a-lammps-input-script-whole).
 
 The interatomic potential has no default at all. `pair_style` and
 `pair_coeff` are required, and SLAB refuses a `lammps` engine without them.
@@ -234,6 +236,76 @@ The details that keep runs honest and directories clean:
 
 A cluster's curated LAMMPS setup (fixed module, MPI launcher) belongs in the
 registry below under a distinct alias like `lammps-delta`, the same as QE.
+
+### Running a LAMMPS input script whole
+
+The engine answers force calls from ASE, one `run 0` per call. For
+production dynamics, hand LAMMPS the whole input script instead. The
+`run_lammps` task runs `lmp -in` in a slab-managed scratch directory, so
+the dynamics, the thermostat, the neighbor lists, and the output run
+inside LAMMPS at its own speed. The script is text, never a path, because
+the text enters the cache identity. `atoms=` writes the structure as
+`structure.data`, `files=` stages potential files and restarts by
+basename, and the task refuses a file the script never mentions.
+
+Executed for real, on a laptop, against a LAMMPS build from 22 Jul 2025:
+
+<!-- no-verify -->
+```python
+from ase.build import bulk
+
+from foundation import check
+from foundation.tasks import run_lammps
+
+atoms = bulk("Ar", "fcc", a=5.26, cubic=True) * (3, 3, 3)
+script = """\
+units metal
+atom_style atomic
+boundary p p p
+read_data structure.data
+pair_style lj/cut 8.5
+pair_coeff 1 1 0.0104 3.40
+velocity all create 300.0 4928459 mom yes rot yes dist gaussian
+timestep 0.002
+fix integrate all nvt temp 300.0 300.0 0.2
+thermo 100
+thermo_style custom step temp pe ke etotal press vol
+dump traj all custom 500 ar.dump id type x y z
+run 2000
+write_data ar-final.data
+"""
+result, info = run_lammps(script, atoms=atoms, label="ar")
+table = result["tables"][-1]
+print(f"LAMMPS {info['version']}: {result['steps']} steps in {table['loop']['seconds']:.2f} s")
+print(f"tail mean T = {table['tail']['mean']['Temp']:.1f} K over {table['tail']['rows']} rows")
+print(f"artifacts: {sorted(info['artifacts'])}")
+
+
+@check
+def the_thermostat_held() -> None:
+    assert abs(table["tail"]["mean"]["Temp"] - 300.0) < 30.0
+```
+
+<!-- no-verify -->
+```text
+LAMMPS 22 Jul 2025 - Update 4: 2000 steps in 0.04 s
+tail mean T = 303.2 K over 11 rows
+artifacts: ['ar-final.data', 'ar-structure.data', 'ar-thermo.json', 'ar.dump', 'ar.in', 'ar.log', 'ar.screen']
+run 01m26dc9ykn0y3k4g8v3yrj8bh  ar-nvt  state=verified status=completed checks=1/1 tasks=1
+```
+
+The run kept the script, the log, the screen capture, the structure, the
+parsed thermo tables, and the two files the script wrote. `result` holds
+the last thermo row and, for each table, its ends, its loop line, and the
+mean and standard deviation of every column over the tail of its rows,
+which is what the check judged. The full tables are the `ar-thermo.json`
+artifact. A KOKKOS or MPI launch rides in the command exactly as for the
+engine, and the command, the detected version, the setup lines, and the
+content of every staged file enter the cache identity. The
+`lammps-scripting` skill carries the input anatomy, the ensembles, and
+the checks for the resident agent, and `slab.outputs` digests the kept
+log on `read_artifact`. A script that dies keeps its evidence; see
+[Debugging failures](debugging-failures.md#when-the-engine-writes-files).
 
 ## Per-engine environments
 

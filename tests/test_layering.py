@@ -227,6 +227,7 @@ def test_builtin_cards_and_skills_ship_inside_the_package() -> None:
         "interface-adhesion",
         "kinetic-fits",
         "lammps-potentials",
+        "lammps-scripting",
         "melt-quench",
         "mlip-training",
         "mp-screening",

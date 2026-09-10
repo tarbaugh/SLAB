@@ -7,7 +7,10 @@ canonical workflow: ``build_structure`` makes the geometry (atomsk), ``relax``
 optimizes it under a cheap engine, then ``single_point`` evaluates the result
 under an expensive one. The training pair extends it:
 ``collect_training_data`` assembles the labels those tasks recorded, and
-``train_potential`` fits a GRACE potential with gracemaker.
+``train_potential`` fits a GRACE potential with gracemaker. ``run_lammps``
+hands LAMMPS a whole input script, so production dynamics run inside
+LAMMPS at its own speed and the log, the dumps, and the thermo tables
+come back as artifacts.
 
 Importing this module pulls in ASE (and numpy) through :mod:`slab.backends`;
 both ``foundation`` and ``slab`` stay import-light, which is why these tasks
@@ -19,6 +22,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import os
 import re
 import shlex
 import shutil
@@ -51,9 +55,18 @@ from slab.backends import (
     describe_engine,
     get_calculator,
 )
-from slab.errors import BuilderError
+from slab.errors import BuilderError, LammpsScriptError
 from slab.gracemaker import describe_gracemaker, run_gracemaker, train_scratch_dir
+from slab.lammps import (
+    INPUT_NAME,
+    LOG_NAME,
+    SCREEN_NAME,
+    describe_lammps,
+    run_lammps_script,
+    script_scratch_dir,
+)
 from slab.mp import describe_mp, mp_root, structure_path
+from slab.outputs import lammps_thermo
 
 
 # cache_extra folds the resolved engine's identity (source + the registry's
@@ -968,6 +981,341 @@ def train_potential(
     return model, info
 
 
+#: The data file ``run_lammps`` writes for an ``atoms=`` argument.
+STRUCTURE_DATA = "structure.data"
+
+_LMP_WALL = re.compile(r"^Total wall time:\s*(\S+)", re.MULTILINE)
+_MAX_KEPT_FAILURE_FILES = 20
+
+
+# cache_extra folds the binary's identity (command, detected version, setup
+# lines) AND every staged file's content hash into the cache key: the
+# serializer would otherwise hash a potential file by its path string, and
+# changed bytes at the same path must miss.
+@task(
+    engines=("ase",),
+    cache_extra=lambda arguments: {
+        **describe_lammps(command=arguments.get("command"), setup=arguments.get("setup")),
+        **(
+            {
+                "files_sha256": {
+                    Path(f).name: _file_sha256(f, what="staged file")
+                    for f in arguments["files"]
+                }
+            }
+            if arguments.get("files")
+            else {}
+        ),
+    },
+)
+def run_lammps(
+    script: str,
+    *,
+    files: Sequence[str] | None = None,
+    atoms: Atoms | None = None,
+    specorder: Sequence[str] | None = None,
+    label: str | None = None,
+    command: str | None = None,
+    setup: Sequence[str] | None = None,
+    timeout_s: float = 86400.0,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Run a LAMMPS input script whole, in its own scratch, traced.
+
+    The ``lammps`` engine asks LAMMPS for forces one step at a time from
+    ASE. This task hands LAMMPS the whole input script instead, so the
+    dynamics, the thermostat, the neighbor lists, and the output run
+    inside LAMMPS at its own speed, on the threads or GPUs its build and
+    the command line give it. Use it for production MD and for anything
+    a LAMMPS script does better than a Python loop; use the engine for a
+    relaxation or a single point that ASE drives.
+
+    *script* is the **text** of the input file, verbatim, never a path:
+    the text is what enters the cache identity. Reference every staged
+    file by bare basename. *files* are copied beside the script under
+    their basenames (potential files, a data file, a restart), and the
+    task refuses a file the script never mentions. With *atoms* the task
+    writes the structure as ``structure.data`` (``units metal``,
+    ``atom_style atomic``, masses included) and the script must
+    ``read_data structure.data``. *specorder* fixes the atom types in
+    order (type 1 is the first symbol) and is required for more than one
+    species; the returned ``types`` map says which element each type is,
+    so ``pair_coeff`` lists the elements in that order.
+
+    The binary is the engine's: *command* overrides ``[engines.lammps]
+    command`` (else ``$ASE_LAMMPSRUN_COMMAND``, else ``lmp``), and *setup*
+    lines override ``[engines.lammps] setup``. A KOKKOS or MPI launch
+    rides in the command (``mpirun -np 4 lmp -k on g 4 -sf kk``). The
+    command, the detected version, the setup lines, and the content of
+    every staged file enter the cache identity, so a different binary,
+    switch, or potential file honestly recomputes.
+
+    Kept with the run: the script as ``{label}.in``, the log as
+    ``{label}.log``, the screen capture as ``{label}.screen``, the
+    structure as ``{label}-structure.data``, every file the script wrote
+    (dumps, restarts, data files, ``fix ave/time`` output) as
+    ``{label}-<name>`` (or under its own name when that already starts
+    with the label), and the thermo tables parsed to
+    ``{label}-thermo.json``. Nothing is copied into the working
+    directory; read the artifacts back by name. Every byte a dump writes
+    is kept, so size the dump intervals. A script that dies keeps the
+    same files under ``{label}-failed`` names, and the ``ERROR`` lines
+    with one line of context become notes on the failure record.
+
+    Returns ``(result, info)``. *result* is the physics: ``thermo`` (the
+    last row of the last thermo table, keyed by column), ``tables`` (one
+    entry per table: columns, first and last row, row count, and the loop
+    line's steps, atoms, and seconds), ``steps`` (the sum over loops),
+    and ``wall_time`` (LAMMPS's own total). *info* is the machine side:
+    ``command``, ``version``, ``setup``, ``types``, ``files`` (the kept
+    names of what the script wrote), ``artifacts`` (name to hash),
+    ``warnings`` (the log's WARNING lines, deduplicated), and
+    ``n_warnings``. A script that finishes with bad physics is not a
+    failure here: judge ``result`` with a ``@check``.
+
+    Args:
+        script: The full input-script text, agent-authored.
+        files: Paths of the files the script reads, staged by basename.
+        atoms: A structure to write as ``structure.data``.
+        specorder: Element symbols in atom-type order for *atoms*.
+        label: Names the kept artifacts (default ``lammps``).
+        command: Override the configured LAMMPS command.
+        setup: Override the configured setup lines.
+        timeout_s: Hard kill for the script (default 24 h; the batch
+            job's own time limit is the outer guard).
+    """
+    name = label or "lammps"
+    if "\n" not in script and Path(script).exists():
+        raise LammpsScriptError(
+            f"script looks like a path ({script!r}); pass the input text itself, "
+            "because the text is what enters the cache identity"
+        )
+    if not script.strip():
+        raise LammpsScriptError("the script is empty")
+    staged = _staged_lammps_files(files, script)
+    types = _lammps_types(atoms, specorder, script)
+    setup_lines = tuple(str(line) for line in setup) if setup is not None else None
+    described = describe_lammps(command=command, setup=setup_lines)
+    active = current_run()
+    scratch = script_scratch_dir()
+    try:
+        (scratch / INPUT_NAME).write_text(script, encoding="utf-8")
+        for source in staged:
+            shutil.copy2(source, scratch / source.name)
+        if atoms is not None:
+            ase_write(
+                scratch / STRUCTURE_DATA,
+                atoms,
+                format="lammps-data",
+                specorder=[types[key] for key in sorted(types)],
+                masses=True,
+                units="metal",
+                atom_style="atomic",
+            )
+        before = {path.name for path in scratch.iterdir()}
+        try:
+            outcome = run_lammps_script(
+                cwd=scratch, command=command, setup=setup_lines, timeout_s=timeout_s
+            )
+        except LammpsScriptError as e:
+            if active is not None:
+                _keep_lammps_failure(active, scratch, name, before, e)
+            raise
+        produced = sorted(
+            path
+            for path in scratch.iterdir()
+            if path.is_file()
+            and path.name not in before
+            and path.name not in (LOG_NAME, SCREEN_NAME)
+        )
+        tables = lammps_thermo(outcome.log)
+        thermo_path = scratch / "thermo.json"
+        thermo_path.write_text(_json_dumps(tables), encoding="utf-8")
+        artifact_hashes: dict[str, str] = {}
+        kept_files: list[str] = []
+        if active is not None:
+            to_keep = [
+                (scratch / INPUT_NAME, f"{name}.in"),
+                (scratch / LOG_NAME, f"{name}.log"),
+                (thermo_path, f"{name}-thermo.json"),
+            ]
+            if atoms is not None:
+                to_keep.append((scratch / STRUCTURE_DATA, f"{name}-{STRUCTURE_DATA}"))
+            if outcome.screen.strip():
+                to_keep.append((scratch / SCREEN_NAME, f"{name}.screen"))
+            for path in produced:
+                kept_as = path.name if path.name.startswith(name) else f"{name}-{path.name}"
+                to_keep.append((path, kept_as))
+            for path, kept_as in to_keep:
+                if not path.is_file():
+                    continue
+                kept = _keep_unique(active, kept_as, path)
+                artifact_hashes[kept] = active.runs.get_artifact(active.id, kept).hash
+                if path in produced:
+                    kept_files.append(kept)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    warnings = _lammps_warnings(outcome.log)
+    wall = _LMP_WALL.search(outcome.log)
+    result: dict[str, Any] = {
+        "thermo": _last_thermo_row(tables),
+        "tables": [_table_summary(table) for table in tables],
+        "steps": sum(int(table["loop"]["steps"]) for table in tables if table.get("loop")),
+        "wall_time": wall.group(1) if wall else None,
+    }
+    info: dict[str, Any] = {
+        "engine": "lammps",
+        "command": outcome.command,
+        "version": described.get("version"),
+        "setup": list(described.get("setup") or []),
+        "types": types,
+        "files": kept_files,
+        "artifacts": artifact_hashes,
+        "warnings": warnings,
+        "n_warnings": len(warnings),
+    }
+    return result, info
+
+
+def _staged_lammps_files(files: Sequence[str] | None, script: str) -> list[Path]:
+    """The files to copy beside the script: existing, unique by basename, and named in it."""
+    if files is None:
+        return []
+    if isinstance(files, (str, os.PathLike)):
+        files = [str(files)]
+    staged: list[Path] = []
+    for entry in files:
+        path = Path(entry).expanduser()
+        if not path.is_file():
+            raise LammpsScriptError(f"staged file {str(entry)!r} does not exist or is not a file")
+        if path.name in {other.name for other in staged}:
+            raise LammpsScriptError(
+                f"two staged files share the basename {path.name!r}; they would "
+                "overwrite each other beside the script"
+            )
+        if path.name not in script:
+            raise LammpsScriptError(
+                f"the script never mentions the staged file's basename {path.name!r}; "
+                "reference it by bare basename (it is copied beside the script under "
+                "that name)"
+            )
+        staged.append(path)
+    return staged
+
+
+def _lammps_types(
+    atoms: Atoms | None, specorder: Sequence[str] | None, script: str
+) -> dict[int, str]:
+    """Type number to element for the ``structure.data`` the task writes."""
+    if atoms is None:
+        if specorder:
+            raise LammpsScriptError("specorder= names types for atoms=; pass atoms too")
+        return {}
+    if STRUCTURE_DATA not in script:
+        raise LammpsScriptError(
+            f"atoms= was given but the script never reads {STRUCTURE_DATA!r}; add "
+            f"`read_data {STRUCTURE_DATA}` (the structure is written under that name)"
+        )
+    present = sorted(set(atoms.get_chemical_symbols()))
+    if specorder is None:
+        if len(present) > 1:
+            raise LammpsScriptError(
+                f"the structure holds {', '.join(present)}; pass specorder= (element "
+                "symbols in atom-type order, type 1 first) so pair_coeff can name them"
+            )
+        order = present
+    else:
+        order = [str(symbol) for symbol in specorder]
+        if len(set(order)) != len(order):
+            raise LammpsScriptError(f"specorder repeats a symbol: {order}")
+        missing = [symbol for symbol in present if symbol not in order]
+        if missing:
+            raise LammpsScriptError(
+                f"specorder {order} lacks {', '.join(missing)}, which the structure holds"
+            )
+    return {index + 1: symbol for index, symbol in enumerate(order)}
+
+
+def _lammps_warnings(log: str, limit: int = 20) -> list[str]:
+    seen: list[str] = []
+    for line in log.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("WARNING") and stripped not in seen:
+            seen.append(stripped)
+            if len(seen) >= limit:
+                break
+    return seen
+
+
+def _last_thermo_row(tables: list[dict[str, Any]]) -> dict[str, Any]:
+    for table in reversed(tables):
+        if table["rows"]:
+            return dict(zip(table["columns"], table["rows"][-1], strict=False))
+    return {}
+
+
+def _table_summary(table: dict[str, Any]) -> dict[str, Any]:
+    """One thermo table, bounded: its ends, its loop line, and tail statistics.
+
+    The tail is the last half of the rows (at least one), the span a
+    ``@check`` judges an equilibrated average on; the full table is the
+    ``-thermo.json`` artifact.
+    """
+    columns = list(table["columns"])
+    rows = table["rows"]
+    tail_rows = rows[max(1, len(rows) // 2) :] if len(rows) > 1 else rows
+    tail: dict[str, Any] = {"rows": len(tail_rows), "mean": {}, "std": {}}
+    if tail_rows:
+        block = np.asarray(tail_rows, dtype=float)
+        for index, column in enumerate(columns):
+            tail["mean"][column] = float(block[:, index].mean())
+            tail["std"][column] = float(block[:, index].std())
+    return {
+        "columns": columns,
+        "first": dict(zip(columns, rows[0], strict=False)) if rows else {},
+        "last": dict(zip(columns, rows[-1], strict=False)) if rows else {},
+        "rows": len(rows),
+        "loop": table.get("loop"),
+        "tail": tail,
+    }
+
+
+def _json_dumps(value: Any) -> str:
+    import json
+
+    return json.dumps(value, indent=1)
+
+
+def _keep_lammps_failure(
+    active: Any, scratch: Path, name: str, before: set[str], e: LammpsScriptError
+) -> None:
+    """Keep a dead script's evidence with the run. Never raises.
+
+    The script, the log, the screen capture, and up to twenty files the
+    script wrote before it died, under ``{label}-failed`` names.
+    """
+    kept: list[str] = []
+    with suppress(Exception):
+        for fname, kept_as in (
+            (INPUT_NAME, f"{name}-failed.in"),
+            (LOG_NAME, f"{name}-failed.log"),
+            (SCREEN_NAME, f"{name}-failed.screen"),
+        ):
+            source = scratch / fname
+            if source.is_file() and (fname != SCREEN_NAME or source.stat().st_size > 0):
+                kept.append(_keep_unique(active, kept_as, source))
+        produced = sorted(
+            path
+            for path in scratch.iterdir()
+            if path.is_file()
+            and path.name not in before
+            and path.name not in (LOG_NAME, SCREEN_NAME)
+        )
+        for path in produced[:_MAX_KEPT_FAILURE_FILES]:
+            kept.append(_keep_unique(active, f"{name}-failed-{path.name}", path))
+    if kept:
+        e.add_note("LAMMPS files kept as artifacts: " + ", ".join(repr(k) for k in kept))
+
+
 # Extensions atomsk writes that ASE reads only under an explicit format name.
 _BUILDER_FORMATS = {
     ".lmp": "lammps-data",
@@ -1167,15 +1515,15 @@ def _resolve_training_sources(
     return sources
 
 
-def _file_sha256(path: str | Path) -> str:
-    """Streamed sha256 of a file; a missing dataset refuses before any work."""
+def _file_sha256(path: str | Path, *, what: str = "dataset") -> str:
+    """Streamed sha256 of a file; a missing *what* refuses before any work."""
     digest = hashlib.sha256()
     try:
         with open(path, "rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
     except OSError as e:
-        raise BuilderError(f"cannot read dataset {str(path)!r}: {e}") from e
+        raise BuilderError(f"cannot read {what} {str(path)!r}: {e}") from e
     return digest.hexdigest()
 
 

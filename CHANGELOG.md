@@ -5,6 +5,20 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- LAMMPS runs whole input scripts as a traced task. `run_lammps` takes
+  the script as text, stages potential files and a structure beside it,
+  runs `lmp -in` in slab-managed scratch, and keeps the script, the log,
+  the screen capture, every file the script wrote, and the parsed thermo
+  tables as artifacts; `result` carries the last thermo row and each
+  table's ends, loop line, and tail statistics for the checks. The
+  command, the version, the setup lines, and the content of every staged
+  file enter the cache identity, and a script that dies keeps its
+  evidence with the `ERROR` line and its context as notes. The new
+  `lammps-scripting` skill gives the md-expert the input anatomy, the
+  ensembles and their constants, outputs and restarts, the guards, the
+  errors LAMMPS prints, a tested equilibration report script, and a
+  workflow template that runs as-is. `slab.outputs.lammps_thermo` parses
+  thermo tables.
 - The md-expert card and the lammps-potentials skill say how to run a
   KOKKOS build of LAMMPS: the switches in the engine command, one MPI task
   per GPU, the package options for many-body potentials, and the smoke

@@ -36,3 +36,17 @@ class BuilderError(SlabError):
     def __init__(self, message: str, *, log: str = "") -> None:
         super().__init__(message)
         self.log = log
+
+
+class LammpsScriptError(SlabError):
+    """A LAMMPS input script ran and failed, or was staged incorrectly.
+
+    Carries the log file's text on ``log`` and the captured screen output
+    on ``screen`` so a caller can keep both as evidence; the message holds
+    the extracted ``ERROR`` lines with one line of context.
+    """
+
+    def __init__(self, message: str, *, log: str = "", screen: str = "") -> None:
+        super().__init__(message)
+        self.log = log
+        self.screen = screen

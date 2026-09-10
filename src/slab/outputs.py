@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 __all__ = ["digest", "extxyz_digest", "lammps_log_digest", "pwscf_digest"]
 
@@ -410,6 +411,61 @@ def lammps_log_digest(name: str, text: str) -> str:
     if errors:
         out.append("errors: " + " | ".join(errors))
     return "\n".join(out)
+
+
+def lammps_thermo(text: str) -> list[dict[str, Any]]:
+    """Every thermo table of a LAMMPS log: columns, rows, and its loop line.
+
+    A table starts at a ``Step ...`` header and holds every numeric row
+    that follows; ``WARNING`` lines inside a table are skipped, any other
+    line ends it. The ``Loop time`` line that follows a table is attached
+    to it as ``loop`` (seconds, procs, steps, atoms). Integers stay
+    integers (the step), everything else is a float.
+
+    Examples:
+        >>> log = (
+        ...     "Step Temp PotEng\\n0 300 -3.5\\n100 298.2 -3.49\\n"
+        ...     "Loop time of 0.5 on 1 procs for 100 steps with 32 atoms\\n"
+        ... )
+        >>> tables = lammps_thermo(log)
+        >>> tables[0]["columns"], tables[0]["rows"][-1]
+        (['Step', 'Temp', 'PotEng'], [100, 298.2, -3.49])
+        >>> tables[0]["loop"]
+        {'seconds': 0.5, 'procs': 1, 'steps': 100, 'atoms': 32}
+        >>> lammps_thermo("no table here\\n")
+        []
+    """
+    tables: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if current is not None:
+            if stripped and _is_numeric_row(stripped):
+                current["rows"].append([_number(token) for token in stripped.split()])
+                continue
+            if stripped.startswith("WARNING"):
+                continue
+            tables.append(current)
+            current = None
+        if _LMP_THERMO_HEAD.match(line):
+            current = {"columns": stripped.split(), "rows": [], "loop": None}
+        elif (m := _LMP_LOOP.match(line)) and tables and tables[-1]["loop"] is None:
+            tables[-1]["loop"] = {
+                "seconds": float(m.group(1)),
+                "procs": int(m.group(2)),
+                "steps": int(m.group(3)),
+                "atoms": int(m.group(4)),
+            }
+    if current is not None:
+        tables.append(current)
+    return tables
+
+
+def _number(token: str) -> int | float:
+    try:
+        return int(token)
+    except ValueError:
+        return float(token)
 
 
 def _is_numeric_row(stripped: str) -> bool:

@@ -27,9 +27,9 @@ content-addressed store, and one command, `slab`, drives everything.
 ## What it can do
 
 - **Engines.** EMT and Lennard-Jones built in, Quantum ESPRESSO and LAMMPS
-  as built-ins that drive the real executables, rootstock-served MLIP
-  checkpoint ids usable directly as engine names, and a cluster engine
-  registry for everything else.
+  as built-ins that drive the real executables, whole LAMMPS input scripts
+  run as traced tasks, rootstock-served MLIP checkpoint ids usable directly
+  as engine names, and a cluster engine registry for everything else.
   [Engines](https://tarbaugh.github.io/SLAB/tutorials/engines/)
 - **Protocols.** AiiDA's named Quantum ESPRESSO input protocols and SSSP
   pseudopotential families, applied by name and traced by value.
