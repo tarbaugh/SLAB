@@ -85,6 +85,11 @@ class Run(BaseModel):
         failure: Structured failure evidence (exception type, message, trimmed
             traceback, diagnostic notes — see :func:`foundation.errors.failure_record`),
             recorded alongside ``error``. The full form, fetched by ``show``.
+        pid / host: The process id and the hostname that own the run, stamped
+            by the store when the status enters ``running``. A hard-killed
+            process leaves its run at ``running`` with no one to advance it;
+            :meth:`foundation.runtime.Workspace.reap_dead` reads these two
+            fields to tell such a run from a live one.
 
     Examples:
         >>> run = Run(name="si-relax", intent="baseline lattice constant")
@@ -112,6 +117,8 @@ class Run(BaseModel):
     finished_at: datetime | None = None
     error: str | None = None
     failure: dict[str, Any] | None = None
+    pid: int | None = None
+    host: str | None = None
 
     @field_validator("created_at", "updated_at", "state_entered_at", "started_at", "finished_at")
     @classmethod

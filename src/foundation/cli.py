@@ -24,7 +24,7 @@ from foundation import _ops
 from foundation.errors import FoundationError
 from foundation.lifecycle import LifecycleState
 from foundation.models import utcnow
-from foundation.runtime import Workspace
+from foundation.runtime import Workspace, describe_liveness, run_liveness
 from slab.errors import SlabError
 
 app = typer.Typer(
@@ -48,6 +48,23 @@ _WorkspaceOpt = Annotated[
 def _fail(message: str) -> NoReturn:
     typer.echo(f"error: {message}", err=True)
     raise typer.Exit(code=1)
+
+
+def _state_text(state: str, status: str) -> str:
+    """The lifecycle state as a reader should take it.
+
+    Every run is born quarantined, so a running run that reads
+    ``quarantined`` is in its initial state, not in trouble.
+
+    Examples:
+        >>> _state_text("quarantined", "running")
+        'quarantined (initial state)'
+        >>> _state_text("quarantined", "failed")
+        'quarantined'
+    """
+    if state == "quarantined" and status == "running":
+        return "quarantined (initial state)"
+    return state
 
 
 def _age(moment: datetime) -> str:
@@ -163,8 +180,9 @@ def list_(
         typer.echo(header)
         for item in runs:
             intent_text = (item.intent or "")[:40]
+            state_text = _state_text(item.state.value, item.status.value)
             typer.echo(
-                f"{item.id[:10]:<12} {item.state.value:<12} {item.status.value:<10} "
+                f"{item.id[:10]:<12} {state_text:<12} {item.status.value:<10} "
                 f"{_age(item.created_at):>5}  {item.name[:20]:<20} {intent_text}"
             )
 
@@ -193,7 +211,10 @@ def _render_details(details: dict[str, object]) -> None:
     tasks = details["tasks"]
     assert isinstance(tasks, list)
     typer.echo(f"run {run['id']}  {run['name']}")
-    typer.echo(f"  state:   {run['state']}    status: {run['status']}")
+    state_text = _state_text(str(run["state"]), str(run["status"]))
+    typer.echo(f"  state:   {state_text}    status: {run['status']}")
+    if run["status"] == "running" and run.get("pid") is not None:
+        typer.echo(f"  process: {run['pid']} on {run['host']}")
     if run.get("error"):
         typer.echo(f"  error:   {run['error']}")
     # The run's failure renders here unless a failed task carries the SAME
@@ -399,6 +420,45 @@ def expire(
     for item in expired:
         typer.echo(f"expired {item.id}  {item.name}")
     typer.echo(f"{len(expired)} run(s) expired")
+
+
+runs_app = typer.Typer(
+    help="Run liveness: reap the runs whose process is gone, or retire one by hand.",
+    no_args_is_help=True,
+    add_completion=False,
+)
+
+
+@runs_app.command("reap")
+def runs_reap(workspace: _WorkspaceOpt = None) -> None:
+    """Mark failed every running run whose recorded process on this host is gone."""
+    with _open(workspace) as ws:
+        reaped = ws.reap_dead(caller="slab runs reap")
+        for item in reaped:
+            typer.echo(f"failed  {item.id}  {item.name}  {item.error}")
+        for item in ws.runs.list_runs(status="running"):
+            typer.echo(f"running {item.id}  {item.name}  {describe_liveness(item)}")
+    typer.echo(f"{len(reaped)} run(s) marked failed")
+
+
+@runs_app.command("fail")
+def runs_fail(
+    run_id: Annotated[str, typer.Argument(help="Run id or unique prefix.")],
+    reason: Annotated[
+        str, typer.Option("--reason", help="Why the operator retires it; recorded on the run.")
+    ],
+    workspace: _WorkspaceOpt = None,
+) -> None:
+    """Mark one running run failed by hand. Refused while its process is alive on this host."""
+    with _open(workspace) as ws:
+        try:
+            before = ws.runs.get(run_id)
+            failed = ws.fail_run(before.id, reason=reason)
+        except (FoundationError, ValueError) as e:
+            _fail(str(e))
+        typer.echo(f"failed {failed.id}  {failed.name}  {failed.error}")
+        if run_liveness(before) != "gone":
+            typer.echo(f"(not checked: {describe_liveness(before)})")
 
 
 @app.command()

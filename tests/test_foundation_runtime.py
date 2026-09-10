@@ -345,3 +345,86 @@ def test_failed_run_keeps_its_session(ws: Workspace) -> None:
         raise RuntimeError("nope")
     failed = ws.runs.get(run.id)
     assert (failed.session, failed.status) == ("chat-1", ExecutionStatus.FAILED)
+
+
+# -- run liveness --------------------------------------------------------------
+
+
+def _vanished_pid() -> int:
+    """The pid of a process that ran and exited: recorded, and gone."""
+    import subprocess
+    import sys
+
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    return child.pid
+
+
+def test_start_run_stamps_the_owning_process(ws: Workspace) -> None:
+    import os
+
+    from foundation.runtime import run_liveness, this_host
+
+    with ws.start_run(name="stamped") as run:
+        live = ws.runs.get(run.id)
+        assert (live.pid, live.host) == (os.getpid(), this_host())
+        assert run_liveness(live) == "alive"
+    assert run_liveness(ws.runs.get(run.id)) == "unrecorded"  # finished: nothing to check
+
+
+def test_reap_dead_marks_a_run_whose_process_vanished(ws: Workspace) -> None:
+    """A run stamped with this host and a pid that no longer exists is marked
+    failed and says who did it. A live run, a run on another host, and a run
+    from before the stamp are left as they are: nothing about them is known."""
+    import os
+
+    from foundation.models import Run
+    from foundation.runtime import run_liveness, this_host
+
+    gone = _vanished_pid()
+    dead = ws.runs.create(Run(name="killed"))
+    ws.runs.set_status(dead.id, "running", pid=gone, host=this_host())
+    live = ws.runs.create(Run(name="live"))
+    ws.runs.set_status(live.id, "running", pid=os.getpid(), host=this_host())
+    away = ws.runs.create(Run(name="elsewhere"))
+    ws.runs.set_status(away.id, "running", pid=1, host="another-node")
+    old = ws.runs.create(Run(name="pre-stamp"))
+    ws.runs.set_status(old.id, "running")
+
+    reaped = ws.reap_dead(caller="the test")
+    assert [r.id for r in reaped] == [dead.id]
+    after = ws.runs.get(dead.id)
+    assert after.status is ExecutionStatus.FAILED
+    assert after.error == f"process {gone} on {this_host()} is gone; marked failed by the test"
+    assert after.finished_at is not None
+    for untouched in (live, away, old):
+        assert ws.runs.get(untouched.id).status is ExecutionStatus.RUNNING
+    assert run_liveness(ws.runs.get(live.id)) == "alive"
+    assert run_liveness(ws.runs.get(away.id)) == "elsewhere"
+    assert run_liveness(ws.runs.get(old.id)) == "unrecorded"
+    assert ws.reap_dead(caller="again") == []  # nothing left to reap
+
+
+def test_fail_run_retires_what_reap_cannot_judge_and_refuses_a_live_process(
+    ws: Workspace,
+) -> None:
+    import os
+
+    from foundation.errors import RunStateError
+    from foundation.models import Run
+    from foundation.runtime import this_host
+
+    away = ws.runs.create(Run(name="elsewhere"))
+    ws.runs.set_status(away.id, "running", pid=1, host="another-node")
+    failed = ws.fail_run(away.id, reason="node drained")
+    assert failed.status is ExecutionStatus.FAILED
+    assert failed.error == "marked failed by the operator: node drained"
+
+    live = ws.runs.create(Run(name="live"))
+    ws.runs.set_status(live.id, "running", pid=os.getpid(), host=this_host())
+    with pytest.raises(RunStateError, match="is alive"):
+        ws.fail_run(live.id, reason="impatience")
+    assert ws.runs.get(live.id).status is ExecutionStatus.RUNNING
+
+    with pytest.raises(RunStateError, match="not 'running'"):
+        ws.fail_run(away.id, reason="twice")

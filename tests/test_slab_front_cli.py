@@ -24,6 +24,7 @@ LIFECYCLE = {"run", "list", "show", "promote", "sessions"}
 HOUSEKEEPING_COMMANDS = {"expire", "gc", "fast-forward", "purge"}
 GROUPS = {
     "memory", "mason", "benchmark", "engines", "pseudos", "protocols", "mp", "hpc", "config",
+    "runs",
 }
 DOCTOR = {"doctor"}
 
@@ -54,6 +55,7 @@ def test_help_panels_group_by_intent() -> None:
     assert group_panels["mason"] == "The resident agent"
     assert group_panels["benchmark"] == "The resident agent"
     assert group_panels["memory"] == "Housekeeping"
+    assert group_panels["runs"] == "Runs and lifecycle"
     for name in ("engines", "pseudos", "protocols", "hpc", "config"):
         assert group_panels[name] == "This machine"
 

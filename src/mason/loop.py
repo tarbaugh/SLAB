@@ -178,8 +178,8 @@ def _turn_hint(
     off the line is empty and the request carries no hint at all.
 
     Examples:
-        >>> _turn_hint(1, 10)
-        '[step 1 of 10]'
+        >>> _turn_hint(1, 10).startswith('[harness: model call 1 of 10')
+        True
         >>> _turn_hint(1, 10, 15, budget=False).startswith('[15 consecutive')
         True
         >>> _turn_hint(1, 10, 15, budget=False, step_back=False)
@@ -193,19 +193,26 @@ def _turn_hint(
 def _budget_hint(step: int, max_turns: int) -> str:
     """One-line reminder appended (ephemerally) to every turn's request.
 
-    Bare counter for the bulk of the run; a land-the-plane instruction once
-    the run is past its last stretch, so a model that lost the plot on
-    step 82 of 120 does not spend the rest reading library source.
+    The line names itself on every turn: a bare ``[step N of M]`` was read
+    by a planner card as the progress of the MD run it was waiting on, for
+    twenty turns. A land-the-plane instruction joins it once the run is
+    past its last stretch, so a model that lost the plot on step 82 of 120
+    does not spend the rest reading library source.
 
     Examples:
         >>> _budget_hint(1, 120)
-        '[step 1 of 120]'
-        >>> _budget_hint(108, 120).startswith('[step 108 of 120] the budget')
+        "[harness: model call 1 of 120 in this session's budget; not the progress of any run]"
+        >>> _budget_hint(108, 120).startswith('[harness: model call 108 of 120')
         True
-        >>> _budget_hint(3, 3).startswith('[step 3 of 3] the budget')
+        >>> 'the budget is nearly out' in _budget_hint(108, 120)
+        True
+        >>> 'the budget is nearly out' in _budget_hint(3, 3)
         True
     """
-    line = f"[step {step} of {max_turns}]"
+    line = (
+        f"[harness: model call {step} of {max_turns} in this session's budget; "
+        f"not the progress of any run]"
+    )
     if step >= max(1, int(max_turns * _BUDGET_LAST_STRETCH)):
         return (
             f"{line} the budget is nearly out. Stop opening new lines of "
@@ -392,6 +399,24 @@ def client_from_config(agent: AgentConfig, keys: dict[str, str] | None = None) -
     )
 
 
+def _reap_at_session_start(session: MasonSession) -> None:
+    """Mark failed the running runs whose process on this host is gone.
+
+    A store that cannot be opened is not a reason to refuse the session:
+    the first workspace tool call names the fault with its recovery.
+    """
+    import sqlite3
+
+    from foundation.errors import FoundationError
+    from foundation.runtime import Workspace
+
+    try:
+        with Workspace(session.workspace_root) as ws:
+            ws.reap_dead(caller="session start")
+    except (FoundationError, sqlite3.Error, OSError):
+        return
+
+
 class Mason:
     """One conversation with one agent of the roster (the PI by default).
 
@@ -440,6 +465,10 @@ class Mason:
             _check_review_first(spec, session.agent, self.roster)
             # One running loop per workspace; children run inside this lock.
             session.acquire_session_lock()
+            # A run left at status running by a hard-killed process is
+            # marked failed before the first turn, so the record the agent
+            # reads never carries a dead run as a live one.
+            _reap_at_session_start(session)
             # An approval on record for the plan as it reads now still holds:
             # a resumed campaign does not pay for a second review.
             session.plan_approved = plan_is_approved(session)

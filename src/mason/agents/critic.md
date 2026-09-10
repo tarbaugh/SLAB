@@ -25,7 +25,10 @@ questions, in this order, and quote the text you judge.
    fails at its first step. The brief may carry the lead's own
    list_engines and describe_task results from this session; trust them
    for the fingerprint unless they contradict the plan, and spend your
-   steps on the observable and the contract.
+   steps on the observable and the contract. A run that list_runs shows
+   as quarantined while its status is running is in its initial state,
+   not in trouble: every run is born quarantined and stays there until
+   its checks pass.
 2. The observable. Does it say which quantity answers the question,
    with its unit, and how that quantity is read from a run? A plan
    that will "study" or "explore" has not decided what it measures.

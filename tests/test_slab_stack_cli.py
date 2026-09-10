@@ -399,3 +399,75 @@ def test_benchmark_render_passes_the_entry_agent(
     assert result.exit_code == 0, result.output
     assert seen["agent"] == "planner"
     assert "rendered Q1" in result.output
+
+
+# -- slab runs: reap and fail -----------------------------------------------------
+
+
+def _three_running(root: Path) -> dict[str, str]:
+    """One run whose process exited, one alive (this test), one on another host."""
+    import os
+    import subprocess
+    import sys
+
+    from foundation.runtime import this_host
+
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    with Workspace(root) as ws:
+        dead = ws.runs.create(Run(name="killed"))
+        ws.runs.set_status(dead.id, "running", pid=child.pid, host=this_host())
+        live = ws.runs.create(Run(name="live"))
+        ws.runs.set_status(live.id, "running", pid=os.getpid(), host=this_host())
+        away = ws.runs.create(Run(name="elsewhere"))
+        ws.runs.set_status(away.id, "running", pid=1, host="another-node")
+    return {"dead": dead.id, "live": live.id, "away": away.id, "pid": str(child.pid)}
+
+
+def test_runs_reap_marks_the_dead_and_names_what_it_did_not_check(tmp_path: Path) -> None:
+    root = tmp_path / "ws"
+    ids = _three_running(root)
+    result = runner.invoke(app, ["runs", "reap", "-w", str(root)])
+    assert result.exit_code == 0, result.output
+    assert f"failed  {ids['dead']}  killed  process {ids['pid']} on" in result.output
+    assert "marked failed by slab runs reap" in result.output
+    assert f"running {ids['live']}  live  process" in result.output
+    assert "is alive" in result.output
+    assert f"running {ids['away']}  elsewhere  process 1 on another-node, not this host" in (
+        result.output
+    )
+    assert "1 run(s) marked failed" in result.output
+    with Workspace(root) as ws:
+        assert ws.runs.get(ids["dead"]).status.value == "failed"
+        assert ws.runs.get(ids["live"]).status.value == "running"
+        assert ws.runs.get(ids["away"]).status.value == "running"
+
+
+def test_runs_fail_retires_one_run_and_refuses_a_live_process(tmp_path: Path) -> None:
+    root = tmp_path / "ws"
+    ids = _three_running(root)
+    result = runner.invoke(
+        app, ["runs", "fail", ids["dead"], "--reason", "node rebooted", "-w", str(root)]
+    )
+    assert result.exit_code == 0, result.output
+    assert f"failed {ids['dead']}  killed  marked failed by the operator: node rebooted" in (
+        result.output
+    )
+    assert "not checked" not in result.output
+
+    result = runner.invoke(app, ["runs", "fail", ids["live"], "--reason", "x", "-w", str(root)])
+    assert result.exit_code == 1
+    assert "is alive; stop it first, or wait for it" in result.output
+    with Workspace(root) as ws:
+        assert ws.runs.get(ids["live"]).status.value == "running"
+
+    result = runner.invoke(
+        app, ["runs", "fail", ids["away"][:16], "--reason", "drained", "-w", str(root)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "marked failed by the operator: drained" in result.output
+    assert "(not checked: process 1 on another-node, not this host" in result.output
+
+    result = runner.invoke(app, ["runs", "fail", ids["dead"], "--reason", "again", "-w", str(root)])
+    assert result.exit_code == 1
+    assert "its status is 'failed', not 'running'" in result.output

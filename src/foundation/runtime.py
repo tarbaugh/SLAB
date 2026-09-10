@@ -25,6 +25,7 @@ propagates; failed runs simply age out.
 from __future__ import annotations
 
 import os
+import socket
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
@@ -34,9 +35,11 @@ from typing import TYPE_CHECKING, overload
 from foundation.artifacts import ArtifactStore
 from foundation.checks import Assertion
 from foundation.errors import (
+    IllegalStatusChangeError,
     IllegalTransitionError,
     NestedRunError,
     NoActiveRunError,
+    RunStateError,
     failure_record,
 )
 from foundation.lifecycle import ExecutionStatus, LifecycleState
@@ -367,6 +370,92 @@ def _from_assertion(run_id: str, name: str, assertion: Assertion) -> CheckResult
     )
 
 
+
+# -- run liveness --------------------------------------------------------------
+
+
+def this_host() -> str:
+    """The hostname stamped on a run this process starts.
+
+    Examples:
+        >>> isinstance(this_host(), str) and this_host() != ""
+        True
+    """
+    return socket.gethostname()
+
+
+def process_alive(pid: int) -> bool:
+    """Whether a process with *pid* exists on this host.
+
+    Signal 0 probes without delivering: a process that belongs to another
+    user answers with a permission error, which still means it exists.
+
+    Examples:
+        >>> process_alive(os.getpid())
+        True
+        >>> process_alive(0)
+        False
+    """
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def run_liveness(run: Run, *, host: str | None = None) -> str:
+    """Where a running run's process stands, as seen from *host* (this one by default).
+
+    One of ``alive`` (the recorded process exists here), ``gone`` (it does
+    not), ``elsewhere`` (the run was started on another host, so nothing
+    can be checked from here), or ``unrecorded`` (the run predates the
+    pid stamp, or is not running).
+
+    Examples:
+        >>> run_liveness(Run(status="running", pid=os.getpid(), host=this_host()))
+        'alive'
+        >>> run_liveness(Run(status="running", pid=os.getpid(), host="another-node"))
+        'elsewhere'
+        >>> run_liveness(Run(status="running"))
+        'unrecorded'
+        >>> run_liveness(Run(status="completed", pid=1, host=this_host()))
+        'unrecorded'
+    """
+    if run.status is not ExecutionStatus.RUNNING or run.pid is None or run.host is None:
+        return "unrecorded"
+    here = host if host is not None else this_host()
+    if run.host != here:
+        return "elsewhere"
+    return "alive" if process_alive(run.pid) else "gone"
+
+
+def describe_liveness(run: Run, *, host: str | None = None) -> str:
+    """One phrase for a listing: what :func:`run_liveness` found and why.
+
+    Examples:
+        >>> describe_liveness(Run(status="running", pid=7, host="n1"), host="n2")
+        'process 7 on n1, not this host (n2); liveness not checked from here'
+        >>> describe_liveness(Run(status="running"))
+        'no process recorded; liveness unknown'
+    """
+    verdict = run_liveness(run, host=host)
+    if verdict == "alive":
+        return f"process {run.pid} on {run.host} is alive"
+    if verdict == "gone":
+        return f"process {run.pid} on {run.host} is gone"
+    if verdict == "elsewhere":
+        here = host if host is not None else this_host()
+        return (
+            f"process {run.pid} on {run.host}, not this host ({here}); "
+            f"liveness not checked from here"
+        )
+    return "no process recorded; liveness unknown"
+
+
 class Workspace:
     """A SLAB workspace: run database + artifact store under one root.
 
@@ -453,7 +542,9 @@ class Workspace:
         created = self.runs.create(
             Run(name=name, intent=intent, session=resolve_session_id(session))
         )
-        self.runs.set_status(created.id, ExecutionStatus.RUNNING)
+        self.runs.set_status(
+            created.id, ExecutionStatus.RUNNING, pid=os.getpid(), host=this_host()
+        )
         active = ActiveRun(self.runs, self.artifacts, created.id)
         token = _CURRENT.set(active)
         try:
@@ -479,6 +570,88 @@ class Workspace:
             active._finish_completed()
         finally:
             _CURRENT.reset(token)
+
+    def reap_dead(self, *, caller: str) -> list[Run]:
+        """Mark failed every running run whose process on this host is gone.
+
+        A hard-killed process (SIGKILL, OOM, a node reboot) leaves its run at
+        status ``running`` forever, and a reader of the record cannot tell it
+        from a live one. Each running run stamped with this host's name is
+        checked with its pid; a run stamped with another host is left alone,
+        because nothing about that host can be seen from here, and so is a
+        run from before the stamp existed. *caller* names who marked the run
+        in its error line. Returns the runs marked failed.
+
+        Examples:
+            >>> import tempfile
+            >>> from foundation.models import Run
+            >>> ws = Workspace(tempfile.mkdtemp())
+            >>> dead = ws.runs.create(Run(name="killed"))
+            >>> _ = ws.runs.set_status(dead.id, "running", pid=2**22 - 1, host=this_host())
+            >>> away = ws.runs.create(Run(name="elsewhere"))
+            >>> _ = ws.runs.set_status(away.id, "running", pid=1, host="another-node")
+            >>> [r.name for r in ws.reap_dead(caller="doctest")]
+            ['killed']
+            >>> ws.runs.get(dead.id).error
+            'process 4194303 on ... is gone; marked failed by doctest'
+            >>> ws.runs.get(away.id).status.value
+            'running'
+            >>> ws.close()
+        """
+        reaped: list[Run] = []
+        for run in self.runs.list_runs(status=ExecutionStatus.RUNNING):
+            if run_liveness(run) != "gone":
+                continue
+            with suppress(IllegalStatusChangeError):  # it may finish under us; fine
+                reaped.append(
+                    self.runs.set_status(
+                        run.id,
+                        ExecutionStatus.FAILED,
+                        error=(
+                            f"process {run.pid} on {run.host} is gone; "
+                            f"marked failed by {caller}"
+                        ),
+                    )
+                )
+        return reaped
+
+    def fail_run(self, run_id: str, *, reason: str) -> Run:
+        """Mark one running run failed on the operator's word; return the snapshot.
+
+        The verb exists for a run that ``reap_dead`` cannot judge: one
+        started on another host, or one from before the pid stamp. It is
+        refused while the run's process is alive on this host, because a
+        live process will advance its own status, and refused for a run
+        that is not running, because there is nothing to retire.
+
+        Raises:
+            RunStateError: The run is not running, or its process is alive here.
+
+        Examples:
+            >>> import tempfile
+            >>> from foundation.models import Run
+            >>> ws = Workspace(tempfile.mkdtemp())
+            >>> away = ws.runs.create(Run(name="elsewhere"))
+            >>> _ = ws.runs.set_status(away.id, "running", pid=1, host="another-node")
+            >>> ws.fail_run(away.id, reason="node drained").error
+            'marked failed by the operator: node drained'
+            >>> ws.close()
+        """
+        run = self.runs.get(run_id)
+        if run.status is not ExecutionStatus.RUNNING:
+            raise RunStateError(
+                run.id, run.state, f"fail (its status is {run.status.value!r}, not 'running')"
+            )
+        if run_liveness(run) == "alive":
+            raise RunStateError(
+                run.id,
+                run.state,
+                f"fail (its process {run.pid} on {run.host} is alive; "
+                f"stop it first, or wait for it)",
+            )
+        return self.runs.set_status(
+            run.id, ExecutionStatus.FAILED, error=f"marked failed by the operator: {reason}"
+        )
 
     def expire_due(
         self,
