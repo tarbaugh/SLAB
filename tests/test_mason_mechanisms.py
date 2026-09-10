@@ -108,6 +108,14 @@ def test_every_mechanism_is_a_named_switch_with_evidence() -> None:
     assert set(names) == ALL_MECHANISMS
     assert mechanisms_table().count("\n") == len(MECHANISMS) + 1
     assert conditions_table().count("\n") == len(CONDITIONS) + 1
+    # The ledger's last column is the measured effect, and no grid has run
+    # yet, so every row says so rather than leaving the reader to guess.
+    from mason.mechanisms import NOT_MEASURED
+
+    header, _rule, *rows = mechanisms_table().splitlines()
+    assert header == "| Switch | What it does | Evidence | Measured effect |"
+    assert all(row.endswith(f"| {NOT_MEASURED} |") for row in rows)
+    assert all(m.measured == NOT_MEASURED for m in MECHANISMS)
 
 
 def test_a_condition_is_a_card_plus_a_mechanism_set() -> None:

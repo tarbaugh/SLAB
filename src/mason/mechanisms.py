@@ -26,14 +26,26 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Protocol
 
+#: What the ledger says for a mechanism the ablation grid has not run yet.
+NOT_MEASURED = "not yet measured"
+
 
 @dataclass(frozen=True)
 class Mechanism:
-    """One harness mechanism: its switch name, what it does, its evidence."""
+    """One harness mechanism: its switch name, what it does, its evidence,
+    and the effect the benchmark measured for it.
+
+    ``measured`` stays :data:`NOT_MEASURED` until the ablation grid has run
+    the mechanism off and on under one model and one question set. Then it
+    names the change in pass rate and in cost, with the records behind it.
+    A mechanism without a ledger row is not finished; a row without a
+    measurement is finished but unmeasured, and the table says which.
+    """
 
     name: str
     does: str
     evidence: str
+    measured: str = NOT_MEASURED
 
 
 MECHANISMS: tuple[Mechanism, ...] = (
@@ -289,10 +301,14 @@ def entry_card(condition: str | None, agent: str | None = None) -> str | None:
 
 
 def mechanisms_table() -> str:
-    """The mechanism ledger as a markdown table: switch, what it does, evidence."""
-    lines = ["| Switch | What it does | Evidence |", "| --- | --- | --- |"]
+    """The mechanism ledger as a markdown table: switch, what it does,
+    evidence, and the measured effect."""
+    lines = [
+        "| Switch | What it does | Evidence | Measured effect |",
+        "| --- | --- | --- | --- |",
+    ]
     for m in MECHANISMS:
-        lines.append(f"| `{m.name}` | {m.does} | {m.evidence} |")
+        lines.append(f"| `{m.name}` | {m.does} | {m.evidence} | {m.measured} |")
     return "\n".join(lines)
 
 
@@ -310,6 +326,7 @@ __all__ = [
     "CONDITIONS",
     "MECHANISMS",
     "MECHANISM_NAMES",
+    "NOT_MEASURED",
     "Condition",
     "ConditionError",
     "Mechanism",

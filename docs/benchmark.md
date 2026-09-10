@@ -129,23 +129,27 @@ ablated row reads `slab -budget-hint`.
 
 Every mechanism the harness runs is a switch, so the ablation grid can
 measure it. The table is rendered from the code. The evidence column
-names what the mechanism rests on now. The measured effect enters this
-page when the grid has run.
+names what the mechanism rests on now. The measured effect column reads
+"not yet measured" until the grid has run the mechanism off and on under
+one model and one question set. Then it names the change in pass rate
+and in cost, with the records behind it. A mechanism without a row is
+not finished. A row without a measurement is finished but unmeasured,
+and the table says which.
 
 <!-- benchmark:mechanisms:start -->
-| Switch | What it does | Evidence |
-| --- | --- | --- |
-| `check-gating` | Calculations run as traced workflow scripts through launch_workflow, wait_for_run, list_runs, show_run, and read_artifact; a run whose checks pass is verified, and the prompt teaches that path. Off, the shell is the only way to run a script. | SLAB's verification gate (ARCHITECTURE.md); a number without a verified run is a rumor. |
-| `failure-records` | A failed run's structured failure record (trimmed traceback and diagnostic notes) is returned with the run, and the prompt asks for a diagnosis before a retry. Off, a failed run reports its status only. | Reflexion (arXiv:2303.11366); Manus, keep failures in context. |
-| `critic-gate` | The review tool reaches a read-only critic, and a card that reviews first spends no compute before the critic approves the plan. | Agent Laboratory (arXiv:2501.04227): fixed tool libraries with checkpoints beat full autonomy. |
-| `machine-memory` | Facts a session learned about this machine persist through remember and enter later prompts through recall and the memory catalog. | MemGPT (arXiv:2310.08560); an overnight job that trips on a quirk at 03:00 should not trip on it twice. |
-| `context-hygiene` | Old tool results are cleared to placeholders once the prompt is large, and superseded plan echoes are folded, before compaction. | SWE-agent and OpenHands: masking old observations matches summarization at half the cost; Anthropic's clear_tool_uses. |
-| `identical-result-annotation` | A tool result identical to the same call's previous result carries a note the model reads as evidence, escalating with the repeat count. | A real 240-call session spent 82 calls on one byte-identical readelf pipeline. |
-| `budget-hint` | An ephemeral step-of-budget line follows every request, stricter near the ceiling. | Transcripts stopped at the call budget mid-inquiry with nothing written down; the hint moved the finish earlier. |
-| `looking-hint` | After fifteen consecutive steps that only read and listed, the budget line tells the model to step back, and again every five steps. Off, a look-only loop runs to the turn budget. | One campaign on 2026-09-03 spent 72 minutes and about a hundred model calls in a look-only run; the science review's no-progress-loop rule reads the same shape afterwards. |
-| `skills` | The skill tool loads procedures and tested scripts from the catalog in the Agent Skills format, one line per skill until loaded. | Anthropic, Agent Skills; the skills audit of 2026-09-03. |
-| `delegation` | A lead hands a separable task to a specialist card that runs its own loop one level down and returns a report. | Anthropic's multi-agent research system: context isolation pays for separable subtasks only. |
-| `adaptive-effort` | A reply cut at the token budget is retried once at lower effort with a request for brevity before the turn ends. | Transcripts where a high-effort reply was cut twice and the turn ended with no report. |
+| Switch | What it does | Evidence | Measured effect |
+| --- | --- | --- | --- |
+| `check-gating` | Calculations run as traced workflow scripts through launch_workflow, wait_for_run, list_runs, show_run, and read_artifact; a run whose checks pass is verified, and the prompt teaches that path. Off, the shell is the only way to run a script. | SLAB's verification gate (ARCHITECTURE.md); a number without a verified run is a rumor. | not yet measured |
+| `failure-records` | A failed run's structured failure record (trimmed traceback and diagnostic notes) is returned with the run, and the prompt asks for a diagnosis before a retry. Off, a failed run reports its status only. | Reflexion (arXiv:2303.11366); Manus, keep failures in context. | not yet measured |
+| `critic-gate` | The review tool reaches a read-only critic, and a card that reviews first spends no compute before the critic approves the plan. | Agent Laboratory (arXiv:2501.04227): fixed tool libraries with checkpoints beat full autonomy. | not yet measured |
+| `machine-memory` | Facts a session learned about this machine persist through remember and enter later prompts through recall and the memory catalog. | MemGPT (arXiv:2310.08560); an overnight job that trips on a quirk at 03:00 should not trip on it twice. | not yet measured |
+| `context-hygiene` | Old tool results are cleared to placeholders once the prompt is large, and superseded plan echoes are folded, before compaction. | SWE-agent and OpenHands: masking old observations matches summarization at half the cost; Anthropic's clear_tool_uses. | not yet measured |
+| `identical-result-annotation` | A tool result identical to the same call's previous result carries a note the model reads as evidence, escalating with the repeat count. | A real 240-call session spent 82 calls on one byte-identical readelf pipeline. | not yet measured |
+| `budget-hint` | An ephemeral step-of-budget line follows every request, stricter near the ceiling. | Transcripts stopped at the call budget mid-inquiry with nothing written down; the hint moved the finish earlier. | not yet measured |
+| `looking-hint` | After fifteen consecutive steps that only read and listed, the budget line tells the model to step back, and again every five steps. Off, a look-only loop runs to the turn budget. | One campaign on 2026-09-03 spent 72 minutes and about a hundred model calls in a look-only run; the science review's no-progress-loop rule reads the same shape afterwards. | not yet measured |
+| `skills` | The skill tool loads procedures and tested scripts from the catalog in the Agent Skills format, one line per skill until loaded. | Anthropic, Agent Skills; the skills audit of 2026-09-03. | not yet measured |
+| `delegation` | A lead hands a separable task to a specialist card that runs its own loop one level down and returns a report. | Anthropic's multi-agent research system: context isolation pays for separable subtasks only. | not yet measured |
+| `adaptive-effort` | A reply cut at the token budget is retried once at lower effort with a request for brevity before the turn ends. | Transcripts where a high-effort reply was cut twice and the turn ended with no report. | not yet measured |
 <!-- benchmark:mechanisms:end -->
 
 `[agent] mechanisms` in `slab.toml` lists the switches a session runs

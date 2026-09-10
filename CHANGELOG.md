@@ -5,6 +5,10 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- The mechanism ledger carries a measured-effect column. Every row reads
+  "not yet measured" until the ablation grid has run the mechanism off and
+  on, so the ledger says which mechanisms are finished and which are
+  measured.
 - The benchmark runs one question under three harness conditions, so the
   reliability claim is measured, not asserted. `slab` is Mason as it is.
   `protocol` is a skill collection with a file protocol: a `protocol`
