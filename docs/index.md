@@ -207,7 +207,8 @@ MVP vertical slice, working end to end. It includes:
 - define-by-run tracing with content-hash caching;
 - verification hooks;
 - relaxation and single-point tasks for ASE, Quantum ESPRESSO, LAMMPS, and
-  MLIPs served through rootstock;
+  MLIPs served through rootstock, and whole LAMMPS input scripts as a
+  traced task;
 - builders as traced tasks: atomsk structures, the offline Materials
   Project snapshot, and MLIP training with gracemaker;
 - AiiDA-style input protocols and SSSP pseudopotential families;

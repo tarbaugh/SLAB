@@ -220,6 +220,9 @@ So the failure path reads the explanation back out of the retained files:
 - For LAMMPS, the `ERROR` line(s) become notes, with one line of preceding
   context, which is the echoed command that died or the last thermo row
   before a blow-up. The input, log, and data files are kept.
+- For a script under `run_lammps`, the `ERROR` line and its context are
+  the error message itself, and the script, the log, and the screen
+  capture are kept under `{label}-failed` names.
 
 A LAMMPS potential file that cannot be opened, captured from a real run:
 
@@ -252,6 +255,23 @@ iteration), which QE reports without a fenced error block:
 <!-- no-verify -->
 ```text
 - engine output flagged (espresso.pwo): convergence NOT achieved after   1 iterations: stopping
+```
+
+And a whole LAMMPS script that names a pair style its binary does not
+have, captured from a real `slab show`, shortened to the lines that
+decide:
+
+<!-- no-verify -->
+```text
+run 01m26dcaf6m3nw7jt3mxzkdn3a  ar-dies
+  state:   quarantined    status: failed
+  error:   LammpsScriptError: LAMMPS failed (exit 1):
+  context: pair_style eam/aloy
+  ERROR: Unrecognized pair style 'eam/aloy' (src/src/force.cpp:275)
+  artifacts:
+    ar-failed.in  intermediate  114B  bytes  aa98fb4dac4e
+    ar-failed.log  intermediate  374B  bytes  5df2e1c70fe2
+    ar-failed.screen  intermediate  299B  bytes  e22870a2d807
 ```
 
 "Exit status 2" invites a blind retry, while "smearing is needed" or

@@ -24,15 +24,15 @@ slab mason roster
 ```
 
 ```text
-pi                 built-in  llama3.1:8b                  19 skill(s)  [delegates]
+pi                 built-in  llama3.1:8b                  20 skill(s)  [delegates]
 analysis-expert    built-in  llama3.1:8b                  9 skill(s)
 bare               built-in  llama3.1:8b                  0 skill(s)  [own prompt]
-critic             built-in  llama3.1:8b                  19 skill(s)  [reviews]
+critic             built-in  llama3.1:8b                  20 skill(s)  [reviews]
 dft-expert         built-in  llama3.1:8b                  10 skill(s)
-md-expert          built-in  llama3.1:8b                  14 skill(s)
-planner            built-in  llama3.1:8b                  19 skill(s)  [delegates, review first]
-protocol           built-in  llama3.1:8b                  19 skill(s)  [own prompt]
-worker             built-in  llama3.1:8b                  19 skill(s)
+md-expert          built-in  llama3.1:8b                  15 skill(s)
+planner            built-in  llama3.1:8b                  20 skill(s)  [delegates, review first]
+protocol           built-in  llama3.1:8b                  20 skill(s)  [own prompt]
+worker             built-in  llama3.1:8b                  20 skill(s)
 ```
 
 Each agent runs the same harness with a different role prompt, its own
@@ -210,7 +210,7 @@ max_reply_tokens = 32000
 
 A skill is a directory with a `SKILL.md` file, in the
 [Agent Skills format](https://agentskills.io/specification). Mason adds
-no dialect, so skills written for other tools load unmodified. Eighteen
+no dialect, so skills written for other tools load unmodified. Nineteen
 skills ship built in:
 
 ```bash
@@ -227,6 +227,7 @@ equation-of-state          built-in  analysis-expert dft-expert   1 script(s)
 interface-adhesion         built-in  analysis-expert dft-expert   1 script(s)
 kinetic-fits               built-in  analysis-expert md-expert    1 script(s)
 lammps-potentials          built-in  md-expert                    1 script(s)
+lammps-scripting           built-in  md-expert                    1 script(s)
 melt-quench                built-in  md-expert                    1 script(s)
 mlip-training              built-in  dft-expert md-expert         0 script(s)
 mp-screening               built-in  dft-expert md-expert         0 script(s)
@@ -244,7 +245,8 @@ supercells, defects and dislocations, interfaces and polycrystals),
 screening from the offline Materials Project snapshot (mp-screening),
 potential training and fine-tuning with gracemaker, with the dataset
 rules for each (mlip-training), LAMMPS potential
-files, their pair styles, and the KOKKOS switches (lammps-potentials), the
+files, their pair styles, and the KOKKOS switches (lammps-potentials),
+LAMMPS input scripts run whole (lammps-scripting), the
 static side (equations of state, convergence, surfaces, elastic
 constants, interface adhesion), and the dynamic side (melt-quench
 glasses, thermal response, two-phase melting, NEMD transport, diffusion,
@@ -263,6 +265,8 @@ atomsk-defects             built-in  dft-expert md-expert         0 script(s)
 atomsk-interfaces          built-in  dft-expert md-expert         0 script(s)
 atomsk-structures          built-in  dft-expert md-expert         1 script(s)
 kinetic-fits               built-in  analysis-expert md-expert    1 script(s)
+lammps-potentials          built-in  md-expert                    1 script(s)
+lammps-scripting           built-in  md-expert                    1 script(s)
 melt-quench                built-in  md-expert                    1 script(s)
 mlip-training              built-in  dft-expert md-expert         0 script(s)
 mp-screening               built-in  dft-expert md-expert         0 script(s)

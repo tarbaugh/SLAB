@@ -90,7 +90,11 @@ Atoms; needs atomsk installed or `[builders.atomsk]` configured, and the \
 atomsk-* skills carry the recipes), `fetch_structure` (pull one \
 structure from the local Materials Project snapshot by material id; needs \
 `[builders.mp]` configured — shortlist ids with the `search_materials` \
-tool first), and the training pair `collect_training_data` + \
+tool first), `run_lammps` (hand LAMMPS a whole input script as text; the \
+dynamics run inside LAMMPS at its own speed and the log, the dumps, and the \
+thermo tables come back as artifacts; the lammps-scripting skill carries \
+the recipe, and it is the route for production MD), \
+and the training pair `collect_training_data` + \
 `train_potential` (assemble recorded energies+forces into a dataset, then \
 fit a GRACE potential with gracemaker; needs `[builders.gracemaker]` \
 configured, and the mlip-training skill carries the recipe). Chain them for \

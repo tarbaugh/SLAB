@@ -429,6 +429,7 @@ def test_every_builtin_skill_validates_and_maps_to_its_specialists(tmp_path: Pat
     skills = discover_skills(tmp_path)
     assert {
         "lammps-potentials",
+        "lammps-scripting",
         "equation-of-state",
         "convergence-study",
         "radial-distribution",
@@ -453,6 +454,9 @@ def test_every_builtin_skill_validates_and_maps_to_its_specialists(tmp_path: Pat
     assert skills["two-phase-melting"].agents == frozenset({"md-expert"})
     assert skills["mlip-training"].agents == frozenset({"dft-expert", "md-expert"})
     assert skills["lammps-potentials"].agents == frozenset({"md-expert"})
+    assert skills["lammps-scripting"].agents == frozenset({"md-expert"})
+    assert (skills["lammps-scripting"].root / "scripts" / "thermo_report.py").is_file()
+    assert (skills["lammps-scripting"].root / "assets" / "md_nvt.py").is_file()
     for analysis in ("thermal-response", "kinetic-fits", "nemd-transport", "nucleation-cnt"):
         assert skills[analysis].agents == frozenset({"md-expert", "analysis-expert"})
     # The scriptless skills are deliberate: scripts are optional in the format.
@@ -1724,6 +1728,84 @@ def test_check_structure_refuses_missing_or_junk_files(
     junk.write_text("not a structure")
     code, _ = _run(CHECK, str(junk), monkeypatch=monkeypatch, capsys=capsys)
     assert isinstance(code, str) and "cannot read" in code
+
+
+# -- thermo_report ------------------------------------------------------------
+
+THERMO_REPORT = SKILLS / "lammps-scripting" / "scripts" / "thermo_report.py"
+
+
+def _synthetic_log(drift: float = 0.0) -> str:
+    """Forty thermo rows: a stationary temperature, an energy that may drift."""
+    rows = []
+    for i in range(40):
+        step = i * 100
+        temp = 300.0 + 5.0 * ((i % 4) - 1.5)  # a bounded wobble, mean 300
+        energy = -350.0 + drift * i + 0.2 * ((i % 3) - 1)
+        rows.append(f"{step} {temp:.3f} {energy:.4f}")
+    body = "\n".join(rows)
+    return (
+        "LAMMPS (22 Jul 2025 - Update 4)\nunits metal\nrun 3900\n"
+        f"Step Temp PotEng\n{body}\n"
+        "Loop time of 1.5 on 1 procs for 3900 steps with 108 atoms\nTotal wall time: 0:00:02\n"
+    )
+
+
+def test_thermo_report_averages_the_tail_with_a_block_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    log = tmp_path / "log.lammps"
+    log.write_text(_synthetic_log())
+    code, out = _run(THERMO_REPORT, str(log), "--json", monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 0
+    report = json.loads(out)
+    assert report["rows"] == 40 and report["tail_rows"] == 20 and report["blocks"] == 5
+    assert report["loop"]["atoms"] == 108
+    temp = report["columns"]["Temp"]
+    assert temp["mean"] == pytest.approx(300.0)
+    assert temp["block_error"] < 2.0 and not temp["drifting"]
+    assert report["drifting"] == []
+    code, out = _run(
+        THERMO_REPORT, str(log), "--columns", "Temp", monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert code == 0 and "Temp" in out and "PotEng" not in out.split("\n", 2)[2]
+
+
+def test_thermo_report_flags_a_drifting_column_and_reads_the_json_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from slab.outputs import lammps_thermo
+
+    text = _synthetic_log(drift=0.5)
+    artifact = tmp_path / "w-thermo.json"
+    artifact.write_text(json.dumps(lammps_thermo(text)))
+    code, out = _run(
+        THERMO_REPORT, str(artifact), "--json", monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert code == 0
+    report = json.loads(out)
+    assert report["columns"]["PotEng"]["drifting"] is True
+    assert report["drifting"] == ["PotEng"]
+    assert abs(report["columns"]["PotEng"]["drift_in_errors"]) > 3.0
+    code, out = _run(THERMO_REPORT, str(artifact), monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 0 and "DRIFTING" in out and "warning: PotEng still moving" in out
+
+
+def test_thermo_report_refuses_what_it_cannot_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    empty = tmp_path / "empty.log"
+    empty.write_text("LAMMPS (22 Jul 2025)\nunits metal\n")
+    code, _ = _run(THERMO_REPORT, str(empty), monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 2
+    log = tmp_path / "log.lammps"
+    log.write_text(_synthetic_log())
+    code, _ = _run(
+        THERMO_REPORT, str(log), "--columns", "Nope", monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert code == 2
+    code, _ = _run(THERMO_REPORT, str(log), "--tail", "0", monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 2
 
 
 # -- pair_style_for -----------------------------------------------------------
