@@ -80,8 +80,10 @@ MECHANISMS: tuple[Mechanism, ...] = (
     ),
     Mechanism(
         "context-hygiene",
-        "Old tool results are cleared to placeholders once the prompt is "
-        "large, and superseded plan echoes are folded, before compaction.",
+        "One tool result is capped at max_tool_output_chars, old tool results "
+        "are cleared to placeholders once the prompt is large, and superseded "
+        "plan echoes are folded, before compaction. Off, every result reaches "
+        "the model whole and stays.",
         "SWE-agent and OpenHands: masking old observations matches "
         "summarization at half the cost; Anthropic's clear_tool_uses.",
     ),

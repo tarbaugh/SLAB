@@ -260,7 +260,15 @@ class Toolbox:
             result = tool.handler(call.arguments)
         except Exception as e:  # evidence for the model, never a dead loop
             result = f"tool {call.name} failed: {type(e).__name__}: {e}"
-        shown = _truncate_middle(result, self.session.agent.max_tool_output_chars)
+        # The output cap is context hygiene's first layer: off, a result
+        # reaches the model whole, however long, so the ablation measures
+        # the cap together with the clearing it precedes.
+        agent = self.session.agent
+        shown = (
+            _truncate_middle(result, agent.max_tool_output_chars)
+            if enabled(agent, "context-hygiene")
+            else result
+        )
         if call.name in FACT_TOOLS and not _is_refusal(shown):
             self.session.facts[_fact_key(call)] = shown
         return shown

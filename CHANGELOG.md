@@ -5,6 +5,8 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- The `context-hygiene` switch also lifts the output cap on one tool
+  result, so the ablation measures the cap with the clearing it precedes.
 - The mechanism ledger carries a measured-effect column. Every row reads
   "not yet measured" until the ablation grid has run the mechanism off and
   on, so the ledger says which mechanisms are finished and which are
