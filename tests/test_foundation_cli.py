@@ -670,3 +670,29 @@ def test_a_workspace_path_that_is_a_file_fails_as_an_error_line(tmp_path: Path) 
     assert result.exit_code == 1
     assert result.exception is None or isinstance(result.exception, SystemExit)
     assert "error:" in result.output
+
+
+# -- the initial state, worded --------------------------------------------------------
+
+
+def test_list_and_show_word_the_initial_state_while_running(root: Path) -> None:
+    import os
+
+    from foundation.models import Run
+    from foundation.runtime import this_host
+
+    with Workspace(root) as ws:
+        run = ws.runs.create(Run(name="live"))
+        ws.runs.set_status(run.id, "running", pid=os.getpid(), host=this_host())
+    listed = runner.invoke(app, ["list", "-w", str(root)])
+    assert "quarantined (initial state) running" in listed.output
+    shown = runner.invoke(app, ["show", run.id, "-w", str(root)])
+    assert "state:   quarantined (initial state)    status: running" in shown.output
+    assert f"process: {os.getpid()} on {this_host()}" in shown.output
+    with Workspace(root) as ws:
+        ws.runs.set_status(run.id, "completed")
+    listed = runner.invoke(app, ["list", "-w", str(root)])
+    assert "(initial state)" not in listed.output
+    shown = runner.invoke(app, ["show", run.id, "-w", str(root)])
+    assert "state:   quarantined    status: completed" in shown.output
+    assert "process:" not in shown.output

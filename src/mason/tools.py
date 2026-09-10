@@ -43,6 +43,7 @@ from foundation import _ops
 from foundation import memory as memory_store
 from foundation.errors import MemoryStoreError
 from foundation.project import plan_write
+from foundation.runtime import describe_liveness
 from mason.client import ToolCall
 from mason.mechanisms import enabled
 from mason.session import MasonSession
@@ -639,6 +640,34 @@ def _store_mutation(command: str, workspace_root: Path) -> str | None:
     )
 
 
+def _state_text(run: Any) -> str:
+    """The lifecycle state as a reader should take it.
+
+    Every run is born quarantined, so a running run that reads
+    ``quarantined`` is in its initial state, not in trouble. A real
+    critic took the pair for an anomaly; the word now says so.
+
+    Examples:
+        >>> from foundation.models import Run
+        >>> _state_text(Run(status="running"))
+        'quarantined (initial state)'
+        >>> _state_text(Run(status="completed"))
+        'quarantined'
+    """
+    if run.state.value == "quarantined" and run.status.value == "running":
+        return "quarantined (initial state)"
+    return str(run.state.value)
+
+
+def _rendered_run(summary: dict[str, Any], run: Any) -> dict[str, Any]:
+    """The run half of ``show_run`` with its state worded and its liveness named."""
+    rendered = dict(summary)
+    rendered["state"] = _state_text(run)
+    if run.status.value == "running":
+        rendered["liveness"] = describe_liveness(run)
+    return rendered
+
+
 def _compact_details(details: dict[str, Any]) -> dict[str, Any]:
     """The run record with its finished tasks folded to one line each.
 
@@ -1195,9 +1224,21 @@ def _add_workflow_tools(
     box: Toolbox, session: MasonSession, read_roots: tuple[Path, ...]
 ) -> None:
     def _run_line(run: Any) -> str:
-        return (
-            f"{run.id[:10]}  {run.state.value:<11} {run.status.value:<10} "
+        line = (
+            f"{run.id[:10]}  {_state_text(run):<11} {run.status.value:<10} "
             f"{run.name[:24]:<24} {run.intent or ''}"
+        )
+        if run.status.value == "running":
+            line += f"  [{describe_liveness(run)}]"
+        return line
+
+    def _reaped_note(reaped: list[Any], caller: str) -> str:
+        if not reaped:
+            return ""
+        ids = ", ".join(r.id[:10] for r in reaped)
+        return (
+            f"(marked failed by {caller}: {ids}; each was at status running and its "
+            f"recorded process on this host is gone)\n"
         )
 
     def _session_filter(raw: object) -> str | None:
@@ -1215,14 +1256,15 @@ def _add_workflow_tools(
         limit = int(arguments.get("limit", 10))
         session_filter = _session_filter(arguments.get("session"))
         with _open_workspace(session) as ws:
+            reaped = _reaped_note(ws.reap_dead(caller="list_runs"), "list_runs")
             runs = ws.runs.list_runs(
                 state=state, status=status, session=session_filter, limit=limit
             )
             if not runs:
                 where = f" for session {session_filter!r}" if session_filter else ""
-                return f"no runs in this workspace yet{where}"
+                return f"{reaped}no runs in this workspace yet{where}"
             lines = [_run_line(run) for run in runs]
-        return "\n".join(lines)
+        return reaped + "\n".join(lines)
 
     box.add(
         Tool(
@@ -1268,6 +1310,7 @@ def _add_workflow_tools(
         with _open_workspace(session) as ws:
             run_id, note = _resolve_run(ws, str(arguments["run_id"]))
             details = run_details(ws, run_id)
+            details["run"] = _rendered_run(details["run"], ws.runs.get(run_id))
         if arguments.get("task") is not None:
             details = _one_task(details, arguments["task"])
         elif not arguments.get("full"):
@@ -1495,6 +1538,7 @@ def _add_workflow_tools(
         timeout = min(float(arguments.get("timeout_s", 900.0)), _MAX_WAIT_TIMEOUT_S)
         with _open_workspace(session):
             pass  # a store that cannot be opened is named here, with the recovery
+        # The wait reaps the dead on every poll (foundation._ops.wait_for_run).
         waited = _ops.wait_for_run(
             session.workspace_root,
             run_id=str(wanted) if wanted else None,
@@ -1505,10 +1549,18 @@ def _add_workflow_tools(
         )
         note = waited["note"]
         outcome = waited["outcome"]
+        if outcome == "process_gone":
+            run = waited["run"]
+            return (
+                f"{note}this run's process is gone: run {run.id} was running as "
+                f"process {run.pid} on {run.host}, and that process no longer exists; "
+                f"marked failed by wait_for_run. {waited['progress']}; read it with "
+                f"show_run, and launch again if the work is still wanted"
+            )
         if outcome == "finished":
             run = waited["run"]
             return (
-                f"{note}run {run.id}: state={run.state.value} "
+                f"{note}run {run.id}: state={_state_text(run)} "
                 f"status={run.status.value}; {waited['progress']}; "
                 f"read it with show_run"
             )
@@ -1523,7 +1575,8 @@ def _add_workflow_tools(
         # The tally answers "is it moving?" without a show_run of the whole
         # record: a real session queried the database by hand for this count.
         lines = "\n".join(
-            f"{r.id[:10]}  {r.name}  running; {progress}" for r, progress in waited["running"]
+            f"{r.id[:10]}  {r.name}  running; {progress}; {liveness}"
+            for r, progress, liveness in waited["running"]
         ) or "(none registered yet)"
         return (
             f"{note}still running after {timeout:.0f}s:\n{lines}\n"

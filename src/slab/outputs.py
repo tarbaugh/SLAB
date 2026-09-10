@@ -11,10 +11,14 @@ the warnings, and whether the job finished. The raw text stays one
 argument away.
 
 Three formats are recognised: pw.x output (any name; the header says
-``Program PWSCF``), a LAMMPS log (the first lines say ``LAMMPS (``), and
-extended XYZ (a frame count line, then a comment line with ``Lattice=`` or
-``Properties=``). :func:`digest` returns ``None`` for anything else, and
-the caller shows the text as it always did.
+``Program PWSCF``), a LAMMPS log (the first lines say ``LAMMPS (``, or open
+with the commands an ASE-driven run echoes), and extended XYZ (a frame
+count line, then a comment line with ``Lattice=`` or ``Properties=``).
+:func:`digest` returns ``None`` for anything else, and the caller shows
+the text as it always did. A source file is never digested: the format is
+decided by the name's extension and by the file's own header, not by
+keywords that a script mentions in its text. A workflow script that
+builds a LAMMPS input was once read as a LAMMPS log.
 """
 
 from __future__ import annotations
@@ -35,6 +39,10 @@ _CYCLE_ENERGIES_SHOWN = 12
 _MAX_NOTES = 6
 #: How much of a file to look at when deciding its format.
 _SNIFF_CHARS = 4_000
+#: Extensions of files that are code or configuration, never engine output.
+_SOURCE_EXTENSIONS = frozenset(
+    {".py", ".sh", ".bash", ".zsh", ".toml", ".json", ".yaml", ".yml", ".md", ".cfg", ".ini"}
+)
 
 
 def digest(name: str, text: str) -> str | None:
@@ -50,7 +58,11 @@ def digest(name: str, text: str) -> str | None:
         energy: present on 1 frame(s), -1.5 to -1.5
         forces: absent; lattice: present
         spacing: n/a (no frame holds two atoms)
+        >>> digest("make_input.py", "lines = ['units metal', 'pair_style eam']\\n") is None
+        True
     """
+    if _is_source_file(name):
+        return None
     head = text[:_SNIFF_CHARS]
     if "Program PWSCF" in head:
         return pwscf_digest(name, text)
@@ -59,6 +71,17 @@ def digest(name: str, text: str) -> str | None:
     if _looks_like_extxyz(head, name):
         return extxyz_digest(name, text)
     return None
+
+
+def _is_source_file(name: str) -> bool:
+    """Whether *name* has the extension of code or configuration.
+
+    Examples:
+        >>> _is_source_file("build_cell.py"), _is_source_file("run.log")
+        (True, False)
+    """
+    dot = name.rfind(".")
+    return dot >= 0 and name[dot:].lower() in _SOURCE_EXTENSIONS
 
 
 # -- pw.x ----------------------------------------------------------------------
@@ -276,13 +299,32 @@ _LMP_LOOP = re.compile(r"^Loop time of (\S+) on (\d+) procs for (\d+) steps with
 _LMP_STOP = re.compile(r"^\s*Stopping criterion\s*=\s*(.+)")
 _LMP_WALL = re.compile(r"^Total wall time:\s*(\S+)")
 _LMP_INPUT_ECHO = re.compile(r"^(atom_style|thermo_style|pair_style|thermo)\s", re.MULTILINE)
+#: The commands an ASE-driven run echoes first, before any banner would come.
+_LMP_OPENING = re.compile(
+    r"^(log|clear|echo|units|atom_style|dimension|boundary|newton|package|"
+    r"processors|variable)\s"
+)
 
 
 def _looks_like_lammps_log(head: str) -> bool:
     """A LAMMPS log opens with its banner, or (under ASE, which logs to
-    stdout without one) with the echoed input: ``units`` plus a style line."""
-    if "LAMMPS (" in head:
+    stdout without one) with an echoed command, then ``units`` plus a
+    style line. The header decides: a file whose first line is anything
+    else, a script that mentions these commands in its text, is not a log.
+
+    Examples:
+        >>> _looks_like_lammps_log("LAMMPS (2 Aug 2023)\\nunits metal\\n")
+        True
+        >>> _looks_like_lammps_log("log /dev/stdout\\nclear\\nunits metal\\npair_style eam\\n")
+        True
+        >>> _looks_like_lammps_log("import ase\\n# units metal\\npair_style = 'eam'\\n")
+        False
+    """
+    first = next((line for line in head.splitlines() if line.strip()), "")
+    if first.startswith("LAMMPS ("):
         return True
+    if not _LMP_OPENING.match(first):
+        return False
     has_units = bool(re.search(r"^units\s+\w+", head, re.MULTILINE))
     return has_units and bool(_LMP_INPUT_ECHO.search(head))
 

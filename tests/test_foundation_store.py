@@ -454,8 +454,10 @@ def test_migrates_v1_database_in_place(db_path: Path) -> None:
                 started_at=utcnow(),
             )
         )
-    # Rewind the database to schema v1 by dropping the v2 columns.
+    # Rewind the database to schema v1 by dropping the v2, v3, and v4 columns.
     conn = sqlite3.connect(db_path)
+    conn.execute("ALTER TABLE runs DROP COLUMN pid")
+    conn.execute("ALTER TABLE runs DROP COLUMN host")
     conn.execute("ALTER TABLE runs DROP COLUMN failure")
     conn.execute("ALTER TABLE tasks DROP COLUMN failure")
     conn.execute("DROP INDEX ix_runs_session")
@@ -473,8 +475,9 @@ def test_migrates_v1_database_in_place(db_path: Path) -> None:
         failed = s2.set_status(run.id, "failed", error="x", failure={"type": "X", "message": "y"})
         assert failed.failure == {"type": "X", "message": "y"}
         assert loaded.session is None  # every later migration ran too
+        assert (loaded.pid, loaded.host) == (None, None)
         conn = sqlite3.connect(db_path)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
         conn.close()
 
 
@@ -483,8 +486,10 @@ def test_migrates_v2_database_in_place(db_path: Path) -> None:
     the migration adds the column and old rows read back with session=None."""
     with SQLiteRunStore(db_path) as s1:
         run = s1.create(Run(name="pre-session"))
-    # Rewind the database to schema v2 by dropping the v3 column and index.
+    # Rewind the database to schema v2 by dropping the v3 and v4 columns.
     conn = sqlite3.connect(db_path)
+    conn.execute("ALTER TABLE runs DROP COLUMN pid")
+    conn.execute("ALTER TABLE runs DROP COLUMN host")
     conn.execute("DROP INDEX ix_runs_session")
     conn.execute("ALTER TABLE runs DROP COLUMN session")
     conn.execute("PRAGMA user_version = 2")
@@ -500,9 +505,34 @@ def test_migrates_v2_database_in_place(db_path: Path) -> None:
         assert s2.get(fresh.id).session == "chat-1"
         assert [r.id for r in s2.list_runs(session="chat-1")] == [fresh.id]
         conn = sqlite3.connect(db_path)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
         indexes = {row[1] for row in conn.execute("PRAGMA index_list(runs)")}
         assert "ix_runs_session" in indexes
+        conn.close()
+
+
+def test_migrates_v3_database_in_place(db_path: Path) -> None:
+    """A workspace created before the pid stamp (schema v3) opens cleanly:
+    old running rows read back with no process recorded, and new runs
+    stamp theirs."""
+    with SQLiteRunStore(db_path) as s1:
+        run = s1.create(Run(name="pre-stamp"))
+        s1.set_status(run.id, "running")
+    conn = sqlite3.connect(db_path)
+    conn.execute("ALTER TABLE runs DROP COLUMN pid")
+    conn.execute("ALTER TABLE runs DROP COLUMN host")
+    conn.execute("PRAGMA user_version = 3")
+    conn.close()
+
+    with SQLiteRunStore(db_path) as s2:
+        loaded = s2.get(run.id)
+        assert (loaded.status.value, loaded.pid, loaded.host) == ("running", None, None)
+        fresh = s2.create(Run(name="post-stamp"))
+        stamped = s2.set_status(fresh.id, "running", pid=4242, host="node7")
+        assert (stamped.pid, stamped.host) == (4242, "node7")
+        assert s2.get(fresh.id).pid == 4242
+        conn = sqlite3.connect(db_path)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
         conn.close()
 
 

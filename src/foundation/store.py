@@ -54,7 +54,7 @@ from foundation.models import (
     utcnow,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -71,7 +71,9 @@ CREATE TABLE IF NOT EXISTS runs (
     started_at       TEXT,
     finished_at      TEXT,
     error            TEXT,
-    failure          TEXT
+    failure          TEXT,
+    pid              INTEGER,
+    host             TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_runs_state ON runs(state);
 CREATE INDEX IF NOT EXISTS ix_runs_status ON runs(status);
@@ -142,6 +144,10 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
     3: (  # which client session created the run
         "ALTER TABLE runs ADD COLUMN session TEXT",
         "CREATE INDEX IF NOT EXISTS ix_runs_session ON runs(session)",
+    ),
+    4: (  # the process and host that own a running run
+        "ALTER TABLE runs ADD COLUMN pid INTEGER",
+        "ALTER TABLE runs ADD COLUMN host TEXT",
     ),
 }
 
@@ -331,6 +337,8 @@ class RunStore(Protocol):
         *,
         error: str | None = None,
         failure: dict[str, object] | None = None,
+        pid: int | None = None,
+        host: str | None = None,
     ) -> Run:
         """Change a run's execution status."""
         ...
@@ -498,8 +506,8 @@ class SQLiteRunStore:
                 conn.execute(
                     "INSERT INTO runs (id, name, state, status, intent, session, meta,"
                     " created_at, updated_at, state_entered_at, started_at, finished_at,"
-                    " error, failure)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " error, failure, pid, host)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         run.id,
                         run.name,
@@ -515,6 +523,8 @@ class SQLiteRunStore:
                         _fmt_dt(run.finished_at),
                         run.error,
                         _fmt_json(run.failure),
+                        run.pid,
+                        run.host,
                     ),
                 )
             except sqlite3.IntegrityError as e:
@@ -600,6 +610,8 @@ class SQLiteRunStore:
         *,
         error: str | None = None,
         failure: dict[str, object] | None = None,
+        pid: int | None = None,
+        host: str | None = None,
     ) -> Run:
         """Change a run's execution status; return the updated snapshot.
 
@@ -608,19 +620,22 @@ class SQLiteRunStore:
         ``pending -> completed`` directly, finishing without ever starting.
         Pass ``error`` (a one-liner) and/or ``failure`` (structured evidence,
         see :func:`foundation.errors.failure_record`) — only with status ``failed`` —
-        to record why.
+        to record why. Pass ``pid`` and ``host`` — only with status ``running`` —
+        to record which process owns the run, so a liveness check can later
+        tell a hard-killed run from a live one.
 
         Raises:
             IllegalStatusChangeError: The change is not permitted
                 (e.g. ``completed -> running``).
             ValueError: ``error``/``failure`` was passed with a non-``failed``
-                status.
+                status, or ``pid``/``host`` with a non-``running`` one.
 
         Examples:
             >>> store = SQLiteRunStore(":memory:")
             >>> r = store.create(Run())
-            >>> store.set_status(r.id, "running").status.value
-            'running'
+            >>> live = store.set_status(r.id, "running", pid=4242, host="node7")
+            >>> (live.status.value, live.pid, live.host)
+            ('running', 4242, 'node7')
             >>> done = store.set_status(r.id, "failed", error="OOM killed",
             ...                         failure={"type": "Killed", "message": "OOM"})
             >>> (done.finished_at is not None, done.error, done.failure["type"])
@@ -632,6 +647,8 @@ class SQLiteRunStore:
             raise ValueError(
                 "error=/failure= are only recordable when setting status to 'failed'"
             )
+        if (pid is not None or host is not None) and new is not ExecutionStatus.RUNNING:
+            raise ValueError("pid=/host= are only recordable when setting status to 'running'")
         with self._txn() as conn:
             rid = self._resolve(run_id)
             row = conn.execute(
@@ -657,6 +674,12 @@ class SQLiteRunStore:
             if failure is not None:
                 sets.append("failure = ?")
                 params.append(_fmt_json(failure))
+            if pid is not None:
+                sets.append("pid = ?")
+                params.append(int(pid))
+            if host is not None:
+                sets.append("host = ?")
+                params.append(host)
             params.append(rid)
             conn.execute(f"UPDATE runs SET {', '.join(sets)} WHERE id = ?", params)
             return self._get_exact(conn, rid)
@@ -1343,6 +1366,8 @@ def _row_to_run(row: sqlite3.Row) -> Run:
         finished_at=_parse_dt(row["finished_at"]),
         error=row["error"],
         failure=_parse_json(row["failure"]),
+        pid=row["pid"],
+        host=row["host"],
     )
 
 

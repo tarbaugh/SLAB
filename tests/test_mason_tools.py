@@ -1145,3 +1145,65 @@ def test_the_workflow_script_is_kept_as_the_runs_input_artifact(
     arguments = {"run_id": run_id, "name": "wf.py"}
     call = ToolCall(id="ra", name="read_artifact", arguments=arguments, arguments_raw="{}")
     assert "relax(atoms, engine='emt'" in box.dispatch(call)
+
+
+# -- run liveness through the tools ---------------------------------------------
+
+
+def _dead_run(root: Path, name: str) -> str:
+    """A run at status running whose recorded process has already exited."""
+    import subprocess
+    import sys
+
+    from foundation.models import Run
+    from foundation.runtime import Workspace, this_host
+
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    with Workspace(root) as ws:
+        run = ws.runs.create(Run(name=name))
+        ws.runs.set_status(run.id, "running", pid=child.pid, host=this_host())
+    return run.id
+
+
+def test_wait_for_run_and_list_runs_report_a_dead_process(box: Toolbox, tmp_path: Path) -> None:
+    """A hard-killed run is not waited on and is not listed as running: the
+    tool that meets it first marks it failed and says so in its answer."""
+    dead = _dead_run(tmp_path / ".slab", "killed")
+    waited = box.dispatch(_call("wait_for_run", run_id=dead, timeout_s=30))
+    assert waited.startswith("this run's process is gone: run " + dead)
+    assert "marked failed by wait_for_run" in waited
+    assert "read it with show_run" in waited
+
+    second = _dead_run(tmp_path / ".slab", "killed-too")
+    listed = box.dispatch(_call("list_runs"))
+    assert listed.startswith(f"(marked failed by list_runs: {second[:10]};")
+    lines = listed.splitlines()
+    assert all("running" not in line for line in lines[1:])
+    assert sum("failed" in line for line in lines[1:]) == 2
+
+
+def test_list_runs_and_show_run_word_the_initial_state_of_a_running_run(
+    box: Toolbox, tmp_path: Path
+) -> None:
+    import os
+
+    from foundation.models import Run
+    from foundation.runtime import Workspace, this_host
+
+    with Workspace(tmp_path / ".slab") as ws:
+        run = ws.runs.create(Run(name="live"))
+        ws.runs.set_status(run.id, "running", pid=os.getpid(), host=this_host())
+    listed = box.dispatch(_call("list_runs"))
+    assert "quarantined (initial state)" in listed
+    assert f"[process {os.getpid()} on {this_host()} is alive]" in listed
+    details = json.loads(box.dispatch(_call("show_run", run_id=run.id)))
+    assert details["run"]["state"] == "quarantined (initial state)"
+    assert details["run"]["liveness"] == f"process {os.getpid()} on {this_host()} is alive"
+    assert (details["run"]["pid"], details["run"]["host"]) == (os.getpid(), this_host())
+    with Workspace(tmp_path / ".slab") as ws:
+        ws.runs.set_status(run.id, "completed")
+    finished = box.dispatch(_call("list_runs"))
+    assert "quarantined (initial state)" not in finished and "quarantined" in finished
+    details = json.loads(box.dispatch(_call("show_run", run_id=run.id)))
+    assert details["run"]["state"] == "quarantined" and "liveness" not in details["run"]

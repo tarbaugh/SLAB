@@ -299,6 +299,35 @@ with more steps or a tighter optimizer, without re-reading the workflow.
     [expires with the run](lifecycle-and-retention.md). Nothing accumulates
     forever unless you promote it.
 
+## A run stuck at running
+
+A process that dies without a chance to record anything, under a SIGKILL,
+an out-of-memory kill, or a node reboot, leaves its run at status
+`running`. Every run records the process id and the hostname that own it
+when it enters `running`. `slab runs reap` checks each running run stamped
+with this host's name and marks the run failed when its process is gone.
+The error line names the process, the host, and the caller, in the form
+`process <pid> on <host> is gone; marked failed by slab runs reap`.
+Mason runs the same check at session start and on every
+`list_runs` and `wait_for_run` call, so `wait_for_run` answers "this run's
+process is gone" at once instead of blocking on a dead record.
+
+A run stamped with another host's name is not judged from here, and the
+listing says so. Retire it by hand once you know its process is dead:
+
+```bash
+slab runs fail 01m2 --reason "node7 was drained"
+```
+
+The verb is refused while the run's process is alive on this host. Mason
+does not have this verb. The agent cancels SLURM jobs, and the operator
+retires runs.
+
+A running run that reads `quarantined` is in its initial state, not in
+trouble. Every run is born quarantined and stays there until its checks
+pass, so the listings word it as `quarantined (initial state)` while the
+status is `running`.
+
 ## The surfaces
 
 `slab show` renders each traceback under its owner. The run's `failure`

@@ -135,8 +135,11 @@ def build_server(
         """List runs, newest first, optionally filtered by lifecycle state
         (quarantined/verified/promoted/archived/expired), execution status
         (pending/running/completed/failed), and/or the session that created
-        them (full id or unique prefix; see list_sessions)."""
+        them (full id or unique prefix; see list_sessions). A running run
+        whose recorded process on this host is gone is marked failed first,
+        so 'running' means a live process or one on another host."""
         with Workspace(root) as ws:
+            ws.reap_dead(caller="list_runs")
             return [
                 _ops.run_summary(r)
                 for r in ws.runs.list_runs(
@@ -245,7 +248,10 @@ def build_server(
         where it stands. run_id takes an id, a unique prefix, or the name of
         a run this session created; without it, waits for every running run
         this session created. 'outcome' is finished (with the run and its
-        task tally), still_running (call again to keep waiting), none_running
+        task tally), process_gone (this call found the run's recorded process
+        dead on this host and marked the run failed; nothing to wait for),
+        still_running (call again to keep waiting; each entry says whether
+        its process is alive here or runs on another host), none_running
         (the session's finished runs), or no_runs."""
         waited = _ops.wait_for_run(
             root, run_id=run_id, session=session_id, timeout_s=min(timeout_s, 1800.0)
@@ -257,7 +263,8 @@ def build_server(
             answer["runs"] = [_ops.run_summary(r) for r in waited["runs"]]
         if "running" in waited:
             answer["running"] = [
-                _ops.run_summary(r) | {"progress": progress} for r, progress in waited["running"]
+                _ops.run_summary(r) | {"progress": progress, "liveness": liveness}
+                for r, progress, liveness in waited["running"]
             ]
         return answer
 

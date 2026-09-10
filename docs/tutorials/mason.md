@@ -302,8 +302,8 @@ more than model choice.
 | `list_dir`, `search` | listing and recursive regex search, output-capped |
 | `shell` | one command, merged output + exit code, timeout-capped; the timeout kills the whole process group, so nothing backgrounded survives it; **not** for long calculations |
 | `launch_workflow` | run a workflow script as a traced, check-gated run; this is how physics happens. `args` reach the script as argv; `background=true` detaches a long run so no tool timeout can touch it |
-| `wait_for_run` | block until a run (or every running run of this session) finishes, then report its state and task tally; the timeout answer says how far each run has got; `run_id` takes an id, a prefix, or a run name from this session |
-| `list_runs`, `show_run`, `list_engines` | the workspace's evidence surface: runs, checks with observed/expected values, failure records, capabilities; `list_runs` takes `session="this"` and `status="running"`; `show_run` folds finished tasks to one line each, `task=<label or seq>` returns one task's recipe, inputs, and outputs, and `full=true` returns them all |
+| `wait_for_run` | block until a run (or every running run of this session) finishes, then report its state and task tally; the timeout answer says how far each run has got and whether its process is alive here or on another host; a run whose recorded process is gone is marked failed and answered at once; `run_id` takes an id, a prefix, or a run name from this session |
+| `list_runs`, `show_run`, `list_engines` | the workspace's evidence surface: runs, checks with observed/expected values, failure records, capabilities; `list_runs` takes `session="this"` and `status="running"`, and first marks failed every running run whose recorded process on this host is gone; `show_run` folds finished tasks to one line each, `task=<label or seq>` returns one task's recipe, inputs, and outputs, and `full=true` returns them all |
 | `read_artifact` | one of a run's artifacts, by name or hash prefix; the way to read an engine's output file after the run. Digested first like `read_file`; `raw=true`, or `offset`/`limit`, gives the line-numbered text. The workflow script is kept as the run's `input` artifact under its own name |
 | `list_tasks`, `describe_task` | the task vocabulary: every traced task with its signature, and one task's full docstring, so the agent never reads the package source to learn a call |
 | `search_materials`, `get_material`, `query_materials` | the offline Materials Project snapshot, present only when `[builders.mp]` names one: filtered search, one record with its CIF path, and one read-only row-capped SELECT; the structure itself arrives traced via `fetch_structure` in a workflow |
@@ -838,6 +838,10 @@ there, when a model update started batching its calls.
 The limits live in the harness, because prompts do not enforce invariants.
 There is a `max_turns` model-call budget per goal, and an abort after five
 consecutive harness-level tool failures, with the evidence left in place.
+The budget line that ends every request names itself, `[harness: model
+call 12 of 120 in this session's budget; not the progress of any run]`,
+because a planner card once read the bare counter as the progress of the
+MD run it was waiting on, for twenty turns.
 The prompt sets bounded diagnose-then-retry expectations, and
 required-argument validation answers with the tool's schema instead of a
 stack trace. Token usage is accounted per turn from the server's own numbers

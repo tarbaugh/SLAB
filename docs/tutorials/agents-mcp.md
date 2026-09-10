@@ -30,8 +30,8 @@ Twenty-three tools, each a thin wrapper over the operations layer, and three mor
 | Tool | What it does |
 | --- | --- |
 | `launch_workflow` | Execute a plain-Python workflow script in a fresh traced run that carries this server's session id. |
-| `wait_for_run` | Block until a run finishes or the timeout passes. Takes an id, a prefix, or a run name; without one, waits for every running run of this session. |
-| `list_runs` | Runs newest first, filterable by lifecycle `state`, execution `status`, and the `session` that created them. |
+| `wait_for_run` | Block until a run finishes or the timeout passes. Takes an id, a prefix, or a run name; without one, waits for every running run of this session. A run whose recorded process on this host is gone is marked failed and answered at once with outcome `process_gone`. |
+| `list_runs` | Runs newest first, filterable by lifecycle `state`, execution `status`, and the `session` that created them. Marks failed every running run whose recorded process on this host is gone before it lists. |
 | `show_run` | Everything about one run: checks, tasks, artifacts, history, failure evidence. |
 | `promote_run` | Make a run permanent (`verified -> promoted`), with a recorded reason. |
 | `list_sessions` | The client sessions that created runs, with run counts and state breakdowns. |

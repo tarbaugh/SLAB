@@ -155,3 +155,21 @@ def test_extxyz_digest_survives_a_file_ase_rejects() -> None:
 def test_digest_declines_what_it_does_not_recognise() -> None:
     assert digest("PLAN.md", "# Plan\n1. relax\n") is None
     assert digest("numbers.txt", "3\n1 2 3\n") is None
+
+
+def test_digest_never_reads_a_script_as_a_lammps_log() -> None:
+    """A workflow script that builds a LAMMPS input mentions units, styles,
+    and thermo lines in its text. The format is decided by the name and the
+    header, so the script is shown as text."""
+    script = (
+        "from ase.calculators.lammpsrun import LAMMPS\n"
+        "cmds = ['units metal', 'atom_style atomic', 'pair_style eam/alloy', 'thermo 10']\n"
+        "thermo_style = 'custom step pe'\n"
+    )
+    assert digest("make_input.py", script) is None
+    assert digest("parse_pw.py", "MARK = 'Program PWSCF'\n") is None
+    # The same text under a log name still opens with a Python line, not a command.
+    assert digest("make_input.log", script) is None
+    # The ASE-driven capture opens with its echoed commands and still digests.
+    text = (DATA / "lammps-cu-relax-final.log").read_text()
+    assert digest("lammps-cu-relax-final.log", text) is not None

@@ -807,11 +807,14 @@ def test_budget_hint_reaches_the_model_each_turn(tmp_path: Path) -> None:
     hints_per_turn = [msgs[-1] for msgs, _ in client.requests]
     contents = [h["content"] for h in hints_per_turn]
     assert all(h["role"] == "user" for h in hints_per_turn)
-    assert contents[0].startswith("[step 1 of 100]")
-    assert contents[1].startswith("[step 2 of 100]")
-    assert contents[2].startswith("[step 3 of 100]")
+    assert contents[0].startswith("[harness: model call 1 of 100 in this session's budget")
+    assert contents[1].startswith("[harness: model call 2 of 100 in this session's budget")
+    assert contents[2].startswith("[harness: model call 3 of 100 in this session's budget")
+    # The line says what it counts, so a model waiting on a run does not
+    # read it as that run's progress.
+    assert all(h.endswith("not the progress of any run]") for h in contents)
     # None of the hints made it into the persisted transcript.
-    assert not any("[step " in str(m.get("content") or "") for m in mason.messages)
+    assert not any("[harness:" in str(m.get("content") or "") for m in mason.messages)
     # And no system message anywhere but the front: chat templates refuse it.
     for msgs, _ in client.requests:
         roles = [m["role"] for m in msgs]
@@ -826,8 +829,9 @@ def test_budget_hint_escalates_in_the_last_stretch(tmp_path: Path) -> None:
     mason.run_turn("burn the whole budget")
     contents = [msgs[-1]["content"] for msgs, _ in client.requests]
     # Steps 1..8 are the bare counter; step 9 (>= int(10*0.9)) and 10 escalate.
-    assert contents[0] == "[step 1 of 10]"
-    assert contents[7] == "[step 8 of 10]"
+    plain = "[harness: model call {} of 10 in this session's budget; not the progress of any run]"
+    assert contents[0] == plain.format(1)
+    assert contents[7] == plain.format(8)
     for late in contents[8:]:
         assert "the budget is nearly out" in late
         assert "finish with the result you can defend" in late
@@ -1126,7 +1130,7 @@ def test_a_run_of_look_only_steps_earns_a_step_back_hint(tmp_path: Path) -> None
     Mason(session, client=client).run_turn("look around")
     hints = [request[0][-1]["content"] for request in client.requests]
     assert all("consecutive steps" not in hint for hint in hints[:15])
-    assert hints[15].startswith("[step 16 of ")
+    assert hints[15].startswith("[harness: model call 16 of ")
     assert "[15 consecutive steps have only read" in hints[15]
     assert all("consecutive steps" not in hint for hint in hints[16:20])
     assert "[20 consecutive steps" in hints[20]
@@ -1215,3 +1219,28 @@ def test_a_second_identical_read_points_at_the_copy_still_in_context(tmp_path: P
     assert results[3].startswith("     1\tx")  # the copy was gone, so the body returns
     assert results[4].startswith("exit 0\n" + "a" * 500)
     assert results[5].startswith("exit 0\n" + "a" * 500)  # a re-run command keeps its output
+
+
+def test_session_start_reaps_the_runs_whose_process_is_gone(tmp_path: Path) -> None:
+    """Before the first turn, a run left at status running by a hard-killed
+    process is marked failed, so the record the agent reads never shows a
+    dead run as a live one."""
+    import subprocess
+    import sys
+
+    from foundation.models import Run
+    from foundation.runtime import Workspace, this_host
+
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    session = _session(tmp_path)
+    with Workspace(session.workspace_root) as ws:
+        dead = ws.runs.create(Run(name="killed"))
+        ws.runs.set_status(dead.id, "running", pid=child.pid, host=this_host())
+    Mason(session, client=FakeClient([_text_reply("hello")]))
+    with Workspace(session.workspace_root) as ws:
+        after = ws.runs.get(dead.id)
+    assert after.status.value == "failed"
+    assert after.error == (
+        f"process {child.pid} on {this_host()} is gone; marked failed by session start"
+    )

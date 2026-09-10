@@ -1025,6 +1025,7 @@ for _group, _name in (
     app.add_typer(_group, name=_name, rich_help_panel=_PANEL_MACHINE)
 
 app.add_typer(mason_app, name="mason", rich_help_panel=_PANEL_AGENT)
+app.add_typer(foundation_cli.runs_app, name="runs", rich_help_panel=_PANEL_LIFECYCLE)
 
 
 def _command_name(info: typer.models.CommandInfo) -> str:

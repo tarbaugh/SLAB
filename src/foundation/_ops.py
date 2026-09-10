@@ -31,7 +31,7 @@ from foundation.errors import (
 from foundation.lifecycle import ExecutionStatus, LifecycleState
 from foundation.models import ArtifactRole, Run
 from foundation.retention import DEFAULT_POLICY, RetentionPolicy
-from foundation.runtime import Workspace
+from foundation.runtime import Workspace, describe_liveness
 
 DEFAULT_ROOT = ".slab"
 _DURATION = re.compile(r"^(\d+(?:\.\d+)?)\s*([smhd])$")
@@ -154,6 +154,8 @@ def run_details(ws: Workspace, run_id: str) -> dict[str, Any]:
             "failure": run.failure,
             "started_at": None if run.started_at is None else run.started_at.isoformat(),
             "finished_at": None if run.finished_at is None else run.finished_at.isoformat(),
+            "pid": run.pid,
+            "host": run.host,
         },
         "checks": [
             {
@@ -612,12 +614,19 @@ def wait_for_run(
     A background launch takes a moment to register its run, so an empty
     record gets *grace_s* before "nothing is running" counts as an answer.
 
+    Every poll first reaps the dead: a running run whose recorded process
+    on this host is gone is marked failed (:meth:`Workspace.reap_dead`),
+    so a wait never blocks on a hard-killed record.
+
     The result's ``outcome`` is one of ``finished`` (``run`` holds the
-    :class:`Run` and ``progress`` its tally), ``still_running`` (``running``
-    holds ``(Run, progress)`` pairs), ``none_running`` (``runs`` holds the
-    session's finished runs), or ``no_runs``. ``note`` says when a name was
-    resolved to a run id. Callers format the text; the MCP server converts
-    the runs with :func:`run_summary`.
+    :class:`Run` and ``progress`` its tally), ``process_gone`` (the same
+    keys; this call found the run's process dead and marked it failed),
+    ``still_running`` (``running`` holds ``(Run, progress, liveness)``
+    triples, the liveness phrase from :func:`describe_liveness`),
+    ``none_running`` (``runs`` holds the session's finished runs), or
+    ``no_runs``. ``note`` says when a name was resolved to a run id.
+    Callers format the text; the MCP server converts the runs with
+    :func:`run_summary`.
     """
     import time
 
@@ -630,13 +639,14 @@ def wait_for_run(
     note = ""
     while True:
         with Workspace(root) as ws:
+            reaped = {r.id for r in ws.reap_dead(caller="wait_for_run")}
             if run_id:
                 if resolved is None:
                     resolved, note = resolve_run(ws, run_id, session=session)
                 run = ws.runs.get(resolved)
                 if run.status.value != "running":
                     return {
-                        "outcome": "finished",
+                        "outcome": "process_gone" if run.id in reaped else "finished",
                         "note": note,
                         "run": run,
                         "progress": run_progress(ws, run.id),
@@ -657,7 +667,9 @@ def wait_for_run(
                     "outcome": "still_running",
                     "note": note,
                     "timeout_s": timeout,
-                    "running": [(r, run_progress(ws, r.id)) for r in running],
+                    "running": [
+                        (r, run_progress(ws, r.id), describe_liveness(r)) for r in running
+                    ],
                 }
         time.sleep(min(poll_s, max(0.05, deadline - time.monotonic())))
 

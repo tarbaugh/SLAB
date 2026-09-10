@@ -427,3 +427,58 @@ def test_promote_session_yields_to_a_concurrent_change(root: Path) -> None:
         assert "someone else moved it" in outcome["detail"]
         assert result["complete"] is False
         assert ws.runs.get(run_id).state.value == "verified"
+
+
+# -- wait_for_run and liveness ----------------------------------------------------
+
+
+def test_wait_for_run_returns_at_once_when_the_process_is_gone(tmp_path: Path) -> None:
+    """A run whose recorded process died is not waited on: the wait marks it
+    failed and returns process_gone without sleeping through its timeout."""
+    import subprocess
+    import sys
+    import time
+
+    from foundation._ops import wait_for_run
+    from foundation.models import Run
+    from foundation.runtime import Workspace, this_host
+
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    root = tmp_path / "ws"
+    with Workspace(root) as ws:
+        run = ws.runs.create(Run(name="killed"))
+        ws.runs.set_status(run.id, "running", pid=child.pid, host=this_host())
+
+    started = time.monotonic()
+    waited = wait_for_run(root, run_id=run.id, timeout_s=30, poll_s=5)
+    assert time.monotonic() - started < 5
+    assert waited["outcome"] == "process_gone"
+    assert waited["run"].status.value == "failed"
+    assert waited["run"].error == (
+        f"process {child.pid} on {this_host()} is gone; marked failed by wait_for_run"
+    )
+    assert waited["progress"].startswith("tasks:")
+    # The next wait finds a finished record, not a dead one.
+    assert wait_for_run(root, run_id=run.id, timeout_s=1)["outcome"] == "finished"
+
+
+def test_wait_for_run_names_a_run_on_another_host_instead_of_guessing(
+    tmp_path: Path,
+) -> None:
+    from foundation._ops import wait_for_run
+    from foundation.models import Run
+    from foundation.runtime import Workspace
+
+    root = tmp_path / "ws"
+    with Workspace(root) as ws:
+        run = ws.runs.create(Run(name="remote"))
+        ws.runs.set_status(run.id, "running", pid=1, host="another-node")
+    waited = wait_for_run(root, run_id=run.id, timeout_s=0.2, poll_s=0.1)
+    assert waited["outcome"] == "still_running"
+    (listed, progress, liveness) = waited["running"][0]
+    assert listed.id == run.id and progress.startswith("tasks:")
+    assert liveness.startswith("process 1 on another-node, not this host")
+    assert "not checked from here" in liveness
+    with Workspace(root) as ws:
+        assert ws.runs.get(run.id).status.value == "running"
