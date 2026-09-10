@@ -121,6 +121,8 @@ def _mason_session(
     provider: str | None = None,
     max_turns: int | None = None,
     interactive: bool = True,
+    condition: str | None = None,
+    without: tuple[str, ...] = (),
 ) -> MasonSession:
     from mason import MasonSession
 
@@ -145,6 +147,14 @@ def _mason_session(
         # would rediscover the serve record's URL — which, in the sandbox,
         # is exactly the address the namespace cannot reach.
         updates["endpoint"] = endpoint
+    if condition is not None or without:
+        # The benchmark arm: its mechanism set becomes the session's
+        # switches, as a flag override so delegated children run under
+        # the same set, and the transcript header names the arm.
+        chosen, on = _resolve_condition(condition, without)
+        updates["mechanisms"] = tuple(sorted(on))
+        session.condition = chosen.name
+        session.ablated = tuple(sorted(set(without)))
     if updates:
         session.agent = _override_agent(session.agent, updates)
         # Remembered so the loop can re-assert them over any
@@ -164,6 +174,18 @@ def _mason_session(
 # The composition behind `slab mason run`, offered by name to the benchmark
 # command so a campaign is exactly what a person would have started by hand.
 open_session = _mason_session
+
+
+def _resolve_condition(
+    condition: str | None, without: tuple[str, ...]
+) -> tuple[Any, frozenset[str]]:
+    """The named condition and its switches, or an error line, never a traceback."""
+    from mason.mechanisms import ConditionError, resolve
+
+    try:
+        return resolve(condition, without)
+    except ConditionError as e:
+        _fail(str(e))
 
 
 def _resolve_spec(agent_name: str | None) -> tuple[AgentSpec, dict[str, AgentSpec]]:
@@ -190,12 +212,16 @@ def render_sandbox_files(
     out: Path | None,
     engine_tasks: int | None,
     agent: str | None = None,
+    condition: str | None = None,
+    without: tuple[str, ...] = (),
 ) -> tuple[Path, str]:
     """Render the sandbox job files for *goal* without submitting (public form).
 
-    Shared with ``slab benchmark render``: the files land in *out* (default
-    ``./sandbox``) for reading and tweaking before an explicit ``sbatch``.
-    *agent* names the card the job runs as; ``None`` is the PI.
+    Shared with ``slab benchmark render`` and ``matrix``: the files land in
+    *out* (default ``./sandbox``) for reading and tweaking before an
+    explicit ``sbatch``. *agent* names the card the job runs as; ``None``
+    is the condition's card, else the PI. *condition* and *without* name
+    the harness arm and the mechanisms switched off from it.
     """
     return _render_sandbox_files(
         goal,
@@ -205,6 +231,8 @@ def render_sandbox_files(
         out=out,
         engine_tasks=engine_tasks,
         agent=agent,
+        condition=condition,
+        without=without,
     )
 
 
@@ -224,6 +252,21 @@ _AgentOpt = Annotated[
     str | None,
     typer.Option(
         "--agent", help="Agent card to run as (default pi); 'slab mason roster' lists them."
+    ),
+]
+_ConditionOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--condition",
+        help="Harness condition to run under: slab (default), protocol, or bare. "
+        "Sets the entry card and the mechanism switches.",
+    ),
+]
+_WithoutOpt = Annotated[
+    list[str] | None,
+    typer.Option(
+        "--without",
+        help="Switch one mechanism off (repeatable); 'slab benchmark matrix' lists them.",
     ),
 ]
 
@@ -315,6 +358,8 @@ def mason_run(
         int | None, typer.Option("--max-turns", help="Model-call budget for this goal.")
     ] = None,
     agent: _AgentOpt = None,
+    condition: _ConditionOpt = None,
+    without: _WithoutOpt = None,
 ) -> None:
     """One autonomous goal: loop until finish, an answer, or a harness stop.
 
@@ -322,7 +367,9 @@ def mason_run(
     reads still work, so inspection goals run safely by default.
     """
     from mason import Mason
+    from mason.mechanisms import entry_card
 
+    ablated = tuple(without or ())
     try:
         session = _mason_session(
             workspace,
@@ -332,8 +379,10 @@ def mason_run(
             provider=provider,
             max_turns=max_turns,
             interactive=False,
+            condition=condition,
+            without=ablated,
         )
-        spec, roster = _resolve_spec(agent)
+        spec, roster = _resolve_spec(entry_card(condition, agent))
         mason = Mason(session, spec=spec, roster=roster)
         try:
             result = mason.run_turn(goal)
@@ -378,6 +427,7 @@ def mason_roster() -> None:
                 (spec.delegates, "delegates"),
                 (spec.reviews, "reviews"),
                 (spec.review_first, "review first"),
+                (not spec.core, "own prompt"),
             )
             if flag
         ]
@@ -903,6 +953,8 @@ def mason_sandbox_render(
         str | None,
         typer.Option("--agent", help="Agent card the job runs as (default pi)."),
     ] = None,
+    condition: _ConditionOpt = None,
+    without: _WithoutOpt = None,
 ) -> None:
     """Write the batch script, slab.toml, context.md, and render.json.
 
@@ -917,6 +969,8 @@ def mason_sandbox_render(
         out=out,
         engine_tasks=engine_tasks,
         agent=agent,
+        condition=condition,
+        without=tuple(without or ()),
     )
     typer.echo(
         "read these files, then submit with: "
@@ -934,12 +988,19 @@ def _render_sandbox_files(
     out: Path | None,
     engine_tasks: int | None,
     agent: str | None = None,
+    condition: str | None = None,
+    without: tuple[str, ...] = (),
 ) -> tuple[Path, str]:
     """Render and write the four sandbox files; echo warnings and paths."""
     import json
 
-    if agent is not None:
-        _resolve_spec(agent)  # an unknown card fails here, not inside the job
+    from mason.mechanisms import entry_card
+
+    if condition is not None or without:
+        _resolve_condition(condition, without)  # an unknown arm fails on the host
+    card = entry_card(condition, agent)
+    if card is not None:
+        _resolve_spec(card)  # an unknown card fails here, not inside the job
 
     from mason.sandbox import (
         render_record,
@@ -973,6 +1034,8 @@ def _render_sandbox_files(
             snapshots=snapshots,
             engine_tasks=engine_tasks,
             entry_agent=agent,
+            entry_condition=condition,
+            ablated=without,
         )
     except (MasonError, FoundationError, SlabError) as e:
         _fail(str(e))
@@ -989,6 +1052,8 @@ def _render_sandbox_files(
         time_limit=time_limit,
         engine_tasks=engine_tasks,
         out_dir=out_dir,
+        condition=condition,
+        without=without,
     )
     record_path = out_dir / "render.json"
     record_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
@@ -1029,6 +1094,8 @@ def mason_sandbox_launch(
         str | None,
         typer.Option("--agent", help="Agent card the job runs as (default pi)."),
     ] = None,
+    condition: _ConditionOpt = None,
+    without: _WithoutOpt = None,
 ) -> None:
     """Preflight, render fresh, and submit — one motion, never a stale render.
 
@@ -1057,6 +1124,10 @@ def mason_sandbox_launch(
             engine_tasks = int(str(record["engine_tasks"]))
         if agent is None and record.get("agent"):
             agent = str(record["agent"])
+        if condition is None and record.get("condition"):
+            condition = str(record["condition"])
+        if not without and record.get("without"):
+            without = [str(name) for name in record["without"]]
     try:
         job = launch_sandbox(
             goal,
@@ -1067,6 +1138,8 @@ def mason_sandbox_launch(
             engine_tasks=engine_tasks,
             emit=typer.echo,
             agent=agent,
+            condition=condition,
+            without=tuple(without or ()),
         )
     except (MasonError, FoundationError, SlabError) as e:
         _fail(str(e))
@@ -1085,6 +1158,8 @@ def launch_sandbox(
     engine_tasks: int | None,
     emit: Callable[[str], None],
     agent: str | None = None,
+    condition: str | None = None,
+    without: tuple[str, ...] = (),
 ) -> SubmittedJob:
     """Preflight, render fresh into *out_dir*, and submit one sandbox job.
 
@@ -1110,6 +1185,8 @@ def launch_sandbox(
         out=out_dir,
         engine_tasks=engine_tasks,
         agent=agent,
+        condition=condition,
+        without=without,
     )
     resolved, _spec = hpc.resolve_partition(partition)
     return submit(script, job_name="mason-sandbox", partition=resolved, directory=out_dir)

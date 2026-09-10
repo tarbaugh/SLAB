@@ -858,6 +858,11 @@ schema_version = 1
 # compute_profile = "cluster"               # laptop | workstation | cluster — how big a
 #                                           # calculation the agent should reach for
 #                                           # (default: cluster if [hpc] partitions exist)
+# mechanisms = ["skills", "delegation"]     # the harness mechanisms this session runs
+#                                           # with, one switch each; unset means every
+#                                           # one, and a name outside the ledger
+#                                           # (docs/benchmark.md) is refused. The benchmark
+#                                           # sets it per campaign (--condition, --without)
 
 # -- Claude instead of a locally served model. Still the [agent] table above:
 # uncomment these keys there, do not add a second [agent] header. Needs reachable

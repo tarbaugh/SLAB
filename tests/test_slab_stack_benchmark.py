@@ -9,6 +9,8 @@ for real, so the scorer is exercised on the evidence a campaign leaves.
 from __future__ import annotations
 
 import json
+import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +22,8 @@ from foundation.models import TaskRecord, utcnow
 from foundation.runtime import Workspace
 from foundation.serialize import dumps
 from foundation.tasks import single_point
+from mason.client import ChatReply, ToolCall
+from mason.mechanisms import ALL_MECHANISMS, CONDITIONS
 from slab_stack import benchmark
 from slab_stack.cli import app
 
@@ -343,8 +347,13 @@ def test_records_append_and_the_latest_wins_per_cell(tmp_path: Path) -> None:
     records = benchmark.load_records(path)
     assert len(records) == 2
     assert benchmark.recorded_sessions(records) == {"s1", "s2"}
-    latest = benchmark.latest_by_cell(records)[("m-30b", "laptop", "a0")]
+    latest = benchmark.latest_by_cell(records)[("m-30b", "laptop", "slab", "a0")]
     assert latest["session"] == "s2"
+    # An ablated arm is its own cell, never folded into the plain one.
+    ablated = _record(session="s3", condition="slab", ablated=["budget-hint"])
+    cells = benchmark.latest_by_cell([*records, ablated])
+    assert cells[("m-30b", "laptop", "slab -budget-hint", "a0")]["session"] == "s3"
+    assert cells[("m-30b", "laptop", "slab", "a0")]["session"] == "s2"
 
 
 def test_render_rewrites_only_the_marker_regions(tmp_path: Path) -> None:
@@ -352,6 +361,8 @@ def test_render_rewrites_only_the_marker_regions(tmp_path: Path) -> None:
     docs.write_text(
         "# Page\n\nprose above\n\n<!-- benchmark:questions:start -->\nold\n"
         "<!-- benchmark:questions:end -->\n\nmore prose\n\n"
+        "<!-- benchmark:conditions:start -->\n<!-- benchmark:conditions:end -->\n\n"
+        "<!-- benchmark:mechanisms:start -->\n<!-- benchmark:mechanisms:end -->\n\n"
         "<!-- benchmark:results:start -->\n<!-- benchmark:results:end -->\n\n"
         "<!-- benchmark:flags:start -->\n<!-- benchmark:flags:end -->\n\ntail\n"
     )
@@ -369,15 +380,19 @@ def test_render_rewrites_only_the_marker_regions(tmp_path: Path) -> None:
     assert changed == [docs, readme]
     text = docs.read_text()
     assert "prose above" in text and "more prose" in text and text.endswith("tail\n")
-    assert "old" not in text
+    assert "-->\nold\n" not in text
     assert "| 1 | Determine the equilibrium lattice constant" in text
-    assert "| m-30b | laptop | pass (3.6 Å)" in text
+    assert "| m-30b | laptop | slab | pass (3.6 Å)" in text
     assert "fail (no finish report)" in text
     assert "fail (3.6 Å; the finish cited no run ids; 1 flag)" in text
-    assert "| card:pi | finish-incomplete | open | — | Q1 | tiny-8b | laptop | rules |" in text
+    assert (
+        "| card:pi | finish-incomplete | open | — | Q1 | tiny-8b | laptop | slab | rules |" in text
+    )
     assert "| 1/5 |" in text and "| 0/5 |" in text
+    assert "| `protocol` | `protocol` |" in text and "| `check-gating` |" in text
     summary = readme.read_text()
-    assert "| m-30b | laptop | 1/5 |" in summary and "| tiny-8b | laptop | 0/5 |" in summary
+    assert "| m-30b | laptop | slab | 1/5 |" in summary
+    assert "| tiny-8b | laptop | slab | 0/5 |" in summary
     assert "the benchmark](https://tarbaugh.github.io/SLAB/benchmark/)" in summary
     # Idempotent: a second render changes nothing.
     assert benchmark.render(records, docs=docs, readme=readme) == []
@@ -418,7 +433,10 @@ def test_cli_list_score_and_render(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
     scored = runner.invoke(app, ["benchmark", "score", "--machine", "hpc-a"])
     assert scored.exit_code == 0, scored.output
-    assert "Q1 a0        big-70b                  hpc-a        pass  [1 flag]" in scored.output
+    assert (
+        "Q1 a0        big-70b                  hpc-a        slab      pass  [1 flag]"
+        in scored.output
+    )
     assert "  script-not-used        rules    loaded at step" not in scored.output
     assert "  skill-not-loaded       rules    no skill event" in scored.output
     records = benchmark.load_records(tmp_path / "benchmarks" / "results.jsonl")
@@ -436,6 +454,8 @@ def test_cli_list_score_and_render(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     docs.parent.mkdir()
     docs.write_text(
         "<!-- benchmark:questions:start -->\n<!-- benchmark:questions:end -->\n"
+        "<!-- benchmark:conditions:start -->\n<!-- benchmark:conditions:end -->\n"
+        "<!-- benchmark:mechanisms:start -->\n<!-- benchmark:mechanisms:end -->\n"
         "<!-- benchmark:results:start -->\n<!-- benchmark:results:end -->\n"
         "<!-- benchmark:flags:start -->\n<!-- benchmark:flags:end -->\n"
     )
@@ -445,7 +465,7 @@ def test_cli_list_score_and_render(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     rendered = runner.invoke(app, ["benchmark", "tables"])
     assert rendered.exit_code == 0, rendered.output
     assert "rewrote docs/benchmark.md" in rendered.output and "rewrote README.md" in rendered.output
-    assert "| big-70b | hpc-a | 1/5 |" in (tmp_path / "README.md").read_text()
+    assert "| big-70b | hpc-a | slab | 1/5 |" in (tmp_path / "README.md").read_text()
 
     unknown = runner.invoke(app, ["benchmark", "score", "--session", "1999"])
     assert unknown.exit_code == 1 and "no session transcript matches" in unknown.output
@@ -547,3 +567,261 @@ def test_a_harness_session_over_mcp_is_scored(
     assert "pass" in scored.output
     (row,) = benchmark.load_records(tmp_path / "benchmarks" / "results.jsonl")
     assert row["session"] == "mcp-q1" and row["model"] == "claude"
+# -- the conditions -----------------------------------------------------------
+
+SLAB_TOML = (
+    '[agent]\nmodel = "m"\nendpoint = "http://gateway.example/v1"\n'
+    'api_key_env = "GATEWAY_API_KEY"\n'
+    '[agent.sandbox]\nimage = "/shared/sw/slab-sandbox.sif"\n'
+    '[hpc]\ndefault_partition = "cpu"\n[hpc.partitions.cpu]\ntime_limit = "04:00:00"\n'
+)
+
+Reply = ChatReply | Callable[[list[dict[str, Any]]], ChatReply]
+
+
+class _Scripted:
+    """A chat backend that answers from a script; an entry may read the messages."""
+
+    def __init__(self, replies: list[Reply]) -> None:
+        self.replies = list(replies)
+
+    def chat(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None, **_: Any
+    ) -> ChatReply:
+        answer = self.replies.pop(0)
+        return answer(messages) if callable(answer) else answer
+
+
+def _tool(name: str, **arguments: object) -> ChatReply:
+    return ChatReply(
+        content=None,
+        tool_calls=(
+            ToolCall(
+                id=f"call_{name}_{len(json.dumps(arguments))}",
+                name=name,
+                arguments=dict(arguments),
+                arguments_raw=json.dumps(arguments),
+            ),
+        ),
+        prompt_tokens=100,
+        completion_tokens=10,
+    )
+
+
+def _last_tool_result(messages: list[dict[str, Any]]) -> str:
+    return str(next(m for m in reversed(messages) if m.get("role") == "tool")["content"])
+
+
+def _campaign(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, condition: str, replies: list[Reply]
+) -> dict[str, Any]:
+    """Run Q1 under *condition* with a scripted backend, then score it."""
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    client = _Scripted(replies)
+    monkeypatch.setattr("mason.loop.client_from_config", lambda agent, keys=None: client)
+    root = tmp_path / "ws"
+    session_id, result = benchmark.run_campaign(
+        Q1, workspace=root, model="fake", condition=condition, max_turns=12
+    )
+    assert result.stop_reason == "finish", result.text
+    return benchmark.score_session(root, session_id, machine="laptop")
+
+
+EOS_WORKFLOW = """\
+from ase.build import bulk
+from foundation import check
+from foundation.tasks import single_point
+
+atoms, info = single_point(bulk("Cu"), engine="emt")
+print("a0 (Å): 3.61")
+
+
+@check
+def computed():
+    return "energy" in info
+"""
+
+EOS_PLAIN = 'print("a0 (Å): 3.61")\n'
+
+
+def test_the_slab_condition_passes_with_a_verified_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def finish_with_the_run(messages: list[dict[str, Any]]) -> ChatReply:
+        launched = _last_tool_result(messages)
+        assert launched.startswith("run ") and "state=verified" in launched, launched
+        run_id = launched.split()[1].rstrip(":")
+        return _tool(
+            "finish",
+            report=f"a0 = 3.61 Å (run {run_id})",
+            results={"a0": {"value": 3.61, "unit": "Å"}},
+            run_ids=[run_id],
+        )
+
+    record = _campaign(
+        tmp_path,
+        monkeypatch,
+        "slab",
+        [
+            _tool("write_file", path="eos.py", content=EOS_WORKFLOW),
+            _tool("launch_workflow", script="eos.py", intent="the benchmark's eos"),
+            finish_with_the_run,
+        ],
+    )
+    assert record["passed"] is True, record["reason"]
+    assert record["condition"] == "slab" and record["ablated"] == []
+    assert set(record["mechanisms"]) == ALL_MECHANISMS
+    assert record["agent"] == "pi" and record["engines"] == ["emt"]
+
+
+def test_the_protocol_condition_logs_its_provenance_and_still_fails_unverified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same correct number, written down in the log, has no verified run
+    behind it. The scorer's rule is the same for every arm, so it fails."""
+    python = sys.executable
+    record = _campaign(
+        tmp_path,
+        monkeypatch,
+        "protocol",
+        [
+            _tool("write_file", path="eos.py", content=EOS_PLAIN),
+            _tool("shell", command=f"{python} eos.py"),
+            _tool(
+                "shell",
+                command="printf '# Provenance\\n\\n- eos.py: python eos.py; a0 (Å): 3.61; "
+                "checked: printed\\n' >> PROVENANCE.md",
+            ),
+            _tool(
+                "finish",
+                report="a0 = 3.61 Å (PROVENANCE.md, entry 1)",
+                results={"a0": {"value": 3.61, "unit": "Å"}},
+            ),
+        ],
+    )
+    assert record["passed"] is False
+    assert record["reason"] == "the finish cited no run ids"
+    assert record["condition"] == "protocol" and record["agent"] == "protocol"
+    assert set(record["mechanisms"]) == CONDITIONS["protocol"].mechanisms
+    assert "a0 (Å): 3.61" in (tmp_path / "project" / "PROVENANCE.md").read_text()
+    assert record["results"] == {"a0": {"value": 3.61, "unit": "Å"}}
+
+
+def test_the_bare_condition_runs_a_shell_and_fails_unverified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = _campaign(
+        tmp_path,
+        monkeypatch,
+        "bare",
+        [
+            _tool("shell", command=f"{sys.executable} -c 'print(3.61)'"),
+            _tool(
+                "finish",
+                report="a0 = 3.61 Å",
+                results={"a0": {"value": 3.61, "unit": "Å"}},
+            ),
+        ],
+    )
+    assert record["passed"] is False
+    assert record["reason"] == "the finish cited no run ids"
+    assert record["condition"] == "bare" and record["agent"] == "bare"
+    assert record["mechanisms"] == []
+
+
+def test_a_protocol_campaign_passes_only_through_a_verified_run(tmp_path: Path) -> None:
+    """The asymmetry cuts one way: an arm without run tools can still pass
+    when the agent found the traced path itself and cited the run."""
+    root = tmp_path / "ws"
+    session = "20260901-100000-9"
+    run_id = _verified_run(root, session)
+    header = {
+        **_events_header(),
+        "agent": "protocol",
+        "condition": "protocol",
+        "mechanisms": sorted(CONDITIONS["protocol"].mechanisms),
+        "ablated": [],
+    }
+    _transcript(
+        root,
+        session,
+        [header, _user(Q1.instruction), _finish({"a0": {"value": 3.60, "unit": "Å"}}, [run_id])],
+    )
+    record = benchmark.score_session(root, session)
+    assert record["passed"] is True and record["condition"] == "protocol"
+    assert benchmark.cell_of(record) == ("fake-30b", "laptop", "protocol", "a0")
+
+
+def test_a_transcript_from_before_the_switches_scores_as_slab(tmp_path: Path) -> None:
+    root = tmp_path / "ws"
+    session = "20260901-100000-10"
+    run_id = _verified_run(root, session)
+    _transcript(
+        root,
+        session,
+        [
+            _events_header(),
+            _user(Q1.instruction),
+            _finish({"a0": {"value": 3.60, "unit": "Å"}}, [run_id]),
+        ],
+    )
+    record = benchmark.score_session(root, session)
+    assert record["condition"] == "slab" and set(record["mechanisms"]) == ALL_MECHANISMS
+
+
+def test_the_cli_carries_the_condition_into_the_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "slab.toml").write_text(SLAB_TOML)
+    monkeypatch.setenv("GATEWAY_API_KEY", "not-a-real-key")
+    result = runner.invoke(
+        app, ["benchmark", "render", "1", "--partition", "cpu", "--condition", "protocol"]
+    )
+    assert result.exit_code == 0, result.output
+    script = (tmp_path / "sandbox" / "mason-sandbox.sbatch").read_text()
+    assert "mason run --auto --condition protocol --endpoint" in script
+    record = json.loads((tmp_path / "sandbox" / "render.json").read_text())
+    assert record["condition"] == "protocol" and record["without"] == []
+    refused = runner.invoke(app, ["benchmark", "render", "1", "--condition", "aicc"])
+    assert refused.exit_code == 1 and "no condition named 'aicc'" in refused.output
+
+
+def test_matrix_cells_and_the_matrix_verb(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cells = benchmark.matrix_cells(["slab", "bare"], [Q1], ["budget-hint"])
+    assert [c.subdir for c in cells] == [
+        "slab/q1-a0", "bare/q1-a0", "slab-without-budget-hint/q1-a0"
+    ]
+    with pytest.raises(benchmark.BenchmarkError, match="no mechanism named 'hint'"):
+        benchmark.matrix_cells(["slab"], [Q1], ["hint"])
+    with pytest.raises(benchmark.BenchmarkError, match="no condition named 'aicc'"):
+        benchmark.matrix_cells(["aicc"], [Q1])
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "slab.toml").write_text(SLAB_TOML)
+    monkeypatch.setenv("GATEWAY_API_KEY", "not-a-real-key")
+    result = runner.invoke(
+        app,
+        ["benchmark", "matrix", "--partition", "cpu", "--condition", "slab", "--condition",
+         "bare", "--question", "1", "--question", "vacancy", "--without", "budget-hint"],
+    )
+    assert result.exit_code == 0, result.output
+    grid = tmp_path / "sandbox" / "matrix"
+    manifest = json.loads((grid / "matrix.json").read_text())
+    assert [m["harness"] for m in manifest] == ["slab"] * 2 + ["bare"] * 2 + [
+        "slab -budget-hint"
+    ] * 2
+    assert [m["question"] for m in manifest] == [1, 3, 1, 3, 1, 3]
+    for cell in manifest:
+        assert Path(cell["script"]).is_file()
+    bare = (grid / "bare" / "q3-vacancy" / "mason-sandbox.sbatch").read_text()
+    assert "--condition bare" in bare and "--without" not in bare
+    assert "monovacancy" in bare
+    ablated = (grid / "slab-without-budget-hint" / "q1-a0" / "mason-sandbox.sbatch").read_text()
+    assert "--condition slab --without budget-hint" in ablated
+    assert "6 job(s) rendered" in result.output and "nothing submitted" in result.output
+    assert not (tmp_path / "benchmarks").exists()
+    # The default grid is every condition by every question.
+    assert len(benchmark.matrix_cells(list(benchmark.CONDITIONS), list(benchmark.QUESTIONS))) == 15

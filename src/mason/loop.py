@@ -47,6 +47,7 @@ from mason.client import (
 )
 from mason.config import AgentConfig, override_agent, roster_agent_config
 from mason.errors import MasonError
+from mason.mechanisms import effective, enabled
 from mason.prompts import COMPACTION_PROMPT, system_messages, team_block
 from mason.reviews import plan_is_approved
 from mason.roster import (
@@ -101,8 +102,7 @@ _COMPACTION_MAX_TOKENS = 4_096
 #: block, or a template that emitted nothing), not an answer; one campaign
 #: closed on exactly that after two and a half hours. The loop asks once.
 _EMPTY_REPLY_NUDGE = (
-    "[harness] your reply was empty: act with a tool call, or call finish with "
-    "the report"
+    "[harness] your reply was empty: act with a tool call, or call finish with the report"
 )
 #: A reply the server cut at max_tokens carried nothing usable: with a
 #: thinking model the whole budget went to the think block. Repeating the
@@ -169,9 +169,25 @@ def _looking_hint(looking: int) -> str:
     )
 
 
-def _turn_hint(step: int, max_turns: int, looking: int = 0) -> str:
-    """The ephemeral line each request ends with: the budget, and the step-back."""
-    return _budget_hint(step, max_turns) + _looking_hint(looking)
+def _turn_hint(
+    step: int, max_turns: int, looking: int = 0, *, budget: bool = True, step_back: bool = True
+) -> str:
+    """The ephemeral line each request ends with: the budget, and the step-back.
+
+    Each half has its switch (``budget-hint``, ``looking-hint``); with both
+    off the line is empty and the request carries no hint at all.
+
+    Examples:
+        >>> _turn_hint(1, 10)
+        '[step 1 of 10]'
+        >>> _turn_hint(1, 10, 15, budget=False).startswith('[15 consecutive')
+        True
+        >>> _turn_hint(1, 10, 15, budget=False, step_back=False)
+        ''
+    """
+    line = _budget_hint(step, max_turns) if budget else ""
+    tail = _looking_hint(looking) if step_back else ""
+    return (line + tail).strip()
 
 
 def _budget_hint(step: int, max_turns: int) -> str:
@@ -278,7 +294,7 @@ def _check_lead_can_delegate(
     """
     if spec.tools is None or "delegate" not in spec.tools:
         return
-    if not agent.delegation:
+    if not enabled(agent, "delegation"):
         raise MasonError(
             f"the {spec.name} card hands every step to its team, but [agent] "
             f"delegation is off; set delegation = true or run another card"
@@ -291,9 +307,7 @@ def _check_lead_can_delegate(
         )
 
 
-def _check_review_first(
-    spec: AgentSpec, agent: AgentConfig, roster: dict[str, AgentSpec]
-) -> None:
+def _check_review_first(spec: AgentSpec, agent: AgentConfig, roster: dict[str, AgentSpec]) -> None:
     """Refuse a card that must be reviewed before compute but cannot be.
 
     A ``review_first`` card's launches and briefs are refused until a
@@ -301,9 +315,11 @@ def _check_review_first(
     the roster, that approval can never arrive, and the card would sit
     with every compute tool refusing. Say so before the model is called.
     """
-    if not spec.review_first:
+    if not spec.review_first or not enabled(agent, "critic-gate"):
+        # With the critic gate switched off (an ablation), the card runs
+        # ungated: there is nothing a critic would be needed for.
         return
-    if not agent.delegation:
+    if not enabled(agent, "delegation"):
         raise MasonError(
             f"the {spec.name} card spends no compute before a critic approves the plan, "
             f"but [agent] delegation is off, so no critic can run; set delegation = "
@@ -339,9 +355,7 @@ def client_from_config(agent: AgentConfig, keys: dict[str, str] | None = None) -
     anonymous access, so a missing key there is refused before any request.
     """
     if agent.model is None:
-        served = (
-            "e.g. claude-opus-5" if agent.provider == "anthropic" else "'mason doctor' lists"
-        )
+        served = "e.g. claude-opus-5" if agent.provider == "anthropic" else "'mason doctor' lists"
         raise MasonError(
             f"no model configured: set [agent] model in the slab config "
             f"('slab config init' writes a template; {served} what the endpoint serves)"
@@ -509,6 +523,11 @@ class Mason:
                     # can attribute a bloated or a truncated turn.
                     "effort": session.agent.effort,
                     "version": __version__,
+                    # The harness arm and its switches, so a benchmark record
+                    # says which mechanisms the campaign ran with.
+                    "condition": session.condition,
+                    "mechanisms": list(effective(session.agent)),
+                    "ablated": list(session.ablated),
                 }
             )
         if resume_from:
@@ -552,7 +571,14 @@ class Mason:
             self.steps_taken = step
             self._clear_tool_results()
             self._maybe_compact()
-            reply = self._call_model(hint=_turn_hint(step, max_turns, self._looking_streak))
+            hint = _turn_hint(
+                step,
+                max_turns,
+                self._looking_streak,
+                budget=enabled(self.session.agent, "budget-hint"),
+                step_back=enabled(self.session.agent, "looking-hint"),
+            )
+            reply = self._call_model(hint=hint or None)
             calls = list(reply.tool_calls)
             from_text = False
             if not calls:
@@ -574,7 +600,8 @@ class Mason:
                     # answer at low effort; a second cut ends the turn below.
                     cut_nudged = True
                     self._append({"role": "user", "content": _CUT_REPLY_NUDGE})
-                    self._effort_override = _retry_effort(self.session.agent.effort)
+                    if enabled(self.session.agent, "adaptive-effort"):
+                        self._effort_override = _retry_effort(self.session.agent.effort)
                     continue
                 if not text.strip() and not empty_nudged and reply.finish_reason != "max_tokens":
                     # No text and no call is a fault, not an answer. Ask once;
@@ -586,9 +613,7 @@ class Mason:
                 if truncated:
                     # A truncated answer must not be passed off as a finished one.
                     text += _TRUNCATED_MARK
-                return TurnResult(
-                    text=text, stop_reason="answer", steps=step, truncated=truncated
-                )
+                return TurnResult(text=text, stop_reason="answer", steps=step, truncated=truncated)
             for position, call in enumerate(calls):
                 if call.name == "finish" and call.arguments_error is None:
                     if len(calls) > 1:
@@ -625,9 +650,7 @@ class Mason:
                     raw_results = call.arguments.get("results")
                     results = dict(raw_results) if isinstance(raw_results, dict) else {}
                     raw_ids = call.arguments.get("run_ids")
-                    run_ids = (
-                        tuple(str(r) for r in raw_ids) if isinstance(raw_ids, list) else ()
-                    )
+                    run_ids = tuple(str(r) for r in raw_ids) if isinstance(raw_ids, list) else ()
                     raw_verdict = call.arguments.get("verdict")
                     verdict = raw_verdict if raw_verdict in ("approve", "revise") else None
                     self.session.record(
@@ -656,9 +679,14 @@ class Mason:
                     # protocol-invalid history, and --resume would replay it.
                     self._answer_unrun(calls[position:], from_text=from_text)
                     raise
-                result = self._note_repetition(call, result)
+                if enabled(self.session.agent, "identical-result-annotation"):
+                    result = self._note_repetition(call, result)
                 self._append_tool_result(call, result, as_text=from_text)
-                if call.name == "plan" and result.startswith("PLAN.md updated:"):
+                if (
+                    call.name == "plan"
+                    and result.startswith("PLAN.md updated:")
+                    and enabled(self.session.agent, "context-hygiene")
+                ):
                     self._supersede_plan_echoes()
                 error_streak = 0 if ok else error_streak + 1
                 if error_streak >= _ERROR_STREAK_LIMIT:
@@ -728,15 +756,24 @@ class Mason:
                     f"still in your context; {len(result)} characters not repeated]"
                 )
                 self._seen_results[(call.name, call.arguments_raw)] = (
-                    digest, times, copy_index, copy_step
+                    digest,
+                    times,
+                    copy_index,
+                    copy_step,
                 )
             else:
                 self._seen_results[(call.name, call.arguments_raw)] = (
-                    digest, times, len(self.messages), self.steps_taken
+                    digest,
+                    times,
+                    len(self.messages),
+                    self.steps_taken,
                 )
         else:
             self._seen_results[(call.name, call.arguments_raw)] = (
-                digest, times, len(self.messages), self.steps_taken
+                digest,
+                times,
+                len(self.messages),
+                self.steps_taken,
             )
         if self._repeat_streak == 2:
             return (
@@ -980,9 +1017,7 @@ class Mason:
         # answer, so their results go back as labeled user messages (a tool
         # message without a preceding tool_calls violates the protocol).
         if self.fenced or as_text:
-            self._append(
-                {"role": "user", "content": f"[tool result: {call.name}]\n{result}"}
-            )
+            self._append({"role": "user", "content": f"[tool result: {call.name}]\n{result}"})
         else:
             self._append({"role": "tool", "tool_call_id": call.id, "content": result})
 
@@ -1008,7 +1043,7 @@ class Mason:
         record of what went wrong is what stops a model repeating it.
         """
         agent = self.session.agent
-        if not agent.clear_tool_results:
+        if not enabled(agent, "context-hygiene"):
             return
         if self._estimated_prompt_tokens() < int(
             agent.context_window * agent.clear_tool_results_at

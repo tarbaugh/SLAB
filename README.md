@@ -166,10 +166,10 @@ model and scored on one criterion: did the agent compute a correct
 answer, backed by verified runs?
 
 <!-- benchmark:summary:start -->
-| Model | Machine | Passed |
-| --- | --- | --- |
-| llama3.1:8b | laptop | 0/5 |
-| llama3.1:8b-32k | laptop | 0/5 |
+| Model | Machine | Condition | Passed |
+| --- | --- | --- | --- |
+| llama3.1:8b | laptop | slab | 0/5 |
+| llama3.1:8b-32k | laptop | slab | 0/5 |
 
 Five copper questions with known answers; [the benchmark](https://tarbaugh.github.io/SLAB/benchmark/) has the rule.
 <!-- benchmark:summary:end -->

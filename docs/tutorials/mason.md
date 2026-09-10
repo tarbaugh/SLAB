@@ -841,7 +841,10 @@ consecutive harness-level tool failures, with the evidence left in place.
 The prompt sets bounded diagnose-then-retry expectations, and
 required-argument validation answers with the tool's schema instead of a
 stack trace. Token usage is accounted per turn from the server's own numbers
-and recorded in the transcript.
+and recorded in the transcript. Every mechanism beyond the loop itself is a
+named switch (`[agent] mechanisms`), so the benchmark can turn it off and
+measure it; [the mechanism ledger](../benchmark.md#the-mechanism-ledger)
+lists them.
 
 ## Design provenance
 

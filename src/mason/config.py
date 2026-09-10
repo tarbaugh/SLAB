@@ -247,6 +247,23 @@ class AgentConfig(BaseModel):
     # (mason.roster); config holds only the machine facts about them.
     delegation: bool = True
     roster: dict[str, RosterOverride] = Field(default_factory=dict)
+    # The harness mechanisms this session runs with (mason.mechanisms):
+    # unset means every one. A name outside the registry is refused, so a
+    # misspelled switch cannot sit in the file looking effective. The
+    # benchmark's conditions and its ablation grid set this per session.
+    mechanisms: tuple[str, ...] | None = None
+
+    @field_validator("mechanisms")
+    @classmethod
+    def _known_mechanisms(cls, value: tuple[str, ...] | None) -> tuple[str, ...] | None:
+        if value is None:
+            return None
+        from mason.mechanisms import ConditionError, check_mechanisms
+
+        try:
+            return check_mechanisms(value)
+        except ConditionError as e:
+            raise ValueError(str(e)) from None
 
     @property
     def resolved_endpoint(self) -> str:
