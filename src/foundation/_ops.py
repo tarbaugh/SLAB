@@ -17,6 +17,7 @@ import re
 import runpy
 import sys
 import traceback
+from collections.abc import Iterable, Sequence
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any
@@ -26,11 +27,12 @@ from foundation.errors import (
     IllegalTransitionError,
     NestedRunError,
     ScriptExitError,
+    SessionNotFoundError,
     StorageError,
 )
 from foundation.lifecycle import ExecutionStatus, LifecycleState
 from foundation.models import ArtifactRole, Run
-from foundation.retention import DEFAULT_POLICY, RetentionPolicy
+from foundation.retention import DEFAULT_POLICY, RetentionPolicy, _reachable_hashes
 from foundation.runtime import Workspace, describe_liveness
 
 DEFAULT_ROOT = ".slab"
@@ -346,6 +348,210 @@ def _verdict(run: Run, *, force: bool) -> tuple[str, str]:
             return "skipped", "not verified: pass --force to promote it anyway"
         return "promoted", "forced: never verified"
     return "skipped", f"{run.state.value}: nothing to promote"
+
+
+RETIRE_MODES = ("keep", "expire", "purge")
+
+
+def retire_session(
+    ws: Workspace,
+    session: str,
+    *,
+    keep: Sequence[str] = (),
+    mode: str = "expire",
+    reason: str | None = None,
+    actor: str = "system",
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Promote what a session's finish cites; expire what it did not.
+
+    This is ``slab retire``, the MCP ``retire_session`` tool, and what
+    Mason does after a root session's ``finish``. *session* is a full id
+    or a unique prefix. *keep* lists the cited runs (full ids or unique
+    prefixes); a kept run may belong to another session, because a
+    campaign cites the anchors it built on earlier. *mode* is what
+    happens to this session's uncited runs: ``keep`` leaves them to the
+    TTL sweep, ``expire`` moves them to ``expired``, and ``purge`` also
+    deletes their rows and unshared bytes.
+
+    Outcomes per kept run: ``promoted``, ``already`` (permanent before
+    the call), or ``skipped`` with a detail (``not verified``,
+    ``failed``, ``expired``, ``running``, ``unknown id``). A kept run is
+    never forced. An uncited run of the session is expired when it is
+    quarantined or verified and not running; a running run, a permanent
+    run, and an already expired run are reported under ``skipped``.
+    Every write is compare-and-swap guarded, so a run that changes state
+    under the call is skipped rather than moved on stale information.
+
+    Every outcome is idempotent: a second call reports ``already`` for
+    the kept runs and expires nothing new. *dry_run* computes the same
+    report and writes nothing.
+
+    The report carries the retention numbers a benchmark records:
+    ``runs_total`` (the session's runs), ``runs_promoted``,
+    ``runs_expired``, and the bytes reachable from each group
+    (``bytes_total``, ``bytes_promoted``, ``bytes_expired``).
+
+    Raises:
+        AmbiguousSessionError: The prefix matches several sessions.
+    """
+    if mode not in RETIRE_MODES:
+        raise ValueError(f"retire mode must be keep, expire, or purge, not {mode!r}")
+    try:
+        resolved = ws.runs.resolve_session(session)
+        session_runs = list(reversed(ws.runs.list_runs(session=resolved)))
+    except SessionNotFoundError:
+        # A session that launched nothing has nothing to expire; it may
+        # still cite runs from earlier sessions.
+        resolved, session_runs = session, []
+    why = reason if reason else f"cited by the finish of session {resolved}"
+
+    kept: list[dict[str, Any]] = []
+    kept_ids: set[str] = set()
+    for value in keep:
+        try:
+            run_id = ws.runs.resolve(str(value))
+        except FoundationError as e:
+            kept.append(
+                {
+                    "id": str(value),
+                    "name": None,
+                    "state": None,
+                    "status": None,
+                    "outcome": "skipped",
+                    "detail": f"unknown id: {e}",
+                }
+            )
+            continue
+        if run_id in kept_ids:
+            continue
+        kept_ids.add(run_id)
+        run = ws.runs.get(run_id)
+        outcome, detail = _keep_verdict(run)
+        if outcome == "promoted" and not dry_run:
+            try:
+                ws.runs.transition(
+                    run.id,
+                    LifecycleState.PROMOTED,
+                    actor=actor,
+                    reason=why,
+                    expected=run.state,
+                )
+            except IllegalTransitionError as e:
+                outcome, detail = "skipped", str(e)
+        kept.append(
+            {
+                "id": run.id,
+                "name": run.name,
+                "state": run.state.value,
+                "status": run.status.value,
+                "outcome": outcome,
+                "detail": detail,
+            }
+        )
+
+    expired: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for run in session_runs:
+        if run.id in kept_ids:
+            continue
+        if mode == "keep":
+            continue
+        entry = {
+            "id": run.id,
+            "name": run.name,
+            "state": run.state.value,
+            "status": run.status.value,
+        }
+        if run.status is ExecutionStatus.RUNNING:
+            skipped.append(entry | {"detail": "running: a live process owns it"})
+            continue
+        if run.state in PERMANENT_STATES:
+            skipped.append(entry | {"detail": "already permanent"})
+            continue
+        if run.state is LifecycleState.EXPIRED:
+            skipped.append(entry | {"detail": "already expired"})
+            continue
+        if not dry_run:
+            try:
+                ws.runs.transition(
+                    run.id,
+                    LifecycleState.EXPIRED,
+                    actor=actor,
+                    reason=f"uncited by the finish of session {resolved}",
+                    expected=run.state,
+                )
+            except IllegalTransitionError as e:
+                skipped.append(entry | {"detail": str(e)})
+                continue
+        expired.append(entry)
+
+    def reachable(ids: Iterable[str]) -> set[str]:
+        digests: set[str] = set()
+        for run_id in ids:
+            digests |= _reachable_hashes(ws.runs, ws.runs.get(run_id))
+        return digests
+
+    def size_of(digests: set[str]) -> int:
+        return sum(ws.artifacts.size(d) for d in digests if ws.artifacts.has(d))
+
+    permanent = [k["id"] for k in kept if k["outcome"] in ("promoted", "already")]
+    bytes_promoted = size_of(reachable(permanent))
+    bytes_expired = size_of(reachable(e["id"] for e in expired))
+    bytes_total = size_of(reachable(run.id for run in session_runs))
+
+    purged: dict[str, Any] = {}
+    if mode == "purge" and expired:
+        report = ws.purge_expired(dry_run=dry_run, only=[e["id"] for e in expired])
+        purged = {"deleted": report.deleted, "freed_bytes": report.freed_bytes}
+
+    return {
+        "session": resolved,
+        "mode": mode,
+        "dry_run": dry_run,
+        "reason": why,
+        "kept": kept,
+        "expired": expired,
+        "purged": purged,
+        "skipped": skipped,
+        "complete": all(k["outcome"] != "skipped" for k in kept),
+        "runs_total": len(session_runs),
+        "runs_promoted": sum(1 for k in kept if k["outcome"] == "promoted"),
+        "runs_expired": len(expired),
+        "bytes_total": bytes_total,
+        "bytes_promoted": bytes_promoted,
+        "bytes_expired": bytes_expired,
+    }
+
+
+def _keep_verdict(run: Run) -> tuple[str, str]:
+    """What a retire does with one cited run, and why (pure). Never forces.
+
+    Examples:
+        >>> _keep_verdict(Run(state="verified"))
+        ('promoted', 'checks passed')
+        >>> _keep_verdict(Run(state="promoted"))
+        ('already', 'already permanent')
+        >>> _keep_verdict(Run(state="quarantined", status="completed"))
+        ('skipped', 'not verified')
+        >>> _keep_verdict(Run(state="quarantined", status="failed"))
+        ('skipped', 'failed')
+        >>> _keep_verdict(Run(state="quarantined", status="running"))
+        ('skipped', 'running')
+        >>> _keep_verdict(Run(state="expired"))
+        ('skipped', 'expired')
+    """
+    if run.state in PERMANENT_STATES:
+        return "already", "already permanent"
+    if run.status is ExecutionStatus.RUNNING:
+        return "skipped", "running"
+    if run.state is LifecycleState.VERIFIED:
+        return "promoted", "checks passed"
+    if run.state is LifecycleState.EXPIRED:
+        return "skipped", "expired"
+    if run.status is ExecutionStatus.FAILED:
+        return "skipped", "failed"
+    return "skipped", "not verified"
 
 
 def launch_script(

@@ -14,6 +14,7 @@ from foundation._ops import (
     parse_duration_days,
     promote_session,
     resolve_root,
+    retire_session,
     run_details,
     run_summary,
     sessions_summary,
@@ -427,6 +428,206 @@ def test_promote_session_yields_to_a_concurrent_change(root: Path) -> None:
         assert "someone else moved it" in outcome["detail"]
         assert result["complete"] is False
         assert ws.runs.get(run_id).state.value == "verified"
+
+
+# -- retire_session ------------------------------------------------------------------
+
+
+def _kept_run(ws: Workspace, name: str, *, session: str, payload: bytes) -> str:
+    """A verified run with one artifact whose bytes are its own."""
+    with ws.start_run(name=name, session=session) as run:
+        run.keep("out", payload)
+        run.check(lambda: True, name="gate")
+    return run.id
+
+
+def _outcomes(report: dict[str, object]) -> dict[str, str]:
+    return {str(k["id"]): str(k["outcome"]) for k in report["kept"]}  # type: ignore[index,union-attr]
+
+
+def test_retire_promotes_the_cited_and_expires_the_rest(root: Path) -> None:
+    with Workspace(root) as ws:
+        cited = _kept_run(ws, "eos", session="chat-1", payload=b"a" * 100)
+        shakeout = _kept_run(ws, "smoke", session="chat-1", payload=b"b" * 40)
+        draft = _run(ws, "draft", verified=False, session="chat-1")
+        report = retire_session(ws, "chat-1", keep=[cited])
+        assert _outcomes(report) == {cited: "promoted"}
+        assert [e["id"] for e in report["expired"]] == [shakeout, draft]
+        assert report["skipped"] == [] and report["purged"] == {}
+        assert report["complete"] is True
+        assert (report["runs_total"], report["runs_promoted"], report["runs_expired"]) == (3, 1, 2)
+        assert report["bytes_promoted"] > report["bytes_expired"] > 0
+        assert report["bytes_total"] == report["bytes_promoted"] + report["bytes_expired"]
+        assert ws.runs.get(cited).state.value == "promoted"
+        assert ws.runs.get(shakeout).state.value == "expired"
+        assert ws.runs.get(draft).state.value == "expired"
+        assert ws.runs.history(cited)[-1].reason == "cited by the finish of session chat-1"
+        assert ws.runs.history(cited)[-1].actor == "system"
+        assert ws.runs.history(shakeout)[-1].reason == "uncited by the finish of session chat-1"
+        # The expired run keeps its row and its bytes: expire is a state change.
+        assert ws.artifacts.has(ws.runs.get_artifact(shakeout, "out").hash)
+
+
+@pytest.mark.parametrize(
+    ("make", "detail"),
+    [
+        ("unverified", "not verified"),
+        ("failed", "failed"),
+        ("expired", "expired"),
+        ("running", "running"),
+        ("unknown", "unknown id"),
+    ],
+)
+def test_retire_reports_a_cited_run_it_cannot_promote_and_never_forces(
+    root: Path, make: str, detail: str
+) -> None:
+    with Workspace(root) as ws:
+        if make == "unverified":
+            run_id = _run(ws, "a", verified=False, session="chat-1")
+        elif make == "failed":
+            with pytest.raises(RuntimeError), ws.start_run(name="a", session="chat-1") as run:
+                raise RuntimeError("boom")
+            run_id = run.id
+        elif make == "expired":
+            run_id = _run(ws, "a", verified=True, session="chat-1")
+            ws.runs.transition(run_id, "expired", reason="ttl")
+        elif make == "running":
+            active = ws.start_run(name="a", session="chat-1")
+            run_id = active.__enter__().id
+        else:
+            _run(ws, "other", verified=True, session="chat-1")
+            run_id = "01zzzzzzzzzzzzzzzzzzzzzzzz"
+        report = retire_session(ws, "chat-1", keep=[run_id])
+        (kept,) = report["kept"]
+        assert kept["outcome"] == "skipped"
+        assert kept["detail"].startswith(detail)
+        assert report["complete"] is False
+        if make != "unknown":
+            assert ws.runs.get(run_id).state.value != "promoted"
+        if make == "running":
+            assert report["expired"] == []  # a cited run is never expired either
+            active.__exit__(None, None, None)
+
+
+def test_retire_promotes_an_anchor_from_an_earlier_session(root: Path) -> None:
+    """Q2 cites the equation-of-state run Q1 made: promote it under Q2's finish."""
+    with Workspace(root) as ws:
+        anchor = _run(ws, "eos", verified=True, session="chat-1")
+        own = _run(ws, "vacancy", verified=True, session="chat-2")
+        report = retire_session(ws, "chat-2", keep=[anchor, own])
+        assert _outcomes(report) == {anchor: "promoted", own: "promoted"}
+        assert ws.runs.get(anchor).state.value == "promoted"
+        assert ws.runs.history(anchor)[-1].reason == "cited by the finish of session chat-2"
+        # Only chat-2's runs are candidates for expiry; chat-1's are not touched.
+        other = _run(ws, "smoke", verified=True, session="chat-1")
+        retire_session(ws, "chat-2", keep=[anchor])
+        assert ws.runs.get(other).state.value == "verified"
+
+
+def test_retire_skips_a_running_uncited_run_and_the_permanent_ones(root: Path) -> None:
+    with Workspace(root) as ws:
+        permanent = _run(ws, "kept", verified=True, session="chat-1")
+        ws.runs.transition(permanent, "promoted", reason="by hand")
+        gone = _run(ws, "old", verified=False, session="chat-1")
+        ws.runs.transition(gone, "expired", reason="ttl")
+        active = ws.start_run(name="live", session="chat-1")
+        live = active.__enter__().id
+        try:
+            report = retire_session(ws, "chat-1")
+        finally:
+            active.__exit__(None, None, None)
+        assert report["expired"] == []
+        details = {s["id"]: s["detail"] for s in report["skipped"]}
+        assert details[permanent] == "already permanent"
+        assert details[gone] == "already expired"
+        assert details[live].startswith("running")
+        assert ws.runs.get(live).state.value == "quarantined"
+
+
+def test_retire_is_idempotent(root: Path) -> None:
+    with Workspace(root) as ws:
+        cited = _run(ws, "a", verified=True, session="chat-1")
+        _run(ws, "b", verified=True, session="chat-1")
+        first = retire_session(ws, "chat-1", keep=[cited])
+        assert (first["runs_promoted"], first["runs_expired"]) == (1, 1)
+        again = retire_session(ws, "chat-1", keep=[cited])
+        assert _outcomes(again) == {cited: "already"}
+        assert (again["runs_promoted"], again["runs_expired"]) == (0, 0)
+        assert [s["detail"] for s in again["skipped"]] == ["already expired"]
+        assert again["complete"] is True
+        assert len(ws.runs.history(cited)) == len(ws.runs.history(cited))
+
+
+def test_retire_dry_run_writes_nothing(root: Path) -> None:
+    with Workspace(root) as ws:
+        cited = _run(ws, "a", verified=True, session="chat-1")
+        other = _run(ws, "b", verified=True, session="chat-1")
+        before = (len(ws.runs.history(cited)), len(ws.runs.history(other)))
+        report = retire_session(ws, "chat-1", keep=[cited], mode="purge", dry_run=True)
+        assert report["dry_run"] is True
+        assert _outcomes(report) == {cited: "promoted"}
+        assert [e["id"] for e in report["expired"]] == [other]
+        assert report["purged"]["deleted"] == [] and report["purged"]["freed_bytes"] == 0
+        assert ws.runs.get(cited).state.value == "verified"
+        assert ws.runs.get(other).state.value == "verified"
+        assert (len(ws.runs.history(cited)), len(ws.runs.history(other))) == before
+
+
+def test_retire_mode_keep_expires_nothing(root: Path) -> None:
+    with Workspace(root) as ws:
+        cited = _run(ws, "a", verified=True, session="chat-1")
+        other = _run(ws, "b", verified=True, session="chat-1")
+        report = retire_session(ws, "chat-1", keep=[cited], mode="keep")
+        assert report["expired"] == [] and report["skipped"] == []
+        assert ws.runs.get(cited).state.value == "promoted"
+        assert ws.runs.get(other).state.value == "verified"
+
+
+def test_retire_purge_keeps_bytes_a_promoted_run_reaches_through_a_purged_sibling(
+    root: Path,
+) -> None:
+    """The cited run consumed what an uncited sibling produced. Purging the
+    sibling must not take the shared bytes: the promoted run still names them."""
+    from foundation import task
+
+    @task
+    def make(seed: int) -> dict[str, int]:
+        return {"seed": seed}
+
+    @task
+    def consume(data: dict[str, int]) -> int:
+        return data["seed"] + 1
+
+    with Workspace(root) as ws:
+        with ws.start_run(name="producer", session="chat-1") as producer:
+            produced = make(7)
+            producer.keep("scratch", b"s" * 60)
+            producer.check(lambda: True, name="gate")
+        with ws.start_run(name="consumer", session="chat-1") as consumer:
+            consume(produced)
+            consumer.check(lambda: True, name="gate")
+        (shared,) = ws.runs.list_tasks(producer.id)[0].outputs.values()
+        scratch = ws.runs.get_artifact(producer.id, "scratch").hash
+        assert ws.runs.list_tasks(consumer.id)[0].inputs["data"] == shared
+        report = retire_session(ws, "chat-1", keep=[consumer.id], mode="purge")
+        assert report["purged"]["deleted"] == [producer.id]
+        assert report["purged"]["freed_bytes"] >= 60
+        assert ws.artifacts.has(shared)
+        assert not ws.artifacts.has(scratch)
+        assert [r.name for r in ws.runs.list_runs()] == ["consumer"]
+        assert ws.runs.get(consumer.id).state.value == "promoted"
+
+
+def test_retire_of_a_session_that_made_no_runs_is_an_empty_report(root: Path) -> None:
+    with Workspace(root) as ws:
+        report = retire_session(ws, "never-ran")
+        assert (report["runs_total"], report["kept"], report["expired"]) == (0, [], [])
+        assert report["complete"] is True
+
+
+def test_retire_rejects_an_unknown_mode(root: Path) -> None:
+    with Workspace(root) as ws, pytest.raises(ValueError, match="keep, expire, or purge"):
+        retire_session(ws, "chat-1", mode="delete")
 
 
 # -- wait_for_run and liveness ----------------------------------------------------

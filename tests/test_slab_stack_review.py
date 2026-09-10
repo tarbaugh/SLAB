@@ -324,6 +324,53 @@ def test_an_unverified_run_is_blamed_on_the_skill_in_force(tmp_path: Path) -> No
     assert [f["target"] for f in record["flags"]] == ["card:dft-expert"]
 
 
+def test_a_session_retired_at_finish_scores_and_flags_the_same(tmp_path: Path) -> None:
+    """After the finish, the cited run is promoted and the uncited ones are
+    expired. A verified shakeout that expired is not a failure; the draft
+    that never verified still is."""
+    from foundation import Workspace, _ops
+
+    root = tmp_path / "ws"
+    session = "20260901-100000-6"
+    cited = _run(root, session)
+    shakeout = _run(root, session, name="smoke")
+    draft = _run(root, session, check=None, name="draft")
+    with Workspace(root) as ws:
+        report = _ops.retire_session(ws, session, keep=[cited])
+        assert ws.runs.get(cited).state.value == "promoted"
+        assert ws.runs.get(shakeout).state.value == "expired"
+        assert ws.runs.get(draft).state.value == "expired"
+    _transcript(
+        root,
+        session,
+        [
+            _header(),
+            _user(Q1.instruction),
+            _skill(at=LONG_AGO),
+            _call("shell", command="python x/scripts/fit_eos.py eos.json"),
+            _result("exit 0\nfine"),
+            _finish({"a0": {"value": 3.60, "unit": "Å"}}, [cited]),
+            {"at": "2026-09-01T10:05:01+00:00", "type": "retire", **report},
+        ],
+    )
+    record = benchmark.score_session(root, session)
+    assert record["passed"] is True, record["reason"]
+    flagged = {f["evidence"].split()[1]: f for f in record["flags"]}
+    assert set(flagged) == {draft[:10]}
+    assert flagged[draft[:10]]["rule"] == "run-not-verified"
+    assert record["retention"]["runs_promoted"] == 1
+    assert record["retention"]["runs_expired"] == 2
+    assert "error" not in record["retention"]
+    from mason.session import transcript_for
+
+    with Workspace(root) as ws:
+        runs = review.session_runs(ws, session)
+    pack = review.evidence_pack(
+        review.walk(transcript_for(root, session)), Q1, record, runs, discover_skills(root)
+    )
+    assert f"run {shakeout[:10]} smoke: state expired (verified, then expired at finish)" in pack
+
+
 @pytest.mark.parametrize(("unit", "flagged"), [("nm", True), ("A", False), ("angstrom", False)])
 def test_a_unit_that_is_not_the_questions_is_flagged_on_the_finish_tool(
     tmp_path: Path, unit: str, flagged: bool

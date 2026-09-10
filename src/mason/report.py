@@ -9,7 +9,7 @@ happened so far.
 
 The event vocabulary is the one :meth:`mason.session.MasonSession.record`
 writes: ``session`` (the header naming the model that answered),
-``message``, ``reasoning``, ``skill``, ``compaction``, ``finish``,
+``message``, ``reasoning``, ``skill``, ``compaction``, ``finish``, ``retire``,
 ``resume``, and ``usage``. A malformed line is counted and skipped — a
 report must describe a damaged transcript, not refuse it.
 """
@@ -72,6 +72,7 @@ def _tally(transcript: Path) -> dict[str, Any]:
     finish_results: dict[str, Any] = {}
     finish_run_ids: list[str] = []
     finished = False
+    retire: dict[str, Any] | None = None
     header: dict[str, Any] = {}
     # Tool results carry no name, but they answer the most recent
     # assistant message's calls in order.
@@ -140,6 +141,8 @@ def _tally(transcript: Path) -> dict[str, Any]:
             finish_results = dict(raw_results) if isinstance(raw_results, dict) else {}
             raw_ids = event.get("run_ids")
             finish_run_ids = [str(r) for r in raw_ids] if isinstance(raw_ids, list) else []
+        elif kind == "retire":
+            retire = {k: v for k, v in event.items() if k not in ("at", "type")}
 
     return {
         "model": header.get("model"),
@@ -178,6 +181,7 @@ def _tally(transcript: Path) -> dict[str, Any]:
             "results": finish_results,
             "run_ids": finish_run_ids,
         },
+        "retire": retire,
     }
 
 

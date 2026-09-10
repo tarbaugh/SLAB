@@ -31,9 +31,10 @@ out, only explicitly archived.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from contextlib import suppress
 from datetime import datetime, timedelta
-from typing import cast
+from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -71,6 +72,36 @@ class StateRule(BaseModel):
     keep: frozenset[ArtifactRole] = _ALL_ROLES
 
 
+class FinishRule(BaseModel):
+    """What a session's finish does with the runs it made.
+
+    A campaign's finish call names the runs behind every number it reports.
+    That call is the completion-time act the lifecycle asks for, so the
+    policy says what follows from it.
+
+    Fields:
+        promote_cited: Promote every verified run the finish cites.
+        uncited: What happens to the session's runs the finish did not
+            cite: ``keep`` leaves them to the TTL sweep, ``expire`` moves
+            them to ``expired`` (the default), and ``purge`` deletes their
+            rows and unshared bytes at once.
+
+    Examples:
+        >>> FinishRule.model_validate({"uncited": "purge"}).uncited
+        'purge'
+        >>> try:
+        ...     FinishRule.model_validate({"uncited": "delete"})
+        ... except ValueError:
+        ...     print("rejected: uncited must be keep, expire, or purge")
+        rejected: uncited must be keep, expire, or purge
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    promote_cited: bool = True
+    uncited: Literal["keep", "expire", "purge"] = "expire"
+
+
 class RetentionPolicy(BaseModel):
     """Per-state retention rules. This is policy-as-data: build it from a dict.
 
@@ -82,12 +113,17 @@ class RetentionPolicy(BaseModel):
     no bytes. Promoted/archived rules cannot carry a TTL — validation enforces
     the promotion-is-permanent asymmetry.
 
+    The ``finish`` rule is not a state rule. It says what a session's
+    finish does: promote the runs it cites, and expire the rest.
+
     Examples:
         >>> policy = RetentionPolicy.model_validate({"quarantined": {"ttl_days": 7}})
         >>> policy.quarantined.ttl_days  # overridden
         7.0
         >>> policy.verified.ttl_days  # other states keep their defaults
         90.0
+        >>> policy.finish.promote_cited, policy.finish.uncited
+        (True, 'expire')
         >>> sorted(role.value for role in policy.rule_for("promoted").keep)
         ['input', 'terminal']
         >>> try:
@@ -109,6 +145,7 @@ class RetentionPolicy(BaseModel):
     # day it may still belong to a run that is about to record it, so gc
     # keeps it; older than this, gc drops it. ``null`` keeps orphans forever.
     orphan_ttl_days: float | None = Field(default=1.0, ge=0)
+    finish: FinishRule = FinishRule()
 
     @model_validator(mode="after")
     def _no_ttl_on_permanent_states(self) -> RetentionPolicy:
@@ -363,6 +400,7 @@ def purge_expired(
     artifacts: ArtifactStore,
     *,
     dry_run: bool = False,
+    only: Iterable[str] | None = None,
 ) -> PurgeReport:
     """Delete expired runs outright: rows and bytes, irreversibly.
 
@@ -375,6 +413,10 @@ def purge_expired(
     of reach. Blobs referenced by no run at all are left alone, exactly
     as in gc: they may belong to an in-flight run that has not recorded
     its references yet.
+
+    *only* restricts the purge to the expired runs with those ids (a
+    session's retire uses it). Every other run survives, expired ones
+    included, and so do the bytes any of them references.
 
     Examples:
         >>> import tempfile
@@ -403,13 +445,19 @@ def purge_expired(
         >>> store.close()
     """
     every = runs.list_runs()
-    expired = [run for run in every if run.state is LifecycleState.EXPIRED]
+    chosen = None if only is None else set(only)
+    expired = [
+        run
+        for run in every
+        if run.state is LifecycleState.EXPIRED and (chosen is None or run.id in chosen)
+    ]
+    doomed = {run.id for run in expired}
     candidates: set[str] = set()
     for run in expired:
         candidates |= _reachable_hashes(runs, run)
     surviving: set[str] = set()
     for run in every:
-        if run.state is not LifecycleState.EXPIRED:
+        if run.id not in doomed:
             surviving |= _reachable_hashes(runs, run)
     to_drop = sorted(
         digest for digest in candidates - surviving if artifacts.has(digest)

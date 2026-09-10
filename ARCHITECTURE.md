@@ -152,6 +152,15 @@ means. Naming the two makes the asymmetry above a design *choice* rather than a
 preference: the totality model withholds nothing and compensates for nothing,
 so the only lever it has left is a deletion nobody ever performs.
 
+For an agent campaign, the completion-time act is the `finish` call. Its
+`run_ids` name the runs behind every number the report gives, written at the
+moment the agent has the evidence in front of it. The harness passes those
+ids to the retention operation: the cited runs that passed their checks are
+promoted, and the session's other runs are expired. The asymmetry holds in
+this form too. The agent promotes by citing, and the harness expires what it
+did not cite. Nothing is forced, so a cited run that never verified stays
+where it is and the record says so.
+
 Deletion of promoted data is intentionally hard (there is no CLI verb for it);
 expiry of unpromoted data is intentionally silent. Both halves are the same
 design decision.

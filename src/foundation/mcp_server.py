@@ -89,7 +89,9 @@ Runs carry the client session that created them: list_sessions shows which
 conversation produced which runs, and promote_session promotes a whole one.
 This server's session id is {session}. Every run it launches carries it, and
 report_results records the session's answer (results with units, and the run
-ids that produced them) where a benchmark scorer reads it.
+ids that produced them) where a benchmark scorer reads it. Call retire_session
+last: it promotes the verified runs the answer cites and expires this session's
+other runs, and it cannot be undone.
 The project directory is {project}: its NOTEBOOK.md and PLAN.md are the notebook
 and plan tools' files, and its skills/ directory adds to the skill catalog.
 """
@@ -541,6 +543,36 @@ def build_server(
             {"type": "results", "results": clean, "run_ids": resolved, "summary": summary}
         )
         return {"session": session_id, "recorded": str(path), "results": clean, "run_ids": resolved}
+
+    @server.tool()
+    @_surfaced
+    def retire_session(
+        run_ids: list[str], uncited: str | None = None, dry_run: bool = False
+    ) -> dict[str, Any]:
+        """Retire this session, last of all: promote the verified runs the
+        answer rests on (run_ids, full ids or unique prefixes, anchors from
+        earlier sessions included) and expire this session's other runs.
+        A cited run that is not verified is reported and left alone, never
+        forced. uncited is keep, expire (the default from the retention
+        policy), or purge, which also deletes the expired rows and their
+        unshared bytes. This cannot be undone: report_results first, then
+        retire. dry_run=True only reports."""
+        policy = _ops.load_policy(root)
+        mode = uncited if uncited is not None else policy.finish.uncited
+        if mode not in _ops.RETIRE_MODES:
+            raise ValueError(f"uncited must be keep, expire, or purge, not {mode!r}")
+        with Workspace(root) as ws:
+            report = _ops.retire_session(
+                ws,
+                session_id,
+                keep=run_ids if policy.finish.promote_cited else [],
+                mode=mode,
+                actor="agent",
+                dry_run=dry_run,
+            )
+        if not dry_run:
+            record.record({"type": "retire", **report})
+        return report
 
     return server
 

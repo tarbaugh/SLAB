@@ -15,6 +15,7 @@ from foundation import (
     DEFAULT_POLICY,
     ArtifactRole,
     ArtifactStore,
+    FinishRule,
     IllegalTransitionError,
     LifecycleState,
     RetentionPolicy,
@@ -77,6 +78,20 @@ def test_nonpositive_ttl_rejected() -> None:
     for bad in (0, -3):
         with pytest.raises(ValidationError):
             StateRule.model_validate({"ttl_days": bad})
+
+
+def test_the_finish_rule_defaults_and_validates() -> None:
+    assert DEFAULT_POLICY.finish == FinishRule(promote_cited=True, uncited="expire")
+    policy = RetentionPolicy.model_validate({"finish": {"uncited": "purge"}})
+    assert policy.finish.uncited == "purge" and policy.finish.promote_cited is True
+    kept = RetentionPolicy.model_validate({"finish": {"promote_cited": False, "uncited": "keep"}})
+    assert (kept.finish.promote_cited, kept.finish.uncited) == (False, "keep")
+
+
+@pytest.mark.parametrize("bad", [{"uncited": "delete"}, {"uncited": "expired"}, {"ttl_days": 3}])
+def test_a_bad_finish_rule_is_rejected(bad: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        RetentionPolicy.model_validate({"finish": bad})
 
 
 def test_unknown_policy_keys_rejected() -> None:
@@ -481,6 +496,32 @@ def test_purge_drops_task_traced_bytes_of_expired_runs(
     assert report.deleted == [run.id]
     assert report.dropped == [blob]
     assert not cas.has(blob)
+    store.close()
+
+
+def test_purge_only_touches_the_named_expired_runs(cas: ArtifactStore) -> None:
+    """Restricted to a set of ids, purge leaves every other run, expired ones
+    included, and keeps the bytes any of them still references."""
+    from foundation import purge_expired
+
+    store = SQLiteRunStore(":memory:")
+    named = store.create(Run(name="named"))
+    other = store.create(Run(name="other-expired"))
+    shared = cas.put_bytes(b"shared by both expired runs")
+    own = cas.put_bytes(b"only the named run's")
+    store.add_artifact(named.id, name="s", role="terminal", hash=shared, size_bytes=27)
+    store.add_artifact(named.id, name="o", role="intermediate", hash=own, size_bytes=20)
+    store.add_artifact(other.id, name="s", role="terminal", hash=shared, size_bytes=27)
+    for run in (named, other):
+        store.transition(run.id, "expired", actor="ttl")
+    report = purge_expired(store, cas, only=[named.id])
+    assert report.deleted == [named.id]
+    assert report.dropped == [own] and report.kept == [shared]
+    assert cas.has(shared) and not cas.has(own)
+    assert [r.name for r in store.list_runs()] == ["other-expired"]
+    # Unrestricted, the default behaviour is unchanged: everything expired goes.
+    rest = purge_expired(store, cas)
+    assert rest.deleted == [other.id] and rest.dropped == [shared]
     store.close()
 
 

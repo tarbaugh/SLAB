@@ -34,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -417,6 +418,40 @@ def _reap_at_session_start(session: MasonSession) -> None:
         return
 
 
+def _retire_at_finish(session: MasonSession, run_ids: tuple[str, ...]) -> None:
+    """Promote what the finish cites; expire what this session did not cite.
+
+    The workspace retention policy's ``finish`` rule decides: with
+    ``promote_cited`` off and ``uncited`` at ``keep`` nothing happens. The
+    outcome lands in the transcript as a ``retire`` event, and a retire
+    that fails records its error there. It never fails the campaign: the
+    finish stands as reported.
+    """
+    import sqlite3
+
+    from foundation import _ops
+    from foundation.errors import FoundationError
+    from foundation.runtime import Workspace
+    from slab.errors import SlabError
+
+    try:
+        rule = _ops.load_policy(Path(session.workspace_root)).finish
+        if not rule.promote_cited and rule.uncited == "keep":
+            return
+        with Workspace(session.workspace_root) as ws:
+            report = _ops.retire_session(
+                ws,
+                session.session_id,
+                keep=run_ids if rule.promote_cited else (),
+                mode=rule.uncited,
+                actor="finish",
+            )
+    except (FoundationError, SlabError, ValueError, sqlite3.Error, OSError) as e:
+        session.record({"type": "retire", "error": str(e)})
+        return
+    session.record({"type": "retire", **report})
+
+
 class Mason:
     """One conversation with one agent of the roster (the PI by default).
 
@@ -691,6 +726,12 @@ class Mason:
                             "verdict": verdict,
                         }
                     )
+                    if self.depth == 0:
+                        # The finish is the completion-time act: the cited
+                        # runs are promoted and the session's other runs
+                        # expire. A delegated child's finish decides nothing;
+                        # the parent's does, for the whole session.
+                        _retire_at_finish(self.session, run_ids)
                     return TurnResult(
                         text=report,
                         stop_reason="finish",

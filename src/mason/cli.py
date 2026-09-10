@@ -594,6 +594,39 @@ def _clip(text: str, full: bool) -> str:
     return f"{text[:_READ_PREVIEW_CHARS]}\n[... {omitted} more characters; --full shows them]"
 
 
+def _retire_line(event: dict[str, Any]) -> str:
+    """The retire event in one line: what the finish kept, what it let go.
+
+    Examples:
+        >>> _retire_line({"error": "database is locked"})
+        'retire failed: database is locked'
+        >>> _retire_line({"runs_promoted": 1, "runs_expired": 2, "runs_total": 3,
+        ...               "bytes_promoted": 10, "bytes_total": 40, "mode": "expire",
+        ...               "kept": [{"outcome": "skipped", "id": "01abcdefghij",
+        ...                         "detail": "failed"}]})  # doctest: +NORMALIZE_WHITESPACE
+        'retire: 1 promoted, 2 expired of 3 run(s); bytes 10 of 40 kept;
+         skipped 01abcdefgh (failed)'
+    """
+    if "error" in event:
+        return f"retire failed: {event['error']}"
+    line = (
+        f"retire: {event.get('runs_promoted', 0)} promoted, "
+        f"{event.get('runs_expired', 0)} expired of {event.get('runs_total', 0)} run(s); "
+        f"bytes {event.get('bytes_promoted', 0)} of {event.get('bytes_total', 0)} kept"
+    )
+    if event.get("mode") == "purge":
+        purged = event.get("purged") or {}
+        line += f"; purged {len(purged.get('deleted') or [])} run(s)"
+    skipped = [
+        f"{str(k.get('id'))[:10]} ({k.get('detail')})"
+        for k in event.get("kept") or []
+        if k.get("outcome") == "skipped"
+    ]
+    if skipped:
+        line += "; skipped " + ", ".join(skipped)
+    return line
+
+
 def _render_event(event: dict[str, Any], full: bool) -> None:
     """One transcript event, in the same visual language as 'slab mason chat'."""
     stamp = str(event.get("at", ""))[11:19]
@@ -631,6 +664,8 @@ def _render_event(event: dict[str, Any], full: bool) -> None:
     elif kind == "finish":
         typer.secho(f"\n=== final report @ {stamp} " + "=" * 39, bold=True)
         typer.echo(_clip(str(event.get("report", "")), full))
+    elif kind == "retire":
+        typer.secho(f"[{stamp}] {_retire_line(event)}", fg=typer.colors.MAGENTA)
     elif kind == "review":
         typer.secho(
             f"[{stamp}] review by {event.get('agent')} of {event.get('subject')}: "
@@ -898,6 +933,8 @@ def mason_report(
         typer.echo(f"finish reported{head}")
     else:
         typer.echo("no finish report (halted, interrupted, or still running)")
+    if summary.get("retire"):
+        typer.echo(_retire_line(summary["retire"]))
 
 
 sandbox_app = typer.Typer(

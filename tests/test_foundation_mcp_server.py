@@ -19,6 +19,7 @@ EXPECTED_TOOLS = {
     "show_run",
     "promote_run",
     "promote_session",
+    "retire_session",
     "expire_runs",
     "gc",
     "launch_workflow",
@@ -211,6 +212,40 @@ def test_promote_session_reports_every_outcome(root: Path) -> None:
         assert ws.runs.get(verified).state.value == "promoted"
         assert ws.runs.history(verified)[-1].actor == "agent"
         assert ws.runs.history(verified)[-1].reason == "the good batch"
+
+
+def test_retire_session_retires_the_servers_own_session_and_records_it(
+    root: Path, tmp_path: Path
+) -> None:
+    from foundation.session_record import find_session_record
+
+    script = tmp_path / "wf.py"
+    script.write_text("from foundation import check\n@check\ndef ok():\n    return True\n")
+    anchor = _seed(root, session="earlier")
+    server = build_server(root, project=tmp_path, session="chat-9")
+    own = _call(server, "launch_workflow", {"script_path": str(script)})["run_id"]
+    shakeout = _call(server, "launch_workflow", {"script_path": str(script)})["run_id"]
+
+    dry = _call(server, "retire_session", {"run_ids": [anchor, own], "dry_run": True})
+    assert dry["dry_run"] is True and dry["runs_promoted"] == 2
+    with Workspace(root) as ws:
+        assert ws.runs.get(anchor).state.value == "verified"
+
+    report = _call(server, "retire_session", {"run_ids": [anchor, own]})
+    assert report["session"] == "chat-9"
+    by_id = {k["id"]: k["outcome"] for k in report["kept"]}
+    assert by_id == {anchor: "promoted", own: "promoted"}
+    assert [e["id"] for e in report["expired"]] == [shakeout]
+    with Workspace(root) as ws:
+        assert ws.runs.get(anchor).state.value == "promoted"
+        assert ws.runs.history(anchor)[-1].actor == "agent"
+        assert ws.runs.get(shakeout).state.value == "expired"
+    events = find_session_record(root, "chat-9").events()
+    retire = [e for e in events if e["type"] == "retire"]
+    assert len(retire) == 1 and retire[0]["runs_expired"] == 1
+
+    with pytest.raises(Exception, match="keep, expire, or purge"):
+        _call(server, "retire_session", {"run_ids": [], "uncited": "drop"})
 
 
 def test_promote_session_default_reason_names_the_session(root: Path) -> None:

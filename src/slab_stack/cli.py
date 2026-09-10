@@ -990,9 +990,23 @@ def benchmark_tables(
         Path | None, typer.Option("--readme", help="The README (default README.md).")
     ] = None,
     records: _RecordsOpt = None,
+    retention: Annotated[
+        bool,
+        typer.Option(
+            "--retention",
+            help="Print the retention table instead: what each campaign's finish "
+            "promoted of what its session produced. Rewrites nothing.",
+        ),
+    ] = False,
 ) -> None:
     """Rewrite the benchmark tables inside their marker regions in the docs and the README."""
     path = records or benchmark.records_path()
+    if retention:
+        try:
+            typer.echo(benchmark.retention_table(benchmark.load_records(path)))
+        except _BENCH_ERRORS as e:
+            _fail(str(e))
+        return
     docs_path = docs if docs is not None else Path("docs") / "benchmark.md"
     readme_path = readme if readme is not None else Path("README.md")
     try:

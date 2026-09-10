@@ -77,6 +77,9 @@ def _campaign(path: Path) -> Path:
             _usage("2026-08-31T10:10:00+00:00"),
             {"at": "2026-08-31T10:10:01+00:00", "type": "finish",
              "report": "a0 = 3.30 A for bcc Nb, MLIP-level"},
+            {"at": "2026-08-31T10:10:01+00:00", "type": "retire", "mode": "expire",
+             "runs_promoted": 1, "runs_expired": 1, "runs_total": 2,
+             "bytes_promoted": 10, "bytes_expired": 5, "bytes_total": 15},
         ],
     )
 
@@ -85,6 +88,7 @@ def test_the_digest_counts_every_dimension(tmp_path: Path) -> None:
     transcript = _campaign(tmp_path / "20260831-100000-11.jsonl")
     summary = summarize(transcript)
     assert summary["session"] == "20260831-100000-11"
+    assert summary["retire"]["runs_promoted"] == 1 and "type" not in summary["retire"]
     assert summary["steps"] == 3
     assert summary["prompt_tokens"] == 300
     assert summary["completion_tokens"] == 30

@@ -297,6 +297,18 @@ _HEAVY_STEP_TOKENS = 8_000
 _WRITING_TOOLS = frozenset({"plan", "finish", "write_file", "edit_file", "notebook"})
 
 
+def _ever_verified(run: dict[str, Any]) -> bool:
+    """True when the run's history shows it reached a passing state.
+
+    Examples:
+        >>> _ever_verified({"history": [{"to": "verified"}, {"to": "expired"}]})
+        True
+        >>> _ever_verified({"history": [{"to": "expired"}]})
+        False
+    """
+    return any(str(t.get("to")) in _PASSING_STATES for t in run.get("history") or [])
+
+
 def _script_names(skill: Skill) -> list[str]:
     scripts = skill.root / "scripts"
     if not scripts.is_dir():
@@ -400,7 +412,9 @@ def rules(
     for run in runs:
         info = run.get("run") or {}
         state = str(info.get("state") or "")
-        if state in _PASSING_STATES:
+        if state in _PASSING_STATES or _ever_verified(run):
+            # A verified shakeout the finish did not cite is expired at
+            # finish; its history, not its current state, says it passed.
             continue
         run_id = str(info.get("id") or "")[:10]
         checks = run.get("checks") or []
@@ -614,9 +628,12 @@ def evidence_pack(
     for run in runs:
         any_run = True
         info = run.get("run") or {}
+        was = " (verified, then expired at finish)" if (
+            info.get("state") == "expired" and _ever_verified(run)
+        ) else ""
         lines.append(
-            f"- run {str(info.get('id'))[:10]} {info.get('name')}: state {info.get('state')}, "
-            f"status {info.get('status')}"
+            f"- run {str(info.get('id'))[:10]} {info.get('name')}: state {info.get('state')}"
+            f"{was}, status {info.get('status')}"
         )
         for task in run.get("tasks") or []:
             engine = ((task.get("recipe") or {}).get("params") or {}).get("engine")
