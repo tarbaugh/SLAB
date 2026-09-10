@@ -123,15 +123,17 @@ them.
   but the `command` is what SLAB traces and caches against, so keep the
   switches there.
 
-How SLAB drives MD matters here. The `lammps` engine asks LAMMPS for
-forces from ASE, one `run 0` per step, and every call re-sends the
-input, the data file, and the potential lines, so a potential that
-loads slowly (a GRACE saved model under TensorFlow) pays its load on
-every step. The Kokkos weights and the FS export load fast, and they are
-the GRACE routes for MD from ASE. The switches speed the force
-evaluation; the positions still cross the host each step, so the gain
-is large for machine-learned potentials and large cells, and small for
-EAM on a few hundred atoms.
+How SLAB drives MD matters here. The `run_lammps` task (the
+lammps-scripting skill) runs a whole input script inside LAMMPS, so the
+potential loads once and the switches speed the entire run; that is the
+route for production MD. The `lammps` engine asks LAMMPS for forces
+from ASE, one `run 0` per step, and every call re-sends the input, the
+data file, and the potential lines, so a potential that loads slowly (a
+GRACE saved model under TensorFlow) pays its load on every step. Under
+the engine the Kokkos weights and the FS export load fast, the switches
+speed the force evaluation only, and the positions still cross the host
+each step, so the gain is large for machine-learned potentials and large
+cells, and small for EAM on a few hundred atoms.
 
 Check before you spend an allocation:
 
@@ -202,12 +204,15 @@ D-optimality scale of PACE: above 5 is outside the training set, above
 25 far outside. A dump of `f_grace_gamma` with `dump_modify ... skip` on
 the same variable keeps only the extrapolating frames for labelling.
 
-These lines belong to a LAMMPS-driven run (`run N`). SLAB drives MD from
-ASE, so `fix halt` cannot act inside the `lammps` engine, and a LAMMPS
-input started from the shell is not a run: nothing traces it, and its
-numbers cannot be reported. Grade the frames of a recorded run
-afterwards instead: `grace_uq predict` over the harvested frames for a
-1L, 2L, or 3L model, or `PyGRACEFSCalculator` with its `.asi` for
-GRACE/FS, both in gracemaker's environment (the mlip-training skill,
+These lines belong in a script under the `run_lammps` task (the
+lammps-scripting skill): the run keeps the log with the halt, the dump
+of the extrapolating frames, and the `fix ave/time` file if you write
+one, and a `@check` on the result decides whether the run reached its
+steps. They cannot act inside the `lammps` engine, which drives MD from
+ASE one `run 0` at a time, and a LAMMPS input started from the shell is
+not a run: nothing traces it, and its numbers cannot be reported. For a
+1L, 2L, or 3L model, grade the frames of a recorded run afterwards with
+`grace_uq predict`, or GRACE/FS frames with `PyGRACEFSCalculator` and
+its `.asi`, both in gracemaker's environment (the mlip-training skill,
 section 5). The gracemaker documentation names no fix or compute that
 reads gamma from the `grace` or `/kk` styles; do not invent one.
