@@ -472,8 +472,17 @@ def test_mason_read_renders_a_transcript_for_humans(tmp_path: Path) -> None:
          "message": {"role": "assistant", "content": None, "tool_calls": [
              {"id": "t1", "type": "function",
               "function": {"name": "shell", "arguments": '{"command": "ls"}'}}]}},
+        {"at": "2026-08-27T10:00:06+00:00", "type": "command", "kind": "shell", "by": "pi",
+         "tool": "shell", "command": "ls", "cwd": "/proj"},
         {"at": "2026-08-27T10:00:06+00:00", "type": "message",
          "message": {"role": "tool", "tool_call_id": "t1", "content": "exit 0\nfiles"}},
+        {"at": "2026-08-27T10:00:08+00:00", "type": "command", "kind": "engine",
+         "by": "md-expert", "tool": "wait_for_run", "run_id": "01abcdefghijkl",
+         "task": "run_lammps", "tasks": 1, "cache_hits": 0, "engine": "lammps",
+         "version": "22 Jul 2025", "command": "mpirun -np 1 lmp -k on g 1 -sf kk",
+         "setup": ["module load lammps"],
+         "kokkos": {"enabled": True, "gpus": 1, "threads": None, "suffix": True,
+                    "package": None}},
         {"at": "2026-08-27T10:00:09+00:00", "type": "finish", "report": "done, run r1"},
         {"at": "2026-08-27T10:00:10+00:00", "type": "retire", "mode": "expire",
          "runs_promoted": 1, "runs_expired": 2, "runs_total": 3,
@@ -490,6 +499,12 @@ def test_mason_read_renders_a_transcript_for_humans(tmp_path: Path) -> None:
     assert "[reasoning @ 10:00:05]" in result.output
     assert "--full shows them" in result.output  # long reasoning clipped
     assert '-> shell {"command": "ls"}' in result.output
+    assert "[10:00:06] shell command by pi: ls" in result.output
+    assert (
+        "[10:00:08] engine command by md-expert (run 01abcdefgh, run_lammps): "
+        "mpirun -np 1 lmp -k on g 1 -sf kk"
+    ) in result.output
+    assert "cwd /proj" not in result.output and "kokkos:" not in result.output
     assert "exit 0" in result.output
     assert "=== final report @ 10:00:09" in result.output
     assert "[10:00:10] retire: 1 promoted, 2 expired of 3 run(s); bytes 10 of 40 kept" in (
@@ -500,6 +515,10 @@ def test_mason_read_renders_a_transcript_for_humans(tmp_path: Path) -> None:
 
     unclipped = runner.invoke(app, ["read", str(transcript), "--full"])
     assert "--full shows them" not in unclipped.output
+    assert "    cwd /proj" in unclipped.output
+    assert "    engine lammps 22 Jul 2025" in unclipped.output
+    assert "    setup: module load lammps" in unclipped.output
+    assert "    kokkos: -k on, 1 GPU(s) per node, -sf kk" in unclipped.output
 
     missing = runner.invoke(app, ["read", str(tmp_path / "nope.jsonl")])
     assert missing.exit_code != 0

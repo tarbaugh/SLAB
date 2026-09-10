@@ -197,6 +197,7 @@ The lifecycle guidance follows from SLAB's one asymmetry ([Lifecycle & retention
 - Promote only what deserves keeping, always with a reason.
 - Let everything else expire, and run `expire_runs` + `gc` periodically to reclaim it.
 - End a session with `retire_session`: cite the runs the answer rests on, and let the session's other runs expire.
+- Read what ran. The session record holds a `command` event for every job `submit_job` submitted and, once a run finishes under `launch_workflow` or `wait_for_run`, one for each distinct engine command its tasks resolved, with the setup lines and the KOKKOS switches a LAMMPS command asks for. A GPU result whose command has no `-k on` was computed on the host.
 
 Promotion is the only path to permanence, so an agent that never promotes leaves nothing behind, and an agent that promotes indiscriminately recreates the archive-of-failures problem that SLAB exists to avoid.
 

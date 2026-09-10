@@ -25,6 +25,7 @@ Requires the ``mcp`` extra: ``pip install 'slab-stack[mcp]'``.
 from __future__ import annotations
 
 import functools
+import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeVar
@@ -112,6 +113,31 @@ def build_server(
     record = SessionRecord(root, session_id, client="mcp")
     hpc = load_slab_config(project_dir).hpc
     versions: dict[str, dict[str, str]] = {}
+    recorded_runs: set[str] = set()
+
+    def _record_run_commands(run_id: str | None, tool: str) -> None:
+        # The session record says what a run ran, the way a Mason
+        # transcript does: one command event per distinct engine command
+        # the run's tasks resolved, recorded once per run.
+        if not run_id or run_id in recorded_runs:
+            return
+        recorded_runs.add(run_id)
+        try:
+            with Workspace(root) as ws:
+                entries = _ops.run_commands(ws, run_id)
+        except (FoundationError, sqlite3.Error, OSError) as e:
+            record.record(
+                {
+                    "type": "command",
+                    "kind": "engine",
+                    "tool": tool,
+                    "run_id": run_id,
+                    "error": str(e),
+                }
+            )
+            return
+        for entry in entries:
+            record.record({"type": "command", "kind": "engine", "tool": tool, **entry})
 
     def software_versions() -> dict[str, str]:
         # Probed once per server: the version checks run engines and builders.
@@ -239,9 +265,11 @@ def build_server(
         recording the failure itself failed (storage died mid-crash), a raw
         'traceback' string appears instead and the run may be left at status
         'running'. Use show_run for per-task failure evidence."""
-        return _ops.launch_script(
+        result = _ops.launch_script(
             root, script_path, name=name, intent=intent, session=session_id, capture_output=True
         )
+        _record_run_commands(result.get("run_id"), "launch_workflow")
+        return result
 
     @server.tool()
     @_surfaced
@@ -258,6 +286,11 @@ def build_server(
         waited = _ops.wait_for_run(
             root, run_id=run_id, session=session_id, timeout_s=min(timeout_s, 1800.0)
         )
+        if waited["outcome"] in ("finished", "process_gone"):
+            _record_run_commands(waited["run"].id, "wait_for_run")
+        elif waited["outcome"] == "none_running":
+            for finished in waited["runs"]:
+                _record_run_commands(finished.id, "wait_for_run")
         answer: dict[str, Any] = {"outcome": waited["outcome"], "note": waited["note"]}
         if "run" in waited:
             answer["run"] = _ops.run_summary(waited["run"]) | {"progress": waited["progress"]}
@@ -375,7 +408,7 @@ def build_server(
             job exports this server's session id, so the runs it launches
             join this session; the script is kept under the workspace's
             jobs/ directory. time_limit is HH:MM:SS."""
-            return _ops.submit_job(
+            job = _ops.submit_job(
                 root,
                 hpc=hpc,
                 command=command,
@@ -385,6 +418,19 @@ def build_server(
                 session=session_id,
                 project=project_dir,
             )
+            record.record(
+                {
+                    "type": "command",
+                    "kind": "job",
+                    "tool": "submit_job",
+                    "command": command,
+                    "job_id": str(job["job_id"]),
+                    "job_name": str(job["job_name"]),
+                    "partition": str(job["partition"]),
+                    "script": str(job["script_path"]),
+                }
+            )
+            return job
 
         @server.tool()
         @_surfaced

@@ -36,6 +36,24 @@ def test_engines_list_without_registry(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert "none configured" in result.output
 
 
+def test_engines_list_shows_the_lammps_command_and_its_kokkos_switches(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The command runs as written, so the listing says what it asks of KOKKOS."""
+    monkeypatch.delenv("SLAB_ENGINES", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("ASE_LAMMPSRUN_COMMAND", "mpirun -np 2 lmp -k on g 2 -sf kk")
+    result = runner.invoke(app, ["engines", "list"])
+    assert result.exit_code == 0, result.output
+    assert (
+        "lammps command: mpirun -np 2 lmp -k on g 2 -sf kk  "
+        "(KOKKOS on, 2 GPU(s) per node, -sf kk)"
+    ) in result.output
+    monkeypatch.setenv("ASE_LAMMPSRUN_COMMAND", "lmp")
+    plain = runner.invoke(app, ["engines", "list"])
+    assert "lammps command: lmp  (KOKKOS off: the plain styles run on the host)" in plain.output
+
+
 def test_engines_list_with_registry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     registry = _write_engines(tmp_path, {"emt-cluster": EMT_ENTRY})
     monkeypatch.setenv("SLAB_ENGINES", str(registry))

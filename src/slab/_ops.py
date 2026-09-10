@@ -78,8 +78,32 @@ def engines_overview(registry_path: str | os.PathLike[str] | None = None) -> dic
         overview["pseudo_families_error"] = str(e)
     overview["mp"] = _mp_overview()
     overview["gracemaker"] = _gracemaker_overview()
+    overview["lammps"] = _lammps_overview()
     overview["hpc"] = _hpc_overview(overview)
     return overview
+
+
+def _lammps_overview() -> dict[str, Any]:
+    """The command the ``lammps`` engine would run, and what it asks of KOKKOS.
+
+    The switches are read from the command as configured, because SLAB
+    adds none: a command without ``-k on`` runs the plain styles on the
+    host, whatever the build contains. No binary is probed here.
+
+    Examples:
+        >>> import os
+        >>> os.environ.pop("ASE_LAMMPSRUN_COMMAND", None) and None
+        >>> _lammps_overview()["kokkos"]["enabled"]
+        False
+    """
+    from slab.lammps import kokkos_switches, lammps_command, lammps_setup
+
+    try:
+        command = lammps_command()
+        setup = list(lammps_setup())
+    except Exception as e:  # a malformed config: report it, keep the overview
+        return {"error": str(e)}
+    return {"command": command, "setup": setup, "kokkos": kokkos_switches(command)}
 
 
 def software_versions() -> dict[str, str]:

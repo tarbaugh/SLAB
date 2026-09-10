@@ -54,7 +54,10 @@ result, info = run_lammps(SCRIPT, atoms=STRUCTURE, files=["W.eam.fs"], label="w-
   script; the task refuses a file the script never mentions.
 - `command=` and `setup=` override `[engines.lammps]`. A KOKKOS or MPI
   launch is `command="mpirun -np 4 lmp -k on g 4 -sf kk"`; the command
-  enters the cache identity.
+  enters the cache identity. Nothing adds a switch the command lacks:
+  the `lammps` entry of `list_engines` shows the configured command and
+  the switches parsed from it, and when `kokkos.enabled` is false there,
+  a run without `command=` is a host run whatever the build contains.
 - `timeout_s` kills the process group; the job's time limit is the
   outer guard, and `timer timeout` inside the script (section 7) stops
   the run cleanly before either.
@@ -67,6 +70,11 @@ What comes back:
   `tail` (mean and std of every column over the last half of the rows),
   the numbers a `@check` judges.
 - `result["steps"]` and `result["wall_time"]`.
+- `info["kokkos"]`: what the log says KOKKOS did. `enabled`, `gpus` per
+  node, `threads` per task, the `/kk` `styles` that ran, and under
+  `switches` what the command asked for. Quote it in the notebook for
+  every GPU run; a GPU number with `enabled: False` was computed on the
+  host. `info["argv"]` is the exact argument vector that ran.
 - `info["artifacts"]`: `{label}.in`, `{label}.log`, `{label}.screen`,
   `{label}-structure.data`, `{label}-thermo.json` (every table, every
   row), and every file the script wrote (dumps, restarts, `write_data`
@@ -255,7 +263,9 @@ holds what MPI or the loader printed when LAMMPS never started.
 
 ## 10. KOKKOS and MPI
 
-The command carries the parallel launch; the script stays the same.
+The command carries the parallel launch; the script stays the same, and
+SLAB adds no switch. Read the `lammps` entry of `list_engines` before a
+GPU run, and `info["kokkos"]` after it.
 `-sf kk` gives every style in the script its Kokkos version where one
 exists, and a fix or compute without one runs on the host and copies
 data back each step, so keep the script inside Kokkos-enabled styles

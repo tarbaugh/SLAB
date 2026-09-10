@@ -633,6 +633,44 @@ line, and `slab mason read` shows it after the final report. A finish
 that cited an unverified run shows that run under `skipped`. The
 benchmark scorer copies the numbers into the record as `retention`.
 
+The transcript also records every command that ran, as `command` events,
+so a reader can check what was run without opening the run store. The
+`shell` tool records its command line and directory. `launch_workflow`
+records the driver's own command, and `submit_job` the payload it
+submitted with the job id, the partition, and the kept batch script.
+When a run finishes, whether under `launch_workflow` or under
+`wait_for_run`, the engine commands its tasks resolved are recorded from
+the run's recipes: one event per distinct command, with the engine, the
+detected version, the setup lines, and for LAMMPS the KOKKOS switches
+the command asks for. Each event carries `by`, the agent card that ran
+it, and `at`. `slab mason read` prints one line per command, and
+`--full` adds the details. The session below was driven by hand through
+the tools, with no model, against a LAMMPS build without the KOKKOS
+package:
+
+```console
+$ slab mason read --full .slab/mason/sessions/20260910-220448-36135.jsonl
+[22:04:48] shell command by pi: lmp -h | grep -m1 Large-scale
+    cwd /private/tmp/claude-501/-Users-tom-SLAB/82ae44c5-5378-41dc-9d2d-584bf2e8b327/scratchpad/cmd-demo
+[22:04:48] launch command by pi: slab run /private/tmp/claude-501/-Users-tom-SLAB/82ae44c5-5378-41dc-9d2d-584bf2e8b327/scratchpad/cmd-demo/ar_nvt.py --name ar-nvt --intent 'argon NVT, 500 steps' --session 20260910-220448-36135 -w /private/tmp/claude-501/-Users-tom-SLAB/82ae44c5-5378-41dc-9d2d-584bf2e8b327/scratchpad/cmd-demo/.slab
+    script /private/tmp/claude-501/-Users-tom-SLAB/82ae44c5-5378-41dc-9d2d-584bf2e8b327/scratchpad/cmd-demo/ar_nvt.py
+    cwd /private/tmp/claude-501/-Users-tom-SLAB/82ae44c5-5378-41dc-9d2d-584bf2e8b327/scratchpad/cmd-demo
+[22:04:49] engine command by pi (run 01m26nm7n1, run_lammps): lmp
+    engine lammps 22 Jul 2025 - Update 4
+    kokkos: off, the plain styles run on the host
+
+[0 model call(s); tokens 0+0]
+```
+
+The last event is the one to read before trusting a GPU number. The
+command was `lmp`, with no `-k on`, so LAMMPS ran its plain styles on
+the host whatever the build contained. The report counts the events by
+kind on one line:
+
+```console
+commands recorded: 3 (shell 1, launch 1, engine 1); 'slab mason read --full' shows each
+```
+
 ## Memory that outlives the context window
 
 Long projects die of context, not of model quality. Models degrade well

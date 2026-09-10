@@ -95,7 +95,11 @@ one MPI task per GPU. Never start a GPU run on the login node.
 
 The switches ride in the engine's `command` (the `calculator_options`
 entry, or `[engines.lammps] command`). ASE appends its own flags after
-them.
+them. SLAB adds no switch: a command without `-k on` runs the plain
+styles on the host, silently, whatever the build contains. The `lammps`
+entry of `list_engines` shows the configured command and the switches
+parsed from it. Read it before a GPU run, and pass `command=` with the
+switches when the configured command has none.
 
 | Hardware | `command` | Meaning |
 | --- | --- | --- |
@@ -122,6 +126,11 @@ them.
 - `suffix kk` and `package kokkos ...` can also be lines in the input,
   but the `command` is what SLAB traces and caches against, so keep the
   switches there.
+- After a `run_lammps`, `info["kokkos"]` says what the log reported:
+  `enabled`, `gpus` per node, `threads` per task, and the `/kk` styles
+  that ran. Check that `gpus` equals what you asked for before you trust
+  a timing or a number from a GPU run. The transcript records the
+  command every run resolved, so a reviewer can check it too.
 
 How SLAB drives MD matters here. The `run_lammps` task (the
 lammps-scripting skill) runs a whole input script inside LAMMPS, so the

@@ -627,6 +627,88 @@ def _retire_line(event: dict[str, Any]) -> str:
     return line
 
 
+def _command_line(event: dict[str, Any]) -> str:
+    """One line for a command event: who ran what, through which tool.
+
+    Examples:
+        >>> _command_line({"kind": "shell", "by": "pi", "tool": "shell", "command": "ls"})
+        'shell command by pi: ls'
+        >>> _command_line({"kind": "engine", "by": "md-expert", "tool": "wait_for_run",
+        ...                "run_id": "01abcdefghijkl", "task": "run_lammps", "tasks": 3,
+        ...                "cache_hits": 1, "engine": "lammps",
+        ...                "command": "mpirun -np 1 lmp -k on g 1 -sf kk"}
+        ...              )  # doctest: +NORMALIZE_WHITESPACE
+        'engine command by md-expert (run 01abcdefgh, run_lammps x3, 1 cached):
+         mpirun -np 1 lmp -k on g 1 -sf kk'
+        >>> _command_line({"kind": "job", "by": "pi", "tool": "submit_job", "job_id": "42",
+        ...                "partition": "gpu", "command": "slab run wf.py"})
+        'job command by pi (job 42 on gpu): slab run wf.py'
+        >>> _command_line({"kind": "engine", "by": "pi", "tool": "wait_for_run",
+        ...                "run_id": "01abcdefghijkl", "error": "database is locked"})
+        'engine command by pi (run 01abcdefgh): not read: database is locked'
+    """
+    kind = event.get("kind", "?")
+    head = f"{kind} command by {event.get('by', '?')}"
+    where: list[str] = []
+    if event.get("run_id"):
+        where.append(f"run {str(event['run_id'])[:10]}")
+    if event.get("task"):
+        tasks = int(event.get("tasks") or 1)
+        where.append(f"{event['task']} x{tasks}" if tasks > 1 else str(event["task"]))
+    if event.get("cache_hits"):
+        where.append(f"{event['cache_hits']} cached")
+    if event.get("job_id"):
+        where.append(f"job {event['job_id']} on {event.get('partition', '?')}")
+    if event.get("background"):
+        where.append("background")
+    if where:
+        head += f" ({', '.join(where)})"
+    if event.get("error"):
+        return f"{head}: not read: {event['error']}"
+    return f"{head}: {event.get('command', '')}"
+
+
+def _command_details(event: dict[str, Any]) -> list[str]:
+    """The lines under a command event that --full shows.
+
+    Examples:
+        >>> _command_details({"kind": "engine", "engine": "lammps", "version": "22 Jul 2025",
+        ...                   "setup": ["module load lammps"],
+        ...                   "kokkos": {"enabled": True, "gpus": 1, "threads": None,
+        ...                              "suffix": True, "package": None}}
+        ...                 )  # doctest: +NORMALIZE_WHITESPACE
+        ['engine lammps 22 Jul 2025', 'setup: module load lammps',
+         'kokkos: -k on, 1 GPU(s) per node, -sf kk']
+        >>> _command_details({"kind": "shell", "cwd": "/proj"})
+        ['cwd /proj']
+    """
+    details: list[str] = []
+    if event.get("engine"):
+        version = f" {event['version']}" if event.get("version") else ""
+        details.append(f"engine {event['engine']}{version}")
+    if event.get("setup"):
+        details.append("setup: " + "; ".join(str(line) for line in event["setup"]))
+    kokkos = event.get("kokkos")
+    if isinstance(kokkos, dict):
+        if kokkos.get("enabled"):
+            parts = ["-k on"]
+            if kokkos.get("gpus") is not None:
+                parts.append(f"{kokkos['gpus']} GPU(s) per node")
+            if kokkos.get("threads") is not None:
+                parts.append(f"{kokkos['threads']} OpenMP thread(s) per task")
+            parts.append("-sf kk" if kokkos.get("suffix") else "no -sf kk")
+            if kokkos.get("package"):
+                parts.append(f"-pk kokkos {kokkos['package']}")
+            details.append("kokkos: " + ", ".join(parts))
+        else:
+            details.append("kokkos: off, the plain styles run on the host")
+    if event.get("script"):
+        details.append(f"script {event['script']}")
+    if event.get("cwd"):
+        details.append(f"cwd {event['cwd']}")
+    return details
+
+
 def _render_event(event: dict[str, Any], full: bool) -> None:
     """One transcript event, in the same visual language as 'slab mason chat'."""
     stamp = str(event.get("at", ""))[11:19]
@@ -666,6 +748,14 @@ def _render_event(event: dict[str, Any], full: bool) -> None:
         typer.echo(_clip(str(event.get("report", "")), full))
     elif kind == "retire":
         typer.secho(f"[{stamp}] {_retire_line(event)}", fg=typer.colors.MAGENTA)
+    elif kind == "command":
+        line = _command_line(event)
+        if not full and len(line) > 200:
+            line = line[:200] + " ..."
+        typer.secho(f"[{stamp}] {line}", fg=typer.colors.GREEN)
+        if full:
+            for detail in _command_details(event):
+                typer.secho(f"    {detail}", fg=typer.colors.GREEN)
     elif kind == "review":
         typer.secho(
             f"[{stamp}] review by {event.get('agent')} of {event.get('subject')}: "
@@ -935,6 +1025,13 @@ def mason_report(
         typer.echo("no finish report (halted, interrupted, or still running)")
     if summary.get("retire"):
         typer.echo(_retire_line(summary["retire"]))
+    commands = summary.get("commands") or {}
+    if commands:
+        by_kind = ", ".join(f"{kind} {count}" for kind, count in commands.items())
+        typer.echo(
+            f"commands recorded: {sum(commands.values())} ({by_kind}); "
+            f"'slab mason read --full' shows each"
+        )
 
 
 sandbox_app = typer.Typer(

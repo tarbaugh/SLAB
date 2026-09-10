@@ -33,6 +33,30 @@ def box(tmp_path: Path) -> Toolbox:
     return build_toolbox(_session(tmp_path))
 
 
+def _command_events(session: MasonSession) -> list[dict[str, object]]:
+    """The command events a session's transcript holds, in order."""
+    if not session.transcript_path.exists():
+        return []
+    events = [json.loads(line) for line in session.transcript_path.read_text().splitlines()]
+    return [event for event in events if event.get("type") == "command"]
+
+
+COMMAND_WORKFLOW = """\
+from foundation import task
+
+IDENTITY = {"engine": "lammps", "command": "mpirun -np 1 lmp -k on g 1 -sf kk",
+            "setup": ["module load lammps"], "version": "22 Jul 2025"}
+
+@task(cache_extra=lambda arguments: IDENTITY)
+def probe(x):
+    return x
+
+probe(1)
+probe(2)
+print("probed")
+"""
+
+
 # -- dispatch plumbing -------------------------------------------------------
 
 
@@ -633,6 +657,10 @@ def test_submit_job_files_land_in_the_workspace_jobs_dir(
     answer = box.dispatch(call)
     assert "submitted job 42" in answer
     assert captured["directory"] == session.workspace_root / "jobs"
+    recorded = _command_events(session)
+    assert len(recorded) == 1 and recorded[0]["kind"] == "job"
+    assert recorded[0]["command"] == "foundation run wf.py" and recorded[0]["job_id"] == "42"
+    assert recorded[0]["partition"] == "cpu" and recorded[0]["by"] == "pi"
     assert f"cd {tmp_path}" in str(captured["script"])
     # the batch job's runs join this chat, so they promote with it
     assert f"export SLAB_SESSION={session.session_id}" in str(captured["script"])
@@ -747,6 +775,9 @@ def test_background_launch_detaches_and_wait_for_run_collects(
     )
     assert "launched in the background: pid" in answer
     assert "wait_for_run" in answer
+    launch = _command_events(box.session)[-1]
+    assert launch["kind"] == "launch" and launch["background"] is True
+    assert "foundation.cli run" in launch["command"] and "--name bg-test" in launch["command"]
     waited = box.dispatch(_call("wait_for_run", timeout_s=60))
     assert "bg-test" in waited
     assert "running" not in waited.split("bg-test")[1].splitlines()[0]
@@ -1207,3 +1238,41 @@ def test_list_runs_and_show_run_word_the_initial_state_of_a_running_run(
     assert "quarantined (initial state)" not in finished and "quarantined" in finished
     details = json.loads(box.dispatch(_call("show_run", run_id=run.id)))
     assert details["run"]["state"] == "quarantined" and "liveness" not in details["run"]
+
+
+def test_the_transcript_records_every_command_that_ran(tmp_path: Path) -> None:
+    """shell, a launch, and the engine commands the run resolved, each with who and when."""
+    session = _session(tmp_path)
+    box = build_toolbox(session)
+    assert box.dispatch(_call("shell", command="echo hi")).startswith("exit 0")
+    (tmp_path / "wf.py").write_text(COMMAND_WORKFLOW)
+    arguments = {"script": "wf.py", "name": "cmd-test", "intent": "record commands"}
+    launched = box.dispatch(
+        ToolCall(id="t2", name="launch_workflow", arguments=arguments, arguments_raw="{}")
+    )
+    run_id = launched.split()[1].rstrip(":")
+    shell, launch, engine = _command_events(session)
+    assert shell["kind"] == "shell" and shell["tool"] == "shell"
+    assert shell["command"] == "echo hi" and shell["cwd"] == str(tmp_path)
+    assert shell["by"] == "pi" and shell["at"] < launch["at"] <= engine["at"]
+    assert launch["kind"] == "launch" and launch["background"] is False
+    assert launch["command"].startswith(f"slab run {tmp_path / 'wf.py'} --name cmd-test")
+    assert launch["script"] == str(tmp_path / "wf.py")
+    assert engine["kind"] == "engine" and engine["tool"] == "launch_workflow"
+    assert engine["run_id"] == run_id and engine["task"] == "probe" and engine["tasks"] == 2
+    assert engine["command"] == "mpirun -np 1 lmp -k on g 1 -sf kk"
+    assert engine["setup"] == ["module load lammps"] and engine["version"] == "22 Jul 2025"
+    assert engine["kokkos"]["enabled"] is True and engine["kokkos"]["gpus"] == 1
+    # a wait on the same run records its commands no second time
+    box.dispatch(_call("wait_for_run", run_id=run_id))
+    assert len(_command_events(session)) == 3
+
+
+def test_a_delegated_child_records_commands_under_its_own_card(tmp_path: Path) -> None:
+    parent = _session(tmp_path)
+    child = parent.spawn("md-expert", parent.agent)
+    box = build_toolbox(child)
+    box.dispatch(_call("shell", command="true"))
+    (event,) = _command_events(child)
+    assert event["by"] == "md-expert" and event["command"] == "true"
+    assert _command_events(parent) == []

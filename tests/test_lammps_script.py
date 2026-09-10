@@ -27,6 +27,8 @@ from slab.lammps import (
     SCREEN_NAME,
     describe_lammps,
     error_lines,
+    kokkos_report,
+    kokkos_switches,
     run_lammps_script,
 )
 from slab.outputs import lammps_thermo
@@ -50,6 +52,14 @@ log_name = args[args.index("-log") + 1] if "-log" in args else "log.lammps"
 NAMES = {{"step": "Step", "temp": "Temp", "pe": "PotEng", "ke": "KinEng",
          "etotal": "TotEng", "press": "Press", "vol": "Volume"}}
 lines = ["LAMMPS (22 Jul 2025 - Update 4)"]
+suffix_kk = "-sf" in args and args[args.index("-sf") + 1] == "kk"
+if "-k" in args and args[args.index("-k") + 1] == "on":
+    kk = args[args.index("-k") + 2:args.index("-k") + 6]
+    gpus = int(kk[kk.index("g") + 1]) if "g" in kk else 0
+    threads = int(kk[kk.index("t") + 1]) if "t" in kk else 1
+    lines.append("KOKKOS mode with Kokkos version 4.6.1 is enabled (src/KOKKOS/kokkos.cpp:72)")
+    lines.append("  will use up to %d GPU(s) per node" % gpus)
+    lines.append("  using %d OpenMP thread(s) per MPI task" % threads)
 if os.environ.get("FAKE_MARK"):
     lines.append("FAKE_MARK=" + os.environ["FAKE_MARK"])
 natoms, every, temp, step = 0, 1, 300.0, 0
@@ -81,6 +91,9 @@ for raw in script.splitlines():
         lines.append("ERROR: Unrecognized pair style 'nonsense' (src/force.cpp:275)")
         failed = True
         break
+    elif cmd == "pair_style" and suffix_kk:
+        lines.append("Neighbor list info ...")
+        lines.append("  (1) pair %s/kk, perpetual" % tok[1])
     elif cmd == "dump":
         with open(tok[5], "w") as handle:
             handle.write("ITEM: TIMESTEP\\n0\\nITEM: NUMBER OF ATOMS\\n%d\\n" % natoms)
@@ -333,6 +346,64 @@ def test_run_lammps_keeps_the_log_the_thermo_and_what_the_script_wrote(
     kept_script = ws.artifacts.get(info["artifacts"]["ar.in"]).read_text()
     assert kept_script == SCRIPT
     assert ws.runs.get(run.id).status is ExecutionStatus.COMPLETED
+
+
+def test_kokkos_switches_read_the_command_and_kokkos_report_reads_the_log() -> None:
+    """SLAB adds no switch, so the command alone says whether KOKKOS is on."""
+    assert kokkos_switches("lmp")["enabled"] is False
+    assert kokkos_switches("env OMP_NUM_THREADS=4 mpirun -np 2 lmp -k on t 8 -sf kk") == {
+        "enabled": True, "gpus": None, "threads": 8, "suffix": True, "package": None,
+    }
+    gpu = kokkos_switches(
+        "srun lmp -kokkos on g 2 t 1 -suffix kk -package kokkos newton on neigh half -in x"
+    )
+    assert gpu == {
+        "enabled": True, "gpus": 2, "threads": 1, "suffix": True, "package": "newton on neigh half",
+    }
+    assert kokkos_switches("lmp -k off g 1")["enabled"] is False
+    assert kokkos_switches("lmp -k on g notanumber")["gpus"] is None
+    assert kokkos_switches("lmp 'unterminated")["enabled"] is False
+    log = FIXTURE_LOG.read_text()
+    assert kokkos_report(log) == {"enabled": False, "gpus": None, "threads": None, "styles": []}
+    kokkos_log = (
+        "LAMMPS (22 Jul 2025 - Update 4)\n"
+        "KOKKOS mode with Kokkos version 4.6.1 is enabled (src/KOKKOS/kokkos.cpp:72)\n"
+        "  will use up to 2 GPU(s) per node\n"
+        "  using 1 OpenMP thread(s) per MPI task\n"
+        "Neighbor list info ...\n"
+        "  (1) pair grace/2l/kk, perpetual\n"
+        "  (2) fix nvt/kk, occasional\n"
+    )
+    assert kokkos_report(kokkos_log) == {
+        "enabled": True, "gpus": 2, "threads": 1, "styles": ["grace/2l/kk", "nvt/kk"],
+    }
+
+
+def test_run_lammps_records_what_kokkos_did_and_the_exact_argv(
+    ws: Workspace, fake_lmp: str
+) -> None:
+    """A GPU run has to show it: the switches asked for, and what the log says ran."""
+    accelerated = f"{fake_lmp} -k on g 1 -sf kk -pk kokkos newton on neigh half"
+    with ws.start_run(name="kk"):
+        _, info = run_lammps(SCRIPT, atoms=_argon(), label="kk", command=accelerated)
+    assert info["command"] == accelerated
+    assert info["argv"][0] == fake_lmp and info["argv"][-4:] == [
+        "-in", "in.lammps", "-log", "log.lammps",
+    ]
+    assert info["kokkos"] == {
+        "enabled": True,
+        "gpus": 1,
+        "threads": 1,
+        "styles": ["lj/cut/kk"],
+        "switches": {
+            "enabled": True, "gpus": 1, "threads": None, "suffix": True,
+            "package": "newton on neigh half",
+        },
+    }
+    with ws.start_run(name="plain"):
+        _, plain = run_lammps(SCRIPT, atoms=_argon(), label="plain", command=fake_lmp)
+    assert plain["kokkos"]["enabled"] is False and plain["kokkos"]["styles"] == []
+    assert plain["kokkos"]["switches"]["enabled"] is False
 
 
 def test_run_lammps_types_follow_specorder_and_warnings_are_collected(

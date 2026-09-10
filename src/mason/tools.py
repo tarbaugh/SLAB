@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import sqlite3
 import subprocess
 from collections.abc import Callable
@@ -41,7 +42,7 @@ if TYPE_CHECKING:
 
 from foundation import _ops
 from foundation import memory as memory_store
-from foundation.errors import MemoryStoreError
+from foundation.errors import FoundationError, MemoryStoreError
 from foundation.project import plan_write
 from foundation.runtime import describe_liveness
 from mason.client import ToolCall
@@ -1126,6 +1127,9 @@ def _add_shell_tool(box: Toolbox, session: MasonSession) -> None:
             return refused
         if refused := _store_mutation(command, Path(session.workspace_root)):
             return refused
+        record_command(
+            session, kind="shell", tool="shell", command=command, cwd=str(session.cwd)
+        )
         timeout = min(
             float(arguments.get("timeout_s", session.agent.shell_timeout_s)),
             _MAX_SHELL_TIMEOUT_S,
@@ -1224,9 +1228,41 @@ def _add_shell_tool(box: Toolbox, session: MasonSession) -> None:
 # -- workflows (foundation) ---------------------------------------------------
 
 
+def record_command(session: MasonSession, **event: Any) -> None:
+    """Record one ``command`` event: what ran, by which card, through which tool.
+
+    The transcript is the record of a campaign, and a reader checking
+    what was run must not have to open the run store. Every path that
+    starts a process records here: ``shell`` its command line, a
+    workflow launch the driver's own command, a job submission the
+    payload and the job, and a finished run the engine commands its
+    tasks resolved (:func:`foundation._ops.run_commands`). ``kind`` says
+    which, ``by`` is the agent card, and ``at`` is stamped by the session.
+    """
+    session.record({"type": "command", "by": session.agent_name, **event})
+
+
 def _add_workflow_tools(
     box: Toolbox, session: MasonSession, read_roots: tuple[Path, ...]
 ) -> None:
+    recorded_runs: set[str] = set()
+
+    def _record_run_commands(run_id: str | None, tool: str) -> None:
+        """Record the engine commands a finished run resolved, once per run."""
+        if not run_id or run_id in recorded_runs:
+            return
+        recorded_runs.add(run_id)
+        from slab.errors import SlabError
+
+        try:
+            with _open_workspace(session) as ws:
+                entries = _ops.run_commands(ws, run_id)
+        except (FoundationError, SlabError, sqlite3.Error, OSError) as e:
+            record_command(session, kind="engine", tool=tool, run_id=run_id, error=str(e))
+            return
+        for entry in entries:
+            record_command(session, kind="engine", tool=tool, **entry)
+
     def _run_line(run: Any) -> str:
         line = (
             f"{run.id[:10]}  {_state_text(run):<11} {run.status.value:<10} "
@@ -1438,6 +1474,16 @@ def _add_workflow_tools(
         if intent:
             command += ["--intent", intent]
         command += ["--session", session.session_id, "-w", str(session.workspace_root)]
+        record_command(
+            session,
+            kind="launch",
+            tool="launch_workflow",
+            command=shlex.join(command),
+            script=str(script),
+            args=args,
+            cwd=str(session.cwd),
+            background=True,
+        )
         try:
             with open(log_path, "ab") as log:
                 process = subprocess.Popen(
@@ -1477,6 +1523,22 @@ def _add_workflow_tools(
             return _launch_background(
                 Path(script), arguments.get("name"), arguments.get("intent"), args
             )
+        driver = ["slab", "run", str(script), *args]
+        if arguments.get("name"):
+            driver += ["--name", str(arguments["name"])]
+        if arguments.get("intent"):
+            driver += ["--intent", str(arguments["intent"])]
+        driver += ["--session", session.session_id, "-w", str(session.workspace_root)]
+        record_command(
+            session,
+            kind="launch",
+            tool="launch_workflow",
+            command=shlex.join(driver),
+            script=str(script),
+            args=args,
+            cwd=str(session.cwd),
+            background=False,
+        )
         result = launch_script(
             session.workspace_root,
             script,
@@ -1486,6 +1548,7 @@ def _add_workflow_tools(
             argv=tuple(args),
             capture_output=True,
         )
+        _record_run_commands(result.get("run_id"), "launch_workflow")
         lines = [
             f"run {result['run_id']}: state={result['state']} status={result['status']} "
             f"checks={result['checks_passed']}/{result['checks_total']} "
@@ -1553,6 +1616,11 @@ def _add_workflow_tools(
         )
         note = waited["note"]
         outcome = waited["outcome"]
+        if outcome in ("finished", "process_gone"):
+            _record_run_commands(waited["run"].id, "wait_for_run")
+        elif outcome == "none_running":
+            for finished in waited["runs"]:
+                _record_run_commands(finished.id, "wait_for_run")
         if outcome == "process_gone":
             run = waited["run"]
             return (
@@ -1807,6 +1875,17 @@ def _add_hpc_tools(box: Toolbox, session: MasonSession) -> None:
             time_limit=arguments.get("time_limit"),
             session=session.session_id,
             project=session.cwd,
+        )
+        record_command(
+            session,
+            kind="job",
+            tool="submit_job",
+            command=str(arguments["command"]),
+            job_id=str(job["job_id"]),
+            job_name=str(job["job_name"]),
+            partition=str(job["partition"]),
+            script=str(job["script_path"]),
+            cwd=str(session.cwd),
         )
         return (
             f"submitted job {job['job_id']} ({job['job_name']}) to partition "

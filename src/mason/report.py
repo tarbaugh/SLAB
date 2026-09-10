@@ -73,6 +73,7 @@ def _tally(transcript: Path) -> dict[str, Any]:
     finish_run_ids: list[str] = []
     finished = False
     retire: dict[str, Any] | None = None
+    commands: Counter[str] = Counter()
     header: dict[str, Any] = {}
     # Tool results carry no name, but they answer the most recent
     # assistant message's calls in order.
@@ -143,6 +144,8 @@ def _tally(transcript: Path) -> dict[str, Any]:
             finish_run_ids = [str(r) for r in raw_ids] if isinstance(raw_ids, list) else []
         elif kind == "retire":
             retire = {k: v for k, v in event.items() if k not in ("at", "type")}
+        elif kind == "command":
+            commands[str(event.get("kind") or "?")] += 1
 
     return {
         "model": header.get("model"),
@@ -182,6 +185,7 @@ def _tally(transcript: Path) -> dict[str, Any]:
             "run_ids": finish_run_ids,
         },
         "retire": retire,
+        "commands": dict(commands),
     }
 
 

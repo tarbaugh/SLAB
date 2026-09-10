@@ -71,6 +71,11 @@ def _campaign(path: Path) -> Path:
             _usage("2026-08-31T10:00:20+00:00"),
             _assistant("2026-08-31T10:00:21+00:00", "recall", "launch_workflow"),
             _tool_result("2026-08-31T10:00:22+00:00", "no memories match"),
+            {"at": "2026-08-31T10:00:22+00:00", "type": "command", "kind": "launch",
+             "by": "pi", "tool": "launch_workflow", "command": "slab run wf.py"},
+            {"at": "2026-08-31T10:00:23+00:00", "type": "command", "kind": "engine",
+             "by": "pi", "tool": "launch_workflow", "run_id": "01m0000000",
+             "task": "relax", "tasks": 1, "engine": "qe", "command": "srun pw.x"},
             _tool_result("2026-08-31T10:00:23+00:00", "run 01m0000000 launched"),
             {"at": "2026-08-31T10:05:00+00:00", "type": "compaction", "summary": "so far"},
             "{not json",
@@ -89,6 +94,7 @@ def test_the_digest_counts_every_dimension(tmp_path: Path) -> None:
     summary = summarize(transcript)
     assert summary["session"] == "20260831-100000-11"
     assert summary["retire"]["runs_promoted"] == 1 and "type" not in summary["retire"]
+    assert summary["commands"] == {"launch": 1, "engine": 1}
     assert summary["steps"] == 3
     assert summary["prompt_tokens"] == 300
     assert summary["completion_tokens"] == 30
@@ -233,6 +239,9 @@ def test_cli_reports_the_newest_conversation_and_its_runs(tmp_path: Path) -> Non
     assert "errored calls: 1 (list_runs x1)" in result.output
     assert "first launch at step 2" in result.output
     assert "finish reported: a0 = 3.30 A" in result.output
+    assert (
+        "commands recorded: 2 (launch 1, engine 1); 'slab mason read --full' shows each"
+    ) in result.output
 
 
 def test_cli_json_is_machine_readable(tmp_path: Path) -> None:

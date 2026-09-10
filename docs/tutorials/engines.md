@@ -219,6 +219,23 @@ The details that keep runs honest and directories clean:
   with `-h`, and a GPU switch on a node without a GPU makes that probe
   record no version, so a GPU command belongs in a job on a GPU node. The
   `lammps-potentials` skill carries the rules for the agent.
+- **Nothing adds a switch the command lacks.** The command runs as
+  written. `-k on` is what enables the KOKKOS package, so a KOKKOS build
+  under a plain `lmp` runs its plain styles on the host, and it does so
+  silently. `slab engines list` and the MCP `list_engines` tool report the
+  resolved command with the switches parsed from it, so you and the agent
+  can read what a run will ask for before it runs:
+
+<!-- no-verify -->
+```text
+lammps command: mpirun -np 1 lmp -k on g 1 -sf kk -pk kokkos newton on neigh half  (KOKKOS on, 1 GPU(s) per node, -sf kk)
+  setup: module load lammps/2025.07-kokkos
+```
+
+<!-- no-verify -->
+```text
+lammps command: lmp  (KOKKOS off: the plain styles run on the host)
+```
 - **Units come back converted.** Whatever `units=` the potential requires
   (`metal`, `real`, ...), ASE converts results to eV and eV/Å, so `relax`'s
   `energy_unit` stays `"eV"`.
@@ -301,10 +318,14 @@ mean and standard deviation of every column over the tail of its rows,
 which is what the check judged. The full tables are the `ar-thermo.json`
 artifact. A KOKKOS or MPI launch rides in the command exactly as for the
 engine, and the command, the detected version, the setup lines, and the
-content of every staged file enter the cache identity. The
-`lammps-scripting` skill carries the input anatomy, the ensembles, and
-the checks for the resident agent, and `slab.outputs` digests the kept
-log on `read_artifact`. A script that dies keeps its evidence; see
+content of every staged file enter the cache identity. After the run,
+`info["kokkos"]` says what the log reported: whether KOKKOS mode was
+enabled, the GPUs per node and the OpenMP threads per task it used, the
+`/kk` styles that ran, and under `switches` what the command asked for.
+A GPU run that shows `enabled: False` there ran on the host. `info["argv"]`
+is the exact argument vector that ran. The `lammps-scripting` skill
+carries the input anatomy, the ensembles, and the checks for the resident
+agent, and `slab.outputs` digests the kept log on `read_artifact`. A script that dies keeps its evidence; see
 [Debugging failures](debugging-failures.md#when-the-engine-writes-files).
 
 ## Per-engine environments
