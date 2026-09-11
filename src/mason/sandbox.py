@@ -1682,6 +1682,8 @@ def _sandbox_context(
         "  clients refuse up front instead of hanging.",
         "- There is no scheduler here: no sbatch, srun, or squeue. Engine",
         "  legs run in this container, on this job's allocation.",
+        "- Runs in here carry this job's id, so 'slab hpc cancel <job>' fails",
+        "  them and frees their slices.",
         "- The model endpoint is a local bridge to the outside; do not",
         "  reconfigure it.",
         "- The SLAB command is `slab`, already on PATH with python. The",
@@ -1966,6 +1968,11 @@ def render_sandbox_script(
                 if engine_tasks is not None
                 else '--env SLURM_NTASKS="${SLURM_NTASKS:-1}"'
             ),
+            # --cleanenv strips the job id too, and start_run stamps every
+            # run with it: without this line the runs made in here carry no
+            # job id, and 'slab hpc cancel <job>' fails none of them. Empty
+            # outside a job, so a local render still runs.
+            '--env SLURM_JOB_ID="${SLURM_JOB_ID:-}"',
             # --cleanenv also strips the GPU ids and the thread count the
             # scheduler set, and the budget inside reads exactly these:
             # CUDA_VISIBLE_DEVICES as the prologue computed it (GPU_ID_LINES:
