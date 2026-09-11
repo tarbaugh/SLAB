@@ -5,6 +5,46 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- A claim is one transaction. `claim_reservation(pid=)` sets `run_id` on
+  the reservation, `resources` on the run, and the run's status to
+  `running` with its pid and host together, and `start_run(reservation=)`
+  uses it, so no moment exists in which a claimed slice counts as free.
+  A claimed reservation whose run is still pending follows its holder's
+  liveness.
+- A hard-killed child is reaped. `process_alive` collects a dead child of
+  this process with one non-blocking `waitpid` before it probes, so a
+  background launch that an OOM kill or a `SIGKILL` ended no longer keeps
+  its run and its reservation live until an unrelated `Popen` reaps it.
+- SLURM's gpu ids are renumbered. `budget()` takes only the count of the
+  devices `SLURM_JOB_GPUS` or `SLURM_STEP_GPUS` names and numbers them from
+  zero, and the sandbox prologue does the same in shell, because a job
+  under cgroup device constraints sees its devices renumbered and the
+  global ids would name devices a child cannot open.
+- The shell refuses `python -m slab_stack.cli run` as it refuses `slab
+  run`.
+- `list_engines` degrades without the store. When the workspace cannot be
+  opened (a `PermissionError` included, which `_open_workspace` now treats
+  as a store fault), the tool still lists the engines and the budget, with
+  `free` null and a `resources_note` that says why, in Mason and over MCP.
+  MCP `launch_workflow` releases a reservation only for the failures a
+  launch can report, so an interrupt no longer deletes the row of a child
+  that may be running.
+- A comma-separated gres is sized entry by entry. `sized_gres` sizes the
+  `gpu` entry alone and keeps `nvme:1` or `shard:8` as written, and the
+  sandbox reads the gpu count from the `gpu` entry alone.
+- `memory_mb` rounds a K value up to the next megabyte and refuses zero,
+  so `500K` no longer passes every cap as `0`.
+- Size arguments are checked. A `ntasks`, `threads`, `gpus`,
+  `ntasks_per_node`, `cpus_per_task`, `gpus_per_node`, or `nodes` that is
+  not an integer or is below one (zero for the gpu counts) comes back as
+  `refused: <name> must be a positive integer, not <value>` in Mason and
+  as a tool error over MCP, and `Workspace.reserve` raises `ValueError`
+  instead of clamping to one. A comment that names an `mpirun` no longer
+  trips the rank check.
+- The refusal of an unsized launch names the free gpus as well as the
+  cpus, and the tool descriptions say that `gpus` without `ntasks` takes
+  every free cpu and the gpus asked.
+
 - The agent sizes every launch and every job. `slab.resources` is the one
   place that knows what a process may use: `budget()` discovers the cpu
   ids of the affinity mask and the visible gpu ids, `envelope()` reads

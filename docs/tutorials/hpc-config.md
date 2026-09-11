@@ -333,8 +333,9 @@ error: partition 'cpu' declares no node, so a job on it cannot be sized; add [hp
 
 Without a size the script is byte for byte what it was. The `submit_job`
 tool takes the same five fields over MCP and in Mason, so an agent sizes
-a job within the same declared caps, and `list_engines` reports each
-partition's `node` and `max_nodes` so it knows them before it submits.
+a job within the same declared caps. `list_engines` reports each
+partition's `node` and `max_nodes`, so the agent knows them before it
+submits.
 
 ## A cluster maintainer's checklist
 

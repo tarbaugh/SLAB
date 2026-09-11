@@ -837,6 +837,7 @@ def test_the_shell_refuses_the_run_driver(box: Toolbox) -> None:
         "slab run wf.py",
         "foundation run wf.py -w .slab",
         "python -m foundation.cli run wf.py",
+        "python -m slab_stack.cli run wf.py",
     ):
         answer = box.dispatch(_call("shell", command=command))
         assert answer.startswith("refused") and "launch_workflow" in answer
@@ -1491,3 +1492,86 @@ def test_a_delegated_child_records_commands_under_its_own_card(tmp_path: Path) -
     (event,) = _command_events(child)
     assert event["by"] == "md-expert" and event["command"] == "true"
     assert _command_events(parent) == []
+
+
+# -- review fixes: sizes, comments, the store ---------------------------------
+
+
+def test_size_arguments_that_are_not_positive_integers_are_refused(
+    box: Toolbox, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A word, a zero, or a negative size is a refusal the model reads, never
+    an exception and never a launch of one rank."""
+    from foundation import Workspace
+
+    (tmp_path / "wf.py").write_text("print('never')\n")
+    for arguments, text in (
+        ({"ntasks": "two"}, "ntasks must be a positive integer, not 'two'"),
+        ({"ntasks": 0}, "ntasks must be a positive integer, not 0"),
+        ({"ntasks": 1, "threads": -2}, "threads must be a positive integer, not -2"),
+        ({"gpus": -1}, "gpus must be zero or a positive integer, not -1"),
+    ):
+        answer = box.dispatch(_call("launch_workflow", script="wf.py", **arguments))
+        assert answer == f"refused: {text}"
+    with Workspace(box.session.workspace_root) as ws:
+        assert ws.runs.list_reservations() == [] and ws.runs.list_runs() == []
+    assert _command_events(box.session) == []
+    clustered, captured = _clustered(tmp_path, monkeypatch)
+    answer = clustered.dispatch(_call("submit_job", command="c", name="n", ntasks_per_node=0))
+    assert answer == "refused: ntasks_per_node must be a positive integer, not 0"
+    answer = clustered.dispatch(_call("submit_job", command="c", name="n", ntasks_per_node="two"))
+    assert answer == "refused: ntasks_per_node must be a positive integer, not 'two'"
+    assert "script" not in captured
+
+
+def test_a_comment_naming_an_mpirun_is_not_an_mpirun(box: Toolbox, tmp_path: Path) -> None:
+    (tmp_path / "noted.py").write_text("# note: mpirun -np 64 was too wide\nprint('ran')\n")
+    answer = box.dispatch(_call("launch_workflow", script="noted.py", ntasks=1))
+    assert answer.startswith("run ") and "script output:\nran" in answer
+    answer = box.dispatch(_call("shell", command="echo ok  # mpirun -np 99999"))
+    assert answer.startswith("exit 0")
+    # A real mpirun after a comment line is still judged.
+    (tmp_path / "wide.py").write_text("# mpirun -np 1\nimport os\nos.system('mpirun -np 64 x')\n")
+    answer = box.dispatch(_call("launch_workflow", script="wide.py", ntasks=1))
+    assert answer.startswith("refused") and "64 MPI rank(s)" in answer
+
+
+def test_a_missing_script_gives_its_reservation_back(box: Toolbox) -> None:
+    from foundation import Workspace
+
+    answer = box.dispatch(_call("launch_workflow", script="nope.py", ntasks=1))
+    assert answer.startswith("could not start the run:") and "no such workflow script" in answer
+    with Workspace(box.session.workspace_root) as ws:
+        assert ws.runs.list_reservations() == []
+
+
+def test_the_unsized_refusal_names_the_free_gpus_too(
+    box: Toolbox, tmp_path: Path, no_gpus: None
+) -> None:
+    from foundation import Workspace
+
+    (tmp_path / "wf.py").write_text("print('never')\n")
+    with Workspace(box.session.workspace_root) as ws:
+        ws.reserve(holder_pid=os.getpid())  # the whole free budget
+    answer = box.dispatch(_call("launch_workflow", script="wf.py"))
+    assert answer.startswith("refused: no cpu is free on") and "free gpus: 0 of 0" in answer
+
+
+def test_list_engines_still_answers_when_the_store_cannot_be_opened(tmp_path: Path) -> None:
+    """A workspace root that cannot be created is a fault of the workspace,
+    not of the engines: the tool lists them, with free unknown and a note."""
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory permissions")
+    sealed = tmp_path / "sealed"
+    sealed.mkdir()
+    sealed.chmod(0o500)
+    try:
+        session = MasonSession(
+            tmp_path, workspace_root=sealed / ".slab", agent=MasonConfig().agent, auto_approve=True
+        )
+        answer = json.loads(build_toolbox(session).dispatch(_call("list_engines")))
+    finally:
+        sealed.chmod(0o700)
+    assert "builtin" in answer and answer["budget"]["cpus"] >= 1
+    assert answer["free"] is None
+    assert answer["resources_note"].startswith("run store unavailable: the run store at")

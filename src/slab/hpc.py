@@ -281,19 +281,38 @@ def render_sbatch(
 def sized_gres(gres: str | None, gpus_per_node: int) -> str | None:
     """The gres directive for a sized job: the partition's type, the size's count.
 
+    A gres is a comma-separated list. Only its ``gpu`` entry is sized (it
+    is added when absent, and dropped when the size asks for no gpu); every
+    other entry is kept as written.
+
     Examples:
         >>> sized_gres("gpu:a100:4", 2)
         'gpu:a100:2'
         >>> sized_gres("gpu:4", 1), sized_gres(None, 1), sized_gres("gpu:a100:4", 0)
         ('gpu:1', 'gpu:1', None)
+        >>> sized_gres("gpu:a100:4,nvme:1", 2), sized_gres("gpu:4,shard:8", 2)
+        ('gpu:a100:2,nvme:1', 'gpu:2,shard:8')
+        >>> sized_gres("nvme:1", 1), sized_gres("gpu:2,nvme:1", 0)
+        ('nvme:1,gpu:1', 'nvme:1')
     """
-    if gpus_per_node <= 0:
-        return None
-    pieces = (gres or "gpu").split(":")
-    resource = pieces[0] or "gpu"
-    if len(pieces) >= 2 and pieces[1] and not pieces[1].isdigit():
-        return f"{resource}:{pieces[1]}:{gpus_per_node}"
-    return f"{resource}:{gpus_per_node}"
+    entries = [entry.strip() for entry in (gres or "").split(",") if entry.strip()]
+    sized: list[str] = []
+    seen_gpu = False
+    for entry in entries:
+        pieces = entry.split(":")
+        if pieces[0].lower() != "gpu":
+            sized.append(entry)
+            continue
+        seen_gpu = True
+        if gpus_per_node <= 0:
+            continue
+        if len(pieces) >= 2 and pieces[1] and not pieces[1].isdigit():
+            sized.append(f"{pieces[0]}:{pieces[1]}:{gpus_per_node}")
+        else:
+            sized.append(f"{pieces[0]}:{gpus_per_node}")
+    if not seen_gpu and gpus_per_node > 0:
+        sized.append(f"gpu:{gpus_per_node}")
+    return ",".join(sized) or None
 
 
 _DRIVERS = frozenset({"slab"})

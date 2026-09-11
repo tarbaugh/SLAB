@@ -34,6 +34,7 @@ cluster config must surface at load, not silently configure nothing.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import tomllib
@@ -310,18 +311,30 @@ _MEMORY_MB = {"": 1, "k": 1 / 1024, "m": 1, "g": 1024, "t": 1024 * 1024}
 def memory_mb(text: str) -> int:
     """A SLURM memory string as megabytes: a bare number is MB, K/M/G/T scale it.
 
+    A K value rounds up to the next megabyte, so a small request never
+    becomes zero and slips under every cap. A zero request is refused.
+
     Examples:
         >>> memory_mb("240G"), memory_mb("4000"), memory_mb("1T"), memory_mb("512M")
         (245760, 4000, 1048576, 512)
+        >>> memory_mb("500K"), memory_mb("2048K")
+        (1, 2)
         >>> memory_mb("lots")
         Traceback (most recent call last):
         ...
         ValueError: memory 'lots' is not a SLURM memory form (e.g. 4000, 240G, 1T)
+        >>> memory_mb("0")
+        Traceback (most recent call last):
+        ...
+        ValueError: memory must be positive, not '0'
     """
     match = _MEMORY.match(text)
     if match is None:
         raise ValueError(f"memory {text!r} is not a SLURM memory form (e.g. 4000, 240G, 1T)")
-    return int(int(match.group(1)) * _MEMORY_MB[match.group(2).lower()])
+    megabytes = math.ceil(int(match.group(1)) * _MEMORY_MB[match.group(2).lower()])
+    if megabytes <= 0:
+        raise ValueError(f"memory must be positive, not {text!r}")
+    return megabytes
 
 
 class NodeSpec(BaseModel):

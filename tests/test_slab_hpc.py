@@ -711,3 +711,14 @@ def test_allocated_tasks_and_cpu_budget_are_thin(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("SLAB_NTASKS", "3")
     assert allocated_tasks() == 3
     assert cpu_budget() == len(budget().cpus)
+
+
+def test_sized_gres_sizes_only_the_gpu_entry_of_a_list() -> None:
+    """A partition's gres may list more than gpus; a sized job keeps the
+    rest as written and sizes the gpu entry alone."""
+    from slab.hpc import sized_gres
+
+    assert sized_gres("gpu:a100:4,nvme:1", 2) == "gpu:a100:2,nvme:1"
+    assert sized_gres("gpu:4,shard:8", 2) == "gpu:2,shard:8"
+    assert sized_gres("nvme:1", 1) == "nvme:1,gpu:1"
+    assert sized_gres("gpu:a100:4,nvme:1", 0) == "nvme:1"

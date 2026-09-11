@@ -633,3 +633,13 @@ def test_partition_node_table_refuses_bad_values(tmp_path: Path, body: str, fiel
     (tmp_path / "slab.toml").write_text(body)
     with pytest.raises(ConfigError, match=field):
         load_config(tmp_path)
+
+
+def test_memory_mb_rounds_kilobytes_up_and_refuses_zero() -> None:
+    """A K value truncated to zero would pass every cap and render --mem=0."""
+    from slab.config import memory_mb
+
+    assert memory_mb("500K") == 1 and memory_mb("2048K") == 2 and memory_mb("2049K") == 3
+    for text in ("0", "0K", "0G"):
+        with pytest.raises(ValueError, match="memory must be positive"):
+            memory_mb(text)

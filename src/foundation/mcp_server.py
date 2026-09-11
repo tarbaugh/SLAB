@@ -81,6 +81,27 @@ def _surfaced(fn: _F) -> _F:
     return wrapper  # type: ignore[return-value]
 
 
+def _positive(name: str, value: int | None, *, minimum: int = 1) -> None:
+    """Refuse a size argument below *minimum*; None means the size is absent.
+
+    The schema already refuses a non-integer; a zero or a negative count
+    is a mistake the client should hear about, not a launch of one.
+
+    Examples:
+        >>> _positive("ntasks", 2), _positive("ntasks", None), _positive("gpus", 0, minimum=0)
+        (None, None, None)
+        >>> _positive("ntasks", 0)
+        Traceback (most recent call last):
+        ...
+        ValueError: ntasks must be a positive integer, not 0
+    """
+    if value is None:
+        return
+    if isinstance(value, bool) or value < minimum:
+        wanted = "a positive integer" if minimum > 0 else "zero or a positive integer"
+        raise ValueError(f"{name} must be {wanted}, not {value!r}")
+
+
 _INSTRUCTIONS = """\
 SLAB tracks materials-modeling runs through a lifecycle:
 quarantined (ephemeral, expires) -> verified (checks passed) -> promoted (permanent).
@@ -271,7 +292,8 @@ def build_server(
         CUDA_VISIBLE_DEVICES, and a slice that does not fit is refused with
         the free amounts (list_engines reports 'budget' and 'free'). A
         sized launch runs as a child process; an unsized one runs here and
-        reserves every free cpu. The result includes the run id, final
+        reserves every free cpu, and gpus without ntasks takes every free
+        cpu and the gpus asked. The result includes the run id, final
         state (verified if all checks passed), the 'resources' it held, and
         captured output; on failure it includes the structured 'failure'
         record (traceback and diagnostic notes). If recording the failure
@@ -280,6 +302,9 @@ def build_server(
         show_run for per-task failure evidence."""
         import shlex
 
+        _positive("ntasks", ntasks)
+        _positive("threads", threads)
+        _positive("gpus", gpus, minimum=0)
         sized = any(value is not None for value in (ntasks, threads, gpus))
         with Workspace(root) as ws:
             ws.reap_dead(caller="launch_workflow")
@@ -331,7 +356,11 @@ def build_server(
                     capture_output=True,
                     reservation=reservation,
                 )
-        except BaseException:
+        except (FoundationError, SlabError, OSError):
+            # A launch that could not start gives its slice back. Anything
+            # else (an interrupt, an exit) propagates without touching the
+            # row: a detached child may be running on that slice, and the
+            # next reap releases it if nothing is.
             with Workspace(root) as ws:
                 ws.runs.release_reservation(reservation.id)
             raise
@@ -394,10 +423,21 @@ def build_server(
         get_material / query_materials). 'budget' is what this server's
         process may use on this host (cpu and gpu counts) and 'free' what
         no live reservation holds right now; size launch_workflow within
-        'free'."""
-        with Workspace(root) as ws:
-            ws.reap_dead(caller="list_engines")
-            resources = ws.free_resources()
+        'free'. When the run store cannot be opened, 'free' is null and
+        'resources_note' says why; the engines are still listed."""
+        from slab.resources import budget as discover_budget
+
+        try:
+            with Workspace(root) as ws:
+                ws.reap_dead(caller="list_engines")
+                resources = ws.free_resources()
+        except (FoundationError, sqlite3.Error, OSError) as e:
+            found = discover_budget()
+            return engines_overview() | {
+                "budget": {"cpus": len(found.cpus), "gpus": len(found.gpus)},
+                "free": None,
+                "resources_note": f"run store unavailable: {e}",
+            }
         return engines_overview() | {
             "budget": {key: len(ids) for key, ids in resources["budget"].items()},
             "free": {key: len(ids) for key, ids in resources["free"].items()},
@@ -496,6 +536,10 @@ def build_server(
             directives apply as declared."""
             from slab.resources import job_size
 
+            _positive("nodes", nodes)
+            _positive("ntasks_per_node", ntasks_per_node)
+            _positive("cpus_per_task", cpus_per_task)
+            _positive("gpus_per_node", gpus_per_node, minimum=0)
             size = job_size(
                 nodes=nodes,
                 ntasks_per_node=ntasks_per_node,

@@ -1178,3 +1178,82 @@ def test_deleting_a_run_deletes_its_reservation(store: SQLiteRunStore) -> None:
     store.transition(run.id, "expired", actor="ttl")
     store.delete_run(run.id)
     assert store.list_reservations() == []
+
+
+def test_a_claim_starts_the_run_and_the_row_is_live_in_the_same_transaction(
+    store: SQLiteRunStore,
+) -> None:
+    """Between a claim and a separate start, a claimed row on a pending run
+    would count as dead: a concurrent reserve would hand out its ids and a
+    release_dead would delete it. The claim with a pid does both at once."""
+    import os
+
+    from foundation.errors import ResourcesError
+
+    budget = {"budget_cpus": range(2), "budget_gpus": ("0",)}
+    held = store.reserve(host="n1", holder_pid=os.getpid(), ntasks=1, gpus=1, **budget)
+    run = store.create(Run(name="claimer"))
+    claimed = store.claim_reservation(held.id, run.id, host="n1", pid=os.getpid())
+    started = store.get(run.id)
+    assert claimed.run_id == run.id and started.status is ExecutionStatus.RUNNING
+    assert started.pid == os.getpid() and started.host == "n1"
+    assert started.started_at is not None
+    assert started.resources == {
+        "cpus": [0], "gpus": ["0"], "ntasks": 1, "threads": 1, "reservation": held.id,
+    }
+    assert [r.id for r in store.live_reservations("n1")] == [held.id]
+    other = store.reserve(host="n1", holder_pid=os.getpid(), ntasks=1, **budget)
+    assert other.cpus == (1,) and other.gpus == ()  # no overlap with the claimed slice
+    with pytest.raises(ResourcesError, match="only 0 of 2 cpu"):
+        store.reserve(host="n1", holder_pid=os.getpid(), ntasks=1, **budget)
+    assert store.release_dead("n1") == []
+    assert {r.id for r in store.list_reservations(host="n1")} == {held.id, other.id}
+    with pytest.raises(IllegalStatusChangeError):  # the transition rules still hold
+        store.claim_reservation(other.id, run.id, host="n1", pid=os.getpid())
+    assert store.get_reservation(other.id).run_id is None  # rolled back with it
+
+
+def test_a_claimed_row_on_a_pending_run_follows_its_holder(store: SQLiteRunStore) -> None:
+    """A claim without a pid leaves the run pending; the row then belongs to
+    its holder, alive or dead, as an unclaimed one does."""
+    import os
+
+    budget = {"budget_cpus": range(2), "budget_gpus": ()}
+    alive = store.reserve(host="n1", holder_pid=os.getpid(), ntasks=1, **budget)
+    dead = store.reserve(host="n1", holder_pid=2**22 - 1, ntasks=1, **budget)
+    for held in (alive, dead):
+        run = store.create(Run(name="pending"))
+        store.claim_reservation(held.id, run.id, host="n1")
+        assert store.get(run.id).status is ExecutionStatus.PENDING
+    assert [r.id for r in store.live_reservations("n1")] == [alive.id]
+    assert [r.id for r in store.release_dead("n1")] == [dead.id]
+
+
+def test_reserve_refuses_a_count_below_one(store: SQLiteRunStore) -> None:
+    import os
+
+    budget = {"host": "n1", "holder_pid": os.getpid(), "budget_cpus": range(2), "budget_gpus": ()}
+    with pytest.raises(ValueError, match="ntasks must be a positive integer, not 0"):
+        store.reserve(ntasks=0, **budget)
+    with pytest.raises(ValueError, match="threads must be a positive integer, not -1"):
+        store.reserve(ntasks=1, threads=-1, **budget)
+    with pytest.raises(ValueError, match="gpus must be zero or a positive integer"):
+        store.reserve(ntasks=1, gpus=-1, **budget)
+    assert store.list_reservations() == []
+
+
+def test_the_unsized_refusal_names_the_free_gpus(store: SQLiteRunStore) -> None:
+    """gpus= without ntasks takes every free cpu, so the refusal of an unsized
+    request must say what is free of both kinds."""
+    import os
+
+    from foundation.errors import ResourcesError
+
+    budget = {
+        "host": "n1", "holder_pid": os.getpid(), "budget_cpus": range(2), "budget_gpus": ("0", "1"),
+    }
+    whole = store.reserve(gpus=1, **budget)
+    assert whole.cpus == (0, 1) and whole.gpus == ("0",)
+    with pytest.raises(ResourcesError, match=r"no cpu is free on n1.*free gpus: 1 of 2") as e:
+        store.reserve(**budget)
+    assert e.value.free == {"cpus": [], "gpus": ["1"]}

@@ -607,7 +607,9 @@ def _open_workspace(session: MasonSession) -> Workspace:
 
     try:
         return Workspace(session.workspace_root)
-    except (FoundationError, sqlite3.Error) as e:
+    except (FoundationError, sqlite3.Error, OSError) as e:
+        # OSError: a root that cannot be created or opened (a read-only
+        # filesystem, a permission refused) is the same fault to the model.
         raise RunStoreUnavailable(Path(session.workspace_root), e) from e
 
 
@@ -1093,6 +1095,9 @@ def _add_file_tools(
 # with an explicit rank count. The configured engines size their own
 # launches; this catches the hand-written ones.
 _RANK_FLAG = re.compile(r"\b(?:mpirun|mpiexec|srun)\b[^\n;|&]*?(?:-np|--ntasks|-n)[=\s]+(\d+)")
+# A '#' at the start of a line or after whitespace opens a comment in
+# Python and in shell; what follows it on the line is not a command.
+_LINE_COMMENT = re.compile(r"(?m)(?:^|(?<=\s))#.*$")
 
 
 def _rank_overcommit(text: str, *, limit: int | None = None) -> str | None:
@@ -1103,13 +1108,21 @@ def _rank_overcommit(text: str, *, limit: int | None = None) -> str | None:
     payload runs in its own allocation with its own budget. The shell
     compares against the session's whole cpu budget (the default); a
     launch compares against its own slice, because that slice is all the
-    run may use whatever the budget holds. The refusal is a tool result
-    the model reads and adapts to, never an exception.
+    run may use whatever the budget holds. Comments are stripped before
+    the scan, so a note about an mpirun is not an mpirun. The refusal is
+    a tool result the model reads and adapts to, never an exception.
+
+    Examples:
+        >>> _rank_overcommit("# note: mpirun -np 64 was too wide", limit=2) is None
+        True
+        >>> _rank_overcommit("mpirun -np 64 pw.x  # too wide", limit=2) is not None
+        True
     """
     from slab.hpc import cpu_budget
 
     requested = max(
-        (int(m.group(1)) for m in _RANK_FLAG.finditer(text)), default=0
+        (int(m.group(1)) for m in _RANK_FLAG.finditer(_LINE_COMMENT.sub("", text))),
+        default=0,
     )
     budget = cpu_budget() if limit is None else limit
     if requested > budget:
@@ -1130,7 +1143,7 @@ def _rank_overcommit(text: str, *, limit: int | None = None) -> str | None:
 # omits it. The rule matches the existing one: physics goes through
 # launch_workflow.
 _DRIVER_INVOCATION = re.compile(
-    r"(?:\b(?:slab|foundation)\s+run\b|\bfoundation\.cli\s+run\b)"
+    r"(?:\b(?:slab|foundation)\s+run\b|\b(?:foundation|slab_stack)\.cli\s+run\b)"
 )
 
 
@@ -1141,6 +1154,8 @@ def _driver_in_shell(command: str) -> str | None:
         >>> _driver_in_shell("slab run wf.py") is not None
         True
         >>> _driver_in_shell("python -m foundation.cli run wf.py") is not None
+        True
+        >>> _driver_in_shell("python -m slab_stack.cli run wf.py") is not None
         True
         >>> _driver_in_shell("slab list") is None
         True
@@ -1309,6 +1324,46 @@ def describe_size(size: dict[str, Any] | None) -> str:
     return text
 
 
+def _count_argument(arguments: dict[str, Any], key: str, *, minimum: int = 1) -> int | None:
+    """The integer a size argument holds, or None when it is absent.
+
+    A value that is not an integer, or one below *minimum*, is a
+    :class:`ValueError` whose text names the argument; the tools return
+    it as a refusal. A zero is never clamped to one: a launch of no ranks
+    is a mistake the model should hear about.
+
+    Examples:
+        >>> _count_argument({"ntasks": "4"}, "ntasks"), _count_argument({}, "ntasks")
+        (4, None)
+        >>> _count_argument({"ntasks": "two"}, "ntasks")
+        Traceback (most recent call last):
+        ...
+        ValueError: ntasks must be a positive integer, not 'two'
+        >>> _count_argument({"ntasks": 0}, "ntasks")
+        Traceback (most recent call last):
+        ...
+        ValueError: ntasks must be a positive integer, not 0
+        >>> _count_argument({"gpus": 0}, "gpus", minimum=0)
+        0
+    """
+    value = arguments.get(key)
+    if value is None:
+        return None
+    wanted = "a positive integer" if minimum > 0 else "zero or a positive integer"
+    count: int | None = None
+    if isinstance(value, bool):
+        count = None
+    elif isinstance(value, int):
+        count = value
+    elif isinstance(value, float) and value.is_integer():
+        count = int(value)
+    elif isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        count = int(value.strip())
+    if count is None or count < minimum:
+        raise ValueError(f"{key} must be {wanted}, not {value!r}")
+    return count
+
+
 def _reserve_for(session: MasonSession, arguments: dict[str, Any]) -> Reservation | str:
     """Check out the slice a launch asks for, or the refusal text.
 
@@ -1317,23 +1372,21 @@ def _reserve_for(session: MasonSession, arguments: dict[str, Any]) -> Reservatio
     accounted for like any other. The session process is the holder
     until the run claims the reservation, and the dead are reaped first
     so a crashed launch never keeps a slice. A slice that does not fit
-    comes back as text carrying the free amounts, never as an exception.
+    comes back as text carrying the free amounts, never as an exception,
+    and so does a size that is not a positive integer.
     """
     from foundation.errors import ResourcesError
 
-    def _count(key: str) -> int | None:
-        value = arguments.get(key)
-        return None if value is None else int(value)
-
+    try:
+        ntasks = _count_argument(arguments, "ntasks")
+        threads = _count_argument(arguments, "threads")
+        gpus = _count_argument(arguments, "gpus", minimum=0) or 0
+    except ValueError as e:
+        return f"refused: {e}"
     try:
         with _open_workspace(session) as ws:
             ws.reap_dead(caller="launch_workflow")
-            return ws.reserve(
-                ntasks=_count("ntasks"),
-                threads=_count("threads"),
-                gpus=_count("gpus") or 0,
-                holder_pid=os.getpid(),
-            )
+            return ws.reserve(ntasks=ntasks, threads=threads, gpus=gpus, holder_pid=os.getpid())
     except ResourcesError as e:
         return f"refused: {e}"
     except RunStoreUnavailable as e:
@@ -1708,8 +1761,10 @@ def _add_workflow_tools(
                 "takes it as an affinity mask plus CUDA_VISIBLE_DEVICES, and an "
                 "engine command with {ntasks}/{threads}/{gpus} placeholders fills "
                 "from it. A size that does not fit what is free is refused with the "
-                "free amounts (list_engines reports budget and free). An unsized "
-                "launch takes every free cpu and no gpu. "
+                "free amounts (list_engines reports budget and free). A launch "
+                "without ntasks or threads takes every free cpu: unsized, it takes "
+                "every free cpu and no gpu; gpus without ntasks takes every free cpu "
+                "and the gpus asked. "
                 "For work longer than a few minutes, pass background=true: the "
                 "run detaches from this process (no tool timeout can kill it) "
                 "and wait_for_run blocks until it finishes."
@@ -1841,11 +1896,21 @@ def _add_workflow_tools(
 def _add_engine_tools(box: Toolbox, session: MasonSession) -> None:
     def list_engines(arguments: dict[str, Any]) -> str:
         from slab._ops import engines_overview
+        from slab.resources import budget as discover_budget
 
         overview = engines_overview()
-        with _open_workspace(session) as ws:
-            ws.reap_dead(caller="list_engines")
-            resources = ws.free_resources()
+        try:
+            with _open_workspace(session) as ws:
+                ws.reap_dead(caller="list_engines")
+                resources = ws.free_resources()
+        except RunStoreUnavailable as e:
+            # The engines are still the answer; the budget needs no store,
+            # and what is free cannot be known without one.
+            found = discover_budget()
+            overview["budget"] = {"cpus": len(found.cpus), "gpus": len(found.gpus)}
+            overview["free"] = None
+            overview["resources_note"] = f"run store unavailable: {e}"
+            return json.dumps(overview, indent=1, ensure_ascii=False)
         overview["budget"] = {key: len(ids) for key, ids in resources["budget"].items()}
         overview["free"] = {key: len(ids) for key, ids in resources["free"].items()}
         return json.dumps(overview, indent=1, ensure_ascii=False)
@@ -2027,21 +2092,21 @@ def _add_hpc_tools(box: Toolbox, session: MasonSession) -> None:
         from slab.errors import JobSizeError
         from slab.resources import job_size
 
-        def _count(key: str) -> int | None:
-            value = arguments.get(key)
-            return None if value is None else int(value)
-
         # A size the node cannot hold, or a size on a partition without a
         # node table, is a refusal the model reads: it names the cap and
         # the config field, so the next call fits or the operator adds it.
+        # So is a size that is not a positive integer.
         try:
             size = job_size(
-                nodes=_count("nodes"),
-                ntasks_per_node=_count("ntasks_per_node"),
-                cpus_per_task=_count("cpus_per_task"),
-                gpus_per_node=_count("gpus_per_node"),
+                nodes=_count_argument(arguments, "nodes"),
+                ntasks_per_node=_count_argument(arguments, "ntasks_per_node"),
+                cpus_per_task=_count_argument(arguments, "cpus_per_task"),
+                gpus_per_node=_count_argument(arguments, "gpus_per_node", minimum=0),
                 mem=None if arguments.get("mem") is None else str(arguments["mem"]),
             )
+        except (JobSizeError, ValueError) as e:
+            return f"refused: {e}"
+        try:
             job = _ops.submit_job(
                 session.workspace_root,
                 hpc=session.hpc,

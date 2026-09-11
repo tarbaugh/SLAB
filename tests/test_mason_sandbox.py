@@ -127,10 +127,50 @@ def test_the_cage_description_notices_the_gpu(tmp_path: Path) -> None:
 def test_render_re_exports_the_gpu_ids_and_turns_binding_off(tmp_path: Path) -> None:
     """--cleanenv strips what the scheduler set; the budget inside reads
     exactly these, and OpenMPI must bind inside each launch's mask."""
+    from mason.sandbox import GPU_ID_LINES
+
     script, _, _ = _render(tmp_path, _agent(), _slab_cfg())
-    assert '--env CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-${SLURM_JOB_GPUS:-}}"' in script
+    assert '--env CUDA_VISIBLE_DEVICES="$SANDBOX_GPUS"' in script
+    assert "\n".join(GPU_ID_LINES) in script
+    assert script.index("SANDBOX_GPUS=") < script.index("apptainer exec")
     assert '--env SLURM_CPUS_PER_TASK="${SLURM_CPUS_PER_TASK:-1}"' in script
     assert "--env OMPI_MCA_hwloc_base_binding_policy=none" in script
+
+
+@pytest.mark.parametrize(
+    ("environment", "expected"),
+    [
+        ({"CUDA_VISIBLE_DEVICES": "3"}, "3"),
+        ({"CUDA_VISIBLE_DEVICES": "", "SLURM_JOB_GPUS": "0,1"}, ""),
+        ({"SLURM_JOB_GPUS": "2,3"}, "0,1"),
+        ({"SLURM_JOB_GPUS": "0-1"}, "0,1"),
+        ({"SLURM_JOB_GPUS": "1-3,5"}, "0,1,2,3"),
+        ({}, ""),
+    ],
+)
+def test_the_gpu_id_lines_renumber_slurms_global_ids(
+    environment: dict[str, str], expected: str
+) -> None:
+    """SLURM_JOB_GPUS names the node's global ids, a comma list or a range;
+    under cgroup device constraints the job sees them renumbered from zero,
+    so the container gets one id per device, counted from zero. A
+    CUDA_VISIBLE_DEVICES the job set passes through, an empty one included."""
+    from mason.sandbox import GPU_ID_LINES
+
+    probe = "\n".join(GPU_ID_LINES) + '\nprintf "%s" "$SANDBOX_GPUS"\n'
+    result = subprocess.run(
+        ["sh", "-c", probe], env={"PATH": "/usr/bin:/bin", **environment}, capture_output=True,
+        text=True, check=True,
+    )
+    assert result.stdout == expected
+
+
+def test_gres_gpus_reads_only_the_gpu_entry_of_a_list() -> None:
+    from mason.sandbox import _gres_gpus
+
+    assert _gres_gpus("gpu:a100:4,nvme:1") == 4
+    assert _gres_gpus("nvme:1,gpu:2") == 2
+    assert _gres_gpus("nvme:1") is None
 
 
 def test_a_sized_render_sizes_the_sandbox_job_and_the_context(tmp_path: Path) -> None:

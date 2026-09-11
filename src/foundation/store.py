@@ -188,6 +188,16 @@ def process_alive(pid: int) -> bool:
     Signal 0 probes without delivering: a process that belongs to another
     user answers with a permission error, which still means it exists.
 
+    A dead child of this process is reaped first. A background launch
+    abandons its ``Popen`` object, so a child that an OOM kill or a
+    ``SIGKILL`` ended stays a zombie until something waits for it, and a
+    zombie still answers signal 0. One non-blocking ``waitpid`` on *pid*
+    collects it when it is a dead child of this process, and reports it
+    dead; a pid that is not a child answers ``ChildProcessError``, which
+    is ignored. This is the whole mechanism: no list of abandoned
+    ``Popen`` objects is kept, because ``waitpid`` on the recorded pid
+    reaches the same child without one.
+
     Examples:
         >>> process_alive(os.getpid())
         True
@@ -196,6 +206,10 @@ def process_alive(pid: int) -> bool:
     """
     if pid <= 0:
         return False
+    with suppress(ChildProcessError):
+        reaped, _ = os.waitpid(pid, os.WNOHANG)
+        if reaped == pid:
+            return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -492,7 +506,9 @@ class RunStore(Protocol):
         """The reservations on *host* that still hold their slice."""
         ...
 
-    def claim_reservation(self, reservation_id: str, run_id: str, *, host: str) -> Reservation:
+    def claim_reservation(
+        self, reservation_id: str, run_id: str, *, host: str, pid: int | None = None
+    ) -> Reservation:
         """Hand a reservation to a run; copy its slice onto the run row."""
         ...
 
@@ -754,40 +770,59 @@ class SQLiteRunStore:
             raise ValueError("pid=/host= are only recordable when setting status to 'running'")
         with self._txn() as conn:
             rid = self._resolve(run_id)
-            row = conn.execute(
-                "SELECT status, started_at, finished_at FROM runs WHERE id = ?", (rid,)
-            ).fetchone()
-            current = ExecutionStatus(row["status"])
-            validate_status_change(current, new)
-            now = utcnow().isoformat()
-            sets = ["status = ?", "updated_at = ?"]
-            params: list[object] = [new.value, now]
-            if new is ExecutionStatus.RUNNING and row["started_at"] is None:
-                sets.append("started_at = ?")
-                params.append(now)
-            if (
-                new in (ExecutionStatus.COMPLETED, ExecutionStatus.FAILED)
-                and row["finished_at"] is None
-            ):
-                sets.append("finished_at = ?")
-                params.append(now)
-            if error is not None:
-                sets.append("error = ?")
-                params.append(error)
-            if failure is not None:
-                sets.append("failure = ?")
-                params.append(_fmt_json(failure))
-            if pid is not None:
-                sets.append("pid = ?")
-                params.append(int(pid))
-            if host is not None:
-                sets.append("host = ?")
-                params.append(host)
-            params.append(rid)
-            conn.execute(f"UPDATE runs SET {', '.join(sets)} WHERE id = ?", params)
-            if new in (ExecutionStatus.COMPLETED, ExecutionStatus.FAILED):
-                conn.execute("DELETE FROM reservations WHERE run_id = ?", (rid,))
+            self._change_status(conn, rid, new, error=error, failure=failure, pid=pid, host=host)
             return self._get_exact(conn, rid)
+
+    def _change_status(
+        self,
+        conn: sqlite3.Connection,
+        rid: str,
+        new: ExecutionStatus,
+        *,
+        error: str | None = None,
+        failure: dict[str, object] | None = None,
+        pid: int | None = None,
+        host: str | None = None,
+    ) -> None:
+        """The status transition of :meth:`set_status`, inside the caller's transaction.
+
+        :meth:`set_status` and :meth:`claim_reservation` share it, so a
+        claim that also starts the run obeys the same transition rules
+        and stamps the same columns.
+        """
+        row = conn.execute(
+            "SELECT status, started_at, finished_at FROM runs WHERE id = ?", (rid,)
+        ).fetchone()
+        current = ExecutionStatus(row["status"])
+        validate_status_change(current, new)
+        now = utcnow().isoformat()
+        sets = ["status = ?", "updated_at = ?"]
+        params: list[object] = [new.value, now]
+        if new is ExecutionStatus.RUNNING and row["started_at"] is None:
+            sets.append("started_at = ?")
+            params.append(now)
+        if (
+            new in (ExecutionStatus.COMPLETED, ExecutionStatus.FAILED)
+            and row["finished_at"] is None
+        ):
+            sets.append("finished_at = ?")
+            params.append(now)
+        if error is not None:
+            sets.append("error = ?")
+            params.append(error)
+        if failure is not None:
+            sets.append("failure = ?")
+            params.append(_fmt_json(failure))
+        if pid is not None:
+            sets.append("pid = ?")
+            params.append(int(pid))
+        if host is not None:
+            sets.append("host = ?")
+            params.append(host)
+        params.append(rid)
+        conn.execute(f"UPDATE runs SET {', '.join(sets)} WHERE id = ?", params)
+        if new in (ExecutionStatus.COMPLETED, ExecutionStatus.FAILED):
+            conn.execute("DELETE FROM reservations WHERE run_id = ?", (rid,))
 
     def set_intent(self, run_id: str, intent: str | None) -> Run:
         """Set (or clear, with ``None``) a run's intent note; return the updated snapshot.
@@ -1407,7 +1442,9 @@ class SQLiteRunStore:
         (``ntasks`` or ``threads`` given) takes ``ntasks * threads`` cpus
         and ``gpus`` gpus. An unsized one takes every free cpu, with the
         rank and thread counts from the defaults, shrunk to fit. The
-        refusal carries the free ids.
+        refusal carries the free ids. A count below one is a
+        :class:`ValueError`: ``None`` means unsized, and a zero-rank launch
+        is a mistake the caller should hear about, not a launch of one.
 
         Examples:
             >>> store = SQLiteRunStore(":memory:")
@@ -1427,6 +1464,11 @@ class SQLiteRunStore:
             {'cpus': [], 'gpus': ['1']}
             >>> store.close()
         """
+        for key, value in (("ntasks", ntasks), ("threads", threads)):
+            if value is not None and value < 1:
+                raise ValueError(f"{key} must be a positive integer, not {value!r}")
+        if gpus < 0:
+            raise ValueError(f"gpus must be zero or a positive integer, not {gpus!r}")
         with self._txn() as conn:
             live = self._live_reservations(conn, host)
             used_cpus = {cpu for row in live for cpu in row.cpus}
@@ -1439,7 +1481,8 @@ class SQLiteRunStore:
                 if not free_cpus:
                     raise ResourcesError(
                         f"no cpu is free on {host}: {len(budget_cpus)} in the budget, "
-                        f"{held} hold them all; wait for a run to finish or release "
+                        f"{held} hold them all; free gpus: {len(free_gpus)} of "
+                        f"{len(budget_gpus)}. Wait for a run to finish or release "
                         f"a stuck reservation ('slab runs reap')",
                         free=free,
                     )
@@ -1449,8 +1492,8 @@ class SQLiteRunStore:
                 if count * width > len(cpus):
                     width = max(1, len(cpus) // count)
             else:
-                count = max(1, ntasks or 1)
-                width = max(1, threads or 1)
+                count = ntasks if ntasks is not None else 1
+                width = threads if threads is not None else 1
                 need = count * width
                 if need > len(free_cpus):
                     raise ResourcesError(
@@ -1471,7 +1514,7 @@ class SQLiteRunStore:
             reservation = Reservation(
                 host=host,
                 cpus=tuple(cpus),
-                gpus=tuple(free_gpus[: max(0, gpus)]),
+                gpus=tuple(free_gpus[:gpus]),
                 ntasks=count,
                 threads=width,
                 holder_pid=holder_pid,
@@ -1529,12 +1572,33 @@ class SQLiteRunStore:
         with self._lock:
             return self._live_reservations(self._conn, host)
 
-    def claim_reservation(self, reservation_id: str, run_id: str, *, host: str) -> Reservation:
+    def claim_reservation(
+        self, reservation_id: str, run_id: str, *, host: str, pid: int | None = None
+    ) -> Reservation:
         """Hand a reservation to a run and copy the slice onto the run row.
 
-        One transaction sets ``run_id`` on the reservation and ``resources``
-        on the run. A reservation that is released, already claimed, or
-        made for another host is refused.
+        One transaction sets ``run_id`` on the reservation, ``resources``
+        on the run, and, when *pid* is given, the run's status to
+        ``running`` with *pid* and *host* under the rules of
+        :meth:`set_status`. The three go together because a claimed
+        reservation is live only while its run is running: a claim in one
+        transaction and a start in another would leave a window in which
+        a concurrent :meth:`reserve` hands out the same ids and a
+        :meth:`release_dead` deletes the row. A reservation that is
+        released, already claimed, or made for another host is refused.
+
+        Examples:
+            >>> store = SQLiteRunStore(":memory:")
+            >>> held = store.reserve(host="n1", holder_pid=os.getpid(),
+            ...     budget_cpus=range(2), budget_gpus=(), ntasks=1)
+            >>> run = store.create(Run(name="claimer"))
+            >>> claimed = store.claim_reservation(held.id, run.id, host="n1", pid=os.getpid())
+            >>> started = store.get(run.id)
+            >>> (claimed.run_id == run.id, started.status.value, started.pid == os.getpid())
+            (True, 'running', True)
+            >>> [r.id for r in store.live_reservations("n1")] == [held.id]
+            True
+            >>> store.close()
         """
         with self._txn() as conn:
             rid = self._resolve(run_id)
@@ -1554,6 +1618,8 @@ class SQLiteRunStore:
                     rid,
                 ),
             )
+            if pid is not None:
+                self._change_status(conn, rid, ExecutionStatus.RUNNING, pid=pid, host=host)
         return claimed
 
     def transfer_reservation(self, reservation_id: str, *, holder_pid: int) -> Reservation:
@@ -1628,6 +1694,11 @@ class SQLiteRunStore:
         live: list[Reservation] = []
         for row in rows:
             if row["run_id"] is None:
+                alive = process_alive(int(row["holder_pid"]))
+            elif row["run_status"] == ExecutionStatus.PENDING.value:
+                # A claim that has not started its run yet (a claimer that
+                # passed no pid) still belongs to the holder, so the holder's
+                # liveness decides, as for an unclaimed row.
                 alive = process_alive(int(row["holder_pid"]))
             else:
                 running = row["run_status"] == ExecutionStatus.RUNNING.value

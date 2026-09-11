@@ -387,13 +387,22 @@ def _affinity_cpus() -> tuple[int, ...]:
 
 
 def _visible_gpus() -> tuple[str, ...]:
+    """The gpu ids this process may name in ``CUDA_VISIBLE_DEVICES``.
+
+    ``CUDA_VISIBLE_DEVICES`` is taken as written. ``SLURM_JOB_GPUS`` and
+    ``SLURM_STEP_GPUS`` hold the node's global ids (``2,3`` on a node with
+    four), but a job under cgroup device constraints sees its devices
+    renumbered from zero, so exporting those ids to a child would name
+    devices it cannot open. Only their count is used, and the ids become
+    ``0, 1, ...``.
+    """
     visible = os.environ.get("CUDA_VISIBLE_DEVICES")
     if visible is not None:
         return _id_list(visible)
     for name in ("SLURM_JOB_GPUS", "SLURM_STEP_GPUS"):
         value = os.environ.get(name)
         if value:
-            return _id_list(value)
+            return tuple(str(index) for index in range(len(_id_list(value))))
     return _probed_gpus()
 
 

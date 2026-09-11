@@ -1614,19 +1614,49 @@ def _tool_lines(snapshots: dict[str, SetupSnapshot] | None) -> list[str]:
     return lines
 
 
+#: Prologue lines that compute ``SANDBOX_GPUS``, the ``CUDA_VISIBLE_DEVICES``
+#: the container gets. ``CUDA_VISIBLE_DEVICES`` passes through as set (an
+#: empty value means none). Otherwise ``SLURM_JOB_GPUS`` decides, but it
+#: holds the node's global ids (``2,3``, or a range ``0-1``), and a job
+#: under cgroup device constraints sees its devices renumbered from zero,
+#: so only its count is used and the ids become ``0,1,...``. POSIX shell,
+#: so the prologue needs no python of its own.
+GPU_ID_LINES = (
+    'if [ "${CUDA_VISIBLE_DEVICES+set}" = set ]; then SANDBOX_GPUS="$CUDA_VISIBLE_DEVICES"; else',
+    '  SANDBOX_GPUS=""; _n=0',
+    '  for _entry in $(printf \'%s\' "${SLURM_JOB_GPUS:-}" | tr \',\' \' \'); do',
+    '    case "$_entry" in',
+    "      *-*) _n=$((_n + ${_entry#*-} - ${_entry%-*} + 1)) ;;",
+    "      *) _n=$((_n + 1)) ;;",
+    "    esac",
+    "  done",
+    '  _i=0; while [ "$_i" -lt "$_n" ]; do SANDBOX_GPUS="${SANDBOX_GPUS:+$SANDBOX_GPUS,}$_i";'
+    " _i=$((_i + 1)); done",
+    "fi",
+)
+
+
 def _gres_gpus(gres: str | None) -> int | None:
     """The gpu count a gres string asks for, or None when it names none.
+
+    A gres is a comma-separated list; the count comes from its ``gpu``
+    entry alone.
 
     Examples:
         >>> _gres_gpus("gpu:a100:4"), _gres_gpus("gpu:2"), _gres_gpus("gpu")
         (4, 2, None)
+        >>> _gres_gpus("gpu:a100:4,nvme:1"), _gres_gpus("nvme:1,gpu:2"), _gres_gpus("nvme:1")
+        (4, 2, None)
         >>> _gres_gpus(None) is None
         True
     """
-    if not gres or "gpu" not in gres.lower():
-        return None
-    last = gres.split(":")[-1]
-    return int(last) if last.isdigit() else None
+    for entry in (gres or "").split(","):
+        pieces = entry.strip().split(":")
+        if pieces[0].lower() != "gpu":
+            continue
+        last = pieces[-1]
+        return int(last) if last.isdigit() else None
+    return None
 
 
 def _sandbox_context(
@@ -1899,6 +1929,7 @@ def render_sandbox_script(
         "BRIDGE_PID=$!",
         "trap 'kill \"$BRIDGE_PID\" 2>/dev/null || true' EXIT",
         'for _ in $(seq 50); do [ -S "$BRIDGE" ] && break; sleep 0.1; done',
+        *GPU_ID_LINES,
     ]
 
     inner = "\n".join(
@@ -1941,11 +1972,12 @@ def render_sandbox_script(
             ),
             # --cleanenv also strips the GPU ids and the thread count the
             # scheduler set, and the budget inside reads exactly these:
-            # CUDA_VISIBLE_DEVICES first (SLURM_JOB_GPUS when the job did
-            # not export it), SLURM_CPUS_PER_TASK for the default thread
-            # count of an unsized launch. Without them every launch would
-            # see no GPU and one thread.
-            '--env CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-${SLURM_JOB_GPUS:-}}"',
+            # CUDA_VISIBLE_DEVICES as the prologue computed it (GPU_ID_LINES:
+            # as set, else one id per device SLURM_JOB_GPUS names, numbered
+            # from 0), SLURM_CPUS_PER_TASK for the default thread count of
+            # an unsized launch. Without them every launch would see no GPU
+            # and one thread.
+            '--env CUDA_VISIBLE_DEVICES="$SANDBOX_GPUS"',
             '--env SLURM_CPUS_PER_TASK="${SLURM_CPUS_PER_TASK:-1}"',
             # OpenMPI inside the namespace: there is no ssh and no
             # scheduler, so component selection must not go looking for

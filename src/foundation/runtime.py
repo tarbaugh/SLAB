@@ -525,11 +525,13 @@ class Workspace:
         *reservation* (a :class:`~foundation.models.Reservation` or its id)
         is the slice a session process checked out for this run with
         :meth:`reserve`. The run claims it: the slice is copied onto the run
-        record as ``resources`` and the reservation is marked as this run's,
-        in one transaction, and the reservation is released when the run
-        ends. A reservation that was released, is already claimed, or was
-        made for another host is refused with :class:`ResourcesError`
-        before the run exists.
+        record as ``resources``, the reservation is marked as this run's,
+        and the run is set running with this process's pid, all in one
+        transaction, so no moment exists in which the slice is neither
+        the holder's nor a running run's. The reservation is released when
+        the run ends. A reservation that was released, is already claimed,
+        or was made for another host is refused with
+        :class:`ResourcesError` before the run exists.
 
         Raises:
             NestedRunError: A run is already active in this context.
@@ -558,13 +560,18 @@ class Workspace:
         )
         if reservation_id is not None:
             try:
-                self.runs.claim_reservation(reservation_id, created.id, host=host)
+                self.runs.claim_reservation(
+                    reservation_id, created.id, host=host, pid=os.getpid()
+                )
             except ResourcesError as e:
                 self.runs.set_status(
                     created.id, ExecutionStatus.FAILED, error=f"ResourcesError: {e}"
                 )
                 raise
-        self.runs.set_status(created.id, ExecutionStatus.RUNNING, pid=os.getpid(), host=host)
+        else:
+            self.runs.set_status(
+                created.id, ExecutionStatus.RUNNING, pid=os.getpid(), host=host
+            )
         active = ActiveRun(self.runs, self.artifacts, created.id)
         token = _CURRENT.set(active)
         try:
