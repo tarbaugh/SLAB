@@ -5,6 +5,42 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- The gpu build is `[engines.lammps.gpu]`, and the slice chooses it. The
+  table carries a KOKKOS `command`, which must name `{gpus}` or turn
+  KOKKOS on with `-k on`, and its `setup`. `[engines.lammps]` stays the
+  plain build, and the loader refuses a plain command that carries
+  `-k on g`, naming both tables. A launch whose reservation holds gpus
+  (`gpus=` on `launch_workflow`, or a batch job that holds gpus) runs
+  the gpu build, and a launch without runs the plain build, on `relax`,
+  `single_point`, and `run_lammps` alike. The agent never names a build;
+  `engine="lammps"` is all it passes. `command=` and `setup=` remain
+  per-call overrides. A registry alias whose calculator is the LAMMPS
+  factory is a further build under its own name, and is no longer the
+  documented way to declare the GPU build. The docs, the
+  lammps-scripting and lammps-potentials skills, the md-expert card, and
+  the lammps note say to size the launch with `gpus=` and confirm with
+  `info["kokkos"]`.
+- The partition table is the cap. `check_size` checks a sized job against
+  the fields the partition itself declares: `nodes`, `ntasks_per_node` (or
+  `ntasks` when only that is set), `cpus_per_task` as cores per node,
+  the gpu count in `gres`, and `mem`. A field the partition leaves unset
+  is no cap, and SLURM enforces its own limit. Each refusal names the
+  field, such as `[hpc.partitions.gpu] gres`, and a size that asks gpus
+  on a partition without a `gres` is refused. An unsized job renders
+  exactly as before. `slab hpc partitions` prints no node line, and
+  `list_engines` reports each partition's `nodes`, `ntasks_per_node`,
+  `cpus_per_task`, `mem`, `gres`, `time_limit`, and `description`.
+- `run_lammps` info names the build. `info["build"]` is `cpu`, `gpu`, or
+  the alias name, `lammps_build()` and `lammps_builds()` in `slab.lammps`
+  resolve and list the builds, and `slab mason read` prints `build gpu`
+  on a command line whose build is not `cpu`.
+- `slab engines list` prints a `lammps builds (gpu build chosen when the
+  launch holds gpus):` block, `cpu` first, `gpu` when declared, then the
+  aliases, each with its command, its `sized per launch` placeholders,
+  and its KOKKOS switches.
+- `gres_gpus` in `slab.resources` reads the gpu count from the `gpu`
+  entry of a gres string alone, and returns none when the entry names
+  no count.
 - A claim is one transaction. `claim_reservation(pid=)` sets `run_id` on
   the reservation, `resources` on the run, and the run's status to
   `running` with its pid and host together, and `start_run(reservation=)`
@@ -54,21 +90,17 @@ All notable changes to SLAB, newest first. Dates are commit dates on
   affinity mask. An engine command holds `{ntasks}`, `{threads}`, and
   `{gpus}` where it wants the launch's numbers, and `fill` replaces only
   the placeholders a command asks for; a `{gpus}` under a launch without
-  a GPU is refused naming the route. The QE bin form is now literally
-  `mpirun -np {ntasks} <bin>/pw.x`, LAMMPS routes fill their command the
-  same way, `lammps_routes()` reports each route's `placeholders`, and
-  `slab engines list` marks such a route `sized per launch`.
-- A partition declares its node. `[hpc.partitions.NAME.node]` carries
-  `cpus`, `gpus`, and `mem`, and `max_nodes` how many nodes one job may
-  take. `render_sbatch(size=)` takes a `JobSize` (`nodes`,
-  `ntasks_per_node`, `cpus_per_task`, `gpus_per_node`, `mem`) whose
-  directives replace the partition's own, the gres keeps the type the
-  partition names, and `check_size` refuses a size the node cannot hold,
-  or a size on a partition without a node table, naming the config field.
-  Without a size the script is byte for byte what it was. `slab hpc
-  render` and `slab hpc submit` take the five size flags, `slab hpc
-  partitions` prints the node line, and `list_engines` reports each
-  partition's `node` and `max_nodes`.
+  a GPU is refused naming the build. The QE bin form is now literally
+  `mpirun -np {ntasks} <bin>/pw.x`, LAMMPS builds fill their command the
+  same way, `lammps_builds()` reports each build's `placeholders`, and
+  `slab engines list` marks such a build `sized per launch`.
+- A batch job is sized per job. `render_sbatch(size=)` takes a `JobSize`
+  (`nodes`, `ntasks_per_node`, `cpus_per_task`, `gpus_per_node`, `mem`)
+  whose directives replace the partition's own, the gres keeps the type
+  the partition names, and `check_size` refuses a size past the fields
+  the partition declares, naming the config field. Without a size the
+  script is byte for byte what it was. `slab hpc render` and `slab hpc
+  submit` take the five size flags.
 - A launch reserves its slice before it starts. The run store (schema 5)
   keeps a `reservations` table and a `resources` column on runs.
   `Workspace.reserve` checks out cpu ids and gpu ids on this host inside
@@ -107,7 +139,7 @@ All notable changes to SLAB, newest first. Dates are commit dates on
   --full` prints both. The environment block states the budget, what is
   free right now, and the default rank count of an unsized launch, and
   the `cluster` compute profile says `submit_job` is sized per job up to
-  the node spec.
+  the fields the partition declares.
 - The sandbox re-exports what `--cleanenv` strips. The rendered script
   carries `CUDA_VISIBLE_DEVICES` (from `SLURM_JOB_GPUS` when the job did
   not set it) and `SLURM_CPUS_PER_TASK` into the container, and sets
@@ -122,7 +154,7 @@ All notable changes to SLAB, newest first. Dates are commit dates on
   skills size a GPU run where it runs: `gpus_per_node` on `submit_job`
   from a login node, `gpus=` with one rank per GPU on `launch_workflow`
   inside a sandbox or an allocation, and `info["kokkos"]["gpus"]` must
-  equal what the launch held. A route with placeholders is `sized per
+  equal what the launch held. A build with placeholders is `sized per
   launch`. The docs state the guarantee: a launch can oversubscribe only
   its own slice, never a neighbour's.
 
@@ -134,20 +166,17 @@ All notable changes to SLAB, newest first. Dates are commit dates on
   card that ran it. `slab mason read` prints one line per command and
   `--full` the details; `slab mason report` counts them by kind. The MCP
   server records the same events in the harness session record.
-- LAMMPS builds are named routes. `lammps` is the plain build under
-  `[engines.lammps]`, and a registry alias that runs the LAMMPS factory,
-  such as a `lammps-gpu` whose options carry the KOKKOS command and its
-  module, is another route. `run_lammps` takes `engine=` to pick one, as
-  `relax` and `single_point` already did, and `command=` and `setup=`
-  override the chosen route. The route enters the cache identity and the
-  transcript's command events. `slab engines list` and `list_engines`
-  list every route with its command and the KOKKOS switches parsed from
-  it, because SLAB adds no switch a route lacks. `run_lammps` returns
-  `info["kokkos"]` with what the log reported (KOKKOS mode, GPUs per
-  node, threads per task, the `/kk` styles that ran) and `info["argv"]`,
-  the exact argument vector. The lammps-scripting and lammps-potentials
-  skills and the md-expert card say to choose the route by name and to
-  read the listing before a GPU run and `info["kokkos"]` after it.
+- LAMMPS builds are named. `run_lammps` takes `engine=`, as `relax` and
+  `single_point` already did, and `command=` and `setup=` override the
+  chosen build. The build enters the cache identity and the transcript's
+  command events. `slab engines list` and `list_engines` list every
+  build with its command and the KOKKOS switches parsed from it, because
+  SLAB adds no switch a build lacks. `run_lammps` returns `info["kokkos"]`
+  with what the log reported (KOKKOS mode, GPUs per node, threads per
+  task, the `/kk` styles that ran) and `info["argv"]`, the exact argument
+  vector. The lammps-scripting and lammps-potentials skills and the
+  md-expert card say to read the listing before a GPU run and
+  `info["kokkos"]` after it.
 - A session retires at finish. Mason passes the `run_ids` of a root
   session's `finish` to the new `retire_session` operation, which
   promotes the cited runs that passed their checks, anchors from earlier

@@ -64,7 +64,7 @@ from mason.config import AgentConfig
 from mason.errors import MasonError
 from mason.serve import read_record, record_path
 from slab.config import HpcConfig, SlabConfig
-from slab.resources import JobSize
+from slab.resources import JobSize, gres_gpus
 
 #: Where the bridge surfaces inside the container. The port exists only in
 #: the sandbox's private namespace, so it can never collide with the host.
@@ -1637,26 +1637,13 @@ GPU_ID_LINES = (
 
 
 def _gres_gpus(gres: str | None) -> int | None:
-    """The gpu count a gres string asks for, or None when it names none.
-
-    A gres is a comma-separated list; the count comes from its ``gpu``
-    entry alone.
+    """The gpu count a gres string asks for, or None: :func:`slab.resources.gres_gpus`.
 
     Examples:
-        >>> _gres_gpus("gpu:a100:4"), _gres_gpus("gpu:2"), _gres_gpus("gpu")
-        (4, 2, None)
-        >>> _gres_gpus("gpu:a100:4,nvme:1"), _gres_gpus("nvme:1,gpu:2"), _gres_gpus("nvme:1")
-        (4, 2, None)
-        >>> _gres_gpus(None) is None
-        True
+        >>> _gres_gpus("gpu:a100:4,nvme:1"), _gres_gpus(None)
+        (4, None)
     """
-    for entry in (gres or "").split(","):
-        pieces = entry.strip().split(":")
-        if pieces[0].lower() != "gpu":
-            continue
-        last = pieces[-1]
-        return int(last) if last.isdigit() else None
-    return None
+    return gres_gpus(gres)
 
 
 def _sandbox_context(

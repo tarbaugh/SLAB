@@ -37,15 +37,16 @@ a sandbox or an allocation it is a `launch_workflow` call with `gpus=`
 and one rank per GPU (`ntasks` equal to `gpus`). Never start a GPU run
 on the login node itself. A timing on the smoke cell decides whether the
 switches pay before a production run spends its allocation. A machine
-keeps the plain build and the KOKKOS build as two named routes, and
-`engine=` picks one per run, so a smoke test stays on the plain route
-and production MD takes the accelerated one. A route whose command holds
-`{ntasks}`, `{threads}`, or `{gpus}` fills them from the launch's size,
-and `list_engines` marks it `sized per launch`; SLAB adds no switch a
-route lacks. Read the `lammps` entry of `list_engines` before a GPU run,
-and `info["kokkos"]` after it, because a route without `-k on` ran on
-the host whatever the build contained, and `gpus` there must equal what
-the launch held.
+keeps a plain build and a gpu build, and the build follows the slice:
+a launch sized with `gpus=` runs the gpu build, and an unsized launch
+runs the plain build, so a smoke test stays plain and production MD is
+accelerated. Never name a build; `engine="lammps"` is all you pass. A
+build whose command holds `{ntasks}`, `{threads}`, or `{gpus}` fills
+them from the launch's size, and `list_engines` marks it `sized per
+launch`; SLAB adds no switch a build lacks. Read the `lammps` entry of
+`list_engines` before a GPU run, and `info["kokkos"]` after it, because
+a build without `-k on` ran on the host whatever it contained, and
+`gpus` there must equal what the launch held.
 
 A machine-learned potential can say when it is guessing. GRACE reports a
 per-atom extrapolation grade, gamma: near 1 is the edge of the training

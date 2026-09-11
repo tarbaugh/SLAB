@@ -550,11 +550,13 @@ idempotently. There is no remote state machine — the payload is typically
 `slab run workflow.py`, so runs, caching, and verification stay in the
 workspace wherever the process executes.
 
-A sized submission keeps "no silent defaults", because the cap is
-declared data: a partition's `node` table (`cpus`, `gpus`, `mem`) and
-`max_nodes` are the only numbers a size is checked against, a partition
-without the table cannot be sized and says which table to add, and
-without a size the script is byte for byte what it was. Inside an
+A sized submission keeps "no silent defaults", because the cap is the
+declared partition itself: the `nodes`, `ntasks_per_node`,
+`cpus_per_task`, `mem`, and `gres` a partition declares are the only
+numbers a size is checked against, so sizing adds no second description
+of the machine; a field the partition leaves unset is no cap (SLURM
+enforces its own limit), a refusal names the field, and without a size
+the script is byte for byte what it was. Inside an
 allocation the same discipline is a checkout before start: a session
 process reserves cpu ids and gpu ids in the run store inside one
 transaction, the run claims the reservation as it starts and copies the

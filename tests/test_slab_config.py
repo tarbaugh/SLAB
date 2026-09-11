@@ -15,9 +15,9 @@ from slab.config import (
     ConfigError,
     GracemakerBuilderConfig,
     HpcConfig,
+    LammpsBuild,
     LammpsEngineConfig,
     MpBuilderConfig,
-    NodeSpec,
     Partition,
     PathsConfig,
     QeEngineConfig,
@@ -269,6 +269,7 @@ def test_every_key_the_template_shows_is_a_key_the_schema_accepts() -> None:
         "[paths]": PathsConfig,
         "[engines.qe]": QeEngineConfig,
         "[engines.lammps]": LammpsEngineConfig,
+        "[engines.lammps.gpu]": LammpsBuild,
         "[builders.atomsk]": AtomskBuilderConfig,
         "[builders.mp]": MpBuilderConfig,
         "[builders.gracemaker]": GracemakerBuilderConfig,
@@ -276,7 +277,6 @@ def test_every_key_the_template_shows_is_a_key_the_schema_accepts() -> None:
         "[hpc]": HpcConfig,
         "[hpc.partitions.cpu]": Partition,
         "[hpc.partitions.gpu]": Partition,
-        "[hpc.partitions.gpu.node]": NodeSpec,
         "[agent]": AgentConfig,
         "[agent.serve]": ServeConfig,
         "[agent.sandbox]": SandboxConfig,
@@ -594,45 +594,108 @@ def test_rootstock_setup_lines_are_kept_verbatim(
     assert config.engines.rootstock.setup == ("module load cuda", "source $HOME/rs/bin/activate")
 
 
-# -- node tables ---------------------------------------------------------------
+# -- LAMMPS builds ------------------------------------------------------------
 
 
-def test_partition_node_table_validates(tmp_path: Path) -> None:
+def test_lammps_gpu_build_table_validates(tmp_path: Path) -> None:
+    """[engines.lammps.gpu] carries the KOKKOS command and its own setup lines."""
+    (tmp_path / "slab.toml").write_text(
+        "[engines.lammps]\n"
+        'command = "lmp"\n'
+        'setup = ["module load lammps/2025.07"]\n'
+        "[engines.lammps.gpu]\n"
+        'command = "mpirun -np {ntasks} lmp -k on g {gpus} -sf kk"\n'
+        'setup = ["module purge", "module load lammps/2025.07-kokkos"]\n'
+    )
+    lammps = load_config(tmp_path).engines.lammps
+    assert lammps.command == "lmp"
+    assert lammps.gpu == LammpsBuild(
+        command="mpirun -np {ntasks} lmp -k on g {gpus} -sf kk",
+        setup=("module purge", "module load lammps/2025.07-kokkos"),
+    )
+    assert LammpsEngineConfig().gpu is None
+    assert LammpsBuild(command="lmp -k on g {gpus}").setup == ()
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["lmp -k on g 2 -sf kk", "srun lmp -kokkos on g {gpus}", "mpirun -np 4 lmp -k on g 1 t 4"],
+)
+def test_plain_lammps_command_may_not_ask_kokkos_for_a_gpu(tmp_path: Path, command: str) -> None:
+    """The plain build runs when a launch holds no gpu, so '-k on g' there is refused
+    and the message points at the gpu table."""
+    (tmp_path / "slab.toml").write_text(f'[engines.lammps]\ncommand = "{command}"\n')
+    with pytest.raises(ConfigError, match=r"\[engines\.lammps\.gpu\]") as excinfo:
+        load_config(tmp_path)
+    assert "-k on g" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("command", ["lmp", "mpirun -np {ntasks} lmp", "env OMP_NUM_THREADS=4 lmp"])
+def test_gpu_lammps_command_must_ask_for_a_gpu(tmp_path: Path, command: str) -> None:
+    """A gpu build that names neither {gpus} nor '-k on' would run the plain binary."""
+    (tmp_path / "slab.toml").write_text(f'[engines.lammps.gpu]\ncommand = "{command}"\n')
+    with pytest.raises(ConfigError, match=r"\[engines\.lammps\.gpu\] command must ask for a gpu"):
+        load_config(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "command", ["lmp -k on g {gpus} -sf kk", "lmp -kokkos on t 4", "srun lmp -k on"]
+)
+def test_gpu_lammps_command_accepts_gpus_placeholder_or_kokkos_on(
+    tmp_path: Path, command: str
+) -> None:
+    (tmp_path / "slab.toml").write_text(f'[engines.lammps.gpu]\ncommand = "{command}"\n')
+    assert load_config(tmp_path).engines.lammps.gpu.command == command
+
+
+def test_gpu_lammps_table_refuses_unknown_keys(tmp_path: Path) -> None:
+    (tmp_path / "slab.toml").write_text(
+        '[engines.lammps.gpu]\ncommand = "lmp -k on g {gpus}"\ngpus = 4\n'
+    )
+    with pytest.raises(ConfigError, match=r"engines\.lammps\.gpu\.gpus"):
+        load_config(tmp_path)
+
+
+# -- partition caps -------------------------------------------------------------
+
+
+def test_partition_caps_are_its_own_fields(tmp_path: Path) -> None:
+    """A partition declares its caps through nodes, ntasks_per_node, cpus_per_task,
+    gres, and mem; there is no separate node table."""
     (tmp_path / "slab.toml").write_text(
         "[hpc.partitions.gpu]\n"
+        "nodes = 4\n"
+        "ntasks_per_node = 4\n"
+        "cpus_per_task = 16\n"
         'gres = "gpu:a100:4"\n'
-        "max_nodes = 4\n"
-        "[hpc.partitions.gpu.node]\n"
-        "cpus = 64\n"
-        "gpus = 4\n"
         'mem = "480G"\n'
         "[hpc.partitions.cpu]\n"
-        "[hpc.partitions.cpu.node]\n"
-        "cpus = 128\n"
+        "ntasks_per_node = 128\n"
     )
     hpc = load_config(tmp_path).hpc
     gpu = hpc.partitions["gpu"]
-    assert gpu.node == NodeSpec(cpus=64, gpus=4, mem="480G") and gpu.max_nodes == 4
+    assert (gpu.nodes, gpu.ntasks_per_node, gpu.cpus_per_task) == (4, 4, 16)
+    assert (gpu.gres, gpu.mem) == ("gpu:a100:4", "480G")
     cpu = hpc.partitions["cpu"]
-    assert cpu.node is not None and (cpu.node.gpus, cpu.node.mem, cpu.max_nodes) == (0, None, 1)
-    assert Partition().node is None
+    assert (cpu.nodes, cpu.ntasks_per_node, cpu.gres, cpu.mem) == (None, 128, None, None)
 
 
 @pytest.mark.parametrize(
     ("body", "field"),
     [
-        ("[hpc.partitions.gpu.node]\ngpus = 4\n", r"node\.cpus"),
-        ("[hpc.partitions.gpu.node]\ncpus = 0\n", r"node\.cpus"),
-        ("[hpc.partitions.gpu.node]\ncpus = 8\ngpus = -1\n", r"node\.gpus"),
-        ("[hpc.partitions.gpu.node]\ncpus = 8\nmem = \"lots\"\n", r"node\.mem"),
-        ("[hpc.partitions.gpu.node]\ncpus = 8\ncores = 8\n", r"node\.cores"),
-        ("[hpc.partitions.gpu]\nmax_nodes = 0\n", r"max_nodes"),
+        ("[hpc.partitions.gpu.node]\ncpus = 64\ngpus = 4\n", r"hpc\.partitions\.gpu\.node"),
+        ("[hpc.partitions.gpu]\nmax_nodes = 4\n", r"hpc\.partitions\.gpu\.max_nodes"),
     ],
 )
-def test_partition_node_table_refuses_bad_values(tmp_path: Path, body: str, field: str) -> None:
+def test_partition_node_table_and_max_nodes_are_unknown_keys(
+    tmp_path: Path, body: str, field: str
+) -> None:
+    """The former node table and max_nodes are gone; a config that still writes
+    them is refused as an unknown key rather than silently ignored."""
     (tmp_path / "slab.toml").write_text(body)
-    with pytest.raises(ConfigError, match=field):
+    with pytest.raises(ConfigError, match=field) as excinfo:
         load_config(tmp_path)
+    assert "unknown key" in str(excinfo.value)
 
 
 def test_memory_mb_rounds_kilobytes_up_and_refuses_zero() -> None:

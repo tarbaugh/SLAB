@@ -64,7 +64,7 @@ from slab.lammps import (
     describe_lammps,
     kokkos_report,
     kokkos_switches,
-    lammps_route,
+    lammps_build,
     run_lammps_script,
     script_scratch_dir,
 )
@@ -996,12 +996,12 @@ _MAX_KEPT_FAILURE_FILES = 20
 # serializer would otherwise hash a potential file by its path string, and
 # changed bytes at the same path must miss.
 def _lammps_identity(arguments: dict[str, Any]) -> dict[str, Any]:
-    """The binary a ``run_lammps`` call names: the route, then per-call overrides."""
-    route = lammps_route(arguments.get("engine"))
-    command = arguments.get("command") or route["command"]
-    setup = arguments.get("setup") if arguments.get("setup") is not None else route["setup"]
+    """The binary a ``run_lammps`` call names: the build, then per-call overrides."""
+    build = lammps_build(arguments.get("engine"))
+    command = arguments.get("command") or build["command"]
+    setup = arguments.get("setup") if arguments.get("setup") is not None else build["setup"]
     described = describe_lammps(command=command, setup=setup)
-    described["route"] = route["engine"]
+    described["build"] = build["build"]
     return described
 
 
@@ -1055,14 +1055,16 @@ def run_lammps(
     species; the returned ``types`` map says which element each type is,
     so ``pair_coeff`` lists the elements in that order.
 
-    The binary is a named route. *engine* is ``lammps`` (the default:
-    ``[engines.lammps] command``, else ``$ASE_LAMMPSRUN_COMMAND``, else
-    ``lmp``) or a registry alias that runs the LAMMPS factory, such as a
-    ``lammps-gpu`` whose options carry a KOKKOS command and its module.
-    *command* and *setup* override the route's own. A KOKKOS or MPI
-    launch rides in the command (``mpirun -np 4 lmp -k on g 4 -sf kk``),
+    The build follows the slice. With *engine* ``lammps`` (the default)
+    a launch whose reservation holds gpus runs ``[engines.lammps.gpu]``,
+    and one without runs ``[engines.lammps]`` (else
+    ``$ASE_LAMMPSRUN_COMMAND``, else ``lmp``); size the launch with
+    ``gpus=`` and never name a build. A registry alias that runs the
+    LAMMPS factory is a further build under its own name. *command* and
+    *setup* override the chosen build's own. A KOKKOS or MPI launch rides
+    in the command (``mpirun -np {ntasks} lmp -k on g {gpus} -sf kk``),
     and nothing adds a switch the command lacks: without ``-k on`` a
-    KOKKOS build runs its plain styles on the host. The route, the
+    KOKKOS build runs its plain styles on the host. The build, the
     command, the detected version, the setup lines, and the content of
     every staged file enter the cache identity, so a different binary,
     switch, or potential file honestly recomputes.
@@ -1084,8 +1086,9 @@ def run_lammps(
     entry per table: columns, first and last row, row count, and the loop
     line's steps, atoms, and seconds), ``steps`` (the sum over loops),
     and ``wall_time`` (LAMMPS's own total). *info* is the machine side:
-    ``route``, ``command``, ``argv`` (the exact argument vector that
-    ran), ``version``, ``setup``, ``kokkos`` (what the log says KOKKOS did:
+    ``build`` (``cpu``, ``gpu``, or an alias name), ``command``, ``argv``
+    (the exact argument vector that ran), ``version``, ``setup``,
+    ``kokkos`` (what the log says KOKKOS did:
     ``enabled``, ``gpus``, ``threads``, the ``/kk`` styles that ran, and
     the ``switches`` the command asked for), ``types``, ``files`` (the
     kept names of what the script wrote), ``artifacts`` (name to hash),
@@ -1099,9 +1102,9 @@ def run_lammps(
         atoms: A structure to write as ``structure.data``.
         specorder: Element symbols in atom-type order for *atoms*.
         label: Names the kept artifacts (default ``lammps``).
-        engine: The LAMMPS route: ``lammps`` or a registry alias.
-        command: Override the route's LAMMPS command.
-        setup: Override the route's setup lines.
+        engine: ``lammps`` (the build follows the slice) or a registry alias.
+        command: Override the chosen build's LAMMPS command.
+        setup: Override the chosen build's setup lines.
         timeout_s: Hard kill for the script (default 24 h; the batch
             job's own time limit is the outer guard).
     """
@@ -1115,10 +1118,10 @@ def run_lammps(
         raise LammpsScriptError("the script is empty")
     staged = _staged_lammps_files(files, script)
     types = _lammps_types(atoms, specorder, script)
-    route = lammps_route(engine)
-    command = command or route["command"]
+    build = lammps_build(engine)
+    command = command or build["command"]
     if setup is None:
-        setup = route["setup"]
+        setup = build["setup"]
     setup_lines = tuple(str(line) for line in setup) if setup is not None else None
     described = describe_lammps(command=command, setup=setup_lines)
     active = current_run()
@@ -1190,7 +1193,7 @@ def run_lammps(
     }
     info: dict[str, Any] = {
         "engine": "lammps",
-        "route": route["engine"],
+        "build": build["build"],
         "command": outcome.command,
         "argv": list(outcome.argv),
         "version": described.get("version"),

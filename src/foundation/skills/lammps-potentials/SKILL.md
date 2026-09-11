@@ -99,28 +99,29 @@ what is free is refused with the free amounts, so read `list_engines`
 (`budget` and `free`) and size within it. One MPI task per GPU either
 way. Never start a GPU run on the login node itself.
 
-The switches ride in a route's `command`. A machine keeps more than one
-LAMMPS, so each build is a route with a name: `lammps` is the plain
-build under `[engines.lammps]`, and an accelerated build is a registry
-alias such as `lammps-gpu` whose options carry the KOKKOS command and
-its module. Choose the route by name, `engine="lammps-gpu"` on `relax`,
-`single_point`, and `run_lammps`, and keep the plain route plain, so a
-smoke test or a small EAM cell never queues for a GPU. ASE appends its
-own flags after the switches. SLAB adds no switch: a route without
+The switches ride in a build's `command`. A machine keeps two LAMMPS
+builds: the plain build under `[engines.lammps]` and the gpu build
+under `[engines.lammps.gpu]`, whose command carries the KOKKOS switches
+and whose setup loads its module. The build follows the slice. A launch
+sized with `gpus=` runs the gpu build, and an unsized launch runs the
+plain build, on `relax`, `single_point`, and `run_lammps` alike. Never
+name a build; `engine="lammps"` is all you pass. So a smoke test or a
+small EAM cell runs unsized and never queues for a GPU. ASE appends its
+own flags after the switches. SLAB adds no switch: a build without
 `-k on` runs the plain styles on the host, silently, whatever the build
-contains. The `lammps` entry of `list_engines` lists every route with
-its command and the switches parsed from it. A route whose command
+contains. The `lammps` entry of `list_engines` lists every build with
+its command and the switches parsed from it. A build whose command
 holds `{ntasks}`, `{threads}`, or `{gpus}` is marked `sized per launch`:
 SLAB fills those from the launch's size, so `ntasks=2, gpus=2` on the
-launch runs `-np 2 ... g 2` on such a route (`gpus=2` alone takes every
-free cpu and two gpus), and a route that asks `{gpus}` under a
-launch without one is refused naming the route. A route that hardcodes
-its numbers runs as written whatever the launch held. Read it before a
-GPU run. When no accelerated route exists, pass `command=` with the
-switches on that call alone, and report the missing route as a machine
-fact.
+launch runs `-np 2 ... g 2` (`gpus=2` alone takes every free cpu and
+two gpus), and a gpu build that asks `{gpus}` under a launch without
+one is refused naming the build. A build that hardcodes its numbers
+runs as written whatever the launch held. Read the listing before a
+GPU run. When the machine declares no gpu build, pass `command=` with
+the switches on that call alone, and report the missing build as a
+machine fact.
 
-| Hardware | the route's `command` | Meaning |
+| Hardware | the build's `command` | Meaning |
 | --- | --- | --- |
 | One GPU | `mpirun -np 1 lmp -k on g 1 -sf kk -pk kokkos newton on neigh half` | one MPI task, one GPU |
 | N GPUs on one node | `mpirun -np N lmp -k on g N -sf kk -pk kokkos newton on neigh half` | `-np` equals the number of GPUs on the node |
