@@ -270,6 +270,36 @@ finished jobs leave the queue. It collapses SLURM's ~22 states onto seven
 neither command answers, the state is reported as undetermined with the
 reason, so an unknown is never presented as a known.
 
+### Cancel a job
+
+A cancelled job takes its processes down with it, and the runs those
+processes were executing cannot record their own end. Every run started
+inside a batch job carries the job id, read from `$SLURM_JOB_ID` when the
+run starts. `slab hpc cancel` uses that stamp. It asks the scheduler to
+cancel the job, marks the job's running runs failed with the reason,
+releases the reservations those runs held, and lists every machine memory
+written since the job's first run started. The memories are listed and
+never deleted, because a job that died may have recorded a fact it never
+verified, and that review is yours. The command expires and purges
+nothing.
+
+The capture below comes from a workspace where job `4242314` was executing
+two runs, one of them sized, and had written one memory:
+
+```text
+$ slab hpc cancel 4242314 -w .slab
+cancel requested for job 4242314
+failed  01m277rwm17ge3nd5sp88rssmh  si-relax-k12  job 4242314 cancelled by the operator; the process died with it
+failed  01m277rwm1771qjb69dzgyspgy  si-relax  job 4242314 cancelled by the operator; the process died with it
+released 01m277rwm1xz0766xcfaj1nzxd  32 cpu(s) 0-31, no gpu; 8 rank(s) x 4 thread(s)
+memory  qe-pools-on-node7  written 0s ago ('slab memory show qe-pools-on-node7' to review)
+```
+
+`--workspace` names the workspace to settle, and it defaults to the
+workspace `slab runs` resolves: `$SLAB_WORKSPACE`, then the config, then
+`./.slab`. Mason's `cancel_job` tool and the MCP `cancel_job` tool run the
+same operation on the session's workspace and return the same lines.
+
 ## Size a job
 
 A partition declares one node's size in a `node` table, with `cpus`,

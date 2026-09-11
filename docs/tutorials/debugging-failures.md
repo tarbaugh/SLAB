@@ -333,15 +333,19 @@ Mason runs the same check at session start and on every
 process is gone" at once instead of blocking on a dead record.
 
 A run stamped with another host's name is not judged from here, and the
-listing says so. Retire it by hand once you know its process is dead:
+listing says so. When the run belongs to a job you are cancelling, do not
+retire it by hand. `slab hpc cancel <job>` marks every running run of that
+job failed, releases their reservations, and lists the memories the job
+wrote. See [Cancel a job](hpc-config.md#cancel-a-job). For a run whose
+process died another way, retire it by hand once you know it is dead:
 
 ```bash
 slab runs fail 01m2 --reason "node7 was drained"
 ```
 
 The verb is refused while the run's process is alive on this host. Mason
-does not have this verb. The agent cancels SLURM jobs, and the operator
-retires runs.
+does not have this verb. The agent cancels SLURM jobs, which settles the
+job's own runs, and the operator retires the rest.
 
 A running run that reads `quarantined` is in its initial state, not in
 trouble. Every run is born quarantined and stays there until its checks

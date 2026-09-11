@@ -44,7 +44,7 @@ Twenty-four tools, each a thin wrapper over the operations layer, and three more
 | `search_materials` | Filtered search over the offline Materials Project snapshot (`[builders.mp]`): elements, ranges, ordering, a row cap. |
 | `get_material` | One snapshot record by material id, with its elements and the resolved CIF path. Absence is reported as absence; there is no online fallback. |
 | `query_materials` | One read-only `SELECT` over the snapshot's metadata database, for what the filters cannot express. |
-| `submit_job`, `job_status`, `cancel_job` | SLURM batch jobs, with the scripts kept under the workspace's `jobs/` directory. Present only when `slab.toml` configures `[hpc]` partitions. `submit_job` takes `nodes`, `ntasks_per_node`, `cpus_per_task`, `gpus_per_node`, and `mem`; the size replaces the partition's directives and must fit the node the partition declares. |
+| `submit_job`, `job_status`, `cancel_job` | SLURM batch jobs, with the scripts kept under the workspace's `jobs/` directory. Present only when `slab.toml` configures `[hpc]` partitions. `submit_job` takes `nodes`, `ntasks_per_node`, `cpus_per_task`, `gpus_per_node`, and `mem`; the size replaces the partition's directives and must fit the node the partition declares. `cancel_job` also marks the job's running runs failed, releases their reservations, and lists the memories written since the job started. |
 | `notebook` | Append a dated entry to the project's `NOTEBOOK.md`, or read its latest entries. |
 | `plan` | Rewrite the project's `PLAN.md`, or read it. |
 | `list_memories`, `recall`, `remember` | The machine's memory: what earlier sessions on this machine recorded about its software. See [Machine memory](memory.md). |

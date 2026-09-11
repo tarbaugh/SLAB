@@ -56,7 +56,7 @@ from foundation.models import (
     utcnow,
 )
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -76,12 +76,14 @@ CREATE TABLE IF NOT EXISTS runs (
     failure          TEXT,
     pid              INTEGER,
     host             TEXT,
-    resources        TEXT
+    resources        TEXT,
+    job_id           TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_runs_state ON runs(state);
 CREATE INDEX IF NOT EXISTS ix_runs_status ON runs(status);
 CREATE INDEX IF NOT EXISTS ix_runs_created_at ON runs(created_at);
 CREATE INDEX IF NOT EXISTS ix_runs_session ON runs(session);
+CREATE INDEX IF NOT EXISTS ix_runs_job_id ON runs(job_id);
 CREATE TABLE IF NOT EXISTS transitions (
     seq         INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id      TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -178,6 +180,10 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
             run_id      TEXT REFERENCES runs(id) ON DELETE CASCADE
         )""",
         "CREATE INDEX IF NOT EXISTS ix_reservations_host ON reservations(host)",
+    ),
+    6: (  # the scheduler job a run started under, so a cancel finds its runs
+        "ALTER TABLE runs ADD COLUMN job_id TEXT",
+        "CREATE INDEX IF NOT EXISTS ix_runs_job_id ON runs(job_id)",
     ),
 }
 
@@ -623,8 +629,8 @@ class SQLiteRunStore:
                 conn.execute(
                     "INSERT INTO runs (id, name, state, status, intent, session, meta,"
                     " created_at, updated_at, state_entered_at, started_at, finished_at,"
-                    " error, failure, pid, host, resources)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " error, failure, pid, host, resources, job_id)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         run.id,
                         run.name,
@@ -643,6 +649,7 @@ class SQLiteRunStore:
                         run.pid,
                         run.host,
                         _fmt_json(run.resources),
+                        run.job_id,
                     ),
                 )
             except sqlite3.IntegrityError as e:
@@ -1234,9 +1241,10 @@ class SQLiteRunStore:
         state: LifecycleState | str | None = None,
         status: ExecutionStatus | str | None = None,
         session: str | None = None,
+        job_id: str | None = None,
         limit: int | None = None,
     ) -> list[Run]:
-        """List runs, newest first, optionally filtered by state, status, session.
+        """List runs, newest first, optionally filtered by state, status, session, job.
 
         The *session* filter takes a full session id or a unique prefix, and is
         resolved the same way run ids are.
@@ -1266,6 +1274,9 @@ class SQLiteRunStore:
         if session is not None:
             clauses.append("session = ?")
             params.append(self.resolve_session(session))
+        if job_id is not None:
+            clauses.append("job_id = ?")
+            params.append(job_id)
         sql = "SELECT * FROM runs"
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
@@ -1798,6 +1809,7 @@ def _row_to_run(row: sqlite3.Row) -> Run:
         pid=row["pid"],
         host=row["host"],
         resources=_parse_json(row["resources"]),
+        job_id=row["job_id"],
     )
 
 

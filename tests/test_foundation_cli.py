@@ -861,3 +861,24 @@ def test_runs_reservations_and_reap(root: Path) -> None:
         assert [r.id for r in ws.runs.list_reservations()] == [live.id]
     empty = runner.invoke(runs_app, ["reservations", "-w", str(root / "other")])
     assert "no reservations" in empty.output
+
+
+def test_show_names_the_job_a_run_started_under(root: Path) -> None:
+    """A run stamped with a scheduler job id shows it, in every status; a
+    run started outside a job shows no job line."""
+    from foundation.models import Run
+
+    with Workspace(root) as ws:
+        batched = ws.runs.create(Run(name="batched", job_id="4242"))
+        ws.runs.set_status(batched.id, "running", pid=1, host="node7")
+        local = ws.runs.create(Run(name="local"))
+    shown = runner.invoke(app, ["show", batched.id, "-w", str(root)])
+    assert "  job:     4242" in shown.output
+    with Workspace(root) as ws:
+        ws.runs.set_status(batched.id, "completed")
+    shown = runner.invoke(app, ["show", batched.id, "-w", str(root)])
+    assert "  job:     4242" in shown.output
+    shown = runner.invoke(app, ["show", local.id, "-w", str(root)])
+    assert "job:" not in shown.output
+    as_json = runner.invoke(app, ["show", batched.id, "-w", str(root), "--json"])
+    assert '"job_id": "4242"' in as_json.output

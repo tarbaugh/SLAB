@@ -722,3 +722,42 @@ def test_sized_gres_sizes_only_the_gpu_entry_of_a_list() -> None:
     assert sized_gres("gpu:4,shard:8", 2) == "gpu:2,shard:8"
     assert sized_gres("nvme:1", 1) == "nvme:1,gpu:1"
     assert sized_gres("gpu:a100:4,nvme:1", 0) == "nvme:1"
+
+
+def test_cli_hpc_cancel_settles_the_workspace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scheduler_bin: Path
+) -> None:
+    """The front door's 'slab hpc cancel' takes --workspace: it fails the
+    job's running runs, releases their reservations, and lists the memories
+    written since the job started, one line each."""
+    from foundation.models import Run
+    from foundation.runtime import Workspace
+    from slab_stack.cli import app as front_door
+
+    _config_file(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SLAB_MEMORY_DIR", str(tmp_path / "memory"))
+    _fake(scheduler_bin, "scancel", "true")
+    root = tmp_path / "ws"
+    with Workspace(root) as ws:
+        run = ws.runs.create(Run(name="si-relax", job_id="31337"))
+        ws.runs.set_status(run.id, "running", pid=1, host="node7")
+        bystander = ws.runs.create(Run(name="other", job_id="31338"))
+        ws.runs.set_status(bystander.id, "running", pid=1, host="node7")
+    from foundation import memory as memory_store
+
+    memory_store.write("qe-on-node7", "pw.x wants -nk 1 there", "One pool.")
+
+    result = runner.invoke(front_door, ["hpc", "cancel", "31337", "-w", str(root)])
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert lines[0] == "cancel requested for job 31337"
+    assert lines[1] == (
+        f"failed  {run.id}  si-relax  job 31337 cancelled by the operator; the process died with it"
+    )
+    assert lines[2].startswith("memory  qe-on-node7  written 0s ago")
+    assert lines[2].endswith("('slab memory show qe-on-node7' to review)")
+    with Workspace(root) as ws:
+        assert ws.runs.get(run.id).status.value == "failed"
+        assert ws.runs.get(bystander.id).status.value == "running"
+    assert (tmp_path / "memory" / "qe-on-node7.md").exists()

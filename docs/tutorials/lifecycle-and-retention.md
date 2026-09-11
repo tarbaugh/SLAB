@@ -202,7 +202,7 @@ The two phases exist because they carry different risk. Expiry is cheap and revi
 Two safety valves follow the same logic:
 
 - Blobs that no run references are orphans: the residue of a task that failed before its row was written, or of a process killed mid-write. `gc` keeps an orphan younger than the policy's `orphan_ttl_days` (default 1 day), because it may belong to a run that is about to record it, and reports it under `orphans`. Older than that, `gc` drops it and reports it under `orphans_dropped`. Set `orphan_ttl_days` to `null` in the policy file to keep orphans forever.
-- Runs at status `running` are never swept by default. A hard-killed process leaves its run at `running` forever, so `expire --include-running` (or `include_running=True`) exists for when you know those processes are dead. Such runs are marked failed first, then expired. To retire one such run without a sweep, use `slab runs reap` or `slab runs fail`. See [A run stuck at running](debugging-failures.md#a-run-stuck-at-running).
+- Runs at status `running` are never swept by default. A hard-killed process leaves its run at `running` forever, so `expire --include-running` (or `include_running=True`) exists for when you know those processes are dead. Such runs are marked failed first, then expired. To retire one such run without a sweep, use `slab runs reap` or `slab runs fail`. `slab hpc cancel` marks a cancelled job's running runs failed and touches no lifecycle state. See [A run stuck at running](debugging-failures.md#a-run-stuck-at-running).
 
 ## Promote a whole session
 

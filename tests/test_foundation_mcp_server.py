@@ -712,3 +712,51 @@ def test_list_engines_still_answers_when_the_store_cannot_be_opened(tmp_path: Pa
         sealed.chmod(0o700)
     assert "builtin" in answer and answer["free"] is None
     assert answer["resources_note"].startswith("run store unavailable:")
+
+
+def test_cancel_job_over_mcp_settles_the_workspace(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The MCP cancel_job is the same operation as Mason's and the CLI's: the
+    job's running runs are failed, and the summary lists them, the released
+    reservations, and the memories written since the job started, with the
+    same lines as text."""
+    import stat
+
+    from foundation import memory as memory_store
+    from foundation.models import Run
+
+    bin_dir = tmp_path / "fake-slurm"
+    bin_dir.mkdir()
+    script = bin_dir / "scancel"
+    script.write_text("#!/bin/sh\ntrue\n")
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    monkeypatch.setenv("SLAB_MEMORY_DIR", str(tmp_path / "memory"))
+    (tmp_path / "slab.toml").write_text('[hpc]\ndefault_partition = "cpu"\n[hpc.partitions.cpu]\n')
+    with Workspace(root) as ws:
+        run = ws.runs.create(Run(name="relax", job_id="4242"))
+        ws.runs.set_status(run.id, "running", pid=1, host="node7")
+        held = ws.runs.reserve(
+            host="node7", holder_pid=1, budget_cpus=range(2), budget_gpus=(), ntasks=1
+        )
+        claimed = ws.runs.create(Run(name="sized", job_id="4242"))
+        ws.runs.claim_reservation(held.id, claimed.id, host="node7", pid=1)
+    memory_store.write("qe-on-node7", "pw.x wants -nk 1 there", "One pool.")
+
+    server = build_server(root, project=tmp_path)
+    summary = _call(server, "cancel_job", {"job_id": "4242"})
+
+    assert summary["job_id"] == "4242"
+    assert {r["name"] for r in summary["runs_failed"]} == {"relax", "sized"}
+    assert [r["id"] for r in summary["reservations_released"]] == [held.id]
+    assert [m["name"] for m in summary["memories"]] == ["qe-on-node7"]
+    lines = summary["text"].splitlines()
+    assert lines[0] == "cancel requested for job 4242"
+    assert sum(line.startswith("failed  ") for line in lines) == 2
+    assert lines[3] == f"released {held.id}  1 cpu(s) 0, no gpu; 1 rank(s) x 1 thread(s)"
+    assert lines[4].startswith("memory  qe-on-node7  written 0s ago")
+    with Workspace(root) as ws:
+        assert ws.runs.get(run.id).status.value == "failed"
+        assert ws.runs.get(claimed.id).status.value == "failed"
+        assert ws.runs.list_reservations() == []

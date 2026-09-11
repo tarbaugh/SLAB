@@ -1575,3 +1575,41 @@ def test_list_engines_still_answers_when_the_store_cannot_be_opened(tmp_path: Pa
     assert "builtin" in answer and answer["budget"]["cpus"] >= 1
     assert answer["free"] is None
     assert answer["resources_note"].startswith("run store unavailable: the run store at")
+
+
+def test_cancel_job_settles_the_sessions_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mason's cancel_job routes through the shared operation with the
+    session's workspace: the answer names the runs it failed and the
+    memories the job wrote, so the model reads what the cancel changed."""
+    import stat
+
+    from foundation import memory as memory_store
+    from foundation.models import Run
+    from foundation.runtime import Workspace
+
+    bin_dir = tmp_path / "fake-slurm"
+    bin_dir.mkdir()
+    script = bin_dir / "scancel"
+    script.write_text("#!/bin/sh\ntrue\n")
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    monkeypatch.setenv("SLAB_MEMORY_DIR", str(tmp_path / "memory"))
+    hpc = HpcConfig.model_validate({"default_partition": "cpu", "partitions": {"cpu": {}}})
+    session = MasonSession(tmp_path, workspace_root=tmp_path / ".slab", hpc=hpc, auto_approve=True)
+    with Workspace(session.workspace_root) as ws:
+        run = ws.runs.create(Run(name="md", job_id="4242"))
+        ws.runs.set_status(run.id, "running", pid=1, host="node7")
+    memory_store.write("lammps-on-node7", "kokkos wants one rank per gpu", "Seen.")
+
+    answer = build_toolbox(session).dispatch(_call("cancel_job", job_id="4242"))
+
+    lines = answer.splitlines()
+    assert lines[0] == "cancel requested for job 4242"
+    assert lines[1] == (
+        f"failed  {run.id}  md  job 4242 cancelled by the operator; the process died with it"
+    )
+    assert lines[2].startswith("memory  lammps-on-node7  written 0s ago")
+    with Workspace(session.workspace_root) as ws:
+        assert ws.runs.get(run.id).status.value == "failed"

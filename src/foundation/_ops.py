@@ -21,11 +21,13 @@ import sys
 import traceback
 from collections.abc import Iterable, Sequence
 from contextlib import ExitStack, redirect_stderr, redirect_stdout, suppress
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from foundation.errors import (
     FoundationError,
+    IllegalStatusChangeError,
     IllegalTransitionError,
     NestedRunError,
     ResourcesError,
@@ -34,7 +36,7 @@ from foundation.errors import (
     StorageError,
 )
 from foundation.lifecycle import ExecutionStatus, LifecycleState
-from foundation.models import ArtifactRole, Reservation, Run
+from foundation.models import ArtifactRole, Reservation, Run, utcnow
 from foundation.retention import DEFAULT_POLICY, RetentionPolicy, _reachable_hashes
 from foundation.runtime import Workspace, describe_liveness
 
@@ -137,6 +139,7 @@ def run_summary(run: Run) -> dict[str, Any]:
         "created_at": run.created_at.isoformat(),
         "state_entered_at": run.state_entered_at.isoformat(),
         "resources": run.resources,
+        "job_id": run.job_id,
     }
 
 
@@ -1194,9 +1197,108 @@ def job_status(job_id: str) -> dict[str, Any]:
     }
 
 
-def cancel_job(job_id: str) -> dict[str, Any]:
-    """Ask the scheduler to cancel one job (a no-op once it has finished)."""
+def cancel_job(job_id: str, *, workspace: str | os.PathLike[str] | None = None) -> dict[str, Any]:
+    """Cancel one job, and settle what it leaves behind in *workspace*.
+
+    The scheduler is asked first (a no-op once the job has finished). Then,
+    when a workspace root is given, every run stamped with *job_id* that is
+    still ``running`` is marked failed with a reason, because its process
+    died with the job and nothing else will advance the record. Failing a
+    run releases the reservation it held, and the host's dead reservations
+    are released with it. Nothing is expired or purged.
+
+    The summary also lists the machine memories written since the job's
+    first run started. A dead job may have recorded a fact it never
+    verified, so the operator reviews them; nothing is deleted here.
+
+    Returns ``job_id``, ``runs_failed`` (id and name), ``reservations_released``
+    (id and slice), and ``memories`` (name, description, when written).
+    """
+    from foundation import memory as memory_store
     from slab.hpc import cancel
 
     cancel(job_id)
-    return {"job_id": job_id, "cancel": "requested"}
+    summary: dict[str, Any] = {
+        "job_id": job_id,
+        "cancel": "requested",
+        "runs_failed": [],
+        "reservations_released": [],
+        "memories": [],
+    }
+    if workspace is None:
+        return summary
+    with Workspace(workspace) as ws:
+        doomed = ws.runs.list_runs(status=ExecutionStatus.RUNNING, job_id=job_id)
+        if not doomed:
+            return summary
+        held_before = {r.id: r for r in ws.runs.list_reservations()}
+        for run in doomed:
+            with suppress(IllegalStatusChangeError):  # it may end under us; fine
+                failed = ws.runs.set_status(
+                    run.id,
+                    ExecutionStatus.FAILED,
+                    error=f"job {job_id} cancelled by the operator; the process died with it",
+                )
+                summary["runs_failed"].append({"id": failed.id, "name": failed.name})
+        ws.release_dead()
+        still = {r.id for r in ws.runs.list_reservations()}
+        summary["reservations_released"] = [
+            {"id": held.id, "slice": describe_resources(held.slice)}
+            for held in held_before.values()
+            if held.id not in still
+        ]
+        earliest = min(run.created_at for run in doomed)
+    summary["memories"] = [
+        {
+            "name": memory.name,
+            "description": memory.description,
+            "written_at": datetime.fromtimestamp(memory.path.stat().st_mtime, tz=UTC).isoformat(),
+        }
+        for memory in memory_store.written_since(earliest)
+    ]
+    return summary
+
+
+def cancel_lines(summary: dict[str, Any]) -> list[str]:
+    """The lines every surface prints for a :func:`cancel_job` summary.
+
+    Examples:
+        >>> cancel_lines({"job_id": "7", "runs_failed": [], "reservations_released": [],
+        ...               "memories": []})
+        ['cancel requested for job 7']
+    """
+    lines = [f"cancel requested for job {summary['job_id']}"]
+    for run in summary.get("runs_failed", []):
+        lines.append(
+            f"failed  {run['id']}  {run['name']}  job {summary['job_id']} cancelled by the "
+            f"operator; the process died with it"
+        )
+    for held in summary.get("reservations_released", []):
+        lines.append(f"released {held['id']}  {held['slice']}")
+    for memory in summary.get("memories", []):
+        age = age_text(datetime.fromisoformat(memory["written_at"]))
+        lines.append(
+            f"memory  {memory['name']}  written {age} ago "
+            f"('slab memory show {memory['name']}' to review)"
+        )
+    return lines
+
+
+def age_text(moment: datetime) -> str:
+    """How long ago *moment* was, in one unit: ``12s``, ``3m``, ``5h``, ``2d``.
+
+    Examples:
+        >>> from datetime import timedelta
+        >>> age_text(utcnow() - timedelta(minutes=3))
+        '3m'
+        >>> age_text(utcnow() + timedelta(days=1))
+        '0s'
+    """
+    seconds = max(0.0, (utcnow() - moment).total_seconds())
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    if seconds < 86_400:
+        return f"{int(seconds // 3600)}h"
+    return f"{int(seconds // 86_400)}d"

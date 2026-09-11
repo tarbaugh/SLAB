@@ -521,6 +521,9 @@ class Workspace:
         *session* stamps the run with the client session that created it (see
         :func:`resolve_session_id`), so one conversation's runs can be listed
         and promoted together.
+        Inside a SLURM job the run is also stamped with ``$SLURM_JOB_ID``, so
+        :func:`foundation._ops.cancel_job` can fail the runs a cancelled job
+        took down.
 
         *reservation* (a :class:`~foundation.models.Reservation` or its id)
         is the slice a session process checked out for this run with
@@ -556,7 +559,14 @@ class Workspace:
         if reservation_id is not None:
             _claimable_from(self.runs.get_reservation(reservation_id), host)
         created = self.runs.create(
-            Run(name=name, intent=intent, session=resolve_session_id(session))
+            Run(
+                name=name,
+                intent=intent,
+                session=resolve_session_id(session),
+                # Every batch job, sandbox jobs included, carries the variable,
+                # so a cancel of the job can find the runs it takes down.
+                job_id=os.environ.get("SLURM_JOB_ID") or None,
+            )
         )
         if reservation_id is not None:
             try:

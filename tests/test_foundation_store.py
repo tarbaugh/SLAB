@@ -456,6 +456,8 @@ def test_migrates_v1_database_in_place(db_path: Path) -> None:
         )
     # Rewind the database to schema v1 by dropping the v2 to v5 additions.
     conn = sqlite3.connect(db_path)
+    conn.execute("DROP INDEX ix_runs_job_id")
+    conn.execute("ALTER TABLE runs DROP COLUMN job_id")
     conn.execute("DROP TABLE reservations")
     conn.execute("ALTER TABLE runs DROP COLUMN resources")
     conn.execute("ALTER TABLE runs DROP COLUMN pid")
@@ -479,7 +481,7 @@ def test_migrates_v1_database_in_place(db_path: Path) -> None:
         assert loaded.session is None  # every later migration ran too
         assert (loaded.pid, loaded.host, loaded.resources) == (None, None, None)
         conn = sqlite3.connect(db_path)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
         conn.close()
 
 
@@ -490,6 +492,8 @@ def test_migrates_v2_database_in_place(db_path: Path) -> None:
         run = s1.create(Run(name="pre-session"))
     # Rewind the database to schema v2 by dropping the v3 to v5 additions.
     conn = sqlite3.connect(db_path)
+    conn.execute("DROP INDEX ix_runs_job_id")
+    conn.execute("ALTER TABLE runs DROP COLUMN job_id")
     conn.execute("DROP TABLE reservations")
     conn.execute("ALTER TABLE runs DROP COLUMN resources")
     conn.execute("ALTER TABLE runs DROP COLUMN pid")
@@ -509,7 +513,7 @@ def test_migrates_v2_database_in_place(db_path: Path) -> None:
         assert s2.get(fresh.id).session == "chat-1"
         assert [r.id for r in s2.list_runs(session="chat-1")] == [fresh.id]
         conn = sqlite3.connect(db_path)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
         indexes = {row[1] for row in conn.execute("PRAGMA index_list(runs)")}
         assert "ix_runs_session" in indexes
         conn.close()
@@ -523,6 +527,8 @@ def test_migrates_v3_database_in_place(db_path: Path) -> None:
         run = s1.create(Run(name="pre-stamp"))
         s1.set_status(run.id, "running")
     conn = sqlite3.connect(db_path)
+    conn.execute("DROP INDEX ix_runs_job_id")
+    conn.execute("ALTER TABLE runs DROP COLUMN job_id")
     conn.execute("DROP TABLE reservations")
     conn.execute("ALTER TABLE runs DROP COLUMN resources")
     conn.execute("ALTER TABLE runs DROP COLUMN pid")
@@ -538,7 +544,7 @@ def test_migrates_v3_database_in_place(db_path: Path) -> None:
         assert (stamped.pid, stamped.host) == (4242, "node7")
         assert s2.get(fresh.id).pid == 4242
         conn = sqlite3.connect(db_path)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
         conn.close()
 
 
@@ -551,6 +557,8 @@ def test_migrates_v4_database_in_place(db_path: Path) -> None:
     with SQLiteRunStore(db_path) as s1:
         run = s1.create(Run(name="pre-reservation"))
     conn = sqlite3.connect(db_path)
+    conn.execute("DROP INDEX ix_runs_job_id")
+    conn.execute("ALTER TABLE runs DROP COLUMN job_id")
     conn.execute("DROP TABLE reservations")
     conn.execute("ALTER TABLE runs DROP COLUMN resources")
     conn.execute("PRAGMA user_version = 4")
@@ -568,7 +576,7 @@ def test_migrates_v4_database_in_place(db_path: Path) -> None:
             "cpus": [0], "gpus": [], "ntasks": 1, "threads": 1, "reservation": held.id,
         }
         conn = sqlite3.connect(db_path)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
         indexes = {row[1] for row in conn.execute("PRAGMA index_list(reservations)")}
         assert "ix_reservations_host" in indexes
         conn.close()
@@ -1257,3 +1265,64 @@ def test_the_unsized_refusal_names_the_free_gpus(store: SQLiteRunStore) -> None:
     with pytest.raises(ResourcesError, match=r"no cpu is free on n1.*free gpus: 1 of 2") as e:
         store.reserve(**budget)
     assert e.value.free == {"cpus": [], "gpus": ["1"]}
+
+
+# -- the job a run started under ---------------------------------------------------
+
+
+def test_migrates_v5_database_in_place(db_path: Path) -> None:
+    """A workspace from before the job stamp (schema v5) opens cleanly: old
+    rows read back with job_id=None, the column takes a value, and the
+    index on it exists."""
+    with SQLiteRunStore(db_path) as s1:
+        run = s1.create(Run(name="pre-job"))
+    conn = sqlite3.connect(db_path)
+    conn.execute("DROP INDEX IF EXISTS ix_runs_job_id")
+    conn.execute("ALTER TABLE runs DROP COLUMN job_id")
+    conn.execute("PRAGMA user_version = 5")
+    conn.close()
+
+    with SQLiteRunStore(db_path) as s2:
+        assert s2.get(run.id).job_id is None
+        stamped = s2.create(Run(name="in-job", job_id="4242"))
+        assert s2.get(stamped.id).job_id == "4242"
+        conn = sqlite3.connect(db_path)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list(runs)")}
+        assert "ix_runs_job_id" in indexes
+        conn.close()
+
+
+def test_job_id_roundtrips_and_filters(store: SQLiteRunStore) -> None:
+    first = store.create(Run(name="a", job_id="4242"))
+    second = store.create(Run(name="b", job_id="4242"))
+    other = store.create(Run(name="c", job_id="4243"))
+    unstamped = store.create(Run(name="d"))
+    assert store.get(first.id).job_id == "4242"
+    assert store.get(unstamped.id).job_id is None
+    assert [r.id for r in store.list_runs(job_id="4242")] == [second.id, first.id]
+    assert [r.id for r in store.list_runs(job_id="4243")] == [other.id]
+    store.set_status(first.id, "running")
+    assert [r.id for r in store.list_runs(job_id="4242", status="running")] == [first.id]
+
+
+def test_start_run_stamps_the_job_from_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Inside a batch job every run records $SLURM_JOB_ID; outside one the
+    field stays null, and an empty variable counts as outside."""
+    from foundation.runtime import Workspace
+
+    with Workspace(tmp_path / "ws") as ws:
+        monkeypatch.setenv("SLURM_JOB_ID", "4242")
+        with ws.start_run(name="batched") as batched:
+            assert ws.runs.get(batched.id).job_id == "4242"
+        monkeypatch.setenv("SLURM_JOB_ID", "")
+        with ws.start_run(name="blank") as blank:
+            pass
+        monkeypatch.delenv("SLURM_JOB_ID")
+        with ws.start_run(name="interactive") as interactive:
+            pass
+        assert ws.runs.get(batched.id).job_id == "4242"
+        assert ws.runs.get(blank.id).job_id is None
+        assert ws.runs.get(interactive.id).job_id is None
