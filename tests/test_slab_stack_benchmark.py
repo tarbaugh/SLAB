@@ -696,6 +696,53 @@ def _campaign(
     return benchmark.score_session(root, session_id, machine="laptop")
 
 
+def test_run_campaign_hands_the_questions_result_keys_to_the_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The expected keys travel explicitly from the question, never parsed
+    back out of the goal text: a finish under another name is refused,
+    and a finish under the asked name is honored."""
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    q4 = benchmark.find_question("4")
+    refusals: list[str] = []
+
+    def second(messages: list[dict[str, Any]]) -> ChatReply:
+        refusals.append(_last_tool_result(messages))
+        return _tool(
+            "finish", report="melts at 1350 K", results={"t_melt": {"value": 1350, "unit": "K"}}
+        )
+
+    client = _Scripted(
+        [
+            _tool(
+                "finish", report="melts at 1350 K", results={"t_m": {"value": 1350, "unit": "K"}}
+            ),
+            second,
+        ]
+    )
+    monkeypatch.setattr("mason.loop.client_from_config", lambda agent, keys=None: client)
+    seen: dict[str, object] = {}
+    from mason import loop as mason_loop
+
+    original = mason_loop.Mason.__init__
+
+    def spy(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        seen["expected_results"] = kwargs.get("expected_results")
+        original(self, *args, **kwargs)
+
+    monkeypatch.setattr(mason_loop.Mason, "__init__", spy)
+    _session_id, result = benchmark.run_campaign(q4, workspace=tmp_path / "ws", model="fake")
+    assert seen["expected_results"] == {"t_melt": "K"}
+    assert result.stop_reason == "finish" and result.steps == 2
+    assert set(result.results) == {"t_melt"}
+    assert refusals == [
+        "finish not honored: results name t_m; the goal asks for t_melt in K; "
+        "call finish again with results keyed exactly so"
+    ]
+
+
 EOS_WORKFLOW = """\
 from ase.build import bulk
 from foundation import check
@@ -864,9 +911,12 @@ def test_the_cli_carries_the_condition_into_the_job(
     )
     assert result.exit_code == 0, result.output
     script = (tmp_path / "sandbox" / "mason-sandbox.sbatch").read_text()
-    assert "mason run --auto --condition protocol --endpoint" in script
+    # The unit is non-ASCII, so shlex quotes it, and the inner line is
+    # quoted once more inside the apptainer command; assert on the pieces.
+    assert "mason run --auto --condition protocol --expect " in script and "a0:Å" in script
     record = json.loads((tmp_path / "sandbox" / "render.json").read_text())
     assert record["condition"] == "protocol" and record["without"] == []
+    assert record["expected_results"] == {"a0": "Å"}
     refused = runner.invoke(app, ["benchmark", "render", "1", "--condition", "aicc"])
     assert refused.exit_code == 1 and "no condition named 'aicc'" in refused.output
 

@@ -1765,6 +1765,7 @@ def render_record(
     condition: str | None = None,
     without: tuple[str, ...] = (),
     size: JobSize | None = None,
+    expected_results: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """The arguments and provenance of one render, for ``render.json``.
 
@@ -1785,6 +1786,7 @@ def render_record(
         "time_limit": time_limit,
         "engine_tasks": engine_tasks,
         "size": None if size is None else size.model_dump(),
+        "expected_results": dict(expected_results or {}),
         "out": str(out_dir),
         "rendered_at": datetime.now(UTC).isoformat(),
         "version": version("slab-stack"),
@@ -1834,6 +1836,7 @@ def render_sandbox_script(
     entry_condition: str | None = None,
     ablated: tuple[str, ...] = (),
     size: JobSize | None = None,
+    expected_results: dict[str, str] | None = None,
 ) -> tuple[str, list[str], str]:
     """The batch script for one autonomous, network-dark session.
 
@@ -1849,7 +1852,9 @@ def render_sandbox_script(
     darkness and reachability with ``slab mason sandbox verify`` (either failing
     aborts the job), then run the goal with ``slab mason run --auto``, as
     *entry_agent* when one is named (``--agent``), under *entry_condition*
-    with the *ablated* mechanisms off (``--condition``, ``--without``).
+    with the *ablated* mechanisms off (``--condition``, ``--without``), and
+    with each of *expected_results* as a ``--expect name:unit`` flag, so the
+    loop refuses a finish whose result names do not match the goal's.
 
     A gateway upstream authenticates with the key named by ``[agent]
     api_key_env``, read on the host at job start. The container is launched
@@ -1930,6 +1935,10 @@ def render_sandbox_script(
             + (f" --agent {shlex.quote(entry_agent)}" if entry_agent else "")
             + (f" --condition {shlex.quote(entry_condition)}" if entry_condition else "")
             + "".join(f" --without {shlex.quote(name)}" for name in ablated)
+            + "".join(
+                f" --expect {shlex.quote(f'{name}:{unit}')}"
+                for name, unit in (expected_results or {}).items()
+            )
             + f" --endpoint http://127.0.0.1:{BRIDGE_PORT}/v1 {shlex.quote(goal)}",
         ]
     )

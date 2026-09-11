@@ -541,6 +541,44 @@ def test_cli_render_takes_the_five_size_flags_and_launch_reuses_them(
     assert size is not None and size.ntasks_per_node == 8 and size.gpus_per_node == 2
 
 
+def test_render_records_the_expected_results_and_launch_reuses_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The --expect flags are rendered into the job's mason run line and
+    recorded in render.json, and a bare launch carries them again."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "slab.toml").write_text(
+        '[agent]\nmodel = "m"\n[agent.sandbox]\nimage = "/i.sif"\n'
+        '[hpc]\ndefault_partition = "cpu"\n[hpc.partitions.cpu]\ntime_limit = "01:00:00"\n'
+    )
+    workspace = ["-w", str(tmp_path / "ws")]
+    result = runner.invoke(
+        app,
+        ["sandbox", "render", "melt it", *workspace, "--expect", "t_melt:K", "--expect", "a0:Å"],
+    )
+    assert result.exit_code == 0, result.output
+    script = (tmp_path / "sandbox" / "mason-sandbox.sbatch").read_text()
+    assert "mason run --auto --expect t_melt:K --expect " in script and "a0:Å" in script
+    record = json.loads((tmp_path / "sandbox" / "render.json").read_text())
+    assert record["expected_results"] == {"t_melt": "K", "a0": "Å"}
+    malformed = runner.invoke(app, ["sandbox", "render", "x", *workspace, "--expect", "t_melt"])
+    assert malformed.exit_code != 0 and "--expect takes name:unit" in malformed.output
+    import mason.cli as mason_cli
+
+    seen: dict[str, object] = {}
+
+    def fake_launch(goal: str, **kwargs: object):
+        from slab.hpc import SubmittedJob
+
+        seen.update(kwargs)
+        return SubmittedJob(job_id="1", job_name="mason-sandbox", partition="p", script_path="x")
+
+    monkeypatch.setattr(mason_cli, "launch_sandbox", fake_launch)
+    launched = runner.invoke(app, ["sandbox", "launch", *workspace])
+    assert launched.exit_code == 0, launched.output
+    assert seen["expected_results"] == {"t_melt": "K", "a0": "Å"}
+
+
 def test_the_prompt_carries_the_sandbox_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

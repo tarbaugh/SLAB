@@ -690,6 +690,7 @@ def benchmark_launch(
             condition=condition,
             without=tuple(without or ()),
             size=size,
+            expected_results=dict(asked.results),
         )
     except _BENCH_ERRORS as e:
         _fail(str(e))
@@ -826,6 +827,7 @@ def benchmark_render(
             agent=agent,
             condition=condition,
             without=tuple(without or ()),
+            expected_results=dict(asked.results),
         )
     except _BENCH_ERRORS as e:
         _fail(str(e))
@@ -891,6 +893,7 @@ def benchmark_matrix(
                 engine_tasks=None,
                 condition=cell.condition,
                 without=cell.without,
+                expected_results=dict(cell.question.results),
             )
             manifest.append(
                 {

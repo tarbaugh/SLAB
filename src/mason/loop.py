@@ -483,8 +483,14 @@ class Mason:
         spec: AgentSpec | None = None,
         roster: dict[str, AgentSpec] | None = None,
         depth: int = 0,
+        expected_results: dict[str, str] | None = None,
     ) -> None:
         self.session = session
+        #: The result names the goal asks finish to carry, each with its
+        #: unit. They travel explicitly from the caller that knows the goal
+        #: (a benchmark question, ``--expect``), never parsed back out of
+        #: the goal text. None means the finish's result names go unchecked.
+        self.expected_results = dict(expected_results) if expected_results else None
         self.roster = roster if roster is not None else discover_roster(session.cwd)
         #: The step the current or last turn reached; read by a parent whose
         #: child died of a transport error mid-turn, so the footer can say
@@ -627,6 +633,22 @@ class Mason:
 
     # -- the loop -------------------------------------------------------------
 
+    def _results_mismatch(self, results: dict[str, Any]) -> str | None:
+        """The refusal for a finish whose result names miss the expected ones.
+
+        None when no names are expected, or when the finish names exactly
+        them. The message names what the finish carried and what the goal
+        asks for, unit included, so the next finish can match.
+        """
+        if self.expected_results is None or set(results) == set(self.expected_results):
+            return None
+        named = ", ".join(sorted(results)) if results else "nothing"
+        asked = ", ".join(f"{name} in {unit}" for name, unit in self.expected_results.items())
+        return (
+            f"finish not honored: results name {named}; the goal asks for {asked}; "
+            f"call finish again with results keyed exactly so"
+        )
+
     def run_turn(self, user_text: str) -> TurnResult:
         """Drive one goal until an answer, a finish, or a harness stop."""
         self._append({"role": "user", "content": user_text})
@@ -710,12 +732,19 @@ class Mason:
                             as_text=from_text,
                         )
                         continue
-                    self._append_tool_result(call, "task closed", as_text=from_text)
-                    self._answer_unrun(calls[position + 1 :], from_text=from_text)
                     # The structured hand-back travels as given: the loop never
                     # re-shapes a report, and a scorer refuses what it cannot read.
                     raw_results = call.arguments.get("results")
                     results = dict(raw_results) if isinstance(raw_results, dict) else {}
+                    mismatch = self._results_mismatch(results)
+                    if mismatch is not None:
+                        # The goal named its result keys; a finish under other
+                        # names is the drift the scorer would fail, so it is
+                        # refused here, where the agent can still fix it.
+                        self._append_tool_result(call, mismatch, as_text=from_text)
+                        continue
+                    self._append_tool_result(call, "task closed", as_text=from_text)
+                    self._answer_unrun(calls[position + 1 :], from_text=from_text)
                     raw_ids = call.arguments.get("run_ids")
                     run_ids = tuple(str(r) for r in raw_ids) if isinstance(raw_ids, list) else ()
                     raw_verdict = call.arguments.get("verdict")
