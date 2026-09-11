@@ -137,6 +137,15 @@ def test_render_re_exports_the_gpu_ids_and_turns_binding_off(tmp_path: Path) -> 
     assert "--env OMPI_MCA_hwloc_base_binding_policy=none" in script
 
 
+def test_render_carries_the_job_id_into_the_container(tmp_path: Path) -> None:
+    """--cleanenv strips SLURM_JOB_ID; start_run stamps runs with it, and
+    'slab hpc cancel' finds them by it. Empty outside a job."""
+    script, _, context = _render(tmp_path, _agent(), _slab_cfg())
+    assert '--env SLURM_JOB_ID="${SLURM_JOB_ID:-}"' in script
+    assert "Runs in here carry this job's id" in context
+    assert "'slab hpc cancel <job>'" in context
+
+
 @pytest.mark.parametrize(
     ("environment", "expected"),
     [

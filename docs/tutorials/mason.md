@@ -616,7 +616,9 @@ declares a `gres` that names gpus, the rendered `apptainer exec` adds
 `--nv`, so a torch-backed served engine (a rootstock MLIP worker) sees the
 device the job holds. A CPU partition renders without it. `--cleanenv`
 strips the variables the scheduler set, so the script re-exports
-`CUDA_VISIBLE_DEVICES` and `SLURM_CPUS_PER_TASK` into the container.
+`CUDA_VISIBLE_DEVICES`, `SLURM_CPUS_PER_TASK`, and `SLURM_JOB_ID` into the
+container. The job id stamps every run made inside, so `slab hpc cancel`
+fails those runs and frees their slices.
 When the job did not set `CUDA_VISIBLE_DEVICES`, the script counts the
 devices that `SLURM_JOB_GPUS` names and exports the ids `0,1,...`
 instead of SLURM's own. SLURM's ids are the node's global ids, and a

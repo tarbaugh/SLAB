@@ -736,3 +736,39 @@ def test_run_commands_collects_the_engine_commands_a_run_resolved(tmp_path: Path
     assert lammps["build"] == "gpu" and "route" not in lammps
     assert atomsk["tasks"] == 1 and "kokkos" not in atomsk and atomsk["setup"] == []
     assert "build" not in atomsk and "template" not in atomsk
+
+
+def test_cancel_job_fails_the_runs_a_job_started(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run started under $SLURM_JOB_ID is stamped with the job id, so a
+    cancel of that job with the workspace fails it. The sandbox render
+    carries the variable into the container for exactly this."""
+    import stat
+
+    from foundation._ops import cancel_job
+    from foundation.errors import IllegalStatusChangeError
+
+    bin_dir = tmp_path / "fake-slurm"
+    bin_dir.mkdir()
+    script = bin_dir / "scancel"
+    script.write_text("#!/bin/sh\ntrue\n")
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    monkeypatch.setenv("SLAB_MEMORY_DIR", str(tmp_path / "memory"))
+    monkeypatch.setenv("SLURM_JOB_ID", "4242")
+    (tmp_path / "slab.toml").write_text('[hpc]\ndefault_partition = "cpu"\n[hpc.partitions.cpu]\n')
+    monkeypatch.chdir(tmp_path)
+
+    # In the job the process dies with the cancel and the block never exits.
+    # Here it does exit, and the record is already failed: final, so refused.
+    with (
+        pytest.raises(IllegalStatusChangeError),
+        Workspace(root) as ws,
+        ws.start_run(name="relax") as active,
+    ):
+        assert ws.runs.get(active.id).job_id == "4242"
+        summary = cancel_job("4242", workspace=root)
+        assert [r["name"] for r in summary["runs_failed"]] == ["relax"]
+    with Workspace(root) as ws:
+        assert ws.runs.get(active.id).status.value == "failed"
