@@ -860,10 +860,10 @@ def test_lammps_setup_wraps_and_cleans_up(tmp_path: Path) -> None:
 def test_lammps_placeholders_fill_from_the_launch_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A route command with {ntasks}/{threads}/{gpus} is filled from the envelope
+    """A build command with {ntasks}/{threads}/{gpus} is filled from the envelope
     at every resolution point, and the filled line is the cache identity."""
     from slab.backends import _lammps_locator, _lammps_template
-    from slab.lammps import lammps_command, lammps_routes
+    from slab.lammps import lammps_builds, lammps_command
 
     monkeypatch.setenv("SLAB_CPUS", "0,1,2,3")
     monkeypatch.setenv("SLAB_GPUS", "0,1")
@@ -877,10 +877,10 @@ def test_lammps_placeholders_fill_from_the_launch_envelope(
     assert identity["command"] == "mpirun -np 2 lmp -k on g 2 t 2 -sf kk"
     monkeypatch.setenv("SLAB_NTASKS", "4")
     assert describe_engine("lammps", {"command": template})["command"] != identity["command"]
-    # The plain route holds no placeholder and lists as it always did.
+    # The cpu build holds no placeholder and lists as it always did.
     monkeypatch.delenv("SLAB_ENGINES", raising=False)
     monkeypatch.setenv("ASE_LAMMPSRUN_COMMAND", "lmp")
-    assert lammps_routes()["lammps"]["placeholders"] == []
+    assert lammps_builds()["cpu"]["placeholders"] == []
 
 
 def test_a_gpu_placeholder_without_a_gpu_is_refused_at_the_engine(
@@ -896,18 +896,18 @@ def test_a_gpu_placeholder_without_a_gpu_is_refused_at_the_engine(
         get_calculator("lammps", command="lmp -k on g {gpus} -sf kk", **POTENTIAL)
 
 
-def test_lammps_routes_report_placeholders_and_the_filled_switches(
+def test_lammps_builds_report_placeholders_and_the_filled_switches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import json
 
-    from slab.lammps import lammps_routes
+    from slab.lammps import lammps_builds
 
     registry = tmp_path / "engines.json"
     registry.write_text(json.dumps({
         "cluster": "t",
         "engines": {
-            "lammps-gpu": {
+            "lammps-kokkos": {
                 "calculator": "slab.backends.lammps_calculator",
                 "options": {"command": "mpirun -np {ntasks} lmp -k on g {gpus} -sf kk"},
             }
@@ -918,9 +918,187 @@ def test_lammps_routes_report_placeholders_and_the_filled_switches(
     monkeypatch.setenv("SLAB_CPUS", "0,1")
     monkeypatch.setenv("SLAB_NTASKS", "2")
     monkeypatch.setenv("SLAB_GPUS", "")
-    route = lammps_routes()["lammps-gpu"]
-    assert route["command"] == "mpirun -np {ntasks} lmp -k on g {gpus} -sf kk"
-    assert route["placeholders"] == ["ntasks", "gpus"]
-    assert route["kokkos"]["enabled"] is True and route["kokkos"]["gpus"] is None  # unfillable
+    builds = lammps_builds()
+    assert list(builds) == ["cpu", "lammps-kokkos"]  # no gpu table declared: no gpu build
+    alias = builds["lammps-kokkos"]
+    assert alias["command"] == "mpirun -np {ntasks} lmp -k on g {gpus} -sf kk"
+    assert alias["placeholders"] == ["ntasks", "gpus"]
+    assert alias["kokkos"]["enabled"] is True and alias["kokkos"]["gpus"] is None  # unfillable
     monkeypatch.setenv("SLAB_GPUS", "0,1")
-    assert lammps_routes()["lammps-gpu"]["kokkos"]["gpus"] == 2
+    assert lammps_builds()["lammps-kokkos"]["kokkos"]["gpus"] == 2
+
+
+# -- the gpu build follows the slice ------------------------------------------------------
+
+GPU_TEMPLATE = "mpirun -np {ntasks} lmp-kokkos -k on g {gpus} t {threads} -sf kk"
+GPU_SETUP = ["module purge", "module load lammps/2025.07-kokkos"]
+CPU_SETUP = ["module load lammps/2025.07"]
+
+
+def _two_builds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, gpu: bool = True) -> None:
+    """A slab.toml with the plain build and, when *gpu*, the [engines.lammps.gpu] table."""
+    monkeypatch.chdir(tmp_path)
+    text = f'[engines.lammps]\ncommand = "lmp-plain"\nsetup = {CPU_SETUP!r}\n'
+    if gpu:
+        text += f'[engines.lammps.gpu]\ncommand = "{GPU_TEMPLATE}"\nsetup = {GPU_SETUP!r}\n'
+    (tmp_path / "slab.toml").write_text(text.replace("'", '"'))
+    monkeypatch.delenv("SLAB_ENGINES", raising=False)
+    monkeypatch.setenv("SLAB_CPUS", "0,1,2,3")
+    monkeypatch.setenv("SLAB_NTASKS", "2")
+    monkeypatch.setenv("SLAB_THREADS", "2")
+
+
+def _envelope_with_gpus(monkeypatch: pytest.MonkeyPatch, gpus: str) -> None:
+    monkeypatch.setenv("SLAB_GPUS", gpus)
+
+
+def test_a_launch_with_gpus_runs_the_gpu_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under an envelope that holds gpus, every resolution point of engine='lammps'
+    picks [engines.lammps.gpu]: its command, filled from the envelope, and its
+    own setup lines rather than the plain build's."""
+    from slab.backends import _lammps_build_name, _lammps_setup, _lammps_template
+    from slab.lammps import lammps_build, lammps_command, lammps_setup
+
+    _two_builds(tmp_path, monkeypatch)
+    _envelope_with_gpus(monkeypatch, "0,1")
+    filled = "mpirun -np 2 lmp-kokkos -k on g 2 t 2 -sf kk"
+    assert _lammps_template({}) == GPU_TEMPLATE
+    assert _lammps_build_name() == "gpu"
+    assert _lammps_setup(None) == tuple(GPU_SETUP)
+    assert lammps_command() == filled
+    assert lammps_setup() == tuple(GPU_SETUP)
+    identity = describe_engine("lammps", {})
+    assert identity["command"] == filled and identity["setup"] == GPU_SETUP
+    build = lammps_build()
+    assert build["build"] == "gpu" and build["engine"] == "lammps"
+    assert build["command"] == GPU_TEMPLATE and build["setup"] == GPU_SETUP
+    assert lammps_build("lammps") == build
+
+
+def test_a_launch_without_gpus_runs_the_plain_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gpu table is declared but this launch holds no gpu, so the plain
+    [engines.lammps] command and setup run and nothing asks for {gpus}."""
+    from slab.backends import _lammps_build_name, _lammps_setup, _lammps_template
+    from slab.lammps import lammps_build, lammps_command, lammps_setup
+
+    _two_builds(tmp_path, monkeypatch)
+    _envelope_with_gpus(monkeypatch, "")
+    assert _lammps_template({}) == "lmp-plain"
+    assert _lammps_build_name() == "cpu"
+    assert _lammps_setup(None) == tuple(CPU_SETUP)
+    assert lammps_command() == "lmp-plain"
+    assert lammps_setup() == tuple(CPU_SETUP)
+    identity = describe_engine("lammps", {})
+    assert identity["command"] == "lmp-plain" and identity["setup"] == CPU_SETUP
+    assert lammps_build() == {
+        "engine": "lammps", "build": "cpu", "source": "builtin", "command": None, "setup": None,
+    }
+
+
+def test_a_gpu_slice_without_a_gpu_table_runs_the_plain_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Holding gpus is not enough: without [engines.lammps.gpu] there is no gpu
+    build to choose, so the launch runs the plain build."""
+    from slab.backends import _lammps_build_name, _lammps_setup, _lammps_template
+    from slab.lammps import lammps_build, lammps_builds
+
+    _two_builds(tmp_path, monkeypatch, gpu=False)
+    _envelope_with_gpus(monkeypatch, "0,1")
+    assert _lammps_template({}) == "lmp-plain"
+    assert _lammps_build_name() == "cpu"
+    assert _lammps_setup(None) == tuple(CPU_SETUP)
+    assert lammps_build()["build"] == "cpu"
+    assert describe_engine("lammps", {})["command"] == "lmp-plain"
+    assert list(lammps_builds()) == ["cpu"]
+
+
+def test_a_per_call_command_overrides_the_chosen_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit command wins over the slice; a per-call setup wins over the
+    build's, and without one the chosen build's setup still applies."""
+    from slab.backends import _lammps_locator, _lammps_setup, _lammps_template
+
+    _two_builds(tmp_path, monkeypatch)
+    _envelope_with_gpus(monkeypatch, "0,1")
+    assert _lammps_template({"command": "/opt/lmp-mine"}) == "/opt/lmp-mine"
+    assert _lammps_locator({"command": "/opt/lmp-mine"}) == "/opt/lmp-mine"
+    assert describe_engine("lammps", {"command": "/opt/lmp-mine"})["command"] == "/opt/lmp-mine"
+    assert describe_engine("lammps", {"command": "/opt/lmp-mine"})["setup"] == GPU_SETUP
+    assert _lammps_setup(["export MINE=1"]) == ("export MINE=1",)
+    calc = get_calculator("lammps", command="/bin/echo", **POTENTIAL)
+    assert calc.parameters["command"] != "/bin/echo"  # a setup wrapper runs the gpu setup
+    wrapper = Path(calc.parameters["command"]).read_text()
+    assert "module load lammps/2025.07-kokkos" in wrapper and 'exec /bin/echo "$@"' in wrapper
+    close_calculator(calc)
+
+
+def test_the_two_builds_have_different_cache_identities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same engine='lammps' call under a gpu slice and a plain slice runs
+    different binaries, so the stamped identities must differ."""
+    _two_builds(tmp_path, monkeypatch)
+    _envelope_with_gpus(monkeypatch, "0,1")
+    on_gpu = describe_engine("lammps", POTENTIAL)
+    _envelope_with_gpus(monkeypatch, "")
+    on_cpu = describe_engine("lammps", POTENTIAL)
+    assert on_gpu != on_cpu
+    assert on_gpu["command"] != on_cpu["command"] and on_gpu["setup"] != on_cpu["setup"]
+
+
+def test_lammps_builds_lists_cpu_then_gpu_then_aliases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The overview names every build on the machine with its command as written,
+    its setup, and the KOKKOS switches filled for this envelope."""
+    import json
+
+    from slab.lammps import lammps_build, lammps_builds
+
+    _two_builds(tmp_path, monkeypatch)
+    _envelope_with_gpus(monkeypatch, "0,1")
+    registry = tmp_path / "engines.json"
+    registry.write_text(json.dumps({
+        "cluster": "t",
+        "engines": {
+            "lammps-legacy": {
+                "calculator": "slab.backends.lammps_calculator",
+                "options": {"command": "lmp-legacy", "setup": ["module load lammps/2024.08"]},
+            },
+            "emt-cluster": {"calculator": "ase.calculators.emt.EMT"},
+        },
+    }))
+    monkeypatch.setenv("SLAB_ENGINES", str(registry))
+    builds = lammps_builds()
+    assert list(builds) == ["cpu", "gpu", "lammps-legacy"]
+    assert builds["cpu"] == {
+        "source": "builtin",
+        "command": "lmp-plain",
+        "placeholders": [],
+        "setup": CPU_SETUP,
+        "kokkos": {
+            "enabled": False, "gpus": None, "threads": None, "suffix": False, "package": None,
+        },
+    }
+    gpu = builds["gpu"]
+    assert gpu["source"] == "builtin" and gpu["command"] == GPU_TEMPLATE
+    assert gpu["placeholders"] == ["ntasks", "gpus", "threads"] and gpu["setup"] == GPU_SETUP
+    assert gpu["kokkos"]["enabled"] is True and gpu["kokkos"]["gpus"] == 2
+    legacy = builds["lammps-legacy"]
+    assert legacy["source"] == "registry:t" and legacy["command"] == "lmp-legacy"
+    assert legacy["setup"] == ["module load lammps/2024.08"]
+    assert lammps_build("lammps-legacy")["build"] == "lammps-legacy"
+    with pytest.raises(
+        EngineNotAvailableError,
+        match=r"names no engine here; the LAMMPS builds on this machine are: "
+        r"cpu, gpu, lammps-legacy",
+    ):
+        lammps_build("lammps-tpu")
+    with pytest.raises(EngineNotAvailableError, match="is not a LAMMPS build"):
+        lammps_build("emt-cluster")

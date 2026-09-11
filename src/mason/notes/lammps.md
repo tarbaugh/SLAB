@@ -13,11 +13,18 @@ If a run dies with only `Failed to retrieve any thermo_style-output`, that
 is LAMMPS masking its real error. The actual `ERROR: ...` line is in the
 LAMMPS log kept in the run's failure evidence — read it with `show_run`.
 
-Two routes drive this binary. The `lammps` engine answers force calls
-from ASE (`relax`, `single_point`), one `run 0` per step. The
+Two entry points drive this binary. The `lammps` engine answers force
+calls from ASE (`relax`, `single_point`), one `run 0` per step. The
 `run_lammps` task hands LAMMPS a whole input script as text, so the
 dynamics run inside LAMMPS at its own speed, on the threads or GPUs the
 command line gives it, and the log, the dumps, and the thermo tables
 come back as artifacts of the run. Production MD goes through
 `run_lammps`; the lammps-scripting skill carries the input anatomy, the
 ensembles, and the checks.
+
+The build follows the slice. A launch sized with `gpus=` runs the gpu
+build from `[engines.lammps.gpu]`, and an unsized launch runs the plain
+build from `[engines.lammps]`. Never name a build; `engine="lammps"` is
+all you pass. Read the `lammps` entry of `list_engines` before a GPU
+run, and `info["kokkos"]` after it, because SLAB adds no switch a build
+lacks.

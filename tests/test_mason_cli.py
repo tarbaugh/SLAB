@@ -479,7 +479,7 @@ def test_mason_read_renders_a_transcript_for_humans(tmp_path: Path) -> None:
         {"at": "2026-08-27T10:00:08+00:00", "type": "command", "kind": "engine",
          "by": "md-expert", "tool": "wait_for_run", "run_id": "01abcdefghijkl",
          "task": "run_lammps", "tasks": 1, "cache_hits": 0, "engine": "lammps",
-         "route": "lammps-gpu",
+         "build": "gpu",
          "version": "22 Jul 2025", "command": "mpirun -np 1 lmp -k on g 1 -sf kk",
          "setup": ["module load lammps"],
          "kokkos": {"enabled": True, "gpus": 1, "threads": None, "suffix": True,
@@ -503,7 +503,7 @@ def test_mason_read_renders_a_transcript_for_humans(tmp_path: Path) -> None:
     assert "[10:00:06] shell command by pi: ls" in result.output
     assert (
         "[10:00:08] engine command by md-expert (run 01abcdefgh, run_lammps, "
-        "route lammps-gpu): mpirun -np 1 lmp -k on g 1 -sf kk"
+        "build gpu): mpirun -np 1 lmp -k on g 1 -sf kk"
     ) in result.output
     assert "cwd /proj" not in result.output and "kokkos:" not in result.output
     assert "exit 0" in result.output

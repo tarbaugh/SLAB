@@ -157,10 +157,27 @@ launcher) still belongs in the registry below, under a distinct alias like
 
 `lammps` is a built-in on the same terms as `qe`. It drives the `lmp` binary
 through ASE's `lammpsrun` calculator, so it works wherever the executable
-exists, with no extra to install. One option locates the code, `command`,
-or you can set it once under `[engines.lammps]` in the slab config or export
-`$ASE_LAMMPSRUN_COMMAND`. Bare `lmp` is the default. The same binary also
-runs whole input scripts through the `run_lammps` task, described
+exists, with no extra to install. Two tables in the slab config declare
+the builds. `[engines.lammps]` is the plain build, with its `command`
+and `setup`. `[engines.lammps.gpu]` is the gpu build, with a KOKKOS
+`command` and the module it needs:
+
+```toml
+[engines.lammps]
+command = "lmp"
+setup = ["module load lammps/2025.07"]
+
+[engines.lammps.gpu]
+command = "mpirun -np {ntasks} lmp -k on g {gpus} -sf kk -pk kokkos newton on neigh half"
+setup = ["module load lammps/2025.07-kokkos"]
+```
+
+The build follows the slice. A launch whose reservation holds gpus runs
+the gpu build, and a launch without runs the plain build. The agent
+never names a build, and `engine="lammps"` is all it passes. Without a
+`[engines.lammps]` table, bare `lmp` is the command, or export
+`$ASE_LAMMPSRUN_COMMAND`. The same binary also runs whole input scripts
+through the `run_lammps` task, described
 [below](#running-a-lammps-input-script-whole).
 
 The interatomic potential has no default at all. `pair_style` and
@@ -211,20 +228,21 @@ The details that keep runs honest and directories clean:
   cache key. Potential file contents are not hashed, because their paths,
   which ride in the traced options, are the identity.
 - **Accelerated builds ride in the command.** A KOKKOS build of LAMMPS
-  takes its switches on the command line, so put them in `command`.
-  `mpirun -np 1 lmp -k on g 1 -sf kk -pk kokkos newton on neigh half`
-  runs on one GPU with one MPI task, and `lmp -k on t 8 -sf kk` runs on
-  eight threads. ASE appends its own flags after them. The switches enter
-  the cache identity with the command. The version probe runs the payload
-  with `-h`, and a GPU switch on a node without a GPU makes that probe
-  record no version, so a GPU command belongs in a job on a GPU node. The
-  `lammps-potentials` skill carries the rules for the agent.
+  takes its switches on the command line, so put them in the gpu build's
+  `command`. `mpirun -np 1 lmp -k on g 1 -sf kk -pk kokkos newton on
+  neigh half` runs on one GPU with one MPI task, and `lmp -k on t 8 -sf
+  kk` runs on eight threads. ASE appends its own flags after them. The
+  switches enter the cache identity with the command. The version probe
+  runs the payload with `-h`, and a GPU switch on a node without a GPU
+  makes that probe record no version, so the gpu build runs in a job on
+  a GPU node. The `lammps-potentials` skill carries the rules for the
+  agent.
 - **A command can be sized per launch.** A command may hold the
   placeholders `{ntasks}`, `{threads}`, and `{gpus}`. SLAB fills them from
   the launch's size before the run starts, and it fills only the
   placeholders the command asks for, so a command without one runs as
   written. A command that asks `{gpus}` under a launch without a GPU is
-  refused naming the route, because `g 0` would fail later and less
+  refused naming the build, because `g 0` would fail later and less
   clearly. The filled command enters the cache identity, as a hand-written
   one would. [Mason](mason.md#compute-budget-sizing-the-physics-to-the-machine)
   says how a launch gets its size.
@@ -232,29 +250,31 @@ The details that keep runs honest and directories clean:
   written. `-k on` is what enables the KOKKOS package, so a KOKKOS build
   under a plain `lmp` runs its plain styles on the host, and it does so
   silently.
-- **Each build is a route with a name.** Not every LAMMPS run wants a
-  GPU: a smoke test on the login node and a small EAM cell belong on the
-  plain build, and production MD on the KOKKOS build. Keep
-  `[engines.lammps]` plain, and declare the accelerated build as a
-  registry alias whose calculator is `slab.backends.lammps_calculator`
-  and whose options carry the KOKKOS command and its module (the
-  registry section below shows the entry). Then `engine="lammps"` and
-  `engine="lammps-gpu"` choose per call, on `relax`, `single_point`, and
-  `run_lammps` alike. `slab engines list` and the MCP `list_engines` tool
-  list every route with its command and the switches parsed from it, so
+- **The two tables stay distinct.** The loader refuses a
+  `[engines.lammps]` command that carries `-k on g`, and names both
+  tables in the message, because the plain build runs when a launch holds
+  no gpu. The `[engines.lammps.gpu]` command must name `{gpus}` or turn
+  KOKKOS on with `-k on`. A smoke test on the login node and a small EAM
+  cell run unsized, so they take the plain build, and a launch sized with
+  `gpus=` takes the gpu build. `command=` and `setup=` in
+  `calculator_options`, or on `run_lammps`, override the chosen build for
+  that call alone. `slab engines list` and the MCP `list_engines` tool
+  list every build with its command and the switches parsed from it, so
   you and the agent can read what a run will ask for before it runs:
 
-<!-- no-verify -->
 ```text
-lammps routes (engine= for relax, single_point, and run_lammps):
-  lammps         lmp  (KOKKOS off: the plain styles run on the host)
-  lammps-gpu     mpirun -np {ntasks} lmp -k on g {gpus} -sf kk -pk kokkos newton on neigh half  (sized per launch: ntasks, gpus; KOKKOS on, -sf kk)
+lammps builds (gpu build chosen when the launch holds gpus):
+  cpu            lmp  (KOKKOS off: the plain styles run on the host)
+                 setup: module load lammps/2025.07
+  gpu            mpirun -np {ntasks} lmp -k on g {gpus} -sf kk -pk kokkos newton on neigh half  (sized per launch: ntasks, gpus; KOKKOS on, -sf kk)
                  setup: module load lammps/2025.07-kokkos
 ```
 
-  A route with placeholders is marked `sized per launch` and names
-  them. The switches parsed from such a route show no GPU count, because
-  the count is the launch's.
+  A build with placeholders is marked `sized per launch` and names
+  them. The switches parsed from such a build show no GPU count, because
+  the count is the launch's. A registry alias whose calculator is
+  `slab.backends.lammps_calculator` is a further build under its own
+  name, listed after `gpu`, and `engine="<alias>"` selects it.
 
 - **Units come back converted.** Whatever `units=` the potential requires
   (`metal`, `real`, ...), ASE converts results to eV and eV/Å, so `relax`'s
@@ -271,9 +291,8 @@ lammps routes (engine= for relax, single_point, and run_lammps):
   before a blow-up), and the kept `-failed.{in,log,data}` files.
   See [Debugging failures](debugging-failures.md#when-the-engine-writes-files).
 
-A cluster's curated LAMMPS setup (fixed module, MPI launcher, KOKKOS
-switches) belongs in the registry below under a distinct alias like
-`lammps-gpu`, the same as QE. Each such alias is a LAMMPS route.
+A cluster's LAMMPS setup belongs in the two tables above. The registry
+below is for a further build under its own alias, the same as QE.
 
 ### Running a LAMMPS input script whole
 
@@ -337,10 +356,11 @@ parsed thermo tables, and the two files the script wrote. `result` holds
 the last thermo row and, for each table, its ends, its loop line, and the
 mean and standard deviation of every column over the tail of its rows,
 which is what the check judged. The full tables are the `ar-thermo.json`
-artifact. `engine=` picks the LAMMPS route exactly as for the engine,
-`lammps` by default, and a KOKKOS or MPI launch rides in the route's
-command. The route, the command, the detected version, the setup lines,
-and the content of every staged file enter the cache identity. After the run,
+artifact. The build follows the slice exactly as for the engine, and a
+KOKKOS or MPI launch rides in the build's command. `info["build"]` names
+the build that ran, `cpu`, `gpu`, or an alias. The build, the command,
+the detected version, the setup lines, and the content of every staged
+file enter the cache identity. After the run,
 `info["kokkos"]` says what the log reported: whether KOKKOS mode was
 enabled, the GPUs per node and the OpenMP threads per task it used, the
 `/kk` styles that ran, and under `switches` what the command asked for.
@@ -801,15 +821,6 @@ unchanged on any cluster whose registry declares `vasp`.
       "options": {"command": "srun pw.x", "pseudo_dir": "/sw/pseudos/sssp"},
       "version": "7.3.1",
       "probe": ["pw.x", "-h"]
-    },
-    "lammps-gpu": {
-      "calculator": "slab.backends.lammps_calculator",
-      "options": {
-        "command": "mpirun -np {ntasks} lmp -k on g {gpus} -sf kk -pk kokkos newton on neigh half",
-        "setup": ["module load lammps/2025.07-kokkos"]
-      },
-      "version": "22 Jul 2025 - Update 4",
-      "probe": ["lmp", "-h"]
     }
   }
 }
@@ -819,9 +830,9 @@ Every entry is a dotted path to an ASE calculator class or factory, and even
 rootstock enters through the same seam. A curated QE or LAMMPS alias goes
 through SLAB's own factories (`slab.backends.qe_calculator` and
 `lammps_calculator`), which carry the built-in engines' guards and take
-JSON-able options. A LAMMPS alias is also a route for `run_lammps`, so
-`lammps-gpu` above runs whole input scripts on the GPU partition while the
-built-in `lammps` stays the plain build. The fields:
+JSON-able options. An alias with the LAMMPS factory is a further LAMMPS
+build under its own name, for `relax`, `single_point`, and `run_lammps`
+alike. The fields:
 
 - `options` are defaults that the caller overrides key-by-key.
 - `env` declares variables the calculator reads at run time

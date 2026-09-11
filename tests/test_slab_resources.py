@@ -18,6 +18,7 @@ from slab.resources import (
     env_for,
     envelope,
     fill,
+    gres_gpus,
     job_size,
     placeholders,
 )
@@ -142,8 +143,8 @@ def test_fill_leaves_shell_variables_alone() -> None:
 
 
 def test_fill_refuses_gpus_when_the_launch_holds_none() -> None:
-    with pytest.raises(EngineNotAvailableError, match=r"route 'lammps-gpu' asks for \{gpus\}"):
-        fill("lmp -k on g {gpus} -sf kk", Envelope(cpus=(0,)), route="lammps-gpu")
+    with pytest.raises(EngineNotAvailableError, match=r"the lammps build 'gpu' asks for \{gpus\}"):
+        fill("lmp -k on g {gpus} -sf kk", Envelope(cpus=(0,)), route="gpu")
     with pytest.raises(EngineNotAvailableError, match=r"asks for \{gpus\} but this launch"):
         fill("lmp -k on g {gpus}", Envelope(cpus=(0,)))
     # ${gpus} is not a request for GPUs.
@@ -152,8 +153,10 @@ def test_fill_refuses_gpus_when_the_launch_holds_none() -> None:
 
 # -- job sizes -----------------------------------------------------------------
 
+# A partition declares its caps through its own fields: nodes, ranks per node,
+# cores per rank, the gpu count in gres, and memory per node.
 GPU = Partition.model_validate(
-    {"gres": "gpu:a100:4", "node": {"cpus": 64, "gpus": 4, "mem": "480G"}, "max_nodes": 2}
+    {"nodes": 2, "ntasks_per_node": 4, "cpus_per_task": 16, "gres": "gpu:a100:4", "mem": "480G"}
 )
 
 
@@ -164,37 +167,104 @@ def test_job_size_needs_the_rank_count() -> None:
         job_size(gpus_per_node=2)
 
 
+def test_gres_gpus_counts_the_gpu_entry_alone() -> None:
+    assert gres_gpus("gpu:a100:4") == 4
+    assert gres_gpus("gpu:2") == 2
+    assert gres_gpus("nvme:1,gpu:a100:8") == 8
+    assert gres_gpus("gpu") is None
+    assert gres_gpus("nvme:1") is None
+    assert gres_gpus(None) is None
+
+
 def test_check_size_accepts_what_fits() -> None:
     size = JobSize(nodes=2, ntasks_per_node=4, cpus_per_task=16, gpus_per_node=4, mem="480G")
     assert check_size(size, "gpu", GPU) is size
 
 
 def test_check_size_refuses_too_many_nodes() -> None:
-    with pytest.raises(JobSizeError, match=r"nodes=3 exceeds the 2 node\(s\).*max_nodes"):
+    """The cap is the partition's own nodes field, and the refusal names it."""
+    with pytest.raises(
+        JobSizeError,
+        match=r"nodes=3 exceeds the 2 node\(s\) gpu declares \(\[hpc\.partitions\.gpu\] nodes\)",
+    ):
         check_size(JobSize(nodes=3, ntasks_per_node=1), "gpu", GPU)
 
 
+def test_check_size_refuses_too_many_ranks_per_node() -> None:
+    with pytest.raises(
+        JobSizeError,
+        match=r"ntasks_per_node=5 exceeds the 4 ranks per node gpu declares "
+        r"\(\[hpc\.partitions\.gpu\] ntasks_per_node\)",
+    ):
+        check_size(JobSize(ntasks_per_node=5), "gpu", GPU)
+
+
+def test_check_size_caps_ranks_by_ntasks_when_only_that_is_set() -> None:
+    """A partition that declares ntasks but no ntasks_per_node caps ranks with ntasks,
+    and the refusal names that field."""
+    spec = Partition.model_validate({"ntasks": 32})
+    assert check_size(JobSize(ntasks_per_node=32), "cpu", spec).ntasks_per_node == 32
+    with pytest.raises(
+        JobSizeError,
+        match=r"ntasks_per_node=33 exceeds the 32 ranks per node cpu declares "
+        r"\(\[hpc\.partitions\.cpu\] ntasks\)",
+    ):
+        check_size(JobSize(ntasks_per_node=33), "cpu", spec)
+
+
 def test_check_size_refuses_too_many_cores() -> None:
-    with pytest.raises(JobSizeError, match=r"= 80 exceeds the 64 cpus.*\.node\] cpus"):
-        check_size(JobSize(ntasks_per_node=8, cpus_per_task=10), "gpu", GPU)
+    """Cores per node are ranks times cpus_per_task; 4 x 20 = 80 exceeds 4 x 16 = 64."""
+    with pytest.raises(
+        JobSizeError,
+        match=r"ntasks_per_node=4 x cpus_per_task=20 = 80 exceeds the 64 cores per node gpu "
+        r"declares \(\[hpc\.partitions\.gpu\] ntasks_per_node x cpus_per_task\)",
+    ):
+        check_size(JobSize(ntasks_per_node=4, cpus_per_task=20), "gpu", GPU)
+    # A partition with ranks but no cpus_per_task caps cores at one per rank.
+    spec = Partition.model_validate({"ntasks_per_node": 8})
+    with pytest.raises(JobSizeError, match=r"= 16 exceeds the 8 cores per node"):
+        check_size(JobSize(ntasks_per_node=8, cpus_per_task=2), "cpu", spec)
 
 
 def test_check_size_refuses_too_many_gpus() -> None:
-    with pytest.raises(JobSizeError, match=r"gpus_per_node=5 exceeds the 4 gpus.*\.node\] gpus"):
+    with pytest.raises(
+        JobSizeError,
+        match=r"gpus_per_node=5 exceeds the 4 gpus per node gpu declares "
+        r"\(\[hpc\.partitions\.gpu\] gres\)",
+    ):
         check_size(JobSize(ntasks_per_node=1, gpus_per_node=5), "gpu", GPU)
 
 
+def test_check_size_refuses_gpus_on_a_partition_without_gres() -> None:
+    """A partition with no gres has no gpus to give, whatever else it leaves unset."""
+    with pytest.raises(
+        JobSizeError,
+        match=r"gpus_per_node=2 asks for gpus on cpu, which declares no gres "
+        r"\(\[hpc\.partitions\.cpu\] gres\)",
+    ):
+        check_size(JobSize(ntasks_per_node=1, gpus_per_node=2), "cpu", Partition())
+
+
 def test_check_size_refuses_too_much_memory() -> None:
-    with pytest.raises(JobSizeError, match=r"mem=1T exceeds the 480G.*\.node\] mem"):
+    with pytest.raises(
+        JobSizeError,
+        match=r"mem=1T exceeds the 480G per node gpu declares \(\[hpc\.partitions\.gpu\] mem\)",
+    ):
         check_size(JobSize(ntasks_per_node=1, mem="1T"), "gpu", GPU)
-    without_mem = Partition.model_validate({"node": {"cpus": 8}})
-    with pytest.raises(JobSizeError, match="declares no node memory"):
-        check_size(JobSize(ntasks_per_node=1, mem="1G"), "cpu", without_mem)
 
 
-def test_check_size_refuses_a_partition_without_a_node_table() -> None:
-    with pytest.raises(JobSizeError, match=r"add \[hpc\.partitions\.cpu\.node\] with cpus"):
-        check_size(JobSize(ntasks_per_node=1), "cpu", Partition())
+def test_check_size_leaves_unset_fields_uncapped() -> None:
+    """A field the partition leaves unset is no cap; SLURM enforces its own limit."""
+    size = JobSize(nodes=64, ntasks_per_node=1024, cpus_per_task=8, mem="4T")
+    assert check_size(size, "cpu", Partition()) is size
+    # A gres without a count allows any gpu count.
+    uncounted = Partition.model_validate({"gres": "gpu"})
+    eight = JobSize(ntasks_per_node=1, gpus_per_node=8)
+    assert check_size(eight, "gpu", uncounted) is eight
+    # Only gres and mem declared: ranks, cores, and nodes stay uncapped.
+    partial = Partition.model_validate({"gres": "gpu:a100:4", "mem": "480G"})
+    size = JobSize(nodes=8, ntasks_per_node=256, cpus_per_task=4, gpus_per_node=4, mem="480G")
+    assert check_size(size, "gpu", partial) is size
 
 
 def test_job_size_validates_its_fields() -> None:

@@ -11,13 +11,12 @@ Three sizes live here, and nothing else in SLAB guesses at any of them.
   budget. :func:`env_for` is the parent's half and :func:`apply` the
   child's: export the envelope, then take the affinity mask.
 * The :class:`JobSize` is what a batch job asks of the scheduler, and
-  :func:`check_size` refuses one that does not fit the partition's declared
-  node.
+  :func:`check_size` refuses one past the partition's own declared fields.
 
 :func:`fill` connects the engines to the envelope. An engine command holds
 the placeholders ``{ntasks}``, ``{threads}``, and ``{gpus}`` where it wants
 the launch's numbers, and SLAB fills only the placeholders the command asks
-for. A command without one runs as written, so a route that hardcodes its
+for. A command without one runs as written, so a build that hardcodes its
 rank count keeps doing what it says.
 """
 
@@ -216,9 +215,9 @@ def fill(command: str, env: Envelope, *, route: str | None = None) -> str:
     """Replace ``{ntasks}``, ``{threads}``, and ``{gpus}`` in an engine command.
 
     ``{gpus}`` becomes the number of gpus in the envelope. A command that
-    asks for it under an envelope with none is refused, naming the route,
-    because a GPU build launched with ``g 0`` would fail later and less
-    clearly. A command without a placeholder comes back unchanged, and
+    asks for it under an envelope with none is refused, naming the build
+    (*route*), because a GPU build launched with ``g 0`` would fail later
+    and less clearly. A command without a placeholder comes back unchanged, and
     shell forms like ``${OMP_NUM_THREADS}`` are left alone.
 
     Examples:
@@ -227,17 +226,17 @@ def fill(command: str, env: Envelope, *, route: str | None = None) -> str:
         'mpirun -np 2 lmp -k on g 2 t 2 -sf kk'
         >>> fill("env OMP_NUM_THREADS=${threads} pw.x", env)
         'env OMP_NUM_THREADS=${threads} pw.x'
-        >>> fill("lmp -k on g {gpus}", Envelope(cpus=(0,)), route="lammps-gpu")
+        >>> fill("lmp -k on g {gpus}", Envelope(cpus=(0,)), route="gpu")
         Traceback (most recent call last):
         ...
-        slab.errors.EngineNotAvailableError: route 'lammps-gpu' asks for {gpus} but ...
+        slab.errors.EngineNotAvailableError: the lammps build 'gpu' asks for {gpus} but ...
     """
     if "gpus" in placeholders(command) and not env.gpus:
-        who = f"route {route!r}" if route else f"the command {command!r}"
+        who = f"the lammps build {route!r}" if route else f"the command {command!r}"
         raise EngineNotAvailableError(
             f"{who} asks for {{gpus}} but this launch holds no GPU (the budget "
             f"lists none, or the launch was not sized with gpus=); size the launch "
-            f"with gpus= or pick a route without a GPU switch"
+            f"with gpus= or use a command without a GPU switch"
         )
     values = {"ntasks": str(env.ntasks), "threads": str(env.threads), "gpus": str(len(env.gpus))}
     return _PLACEHOLDER.sub(lambda match: values[match.group(1)], command)
@@ -312,62 +311,96 @@ def job_size(
     return JobSize.model_validate(fields)
 
 
-def check_size(size: JobSize, partition_name: str, spec: Partition) -> JobSize:
-    """Refuse a size the partition's declared node cannot hold; return it otherwise.
+def gres_gpus(gres: str | None) -> int | None:
+    """The gpu count a gres string asks for, or None when it names none.
 
-    Each refusal names the cap and the config field that declares it. A
-    partition without a ``node`` table cannot be sized at all.
+    A gres is a comma-separated list; the count comes from its ``gpu``
+    entry alone.
+
+    Examples:
+        >>> gres_gpus("gpu:a100:4"), gres_gpus("gpu:2"), gres_gpus("gpu")
+        (4, 2, None)
+        >>> gres_gpus("gpu:a100:4,nvme:1"), gres_gpus("nvme:1,gpu:2"), gres_gpus("nvme:1")
+        (4, 2, None)
+        >>> gres_gpus(None) is None
+        True
+    """
+    for entry in (gres or "").split(","):
+        pieces = entry.strip().split(":")
+        if pieces[0].lower() != "gpu":
+            continue
+        last = pieces[-1]
+        return int(last) if last.isdigit() else None
+    return None
+
+
+def check_size(size: JobSize, partition_name: str, spec: Partition) -> JobSize:
+    """Refuse a size past the partition's declared fields; return it otherwise.
+
+    The caps are what the partition itself declares: ``nodes``,
+    ``ntasks_per_node`` (or ``ntasks`` when only that is set),
+    ``cpus_per_task`` (as cores per node, ``ntasks_per_node`` times
+    ``cpus_per_task``), the gpu count in ``gres``, and ``mem``. Each
+    refusal names the config field. A field the partition leaves unset is
+    no cap, and SLURM enforces its own limit.
 
     Examples:
         >>> spec = Partition.model_validate(
-        ...     {"node": {"cpus": 64, "gpus": 4, "mem": "480G"}, "max_nodes": 2})
+        ...     {"nodes": 2, "ntasks_per_node": 64, "gres": "gpu:a100:4", "mem": "480G"})
         >>> check_size(JobSize(ntasks_per_node=4, gpus_per_node=4), "gpu", spec).gpus_per_node
         4
         >>> check_size(JobSize(ntasks_per_node=4, gpus_per_node=5), "gpu", spec)
         Traceback (most recent call last):
         ...
-        slab.errors.JobSizeError: gpus_per_node=5 exceeds the 4 gpus of one gpu node ...
-        >>> check_size(JobSize(ntasks_per_node=1), "cpu", Partition())
+        slab.errors.JobSizeError: gpus_per_node=5 exceeds the 4 gpus per node ...
+        >>> check_size(JobSize(ntasks_per_node=1, gpus_per_node=2), "cpu", Partition())
         Traceback (most recent call last):
         ...
-        slab.errors.JobSizeError: partition 'cpu' declares no node, so ...
+        slab.errors.JobSizeError: gpus_per_node=2 asks for gpus on cpu, which declares no gres ...
+        >>> check_size(JobSize(ntasks_per_node=1024), "cpu", Partition()).ntasks_per_node
+        1024
     """
-    node = spec.node
-    if node is None:
+    where = f"[hpc.partitions.{partition_name}]"
+    if spec.nodes is not None and size.nodes > spec.nodes:
         raise JobSizeError(
-            f"partition {partition_name!r} declares no node, so a job on it cannot be "
-            f"sized; add [hpc.partitions.{partition_name}.node] with cpus (and gpus, "
-            f"mem) to the slab config, or submit without a size"
+            f"nodes={size.nodes} exceeds the {spec.nodes} node(s) {partition_name} "
+            f"declares ({where} nodes)"
         )
-    where = f"[hpc.partitions.{partition_name}"
-    if size.nodes > spec.max_nodes:
+    ranks_cap = spec.ntasks_per_node
+    ranks_field = "ntasks_per_node"
+    if ranks_cap is None and spec.ntasks is not None:
+        ranks_cap, ranks_field = spec.ntasks, "ntasks"
+    if ranks_cap is not None and size.ntasks_per_node > ranks_cap:
         raise JobSizeError(
-            f"nodes={size.nodes} exceeds the {spec.max_nodes} node(s) one job may take on "
-            f"{partition_name} ({where}] max_nodes)"
+            f"ntasks_per_node={size.ntasks_per_node} exceeds the {ranks_cap} ranks per node "
+            f"{partition_name} declares ({where} {ranks_field})"
         )
-    cores = size.ntasks_per_node * size.cpus_per_task
-    if cores > node.cpus:
-        raise JobSizeError(
-            f"ntasks_per_node={size.ntasks_per_node} x cpus_per_task={size.cpus_per_task} "
-            f"= {cores} exceeds the {node.cpus} cpus of one {partition_name} node "
-            f"({where}.node] cpus)"
-        )
-    if size.gpus_per_node > node.gpus:
-        raise JobSizeError(
-            f"gpus_per_node={size.gpus_per_node} exceeds the {node.gpus} gpus of one "
-            f"{partition_name} node ({where}.node] gpus)"
-        )
-    if size.mem is not None:
-        if node.mem is None:
+    if ranks_cap is not None:
+        cores_cap = ranks_cap * (spec.cpus_per_task or 1)
+        cores = size.ntasks_per_node * size.cpus_per_task
+        if cores > cores_cap:
             raise JobSizeError(
-                f"mem={size.mem} cannot be checked: {partition_name} declares no node "
-                f"memory ({where}.node] mem)"
+                f"ntasks_per_node={size.ntasks_per_node} x cpus_per_task={size.cpus_per_task} "
+                f"= {cores} exceeds the {cores_cap} cores per node {partition_name} declares "
+                f"({where} {ranks_field} x cpus_per_task)"
             )
-        if memory_mb(size.mem) > memory_mb(node.mem):
+    if size.gpus_per_node > 0:
+        gpus_cap = gres_gpus(spec.gres)
+        if spec.gres is None:
             raise JobSizeError(
-                f"mem={size.mem} exceeds the {node.mem} of one {partition_name} node "
-                f"({where}.node] mem)"
+                f"gpus_per_node={size.gpus_per_node} asks for gpus on {partition_name}, "
+                f"which declares no gres ({where} gres)"
             )
+        if gpus_cap is not None and size.gpus_per_node > gpus_cap:
+            raise JobSizeError(
+                f"gpus_per_node={size.gpus_per_node} exceeds the {gpus_cap} gpus per node "
+                f"{partition_name} declares ({where} gres)"
+            )
+    if size.mem is not None and spec.mem is not None and memory_mb(size.mem) > memory_mb(spec.mem):
+        raise JobSizeError(
+            f"mem={size.mem} exceeds the {spec.mem} per node {partition_name} declares "
+            f"({where} mem)"
+        )
     return size
 
 

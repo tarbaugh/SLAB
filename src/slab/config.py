@@ -161,6 +161,24 @@ class QeEngineConfig(BaseModel):
         return self
 
 
+class LammpsBuild(BaseModel):
+    """One further LAMMPS build (``[engines.lammps.gpu]``): its command and setup.
+
+    Examples:
+        >>> LammpsBuild.model_validate({"command": "lmp -k on g {gpus} -sf kk"}).setup
+        ()
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    command: str
+    setup: tuple[str, ...] = ()
+
+
+_KOKKOS_GPU = re.compile(r"(?:^|\s)-k(?:okkos)?\s+on\s+g\b")
+_KOKKOS_ON = re.compile(r"(?:^|\s)-k(?:okkos)?\s+on\b")
+
+
 class LammpsEngineConfig(BaseModel):
     """Defaults for the built-in ``lammps`` engine (``[engines.lammps]``).
 
@@ -170,12 +188,45 @@ class LammpsEngineConfig(BaseModel):
     The interatomic potential (``pair_style``/``pair_coeff``/``files``) is a
     science decision passed per call in ``calculator_options``, never a
     machine default.
+
+    ``command`` and ``setup`` are the plain build. ``gpu`` is the build a
+    launch runs when its reservation holds gpus: a KOKKOS command with
+    ``{gpus}`` (and ``{ntasks}``, ``{threads}``) and the module it needs.
+    The agent never names a build; the slice chooses. So the plain command
+    may not carry ``-k on g``, and the gpu command must ask for a gpu.
+
+    Examples:
+        >>> LammpsEngineConfig.model_validate(
+        ...     {"command": "lmp", "gpu": {"command": "lmp -k on g {gpus} -sf kk"}}).gpu.command
+        'lmp -k on g {gpus} -sf kk'
+        >>> LammpsEngineConfig.model_validate({"command": "lmp -k on g 2 -sf kk"})
+        Traceback (most recent call last):
+        ...
+        pydantic_core._pydantic_core.ValidationError: ...
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     command: str | None = None
     setup: tuple[str, ...] = ()
+    gpu: LammpsBuild | None = None
+
+    @model_validator(mode="after")
+    def _builds_are_distinct(self) -> LammpsEngineConfig:
+        if self.command is not None and _KOKKOS_GPU.search(self.command):
+            raise ValueError(
+                "[engines.lammps] command asks KOKKOS for a gpu (-k on g); the plain "
+                "build runs when a launch holds no gpu, so move that command to "
+                "[engines.lammps.gpu] command and keep [engines.lammps] command plain"
+            )
+        if self.gpu is not None and not (
+            "{gpus}" in self.gpu.command or _KOKKOS_ON.search(self.gpu.command)
+        ):
+            raise ValueError(
+                "[engines.lammps.gpu] command must ask for a gpu: it runs when a launch "
+                "holds gpus, so it names {gpus} or turns KOKKOS on with -k on"
+            )
+        return self
 
 
 class RootstockEngineConfig(BaseModel):
@@ -337,33 +388,6 @@ def memory_mb(text: str) -> int:
     return megabytes
 
 
-class NodeSpec(BaseModel):
-    """One node of a partition: the cap a sized job is checked against.
-
-    ``cpus`` and ``gpus`` are per node, ``mem`` is the node's memory in
-    SLURM's form. A partition with a ``node`` table can be sized per job
-    (``slab hpc submit --ntasks-per-node 8 --gpus-per-node 2``); one
-    without cannot, and a sized request is refused naming this table.
-
-    Examples:
-        >>> NodeSpec.model_validate({"cpus": 64, "gpus": 4, "mem": "480G"}).gpus
-        4
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    cpus: int = Field(ge=1)
-    gpus: int = Field(default=0, ge=0)
-    mem: str | None = None
-
-    @field_validator("mem")
-    @classmethod
-    def _mem_parses(cls, value: str | None) -> str | None:
-        if value is not None:
-            memory_mb(value)
-        return value
-
-
 class Partition(BaseModel):
     """One SLURM partition as the cluster config declares it.
 
@@ -372,22 +396,20 @@ class Partition(BaseModel):
     sees. ``setup`` lines (module loads, environment) run before the job
     body; ``launcher`` (e.g. ``srun``) prefixes commands that should run
     under the parallel launcher; ``sbatch_extra`` is the explicit escape
-    hatch for directives this schema does not model. ``node`` declares
-    one node's size and ``max_nodes`` how many a job may take, so a
-    submission can be sized per job within declared caps.
+    hatch for directives this schema does not model. The declared
+    ``nodes``, ``ntasks_per_node`` (or ``ntasks``), ``cpus_per_task``,
+    ``mem``, and the gpu count in ``gres`` are also the caps a sized job
+    is checked against, so the partition is described once. A field the
+    partition leaves unset is no cap, and SLURM enforces its own limit.
 
     Examples:
         >>> Partition.model_validate({"time_limit": "24:00:00", "gres": "gpu:a100:4"}).gres
         'gpu:a100:4'
-        >>> Partition.model_validate({"node": {"cpus": 64, "gpus": 4}}).node.gpus
-        4
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     description: str = ""
-    node: NodeSpec | None = None
-    max_nodes: int = Field(default=1, ge=1)
     account: str | None = None
     qos: str | None = None
     time_limit: str | None = None
@@ -822,6 +844,16 @@ schema_version = 1
 #                                      # same per-engine setup rule as qe —
 #                                      # purge first so whatever the job (or
 #                                      # your profile) loaded can't reach it
+#                                      # Keep this command plain (no '-k on g'):
+#                                      # it runs when a launch holds no gpu.
+
+# [engines.lammps.gpu]                 # the build a launch runs when its
+#                                      # reservation holds gpus; the agent sizes
+#                                      # the launch with gpus= and never names a build
+# command = "mpirun -np {ntasks} lmp -k on g {gpus} -sf kk -pk kokkos newton on neigh half"
+#                                      # {ntasks}, {threads}, {gpus} are filled
+#                                      # from the launch's reservation
+# setup = ["module purge", "module load lammps/2025.07-kokkos"]
 
 [builders.atomsk]
 # command = "atomsk"                   # atomsk builds and transforms structures
@@ -891,13 +923,12 @@ schema_version = 1
 # setup = ["module load cuda/12.4"]    # replaces [hpc] setup for this partition? no:
 #                                      # partition setup runs AFTER the [hpc] setup lines
 # sbatch_extra = ["--exclusive"]       # raw directives the schema does not model
-# max_nodes = 4                        # how many nodes one sized job may take (default 1)
-
-# [hpc.partitions.gpu.node]
-# cpus = 64                            # one node's size: the cap a sized job is
-# gpus = 4                             # checked against ('submit_job' with ntasks_per_node,
-# mem = "480G"                         # cpus_per_task, gpus_per_node, mem). Without this
-#                                      # table a job on the partition cannot be sized.
+#                                      # The fields a partition declares (nodes,
+#                                      # ntasks_per_node, cpus_per_task, mem, and the
+#                                      # gpu count in gres) are also the caps a sized
+#                                      # job ('submit_job' with ntasks_per_node,
+#                                      # gpus_per_node, ...) is checked against. An
+#                                      # unset field is no cap.
 
 [agent]
 # provider = "openai"                       # "openai" = any OpenAI-compatible server; "anthropic"
