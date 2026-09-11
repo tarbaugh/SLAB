@@ -102,7 +102,7 @@ def _call(tool: str, **arguments: object) -> ToolCall:
 
 def test_every_mechanism_is_a_named_switch_with_evidence() -> None:
     names = [m.name for m in MECHANISMS]
-    assert len(names) == len(set(names)) == 11
+    assert len(names) == len(set(names)) == 12
     assert all(n == n.lower() and " " not in n for n in names)
     assert all(m.does and m.evidence for m in MECHANISMS)
     assert set(names) == ALL_MECHANISMS

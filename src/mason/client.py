@@ -515,6 +515,49 @@ def parse_loose_calls(content: str | None, known_names: frozenset[str]) -> tuple
     )
 
 
+def unfinished_call_name(content: str | None, *, fenced: bool) -> str | None:
+    """The tool a text-protocol reply was calling when it stopped, or ``None``.
+
+    A reply cut at the reply-token ceiling inside a fenced ````tool`` block
+    leaves the fence open, and one cut inside a loose ``{"name": ...}``
+    object leaves JSON that does not decode. Either is a call the model
+    meant to make and the loop must not run; the name lets the loop say
+    which. ``"unknown"`` when the cut fell before the name.
+
+    Examples:
+        >>> cut = '```tool\\n{"tool": "write_file", "arguments": {"path"'
+        >>> unfinished_call_name(cut, fenced=True)
+        'write_file'
+        >>> unfinished_call_name('{"name": "shell", "parameters": {"command": "ls', fenced=False)
+        'shell'
+        >>> unfinished_call_name('{"name": "shell", "parameters": {}}', fenced=False) is None
+        True
+    """
+    if not content:
+        return None
+    if fenced:
+        opened = content.count("```tool")
+        if opened > len(_FENCED_ACTION.findall(content)):
+            return _called_name(content[content.rfind("```tool") :])
+        return None
+    stripped = _QUOTED_REGIONS.sub(" ", content)
+    decoder = json.JSONDecoder()
+    for match in _LOOSE_CALL_START.finditer(stripped):
+        try:
+            decoder.raw_decode(stripped, match.start())
+        except json.JSONDecodeError:
+            return _called_name(stripped[match.start() :])
+    return None
+
+
+_CALLED_NAME = re.compile(r'"(?:name|tool)"\s*:\s*"([^"]*)"')
+
+
+def _called_name(text: str) -> str:
+    match = _CALLED_NAME.search(text)
+    return match.group(1) if match and match.group(1) else "unknown"
+
+
 def parse_fenced_calls(content: str | None) -> tuple[ToolCall, ...]:
     """Tool calls written as fenced ````tool`` blocks in plain text.
 

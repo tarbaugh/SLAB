@@ -363,3 +363,33 @@ def test_a_lead_takes_no_briefs(tmp_path: Path) -> None:
     seen = json.dumps(client.requests[1])
     assert "planner leads a group of its own and takes no briefs" in seen
     assert "your team: analysis-expert, dft-expert, md-expert, worker" in seen
+
+
+def test_a_child_cut_at_its_ceiling_hands_back_its_partial_outcome(tmp_path: Path) -> None:
+    """The child's answer was cut twice; the parent still learns what the
+    child wrote, so it re-briefs from there and not from zero."""
+    session = _session(tmp_path)
+    cut = ChatReply(content="script so far\nline", finish_reason="max_tokens", prompt_tokens=100)
+    client = FakeClient(
+        [
+            _call("delegate", agent="md-expert", task="write the MD script"),
+            _call("write_file", path="md.py", content="print('part one')\n"),
+            cut,
+            cut,
+            _text("md-expert got cut; I will re-brief from md.py"),
+        ]
+    )
+    Mason(session, client=client).run_turn("go")
+    handed = next(
+        m["content"] for m in client.requests[-1] if m["role"] == "tool"
+    )
+    assert "[truncated:" in handed
+    assert "[partial outcome:" in handed
+    assert f"files it wrote: {tmp_path / 'md.py'}" in handed
+    assert "[md-expert: answer after" in handed
+
+
+def test_a_child_that_ends_whole_hands_back_no_partial_outcome(tmp_path: Path) -> None:
+    _mason, client, _result = _delegated_turn(tmp_path)
+    handed = next(m["content"] for m in client.requests[-1] if m["role"] == "tool")
+    assert "[partial outcome:" not in handed

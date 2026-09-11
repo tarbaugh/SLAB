@@ -206,6 +206,37 @@ def test_a_step_that_thinks_at_length_and_writes_nothing_is_flagged_on_the_promp
     assert "effort was low" in flag["note"]
 
 
+def _cut(case: int, continued: bool = True) -> dict[str, Any]:
+    return {"at": "2026-09-01T10:00:02+00:00", "type": "cut", "case": case, "continued": continued}
+
+
+def test_replies_cut_mid_text_or_mid_call_are_flagged_on_the_prompt(tmp_path: Path) -> None:
+    """A planner on 2026-09-10 lost a script three times to the ceiling; the
+    flag counts the cuts that held something, and blames the ceiling and
+    the card's one-call habit, not a skill."""
+    root = tmp_path / "ws"
+    stem = "20260901-100000-6"
+    said = {"type": "message", "message": {"role": "assistant", "content": "part of a script"}}
+    steps = [
+        _usage(100), _call("shell", command="ls"), _result("exit 0\n"),
+        _usage(16_000), said, _cut(3),
+        _usage(100), _call("write_file", path="a.py", content="x"), _result("wrote"),
+        _usage(16_000), said, _cut(1, continued=False),
+        _usage(16_000), said, _cut(2),
+    ]
+    _transcript(
+        root, stem, [_header(effort="high"), _user(Q1.instruction), *steps, _finish(None, None)]
+    )
+    clean = "20260901-100000-7"
+    _transcript(root, clean, [_header(), _user(Q1.instruction), _usage(100), _cut(1, False)])
+    Workspace(root).close()
+    flag = _flags(benchmark.score_session(root, stem))[("cut-reply", "prompt")]
+    assert flag["evidence"] == "steps 2, 5"
+    assert "2 reply(ies)" in flag["note"] and "1 mid-text, 1 mid-call" in flag["note"]
+    assert "effort was high" in flag["note"] and "max_reply_tokens" in flag["note"]
+    assert ("cut-reply", "prompt") not in _flags(benchmark.score_session(root, clean))
+
+
 def test_a_campaign_that_never_loaded_the_skill_is_flagged_for_it(tmp_path: Path) -> None:
     root = tmp_path / "ws"
     session = "20260901-100000-1"

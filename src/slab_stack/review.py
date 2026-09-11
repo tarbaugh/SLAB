@@ -147,6 +147,10 @@ class Campaign:
     steps: list[Step] = field(default_factory=list)
     loads: list[SkillLoad] = field(default_factory=list)
     finish: dict[str, Any] | None = None
+    #: Every ``cut`` event the loop recorded: ``{"case": 1|2|3, "step": n}``.
+    #: Case 1 is a reply with no text and no call; case 2 a reply cut
+    #: mid-text; case 3 a reply cut inside a tool call's arguments.
+    cuts: list[dict[str, int]] = field(default_factory=list)
 
     @property
     def agent(self) -> str:
@@ -264,6 +268,10 @@ def walk(transcript: Path) -> Campaign:
             )
         elif kind == "finish":
             campaign.finish = event
+        elif kind == "cut":
+            raw_case = event.get("case")
+            case = raw_case if isinstance(raw_case, int) else 0
+            campaign.cuts.append({"case": case, "step": step_index})
     return campaign
 
 
@@ -361,6 +369,9 @@ def rules(
       finish. The card's doctrine on when to step back (``card:<agent>``).
     - ``reasoning-heavy``: a step billed 8,000 or more completion tokens
       and wrote nothing. The dial, which the note names (``prompt``).
+    - ``cut-reply``: a reply was cut at the reply-token ceiling while it
+      held text or a tool call (cut cases 2 and 3). The ceiling or the
+      card's habit of writing a file in one call (``prompt``).
     """
     flags: list[Flag] = []
     card = f"card:{campaign.agent}"
@@ -498,6 +509,21 @@ def rules(
                 f"{len(heavy)} step(s) billed {_HEAVY_STEP_TOKENS:,}+ completion tokens "
                 f"(peak {peak:,}) and wrote no plan, file, note, or report; effort was "
                 f"{dial}.",
+            )
+        )
+    cut = [c for c in campaign.cuts if c["case"] in (2, 3)]
+    if cut:
+        mid_text = sum(1 for c in cut if c["case"] == 2)
+        mid_call = len(cut) - mid_text
+        flags.append(
+            Flag(
+                "cut-reply",
+                "prompt",
+                "steps " + ", ".join(str(c["step"]) for c in cut),
+                f"{len(cut)} reply(ies) were cut at the reply-token ceiling while "
+                f"holding text or a tool call ({mid_text} mid-text, {mid_call} mid-call); "
+                f"effort was {campaign.effort or 'unset'}. Raise [agent] max_reply_tokens, "
+                f"or have the card write long files in parts.",
             )
         )
     return flags
