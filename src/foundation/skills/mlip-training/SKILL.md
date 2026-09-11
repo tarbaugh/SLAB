@@ -315,8 +315,14 @@ gamma far above 1 is not evidence; it is a list of frames to label.
   `grace_models download NAME --kokkos`. The `/kk` pair styles read the
   file without TensorFlow, and the lammps-potentials skill gives the
   `-k on g 1 -sf kk -pk kokkos newton on neigh half` switches that run
-  them on a GPU. This is the fast route for MD with a 1L, 2L, or 3L
-  model.
+  them on a GPU. This is the route for MD with a 1L, 2L, or 3L model
+  whenever the machine declares a gpu build: the script names
+  `grace/1l/kk`, `grace/2l/kk`, or `grace/3l/kk` (or a `/mixed` or
+  `/fp32` variant) and passes the `.npz` in `files=`, because `-sf kk`
+  cannot derive those styles from `pair_style grace`. The export takes
+  the standard architectures only and refuses a custom one with a clear
+  error; a refused model runs through the TensorFlow styles or as
+  GRACE/FS.
 - The FS preset. Choose it when the campaign needs millions of atoms,
   CPU-only nodes, or MPI across nodes: `grace/fs` is a C++
   implementation with MPI parallelisation and no TensorFlow, at lower

@@ -36,8 +36,10 @@ MLIP checkpoint id are for a small relaxation or single point that feeds
 another task; neither ever drives dynamics, and a brief or a skill
 template that asks for `ase.md` under one of them is rewritten as a
 LAMMPS script before anything runs. A GRACE model runs its dynamics
-through `pair_style grace` and the lines in the lammps-potentials
-skill. The build
+through the GRACE pair styles in the lammps-potentials skill: under a
+gpu build the `/kk` style on the exported Kokkos weights, named in the
+script yourself because `-sf kk` cannot derive it, and `pair_style
+grace` on the saved model only where no KOKKOS build exists. The build
 follows the slice, so a smoke test on the small cell runs plain and
 unsized first, and the accelerated run must reproduce it. Never name a
 build; `engine="lammps"` is all you pass. Never start a GPU run on the

@@ -114,9 +114,10 @@ through `run_lammps` as a whole input script, and so does any static \
 calculation on more than a few hundred atoms. A dynamics loop driven from \
 Python (`ase.md` or its like) under any engine is not a route on such a \
 machine, and a served MLIP checkpoint id is an engine for `relax` and \
-`single_point` only: a GRACE potential runs its dynamics through \
-`pair_style grace` in LAMMPS, with the lines the lammps-potentials skill \
-gives. Write every plan, brief, and script for a dynamics step in those \
+`single_point` only: a GRACE potential runs its dynamics through the GRACE \
+pair styles in LAMMPS, the `/kk` style on exported Kokkos weights under a gpu \
+build, with the lines the lammps-potentials skill gives. Write every plan, \
+brief, and script for a dynamics step in those \
 terms; the melt-quench, thermal-response, and lammps-scripting templates \
 already are.
 """,

@@ -143,6 +143,11 @@ machine fact.
   style without one runs on the host, and every such fix, compute,
   thermo line, or dump copies the data back from the device, so keep
   the input inside Kokkos-enabled styles and keep output intervals long.
+  The GRACE Kokkos styles are the exception: they are named
+  `grace/1l/kk`, `grace/2l/kk`, and `grace/3l/kk`, not `grace/kk`, so
+  `-sf kk` cannot derive them from `pair_style grace`. A script that
+  names `grace` under a KOKKOS build runs the TensorFlow style on the
+  host, GPU or not. Name the `/kk` style yourself (section 5).
 - `-pk kokkos` overrides the package defaults. The GPU defaults are
   `newton off neigh full`; for many-body and machine-learned potentials
   (EAM, ACE, GRACE) `newton on neigh half` is usually faster, and it is
@@ -214,9 +219,51 @@ each form is produced and how its extrapolation grade is built.
   `grace/2layer/parallel`.
 - The `/kk` styles read the weights that `grace_utils export_kokkos`
   or `grace_models download NAME --kokkos` writes, and run without
-  TensorFlow. `/kk/fp32` and `/kk/mixed` select the precision, and the
-  foundation 3L models run as `grace/3l/kk/fp32`. Run them with the
-  switches of section 4. A 3L model has no TensorFlow pair style.
+  TensorFlow. Run them with the switches of section 4; `newton on` is
+  required, and `-pk kokkos newton on neigh half` sets it. A 3L model
+  has no TensorFlow pair style.
+- The `/kk` styles support the standard GRACE-1L, 2L, and 3L
+  architectures only: the built-in presets and the foundation models.
+  `export_kokkos` refuses a custom instruction graph, an unsupported
+  activation, or a dimension past the Kokkos compile-time caps, and
+  says so. Such a model runs through the TensorFlow styles or as
+  GRACE/FS; report the refusal with the route you took.
+
+### Which GRACE style to name
+
+When the machine declares a gpu build (a KOKKOS command in
+`list_engines`) and the model is a standard 1L, 2L, or 3L architecture,
+the run names the `/kk` style and passes the `.npz` weights in
+`files=`. Export them once per fit, keep the file with the run that
+made it, and name it by bare basename:
+
+```
+pair_style grace/1l/kk
+pair_coeff * * grace_weights.npz Mo Nb Ta W
+```
+
+`pair_style grace` on the saved model is the route only when the
+machine has no KOKKOS build, when the architecture is custom, or for a
+smoke comparison against the `/kk` result. The build follows the slice
+(the lammps-scripting skill), so the same script under a launch with no
+gpu runs the plain build; keep a `/kk` script for the sized launch.
+
+The same `.npz` serves every precision variant. `export_kokkos` writes
+float64, and the pair style picks the compute precision:
+
+| `pair_style` | Network math | Geometry |
+| --- | --- | --- |
+| `grace/1l/kk`, `grace/2l/kk` | fp64 | fp64 |
+| `grace/1l/kk/mixed`, `grace/2l/kk/mixed` | fp32 | fp64 |
+| `grace/1l/kk/fp32`, `grace/2l/kk/fp32` | fp32 | fp32 |
+| `grace/3l/kk` | fp32 | fp64 |
+| `grace/3l/kk/fp32` | fp32 | fp32 |
+
+The 3L models are natively fp32, so `grace/3l/kk` is their mixed-precision
+style and no fp64 3L variant exists. `fp32` and `mixed` agree with fp64
+to about 1e-6 relative on energies and forces, well inside what MD
+needs, so choose by throughput and state the style in the intent: the
+style is part of the script and so of the cache identity.
 - The Kokkos 2L style fails to compile under CUDA 12.2 to 12.6 (an nvcc
   loop); a site build needs CUDA 12.8 or later. A missing style is a
   machine fact to report, never a reason to install anything.

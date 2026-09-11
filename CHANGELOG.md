@@ -5,6 +5,16 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- The Kokkos GRACE styles are named, not derived. The lammps-potentials
+  skill states that `-sf kk` cannot turn `pair_style grace` into a
+  Kokkos style, because those styles are `grace/1l/kk`, `grace/2l/kk`,
+  and `grace/3l/kk`; a run under a gpu build names the `/kk` style and
+  passes the exported `.npz`, and `pair_style grace` on the saved model
+  is for a machine without a KOKKOS build or a custom architecture the
+  export refuses. The skill gains the precision table of the `/kk`,
+  `/mixed`, and `/fp32` variants (a 3L model is natively fp32, so
+  `grace/3l/kk` is its mixed style), and the mlip-training skill, the
+  md-expert card, and the core prompt say the same.
 - Dynamics run inside LAMMPS, at every level the agent reads. The core
   prompt every card shares now states the rule: when `list_engines`
   shows `lammps`, every molecular dynamics run goes through `run_lammps`
