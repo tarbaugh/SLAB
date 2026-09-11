@@ -141,8 +141,8 @@ MECHANISMS: tuple[Mechanism, ...] = (
         "reply gets the brevity nudge.",
         "One campaign on 2026-09-10 briefed the same specialist three times "
         "because its replies were cut two thirds of the way through a script "
-        "and the brevity nudge discarded them: about thirty minutes and "
-        "470,000 tokens.",
+        "and the brevity nudge discarded them. About thirty minutes and "
+        "470,000 tokens were lost.",
     ),
 )
 

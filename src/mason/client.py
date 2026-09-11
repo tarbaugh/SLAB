@@ -524,6 +524,10 @@ def unfinished_call_name(content: str | None, *, fenced: bool) -> str | None:
     meant to make and the loop must not run; the name lets the loop say
     which. ``"unknown"`` when the cut fell before the name.
 
+    Ordinary cut prose is not a call: a fence opened for any other
+    language, a mention of the fence in prose, or an object that prose
+    follows all read as text.
+
     Examples:
         >>> cut = '```tool\\n{"tool": "write_file", "arguments": {"path"'
         >>> unfinished_call_name(cut, fenced=True)
@@ -532,24 +536,43 @@ def unfinished_call_name(content: str | None, *, fenced: bool) -> str | None:
         'shell'
         >>> unfinished_call_name('{"name": "shell", "parameters": {}}', fenced=False) is None
         True
+        >>> unfinished_call_name('```json\\n{"name": "Al2O3", "sites": [', fenced=False) is None
+        True
+        >>> unfinished_call_name('```tools\\nread_file\\n```\\nmore text cut he', fenced=True) is None
+        True
+        >>> unfinished_call_name('Use a ```tool block like this in your next', fenced=True) is None
+        True
+        >>> prose = '{"name": shell} was a typo.\\n\\nThe next step is to read the'
+        >>> unfinished_call_name(prose, fenced=False) is None
+        True
     """
     if not content:
         return None
     if fenced:
-        opened = content.count("```tool")
-        if opened > len(_FENCED_ACTION.findall(content)):
-            return _called_name(content[content.rfind("```tool") :])
+        opened = list(_FENCED_OPEN.finditer(content))
+        if len(opened) > len(_FENCED_ACTION.findall(content)):
+            tail = content[opened[-1].end() :]
+            if tail.lstrip().startswith("{"):
+                return _called_name(tail)
+        return None
+    if content.count("```") % 2:
+        # A fence that never closed: the cut fell inside quoted material.
         return None
     stripped = _QUOTED_REGIONS.sub(" ", content)
-    decoder = json.JSONDecoder()
-    for match in _LOOSE_CALL_START.finditer(stripped):
-        try:
-            decoder.raw_decode(stripped, match.start())
-        except json.JSONDecodeError:
-            return _called_name(stripped[match.start() :])
+    starts = list(_LOOSE_CALL_START.finditer(stripped))
+    if not starts:
+        return None
+    last = starts[-1]
+    try:
+        json.JSONDecoder().raw_decode(stripped, last.start())
+    except json.JSONDecodeError:
+        if "\n\n" in stripped[last.start() :].rstrip():
+            return None  # prose followed the object, so the cut fell in prose
+        return _called_name(stripped[last.start() :])
     return None
 
 
+_FENCED_OPEN = re.compile(r"```tool[ \t]*\n")
 _CALLED_NAME = re.compile(r'"(?:name|tool)"\s*:\s*"([^"]*)"')
 
 

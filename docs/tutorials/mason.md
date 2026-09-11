@@ -370,7 +370,7 @@ more than model choice.
 | `skill` | load a skill: its instructions, root path, and bundled files; the catalog is per-agent |
 | `delegate` | hand one scoped task to a specialist's own loop; the PI only, one level deep, sequential |
 | `review` | hand the plan or a file to the read-only critic before compute is spent; the leads only; the findings persist as a review record |
-| `finish` | end the task with a report citing run ids; honored only as the sole call of its reply, and only with a report. When the caller named the expected result keys (`slab mason run --expect t_melt:K`, or a benchmark question), a finish whose `results` names differ is not honored either: the tool result names the keys and units the goal asks for, and the agent calls finish again. The cited runs are the keep decision: the harness promotes the verified ones and expires the session's other runs, so the agent cites every run a number rests on, anchors from earlier sessions included |
+| `finish` | end the task with a report citing run ids; honored only as the sole call of its reply, and only with a report. When the caller named the expected result keys (`slab mason run --expect t_melt:K`, or a benchmark question), a finish whose `results` names differ is not honored either. The tool result names the keys and units the goal asks for, and the agent calls finish again. The cited runs are the keep decision: the harness promotes the verified ones and expires the session's other runs, so the agent cites every run a number rests on, anchors from earlier sessions included |
 
 `skill`, `delegate`, and `review` belong to the roster: Mason is a research
 group of agent cards with per-specialist skills, described in
@@ -725,9 +725,12 @@ session header records the budget the session started with, as
 `budget: {cpus, gpus}`, and the report divides the hours held by that
 budget over the session's wall time. The word is "held". A run that
 reserved two cpus for a minute held two cpu-minutes, whether or not the
-cores were busy. This laptop session was driven by a scripted model
-through the real loop. It wrote an EMT relax, launched it on two ranks,
-and finished:
+cores were busy. A run a batch job executed carries no slice, so on a
+cluster the fractions describe the launches from the session's own host.
+A run reaped after its process died is charged until the reap, because
+its slice was held until then. A scripted model drove this laptop
+session through the real loop. It wrote an EMT relax, launched it on two
+ranks, and finished:
 
 ```console
 $ slab mason report -w .slab
@@ -842,14 +845,15 @@ under version control, readable by humans:
   header records the effort and the SLAB version, and each token count
   carries the server's finish reason, so a review can tell a truncated
   turn from a finished one. A reply with no text and no tool call is a
-  fault, not an answer: the loop asks once more. A reply the server cut
-  at the reply-token ceiling is read before it is answered. A cut with
-  no text is asked once more at low effort, with a request for a short
-  answer. A cut mid-text stays in the history, and the model continues
-  from its last complete line. A cut inside a tool call's arguments
-  names the tool and asks for the file in parts, and the partial call
-  never runs. Each cut is a `cut` event with its case, and a second cut
-  ends the turn marked truncated. Also,
+  fault, not an answer: the loop asks once more. The loop reads a reply
+  the server cut at the reply-token ceiling before it answers. For a cut
+  with no text, the loop asks once more at low effort, with a request
+  for a short answer. For a cut mid-text, the text stays in the history,
+  and the model rewrites the unfinished last line and continues. For a
+  cut inside a tool call's arguments, the loop names the tool, asks for
+  shorter arguments or a file in parts, and runs no call from that
+  reply. Each cut is a `cut` event with its case, and a second cut ends
+  the turn marked truncated. Also,
   `slab mason chat --resume` replays the newest one. Read one with
   `slab mason read`: without a path it lists the workspace's sessions
   newest first, each by the directory it was launched from and the launch

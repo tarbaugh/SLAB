@@ -67,6 +67,7 @@ from mason.mechanisms import (
 )
 from mason.mechanisms import conditions_table as _conditions_table
 from mason.mechanisms import mechanisms_table as _mechanisms_table
+from mason.report import format_hours as _format_hours
 from mason.report import session_runs, summarize, utilisation
 from mason.session import SessionError, session_header, transcript_for, transcript_groups
 from slab._version import __version__
@@ -561,7 +562,7 @@ def retention_of(retire: dict[str, Any] | None) -> dict[str, Any] | None:
     return {key: retire.get(key) for key in RETENTION_KEYS}
 
 
-UTILISATION_KEYS = (
+RECORD_UTILISATION_KEYS = (
     "budget",
     "cpu_hours_held",
     "gpu_hours_held",
@@ -581,10 +582,10 @@ def utilisation_of(summary: dict[str, Any]) -> dict[str, Any]:
         ...                        "gpu_hours_held": 0.0, "wall_hours": 0.25, "runs_sized": 1,
         ...                        "runs_unsized": 0, "runs_open": 0,
         ...                        "utilisation": {"cpu": 0.25, "gpu": None}, "steps": 3})
-        >>> sorted(held) == sorted(UTILISATION_KEYS), held["utilisation"]["cpu"]
+        >>> sorted(held) == sorted(RECORD_UTILISATION_KEYS), held["utilisation"]["cpu"]
         (True, 0.25)
     """
-    return {key: summary.get(key) for key in UTILISATION_KEYS}
+    return {key: summary.get(key) for key in RECORD_UTILISATION_KEYS}
 
 
 def _harness_summary(harness: SessionRecord) -> dict[str, Any]:
@@ -950,9 +951,7 @@ def retention_table(records: Iterable[dict[str, Any]]) -> str:
 
 
 def _hours(value: Any) -> str:
-    hours = float(value or 0.0)
-    text = f"{hours:.3g}"
-    return f"{hours:.6f}" if "e" in text else text
+    return _format_hours(float(value or 0.0))
 
 
 def utilisation_table(records: Iterable[dict[str, Any]]) -> str:

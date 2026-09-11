@@ -130,17 +130,32 @@ _TRUNCATED_MARK = (
 #: nudge threw such replies away: about thirty minutes and 470,000 tokens.
 _CONTINUE_REPLY_NUDGE = (
     "[harness] your reply was cut at the reply-token ceiling while you were writing "
-    "text; what you wrote is kept above. Continue from your last complete line; do "
-    "not repeat what you wrote."
+    "text. The lines before your last one are kept above; the last, incomplete line "
+    "was dropped. Write that line again in full, then continue. Do not repeat the "
+    "lines before it."
 )
-#: A cut inside a tool call's arguments: the call is not run, and the
-#: model is told which tool and how to fit the call in the ceiling.
+#: The continuation came back with no text: the think block took it. The
+#: kept half stays, and the model is asked once for the rest.
+_EMPTY_CONTINUATION_NUDGE = (
+    "[harness] your continuation was empty. The text you wrote before the cut is "
+    "kept above. Write the rest, from the incomplete last line on."
+)
+#: What closes a turn whose kept half never got its continuation.
+_CUT_UNFINISHED_MARK = (
+    "\n\n[truncated: the reply was cut at the reply-token ceiling and the "
+    "continuation added nothing; the operator can raise [agent] max_reply_tokens]"
+)
+#: A cut inside a tool call's arguments: no call in that reply runs, and
+#: the model is told which tool and how to fit the call in the ceiling.
 _CUT_CALL_NUDGE = (
     "[harness] your reply was cut at the reply-token ceiling inside the arguments "
-    "of your {name} call, so the call did not run. Write the file in parts: "
-    "write_file the first part, then extend it with edit_file (replace its last "
-    "line with that line plus the next part). Or shorten the arguments. Then call "
+    "of your {name} call, so the call did not run. Shorten the arguments, then call "
     "again."
+)
+_CUT_CALL_OTHERS = " The other {n} call(s) in that reply were dropped with it; make them again."
+_WRITE_IN_PARTS = (
+    " Or write the file in parts: write_file the first part, then extend it with "
+    "edit_file (replace its last line with that line plus the next part)."
 )
 #: Messages that must accumulate after a compaction before another may fire.
 _COMPACTION_MIN_NEW_MESSAGES = 4
@@ -700,12 +715,15 @@ class Mason:
                 # partial call never runs; the history keeps the text only,
                 # and the model reads which tool and how to fit the call.
                 cut_nudged = True
-                self._append_assistant(reply, has_calls=False)
+                # A native cut call arrives with null content; a message with
+                # null content and no tool_calls is refused by OpenAI-style
+                # servers, so the history keeps an empty string.
+                kept = reply.model_copy(update={"content": reply.content or ""})
+                self._append_assistant(kept, has_calls=False)
                 self._observe_step(reply, interim=False)
                 self.session.record({"type": "cut", "case": 3, "continued": True})
-                self._append(
-                    {"role": "user", "content": _CUT_CALL_NUDGE.format(name=cut_call)}
-                )
+                nudge = self._cut_call_nudge(cut_call, dropped=len(reply.tool_calls))
+                self._append({"role": "user", "content": nudge})
                 continue
             calls = list(reply.tool_calls)
             from_text = False
@@ -742,6 +760,15 @@ class Mason:
                     if enabled(self.session.agent, "adaptive-effort"):
                         self._effort_override = _retry_effort(self.session.agent.effort)
                     continue
+                if cut_prefix is not None and not text.strip() and not cut:
+                    # The continuation was empty: a think block took it. Ask
+                    # once; then close the turn on the kept half, marked.
+                    if not empty_nudged:
+                        empty_nudged = True
+                        self._append({"role": "user", "content": _EMPTY_CONTINUATION_NUDGE})
+                        continue
+                    text = _join_cut(cut_prefix, "") + _CUT_UNFINISHED_MARK
+                    return TurnResult(text=text, stop_reason="answer", steps=step, truncated=True)
                 if cut_prefix is not None:
                     text = _join_cut(cut_prefix, text)
                 if not text.strip() and not empty_nudged and reply.finish_reason != "max_tokens":
@@ -797,8 +824,8 @@ class Mason:
                     mismatch = self._results_mismatch(results)
                     if mismatch is not None:
                         # The goal named its result keys; a finish under other
-                        # names is the drift the scorer would fail, so it is
-                        # refused here, where the agent can still fix it.
+                        # names would leave the scorer without its number, so
+                        # it is refused here, where the agent can still fix it.
                         self._append_tool_result(call, mismatch, as_text=from_text)
                         continue
                     self._append_tool_result(call, "task closed", as_text=from_text)
@@ -862,6 +889,15 @@ class Mason:
                     )
             looked = all(call.name in LOOKING_TOOLS for call in calls)
             self._looking_streak = self._looking_streak + 1 if looked else 0
+        if cut_prefix is not None:
+            # The budget ended before the continuation: the kept half is
+            # usable text, returned as such and marked.
+            return TurnResult(
+                text=_join_cut(cut_prefix, "") + _CUT_UNFINISHED_MARK,
+                stop_reason="max_turns",
+                steps=max_turns,
+                truncated=True,
+            )
         return TurnResult(
             text=(
                 f"stopped at the {self.session.agent.max_turns}-call budget for one "
@@ -1049,6 +1085,20 @@ class Mason:
             if call.arguments_error is not None:
                 return call.name
         return unfinished_call_name(reply.content, fenced=self.fenced)
+
+    def _cut_call_nudge(self, name: str, *, dropped: int) -> str:
+        """What the model reads after a cut inside a call's arguments.
+
+        The recipe for a file in parts is offered only for a write_file cut
+        on a card that holds edit_file; a planner cut inside a long brief
+        has neither tool and is told to shorten the arguments.
+        """
+        text = _CUT_CALL_NUDGE.format(name=name)
+        if dropped > 1:
+            text += _CUT_CALL_OTHERS.format(n=dropped - 1)
+        if name == "write_file" and "edit_file" in self.toolbox.tools:
+            text += _WRITE_IN_PARTS
+        return text
 
     def _call_model(self, *, hint: str | None = None) -> ChatReply:
         tools = None if self.fenced else self.toolbox.specs()
@@ -1388,17 +1438,19 @@ class Mason:
 def _join_cut(prefix: str, rest: str) -> str:
     """The cut half and its continuation as one text.
 
-    The continuation was asked to resume from the last complete line, so
-    the prefix's unfinished last line is dropped before the join; a prefix
-    with no line break is kept whole.
+    The continuation was asked to rewrite the unfinished last line in
+    full, so that line is dropped from the prefix before the join. A
+    prefix with no line break was one unfinished line.
 
     Examples:
         >>> _join_cut("a = 1\\nb = 2\\nc = ", "c = 3\\n")
         'a = 1\\nb = 2\\nc = 3\\n'
-        >>> _join_cut("one long sen", "tence")
-        'one long sentence'
+        >>> _join_cut("a = 1\\n", "b = 2\\n")
+        'a = 1\\nb = 2\\n'
+        >>> _join_cut("one unfinished li", "one unfinished line")
+        'one unfinished line'
     """
-    if prefix.endswith("\n") or "\n" not in prefix:
+    if prefix.endswith("\n"):
         return prefix + rest
     return prefix[: prefix.rfind("\n") + 1] + rest
 

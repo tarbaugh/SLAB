@@ -38,7 +38,7 @@ from foundation.errors import (
 from foundation.lifecycle import ExecutionStatus, LifecycleState
 from foundation.models import ArtifactRole, Reservation, Run, utcnow
 from foundation.retention import DEFAULT_POLICY, RetentionPolicy, _reachable_hashes
-from foundation.runtime import Workspace, describe_liveness
+from foundation.runtime import Workspace, describe_liveness, this_host
 
 if TYPE_CHECKING:
     from slab.resources import JobSize
@@ -214,9 +214,12 @@ def free_resources(ws: Workspace) -> dict[str, Any]:
     answer is what a launch made now would be judged against.
     """
     ws.reap_dead(caller="free_resources")
-    answer = ws.free_resources()
-    live = {row.id: row for row in ws.runs.live_reservations(answer["host"])}
-    answer["held"] = [describe_reservation(live[rid]) for rid in answer["reservations"]]
+    # One read: a reservation that ends between two reads would be listed
+    # by one and missing from the other, and the tool is called exactly
+    # while concurrent launches finish.
+    live = ws.runs.live_reservations(this_host())
+    answer = ws.free_resources(live=live)
+    answer["held"] = [describe_reservation(row) for row in live]
     return answer
 
 
@@ -1294,10 +1297,12 @@ def cancel_job(job_id: str, *, workspace: str | os.PathLike[str] | None = None) 
     if workspace is None:
         return summary
     with Workspace(workspace) as ws:
-        doomed = ws.runs.list_runs(status=ExecutionStatus.RUNNING, job_id=job_id)
+        stamped = ws.runs.list_runs(job_id=job_id)
+        doomed = [run for run in stamped if run.status == ExecutionStatus.RUNNING]
         if not doomed:
             return summary
         held_before = {r.id: r for r in ws.runs.list_reservations()}
+        failed_ids: set[str] = set()
         for run in doomed:
             with suppress(IllegalStatusChangeError):  # it may end under us; fine
                 failed = ws.runs.set_status(
@@ -1306,14 +1311,19 @@ def cancel_job(job_id: str, *, workspace: str | os.PathLike[str] | None = None) 
                     error=f"job {job_id} cancelled by the operator; the process died with it",
                 )
                 summary["runs_failed"].append({"id": failed.id, "name": failed.name})
+                failed_ids.add(failed.id)
         ws.release_dead()
         still = {r.id for r in ws.runs.list_reservations()}
+        # Only the slices the job's own runs held: release_dead sweeps this
+        # host's other dead reservations too, and they are not the cancel's.
         summary["reservations_released"] = [
             {"id": held.id, "slice": describe_resources(held.slice)}
             for held in held_before.values()
-            if held.id not in still
+            if held.id not in still and held.run_id in failed_ids
         ]
-        earliest = min(run.created_at for run in doomed)
+        # The cutoff is the job's first run, finished or not: a fact the job
+        # recorded during a run that completed is as unverified as any other.
+        earliest = min(run.created_at for run in stamped)
     summary["memories"] = [
         {
             "name": memory.name,

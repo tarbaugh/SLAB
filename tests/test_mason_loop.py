@@ -401,12 +401,12 @@ def test_explicit_compute_profile_wins_over_the_derived_one(tmp_path: Path) -> N
 def test_truncated_answers_are_reported_not_passed_off_as_finished(tmp_path: Path) -> None:
     """Cut mid-text, continued, and cut again: the two halves are joined,
     the turn ends, and the mark says the ceiling was hit twice."""
-    cut = ChatReply(content="half an ans", finish_reason="max_tokens", prompt_tokens=10)
-    again = ChatReply(content="wer, still cut", finish_reason="max_tokens", prompt_tokens=10)
+    cut = ChatReply(content="half an answer\nand more te", finish_reason="max_tokens", prompt_tokens=10)
+    again = ChatReply(content="and more text, still cut", finish_reason="max_tokens", prompt_tokens=10)
     result = Mason(_session(tmp_path), client=FakeClient([cut, again])).run_turn("go")
     assert result.stop_reason == "answer"
     assert result.truncated
-    assert result.text.startswith("half an answer, still cut")
+    assert result.text.startswith("half an answer\nand more text, still cut")
     assert "truncated" in result.text
     assert "max_reply_tokens" in result.text
 
@@ -451,8 +451,8 @@ def test_cut_case_2_mid_text_is_continued_and_joined(tmp_path: Path) -> None:
     assert kept and kept[-1]["content"] == "line 1\nline 2\nline 3 is cut he"
     nudge = history[-2]
     assert nudge["role"] == "user"
-    assert "Continue from your last complete line" in nudge["content"]
-    assert "do not repeat" in nudge["content"]
+    assert "Write that line again in full" in nudge["content"]
+    assert "Do not repeat the lines before it" in nudge["content"]
     assert "effort" not in client.options[1]  # the model was writing, not deliberating
     (event,) = _cut_events(session)
     assert event["case"] == 2 and event["continued"] is True
@@ -493,6 +493,9 @@ def test_cut_case_3_native_call_is_never_run_and_names_the_tool(tmp_path: Path) 
     assert "inside the arguments of your write_file call" in nudge["content"]
     assert "write_file the first part" in nudge["content"]
     assert "edit_file" in nudge["content"]
+    assert "other" not in nudge["content"]  # one call in the reply, nothing else dropped
+    kept = [m for m in history if m["role"] == "assistant"][-1]
+    assert kept["content"] == ""  # never null without tool_calls
     (event,) = _cut_events(session)
     assert event["case"] == 3 and event["continued"] is True
 
@@ -1563,3 +1566,78 @@ def test_a_finish_that_cites_nothing_retires_nothing_when_nothing_ran(tmp_path: 
     retire = next(e for e in _events(session) if e["type"] == "retire")
     assert (retire["runs_total"], retire["runs_promoted"], retire["runs_expired"]) == (0, 0, 0)
     assert retire["kept"] == [] and retire["expired"] == []
+
+
+def test_an_empty_continuation_is_asked_once_then_the_kept_half_is_returned_marked(
+    tmp_path: Path,
+) -> None:
+    """A thinking model can spend the continuation in its think block. The
+    kept half is not passed off as whole: one more ask, then the half
+    comes back marked."""
+    session = _session(tmp_path)
+    cut = ChatReply(content="line 1\nline 2\npart", finish_reason="max_tokens", prompt_tokens=10)
+    empty = ChatReply(content="", finish_reason="stop", prompt_tokens=10)
+    rest = ChatReply(content="part two\n", prompt_tokens=10)
+    client = FakeClient([cut, empty, rest])
+    result = Mason(session, client=client).run_turn("go")
+    assert result.text == "line 1\nline 2\npart two\n" and not result.truncated
+    nudge = client.requests[2][0][-2]
+    assert nudge["role"] == "user" and "continuation was empty" in nudge["content"]
+    session.release_session_lock()
+    session = _session(tmp_path)
+    client = FakeClient([cut, empty, empty])
+    result = Mason(session, client=client).run_turn("go")
+    assert result.truncated and result.stop_reason == "answer"
+    assert result.text.startswith("line 1\nline 2\n\n\n[truncated: the reply was cut")
+
+
+def test_a_cut_inside_quoted_material_is_text_not_a_call(tmp_path: Path) -> None:
+    """A reply cut inside a python block that holds a dict with a "name"
+    key is case 2: the model continues the text, nothing names a tool."""
+    session = _session(tmp_path)
+    cut = ChatReply(
+        content='Here is the config:\n```python\ncfg = {"name": "run1", "steps": 10',
+        finish_reason="max_tokens",
+        prompt_tokens=10,
+    )
+    client = FakeClient([cut, ChatReply(content='cfg = {"name": "run1", "steps": 10}\n```\n', prompt_tokens=10)])
+    result = Mason(session, client=client).run_turn("go")
+    assert "Write that line again in full" in client.requests[1][0][-2]["content"]
+    assert result.text.startswith("Here is the config:\n```python\ncfg = ")
+    assert _cut_events(session)[0]["case"] == 2
+
+
+def test_a_cut_call_beside_a_complete_one_drops_both_and_says_so(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    whole = ToolCall(
+        id="w0", name="write_file", arguments={"path": "one.py", "content": "x\n"},
+        arguments_raw=json.dumps({"path": "one.py", "content": "x\n"}),
+    )
+    partial = ToolCall(id="w1", name="write_file", arguments_raw='{"path": "two', arguments_error="bad")
+    cut = ChatReply(
+        content=None, tool_calls=(whole, partial), finish_reason="max_tokens", prompt_tokens=10
+    )
+    client = FakeClient([cut, ChatReply(content="redo", prompt_tokens=10)])
+    Mason(session, client=client).run_turn("go")
+    assert not (tmp_path / "one.py").exists()
+    nudge = client.requests[1][0][-2]["content"]
+    assert "The other 1 call(s) in that reply were dropped with it" in nudge
+
+
+def test_the_cut_call_nudge_offers_parts_only_for_a_write_file(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    partial = ToolCall(id="d1", name="delegate", arguments_raw='{"agent": "md', arguments_error="bad")
+    cut = ChatReply(content=None, tool_calls=(partial,), finish_reason="max_tokens", prompt_tokens=10)
+    client = FakeClient([cut, ChatReply(content="ok", prompt_tokens=10)])
+    Mason(session, client=client).run_turn("go")
+    nudge = client.requests[1][0][-2]["content"]
+    assert "your delegate call" in nudge and "Shorten the arguments" in nudge
+    assert "write_file the first part" not in nudge
+
+
+def test_a_cut_at_the_last_step_returns_the_kept_half_marked(tmp_path: Path) -> None:
+    session = _session(tmp_path, max_turns=1)
+    cut = ChatReply(content="line 1\nline 2\npart", finish_reason="max_tokens", prompt_tokens=10)
+    result = Mason(session, client=FakeClient([cut])).run_turn("go")
+    assert result.stop_reason == "max_turns" and result.truncated
+    assert result.text.startswith("line 1\nline 2\n\n\n[truncated:")

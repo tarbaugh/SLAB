@@ -162,7 +162,7 @@ and the table says which.
 | `skills` | The skill tool loads procedures and tested scripts from the catalog in the Agent Skills format, one line per skill until loaded. | Anthropic, Agent Skills; the skills audit of 2026-09-03. | not yet measured |
 | `delegation` | A lead hands a separable task to a specialist card that runs its own loop one level down and returns a report. | Anthropic's multi-agent research system: context isolation pays for separable subtasks only. | not yet measured |
 | `adaptive-effort` | A reply cut at the token budget is retried once at lower effort with a request for brevity before the turn ends. | Transcripts where a high-effort reply was cut twice and the turn ended with no report. | not yet measured |
-| `continue-cut-reply` | A reply cut at the reply-token ceiling is read before it is nudged. Text with no tool call stays in the history and the model continues from its last complete line, joined on return. A cut inside a tool call's arguments names the tool and asks for the file in parts, and the partial call never runs. A delegate whose turn ends cut hands back the files it wrote and the runs it launched. Off, every cut reply gets the brevity nudge. | One campaign on 2026-09-10 briefed the same specialist three times because its replies were cut two thirds of the way through a script and the brevity nudge discarded them: about thirty minutes and 470,000 tokens. | not yet measured |
+| `continue-cut-reply` | A reply cut at the reply-token ceiling is read before it is nudged. Text with no tool call stays in the history and the model continues from its last complete line, joined on return. A cut inside a tool call's arguments names the tool and asks for the file in parts, and the partial call never runs. A delegate whose turn ends cut hands back the files it wrote and the runs it launched. Off, every cut reply gets the brevity nudge. | One campaign on 2026-09-10 briefed the same specialist three times because its replies were cut two thirds of the way through a script and the brevity nudge discarded them. About thirty minutes and 470,000 tokens were lost. | not yet measured |
 <!-- benchmark:mechanisms:end -->
 
 `[agent] mechanisms` in `slab.toml` lists the switches a session runs
@@ -246,9 +246,11 @@ Rules for the record:
   rewrites nothing.
 - A record carries `utilisation`: what the session's runs held of the
   machine. `cpu_hours_held` and `gpu_hours_held` sum each run's slice
-  times its running span, `wall_hours` is the transcript span, `budget`
-  is the `{cpus, gpus}` the session started with, and `utilisation` is
-  held over budget times wall, per resource, as a fraction. `runs_sized`
+  times its running span. `wall_hours` is the transcript span. `budget`
+  is the `{cpus, gpus}` the session started with. `utilisation` is
+  held over budget times wall, per resource, as a fraction. A run that
+  finished after the transcript's last event pushes the fraction above
+  one, and the scorer does not clip it. `runs_sized`
   counts the runs that contributed, `runs_unsized` the runs without a
   slice, and `runs_open` the sized runs that had not finished. A session
   whose header records no budget carries `null` for `budget` and for the

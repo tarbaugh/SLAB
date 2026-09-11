@@ -958,17 +958,6 @@ def _format_span(seconds: float | None) -> str:
     return f"{int(seconds // 3600)}h{int(seconds % 3600 // 60):02d}m"
 
 
-def _format_hours(hours: float) -> str:
-    """Three significant figures, never in exponent form.
-
-    Examples:
-        >>> [_format_hours(h) for h in (12.34, 1.5, 0.002, 0.0000123, 0.0)]
-        ['12.3', '1.5', '0.002', '0.000012', '0']
-    """
-    text = f"{hours:.3g}"
-    return f"{hours:.6f}" if "e" in text else text
-
-
 def _held_line(summary: dict[str, Any]) -> str:
     """The resource hours the session's runs held, against the budget.
 
@@ -982,9 +971,11 @@ def _held_line(summary: dict[str, Any]) -> str:
         ...             "budget": None, "utilisation": None, "runs_unsized": 2, "runs_open": 0})
         'held 0.002 cpu-h and 0 gpu-h over 30s; budget not recorded; 2 run(s) without a slice'
     """
+    from mason.report import format_hours
+
     line = (
-        f"held {_format_hours(summary['cpu_hours_held'])} cpu-h and "
-        f"{_format_hours(summary['gpu_hours_held'])} gpu-h over "
+        f"held {format_hours(summary['cpu_hours_held'])} cpu-h and "
+        f"{format_hours(summary['gpu_hours_held'])} gpu-h over "
         f"{_format_span(summary['span_s'])}"
     )
     budget = summary.get("budget")

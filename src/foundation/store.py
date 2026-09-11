@@ -382,6 +382,7 @@ class RunStore(Protocol):
         status: ExecutionStatus | str | None = None,
         session: str | None = None,
         limit: int | None = None,
+        job_id: str | None = None,
     ) -> list[Run]:
         """List runs, newest first, optionally filtered."""
         ...

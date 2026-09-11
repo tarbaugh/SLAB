@@ -1716,3 +1716,12 @@ def test_partial_outcome_names_the_files_and_runs_a_cut_child_left(tmp_path: Pat
     assert outcome.count(str(tmp_path / "md.py")) == 1  # two edits, one file
     assert f"runs it launched: {run_id}" in outcome
     assert "continue from these" in outcome
+
+
+def test_a_launch_that_cannot_start_records_the_attempt_with_its_error(
+    box: Toolbox, tmp_path: Path
+) -> None:
+    answer = box.dispatch(_call("launch_workflow", script="missing.py"))
+    assert "could not start the run" in answer or "no such" in answer.lower()
+    launches = [e for e in _command_events(box.session) if e["kind"] == "launch"]
+    assert launches and "error" in launches[-1] and "run_id" not in launches[-1]

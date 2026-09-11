@@ -252,6 +252,19 @@ def summarize(
     return summary
 
 
+def format_hours(hours: float) -> str:
+    """Three significant figures, never in exponent form.
+
+    Examples:
+        >>> [format_hours(h) for h in (12.34, 1.5, 0.002, 0.0000123, 0.0, 1536.0, 25000.5)]
+        ['12.3', '1.5', '0.002', '0.000012', '0', '1536', '25000']
+    """
+    if abs(hours) >= 1000:
+        return f"{hours:.0f}"
+    text = f"{hours:.3g}"
+    return f"{hours:.6f}" if "e" in text else text
+
+
 UTILISATION_KEYS = (
     "cpu_hours_held",
     "gpu_hours_held",
@@ -278,7 +291,13 @@ def utilisation(summary: dict[str, Any], runs: list[dict[str, Any]]) -> dict[str
     ``utilisation`` is held over the budget times the session's wall time,
     per resource: ``{"cpu": 0.13, "gpu": 0.26}``. It is None when the
     header records no budget, and a resource the budget has none of reads
-    None inside it. ``wall_hours`` is the transcript span.
+    None inside it. ``wall_hours`` is the transcript span. A run's span
+    comes from the run store, so a run that finished after the transcript's
+    last event pushes the fraction above one; the fraction is not clipped.
+    A run reaped after its process died is charged until the reap, because
+    its slice was held until then. A run a batch job executed carries no
+    slice, so on a cluster the fractions describe the launches from the
+    session's own host only.
 
     Examples:
         >>> rows = [

@@ -1752,6 +1752,11 @@ def _add_workflow_tools(
             record_command(session, **launch_event, error=str(e))
             _release(reservation.id)
             return f"could not start the run: {e}"
+        except BaseException as e:
+            # An interrupt mid-run: the launch happened and the transcript
+            # must say so, then the interrupt goes on up.
+            record_command(session, **launch_event, error=type(e).__name__)
+            raise
         record_command(session, **launch_event, run_id=result.get("run_id"))
         _record_run_commands(result.get("run_id"), "launch_workflow")
         lines = [

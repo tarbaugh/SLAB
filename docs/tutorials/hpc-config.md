@@ -272,13 +272,17 @@ reason, so an unknown is never presented as a known.
 A cancelled job takes its processes down with it, and the runs those
 processes were executing cannot record their own end. Every run started
 inside a batch job carries the job id, read from `$SLURM_JOB_ID` when the
-run starts. `slab hpc cancel` uses that stamp. It asks the scheduler to
-cancel the job, marks the job's running runs failed with the reason,
-releases the reservations those runs held, and lists every machine memory
-written since the job's first run started. The memories are listed and
-never deleted, because a job that died may have recorded a fact it never
-verified, and that review is yours. The command expires and purges
-nothing.
+run starts. `slab hpc cancel` uses that stamp. The command does four
+things:
+
+1. It asks the scheduler to cancel the job.
+2. It marks the job's running runs failed, with the reason.
+3. It releases the reservations those runs held.
+4. It lists every machine memory written since the job's first run started.
+
+The command lists the memories and deletes none. A job that died may have
+recorded a fact it never verified. Review those memories yourself. The
+command expires and purges nothing.
 
 The capture below comes from a workspace where job `4242314` was executing
 two runs, one of them sized, and had written one memory:

@@ -663,19 +663,26 @@ class Workspace:
         )
 
     def free_resources(
-        self, *, host: str | None = None, budget: Budget | None = None
+        self,
+        *,
+        host: str | None = None,
+        budget: Budget | None = None,
+        live: list[Reservation] | None = None,
     ) -> dict[str, Any]:
         """What this host's budget holds and what is free right now.
 
         The read side of :meth:`reserve`: ``budget`` and ``free`` each list
         cpu ids and gpu ids, and ``reservations`` the ids of the live
         reservations that hold the difference. Derived, never counted.
+        A caller that has already read the live reservations passes them
+        as *live*, so one answer rests on one read.
         """
         from slab.resources import budget as discover_budget
 
         found = budget if budget is not None else discover_budget()
         where = host if host is not None else this_host()
-        live = self.runs.live_reservations(where)
+        if live is None:
+            live = self.runs.live_reservations(where)
         used_cpus = {cpu for row in live for cpu in row.cpus}
         used_gpus = {gpu for row in live for gpu in row.gpus}
         return {
