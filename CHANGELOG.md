@@ -5,6 +5,54 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- The agent sizes every launch and every job. `slab.resources` is the one
+  place that knows what a process may use: `budget()` discovers the cpu
+  ids of the affinity mask and the visible gpu ids, `envelope()` reads
+  the per-launch `SLAB_CPUS`, `SLAB_GPUS`, `SLAB_NTASKS`, and
+  `SLAB_THREADS` variables and falls back to the budget and SLURM's
+  counts, `env_for` exports an envelope to a child, and `apply` takes its
+  affinity mask. An engine command holds `{ntasks}`, `{threads}`, and
+  `{gpus}` where it wants the launch's numbers, and `fill` replaces only
+  the placeholders a command asks for; a `{gpus}` under a launch without
+  a GPU is refused naming the route. The QE bin form is now literally
+  `mpirun -np {ntasks} <bin>/pw.x`, LAMMPS routes fill their command the
+  same way, `lammps_routes()` reports each route's `placeholders`, and
+  `slab engines list` marks such a route `sized per launch`.
+- A partition declares its node. `[hpc.partitions.NAME.node]` carries
+  `cpus`, `gpus`, and `mem`, and `max_nodes` how many nodes one job may
+  take. `render_sbatch(size=)` takes a `JobSize` (`nodes`,
+  `ntasks_per_node`, `cpus_per_task`, `gpus_per_node`, `mem`) whose
+  directives replace the partition's own, the gres keeps the type the
+  partition names, and `check_size` refuses a size the node cannot hold,
+  or a size on a partition without a node table, naming the config field.
+  Without a size the script is byte for byte what it was. `slab hpc
+  render` and `slab hpc submit` take the five size flags, `slab hpc
+  partitions` prints the node line, and `list_engines` reports each
+  partition's `node` and `max_nodes`.
+- A launch reserves its slice before it starts. The run store (schema 5)
+  keeps a `reservations` table and a `resources` column on runs.
+  `Workspace.reserve` checks out cpu ids and gpu ids on this host inside
+  one transaction, so two reservers never overlap, and refuses a slice
+  that does not fit with the free amounts; an unsized reservation takes
+  the whole free cpu budget. `start_run(reservation=)` claims it, copying
+  the slice onto the run record, and the reservation is released when
+  the run ends or its holder dies: free is derived from the live
+  reservations, never counted. `Workspace.free_resources` is the read
+  side, and `reap_dead` (so `slab runs reap` and every `wait_for_run`
+  poll) releases the dead ones. `slab run --reservation` takes the mask
+  and the GPU variables before the script runs, `launch_child` runs a
+  sized launch as such a child, `slab list` gets a `RES` column, `slab
+  show` and `show_run` print the slice, and `slab runs reservations`
+  lists the reservations with their holder and age.
+- The MCP tools take sizes. `launch_workflow` gains `ntasks`, `threads`,
+  and `gpus`; the server reserves with its own pid, runs a sized launch
+  as a child, and returns the refusal with the free amounts when the
+  slice does not fit. `submit_job` gains `nodes`, `ntasks_per_node`,
+  `cpus_per_task`, `gpus_per_node`, and `mem`. `list_engines` carries
+  `budget` and `free`. The session record's `launch` and `job` events
+  carry the slice and the size. Mason's tools and the docs follow in the
+  next change.
+
 - Transcripts record every command that ran. The `shell` tool records
   its command line, `launch_workflow` the driver's command, `submit_job`
   the payload with the job id and the kept script, and a finished run

@@ -1168,7 +1168,8 @@ def test_qe_setup_from_config_and_per_call_override(
 def test_bin_constructs_the_command_sized_to_the_allocation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """[engines.qe] bin -> 'mpirun -np N <bin>/pw.x', N from $SLURM_NTASKS."""
+    """[engines.qe] bin -> literally 'mpirun -np {ntasks} <bin>/pw.x', filled per launch:
+    $SLAB_NTASKS from a sized launch, else $SLURM_NTASKS, else 1."""
     from slab.backends import _qe_config_command, _qe_locator
 
     project = tmp_path / "project"
@@ -1178,15 +1179,27 @@ def test_bin_constructs_the_command_sized_to_the_allocation(
     monkeypatch.chdir(project)
     monkeypatch.delenv("SLAB_CONFIG", raising=False)
     monkeypatch.delenv("SLAB_SITE_CONFIG", raising=False)
+    for name in ("SLAB_CPUS", "SLAB_GPUS", "SLAB_NTASKS", "SLAB_THREADS"):
+        monkeypatch.delenv(name, raising=False)
 
+    assert _qe_config_command() == f"mpirun -np {{ntasks}} {bin_dir}/pw.x"
     monkeypatch.delenv("SLURM_NTASKS", raising=False)
-    assert _qe_config_command() == f"mpirun -np 1 {bin_dir}/pw.x"
-    monkeypatch.setenv("SLURM_NTASKS", "32")
-    assert _qe_config_command() == f"mpirun -np 32 {bin_dir}/pw.x"
-    monkeypatch.setenv("SLURM_NTASKS", "not-a-number")
-    assert _qe_config_command() == f"mpirun -np 1 {bin_dir}/pw.x"
-    # Cache identity resolves through the same chain as the calculator.
     assert _qe_locator({})[0] == f"mpirun -np 1 {bin_dir}/pw.x"
+    monkeypatch.setenv("SLURM_NTASKS", "32")
+    assert _qe_locator({})[0] == f"mpirun -np 32 {bin_dir}/pw.x"
+    monkeypatch.setenv("SLURM_NTASKS", "not-a-number")
+    assert _qe_locator({})[0] == f"mpirun -np 1 {bin_dir}/pw.x"
+    # A sized launch's envelope wins over the allocation's count.
+    monkeypatch.setenv("SLAB_NTASKS", "4")
+    assert _qe_locator({})[0] == f"mpirun -np 4 {bin_dir}/pw.x"
+    # An explicit command with a placeholder is filled the same way, and its
+    # cache identity is the filled line.
+    assert _qe_locator({"command": "srun -n {ntasks} pw.x"})[0] == "srun -n 4 pw.x"
+    from slab.backends import describe_engine
+
+    assert describe_engine("qe", {"command": "srun -n {ntasks} pw.x"})["command"] == (
+        "srun -n 4 pw.x"
+    )
 
 
 def test_bin_prefers_a_bundled_mpirun(
@@ -1204,7 +1217,7 @@ def test_bin_prefers_a_bundled_mpirun(
     monkeypatch.delenv("SLAB_CONFIG", raising=False)
     monkeypatch.delenv("SLAB_SITE_CONFIG", raising=False)
     monkeypatch.delenv("SLURM_NTASKS", raising=False)
-    assert _qe_config_command() == f"{bin_dir}/mpirun -np 1 {bin_dir}/pw.x"
+    assert _qe_config_command() == f"{bin_dir}/mpirun -np {{ntasks}} {bin_dir}/pw.x"
 
 
 def test_an_explicit_command_still_wins_over_nothing(

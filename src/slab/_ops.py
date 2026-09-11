@@ -243,6 +243,8 @@ def _hpc_overview(overview: dict[str, Any]) -> dict[str, Any] | None:
                 "description": spec.description,
                 "time_limit": spec.time_limit,
                 "gres": spec.gres,
+                "node": None if spec.node is None else spec.node.model_dump(),
+                "max_nodes": spec.max_nodes,
             }
             for name, spec in sorted(hpc.partitions.items())
         },

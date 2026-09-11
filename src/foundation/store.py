@@ -28,6 +28,7 @@ from foundation.errors import (
     ArtifactExistsError,
     ArtifactNotFoundError,
     IllegalTransitionError,
+    ResourcesError,
     RunExistsError,
     RunNotFoundError,
     RunStateError,
@@ -47,6 +48,7 @@ from foundation.models import (
     ArtifactRef,
     ArtifactRole,
     CheckResult,
+    Reservation,
     Run,
     SessionSummary,
     TaskRecord,
@@ -54,7 +56,7 @@ from foundation.models import (
     utcnow,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -73,7 +75,8 @@ CREATE TABLE IF NOT EXISTS runs (
     error            TEXT,
     failure          TEXT,
     pid              INTEGER,
-    host             TEXT
+    host             TEXT,
+    resources        TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_runs_state ON runs(state);
 CREATE INDEX IF NOT EXISTS ix_runs_status ON runs(status);
@@ -132,6 +135,18 @@ CREATE TABLE IF NOT EXISTS checks (
     at        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_checks_run_id ON checks(run_id);
+CREATE TABLE IF NOT EXISTS reservations (
+    id          TEXT PRIMARY KEY,
+    host        TEXT NOT NULL,
+    cpus        TEXT NOT NULL,
+    gpus        TEXT NOT NULL,
+    ntasks      INTEGER NOT NULL,
+    threads     INTEGER NOT NULL,
+    holder_pid  INTEGER NOT NULL,
+    created_at  TEXT NOT NULL,
+    run_id      TEXT REFERENCES runs(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS ix_reservations_host ON reservations(host);
 """
 
 # Statements upgrading an existing database from (version - 1) to version.
@@ -149,7 +164,45 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         "ALTER TABLE runs ADD COLUMN pid INTEGER",
         "ALTER TABLE runs ADD COLUMN host TEXT",
     ),
+    5: (  # the slice a run held, and the reservations a session checks out
+        "ALTER TABLE runs ADD COLUMN resources TEXT",
+        """CREATE TABLE IF NOT EXISTS reservations (
+            id          TEXT PRIMARY KEY,
+            host        TEXT NOT NULL,
+            cpus        TEXT NOT NULL,
+            gpus        TEXT NOT NULL,
+            ntasks      INTEGER NOT NULL,
+            threads     INTEGER NOT NULL,
+            holder_pid  INTEGER NOT NULL,
+            created_at  TEXT NOT NULL,
+            run_id      TEXT REFERENCES runs(id) ON DELETE CASCADE
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_reservations_host ON reservations(host)",
+    ),
 }
+
+
+def process_alive(pid: int) -> bool:
+    """Whether a process with *pid* exists on this host.
+
+    Signal 0 probes without delivering: a process that belongs to another
+    user answers with a permission error, which still means it exists.
+
+    Examples:
+        >>> process_alive(os.getpid())
+        True
+        >>> process_alive(0)
+        False
+    """
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 #: Filesystem types whose files may be open from several hosts at once. WAL
@@ -411,6 +464,54 @@ class RunStore(Protocol):
         """Fetch one of the run's artifact references by name."""
         ...
 
+    def reserve(
+        self,
+        *,
+        host: str,
+        holder_pid: int,
+        budget_cpus: Sequence[int],
+        budget_gpus: Sequence[str],
+        ntasks: int | None = None,
+        threads: int | None = None,
+        gpus: int = 0,
+        default_ntasks: int = 1,
+        default_threads: int = 1,
+    ) -> Reservation:
+        """Check out a slice of *host*; raise ``ResourcesError`` when it does not fit."""
+        ...
+
+    def get_reservation(self, reservation_id: str) -> Reservation:
+        """Return one reservation. Raises ``ResourcesError``."""
+        ...
+
+    def list_reservations(self, *, host: str | None = None) -> list[Reservation]:
+        """Every reservation row, oldest first, optionally on one host."""
+        ...
+
+    def live_reservations(self, host: str) -> list[Reservation]:
+        """The reservations on *host* that still hold their slice."""
+        ...
+
+    def claim_reservation(self, reservation_id: str, run_id: str, *, host: str) -> Reservation:
+        """Hand a reservation to a run; copy its slice onto the run row."""
+        ...
+
+    def transfer_reservation(self, reservation_id: str, *, holder_pid: int) -> Reservation:
+        """Move an unclaimed reservation to another holder process."""
+        ...
+
+    def release_reservation(self, reservation_id: str) -> Reservation | None:
+        """Delete one reservation; return it, or None when it was already gone."""
+        ...
+
+    def release_dead(self, host: str) -> list[Reservation]:
+        """Delete every reservation on *host* that is no longer live."""
+        ...
+
+    def run_for_reservation(self, reservation_id: str) -> Run | None:
+        """The run that claimed a reservation, or None."""
+        ...
+
     def close(self) -> None:
         """Release underlying resources."""
         ...
@@ -506,8 +607,8 @@ class SQLiteRunStore:
                 conn.execute(
                     "INSERT INTO runs (id, name, state, status, intent, session, meta,"
                     " created_at, updated_at, state_entered_at, started_at, finished_at,"
-                    " error, failure, pid, host)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " error, failure, pid, host, resources)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         run.id,
                         run.name,
@@ -525,6 +626,7 @@ class SQLiteRunStore:
                         _fmt_json(run.failure),
                         run.pid,
                         run.host,
+                        _fmt_json(run.resources),
                     ),
                 )
             except sqlite3.IntegrityError as e:
@@ -616,7 +718,8 @@ class SQLiteRunStore:
         """Change a run's execution status; return the updated snapshot.
 
         Stamps ``started_at`` when entering ``running`` and ``finished_at`` when
-        entering ``completed`` or ``failed``. A run served from cache may go
+        entering ``completed`` or ``failed``, and a run that finishes releases
+        the reservation it claimed. A run served from cache may go
         ``pending -> completed`` directly, finishing without ever starting.
         Pass ``error`` (a one-liner) and/or ``failure`` (structured evidence,
         see :func:`foundation.errors.failure_record`) — only with status ``failed`` —
@@ -682,6 +785,8 @@ class SQLiteRunStore:
                 params.append(host)
             params.append(rid)
             conn.execute(f"UPDATE runs SET {', '.join(sets)} WHERE id = ?", params)
+            if new in (ExecutionStatus.COMPLETED, ExecutionStatus.FAILED):
+                conn.execute("DELETE FROM reservations WHERE run_id = ?", (rid,))
             return self._get_exact(conn, rid)
 
     def set_intent(self, run_id: str, intent: str | None) -> Run:
@@ -1278,6 +1383,259 @@ class SQLiteRunStore:
             conn.execute("DELETE FROM runs WHERE id = ?", (rid,))
             return run
 
+    # -- reservations -----------------------------------------------------------------
+
+    def reserve(
+        self,
+        *,
+        host: str,
+        holder_pid: int,
+        budget_cpus: Sequence[int],
+        budget_gpus: Sequence[str],
+        ntasks: int | None = None,
+        threads: int | None = None,
+        gpus: int = 0,
+        default_ntasks: int = 1,
+        default_threads: int = 1,
+    ) -> Reservation:
+        """Check out a slice of *host* for *holder_pid*; refuse when it does not fit.
+
+        One ``BEGIN IMMEDIATE`` transaction computes what is free (the
+        budget minus the live reservations on the host), picks the lowest
+        free cpu ids and gpu ids, and inserts the row, so two reservers on
+        one store serialize and the second sees the first. A sized request
+        (``ntasks`` or ``threads`` given) takes ``ntasks * threads`` cpus
+        and ``gpus`` gpus. An unsized one takes every free cpu, with the
+        rank and thread counts from the defaults, shrunk to fit. The
+        refusal carries the free ids.
+
+        Examples:
+            >>> store = SQLiteRunStore(":memory:")
+            >>> first = store.reserve(host="n1", holder_pid=os.getpid(),
+            ...     budget_cpus=range(4), budget_gpus=("0", "1"), ntasks=2, gpus=1)
+            >>> (first.cpus, first.gpus)
+            ((0, 1), ('0',))
+            >>> second = store.reserve(host="n1", holder_pid=os.getpid(),
+            ...     budget_cpus=range(4), budget_gpus=("0", "1"))
+            >>> (second.cpus, second.gpus, second.ntasks)
+            ((2, 3), (), 1)
+            >>> try:
+            ...     store.reserve(host="n1", holder_pid=os.getpid(),
+            ...         budget_cpus=range(4), budget_gpus=("0", "1"), ntasks=1)
+            ... except ResourcesError as e:
+            ...     print(e.free)
+            {'cpus': [], 'gpus': ['1']}
+            >>> store.close()
+        """
+        with self._txn() as conn:
+            live = self._live_reservations(conn, host)
+            used_cpus = {cpu for row in live for cpu in row.cpus}
+            used_gpus = {gpu for row in live for gpu in row.gpus}
+            free_cpus = [cpu for cpu in budget_cpus if cpu not in used_cpus]
+            free_gpus = [gpu for gpu in budget_gpus if gpu not in used_gpus]
+            free: dict[str, list[object]] = {"cpus": list(free_cpus), "gpus": list(free_gpus)}
+            held = f"{len(live)} live reservation(s)" if live else "no live reservation"
+            if ntasks is None and threads is None:
+                if not free_cpus:
+                    raise ResourcesError(
+                        f"no cpu is free on {host}: {len(budget_cpus)} in the budget, "
+                        f"{held} hold them all; wait for a run to finish or release "
+                        f"a stuck reservation ('slab runs reap')",
+                        free=free,
+                    )
+                cpus = list(free_cpus)
+                count = max(1, min(default_ntasks, len(cpus)))
+                width = max(1, default_threads)
+                if count * width > len(cpus):
+                    width = max(1, len(cpus) // count)
+            else:
+                count = max(1, ntasks or 1)
+                width = max(1, threads or 1)
+                need = count * width
+                if need > len(free_cpus):
+                    raise ResourcesError(
+                        f"{count} rank(s) x {width} thread(s) = {need} cpus asked, but "
+                        f"only {len(free_cpus)} of {len(budget_cpus)} cpu(s) are free on "
+                        f"{host} ({held}); free gpus: {len(free_gpus)} of "
+                        f"{len(budget_gpus)}. Size the launch within what is free",
+                        free=free,
+                    )
+                cpus = list(free_cpus[:need])
+            if gpus > len(free_gpus):
+                raise ResourcesError(
+                    f"{gpus} gpu(s) asked, but only {len(free_gpus)} of {len(budget_gpus)} "
+                    f"gpu(s) are free on {host} ({held}); free cpus: {len(free_cpus)} of "
+                    f"{len(budget_cpus)}. Size the launch within what is free",
+                    free=free,
+                )
+            reservation = Reservation(
+                host=host,
+                cpus=tuple(cpus),
+                gpus=tuple(free_gpus[: max(0, gpus)]),
+                ntasks=count,
+                threads=width,
+                holder_pid=holder_pid,
+            )
+            conn.execute(
+                "INSERT INTO reservations (id, host, cpus, gpus, ntasks, threads, holder_pid,"
+                " created_at, run_id) VALUES (?,?,?,?,?,?,?,?,NULL)",
+                (
+                    reservation.id,
+                    reservation.host,
+                    json.dumps(list(reservation.cpus)),
+                    json.dumps(list(reservation.gpus)),
+                    reservation.ntasks,
+                    reservation.threads,
+                    reservation.holder_pid,
+                    reservation.created_at.isoformat(),
+                ),
+            )
+        return reservation
+
+    def get_reservation(self, reservation_id: str) -> Reservation:
+        """One reservation by id. Raises :class:`ResourcesError` for an unknown one."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM reservations WHERE id = ?", (reservation_id,)
+            ).fetchone()
+        if row is None:
+            raise ResourcesError(
+                f"no reservation {reservation_id!r}: it was released (its run finished, "
+                f"or its holder died and a reap removed it), or it never existed"
+            )
+        return _row_to_reservation(row)
+
+    def list_reservations(self, *, host: str | None = None) -> list[Reservation]:
+        """Every reservation row, oldest first, optionally on one host."""
+        sql = "SELECT * FROM reservations"
+        params: list[object] = []
+        if host is not None:
+            sql += " WHERE host = ?"
+            params.append(host)
+        sql += " ORDER BY created_at, id"
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [_row_to_reservation(row) for row in rows]
+
+    def live_reservations(self, host: str) -> list[Reservation]:
+        """The reservations on *host* that still hold their slice.
+
+        Live means unclaimed with its holder process alive, or claimed by a
+        run that is running and whose process is alive (a running run with
+        no process recorded is taken as live, because nothing says
+        otherwise). Liveness is judged with signals, so *host* must be
+        this host for the answer to mean anything.
+        """
+        with self._lock:
+            return self._live_reservations(self._conn, host)
+
+    def claim_reservation(self, reservation_id: str, run_id: str, *, host: str) -> Reservation:
+        """Hand a reservation to a run and copy the slice onto the run row.
+
+        One transaction sets ``run_id`` on the reservation and ``resources``
+        on the run. A reservation that is released, already claimed, or
+        made for another host is refused.
+        """
+        with self._txn() as conn:
+            rid = self._resolve(run_id)
+            row = conn.execute(
+                "SELECT * FROM reservations WHERE id = ?", (reservation_id,)
+            ).fetchone()
+            reservation = _claimable(row, reservation_id, host)
+            claimed = reservation.model_copy(update={"run_id": rid})
+            conn.execute(
+                "UPDATE reservations SET run_id = ? WHERE id = ?", (rid, reservation_id)
+            )
+            conn.execute(
+                "UPDATE runs SET resources = ?, updated_at = ? WHERE id = ?",
+                (
+                    _fmt_json({**claimed.slice, "reservation": reservation_id}),
+                    utcnow().isoformat(),
+                    rid,
+                ),
+            )
+        return claimed
+
+    def transfer_reservation(self, reservation_id: str, *, holder_pid: int) -> Reservation:
+        """Move an unclaimed reservation to another holder process.
+
+        A parent reserves before the child exists, then hands the
+        reservation to the child's pid once it does, so a child that dies
+        before claiming leaves a reservation whose holder is dead, which a
+        reap releases. Refused once claimed.
+        """
+        with self._txn() as conn:
+            row = conn.execute(
+                "SELECT * FROM reservations WHERE id = ?", (reservation_id,)
+            ).fetchone()
+            if row is None:
+                raise ResourcesError(f"no reservation {reservation_id!r} to transfer")
+            if row["run_id"] is not None:
+                raise ResourcesError(
+                    f"reservation {reservation_id!r} is claimed by run {row['run_id']}; "
+                    f"a claimed reservation belongs to its run"
+                )
+            conn.execute(
+                "UPDATE reservations SET holder_pid = ? WHERE id = ?",
+                (int(holder_pid), reservation_id),
+            )
+            return _row_to_reservation(row).model_copy(update={"holder_pid": int(holder_pid)})
+
+    def release_reservation(self, reservation_id: str) -> Reservation | None:
+        """Delete one reservation; return it, or None when it was already gone."""
+        with self._txn() as conn:
+            row = conn.execute(
+                "SELECT * FROM reservations WHERE id = ?", (reservation_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            conn.execute("DELETE FROM reservations WHERE id = ?", (reservation_id,))
+            return _row_to_reservation(row)
+
+    def release_dead(self, host: str) -> list[Reservation]:
+        """Delete every reservation on *host* that is no longer live; return them."""
+        with self._txn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM reservations WHERE host = ? ORDER BY created_at, id", (host,)
+            ).fetchall()
+            live = {row.id for row in self._live_reservations(conn, host)}
+            dead = [_row_to_reservation(row) for row in rows if row["id"] not in live]
+            for reservation in dead:
+                conn.execute("DELETE FROM reservations WHERE id = ?", (reservation.id,))
+        return dead
+
+    def run_for_reservation(self, reservation_id: str) -> Run | None:
+        """The run that claimed a reservation, or None: read from the run's record.
+
+        The run row keeps the reservation id inside ``resources``, so the
+        answer outlives the reservation row, which goes when the run ends.
+        """
+        needle = f'%"reservation": "{reservation_id}"%'
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM runs WHERE resources LIKE ? ORDER BY created_at DESC LIMIT 1",
+                (needle,),
+            ).fetchone()
+        return None if row is None else _row_to_run(row)
+
+    def _live_reservations(self, conn: sqlite3.Connection, host: str) -> list[Reservation]:
+        rows = conn.execute(
+            "SELECT r.*, runs.status AS run_status, runs.pid AS run_pid"
+            " FROM reservations r LEFT JOIN runs ON runs.id = r.run_id"
+            " WHERE r.host = ? ORDER BY r.created_at, r.id",
+            (host,),
+        ).fetchall()
+        live: list[Reservation] = []
+        for row in rows:
+            if row["run_id"] is None:
+                alive = process_alive(int(row["holder_pid"]))
+            else:
+                running = row["run_status"] == ExecutionStatus.RUNNING.value
+                alive = running and (row["run_pid"] is None or process_alive(int(row["run_pid"])))
+            if alive:
+                live.append(_row_to_reservation(row))
+        return live
+
     # -- internals --------------------------------------------------------------------
 
     @contextmanager
@@ -1368,7 +1726,43 @@ def _row_to_run(row: sqlite3.Row) -> Run:
         failure=_parse_json(row["failure"]),
         pid=row["pid"],
         host=row["host"],
+        resources=_parse_json(row["resources"]),
     )
+
+
+def _row_to_reservation(row: sqlite3.Row) -> Reservation:
+    return Reservation(
+        id=row["id"],
+        host=row["host"],
+        cpus=tuple(int(cpu) for cpu in json.loads(row["cpus"])),
+        gpus=tuple(str(gpu) for gpu in json.loads(row["gpus"])),
+        ntasks=row["ntasks"],
+        threads=row["threads"],
+        holder_pid=row["holder_pid"],
+        created_at=datetime.fromisoformat(row["created_at"]),
+        run_id=row["run_id"],
+    )
+
+
+def _claimable(row: sqlite3.Row | None, reservation_id: str, host: str) -> Reservation:
+    """The reservation a run on *host* may claim, or the refusal."""
+    if row is None:
+        raise ResourcesError(
+            f"no reservation {reservation_id!r} to claim: it was released (its holder "
+            f"died and a reap removed it), or it never existed; reserve again"
+        )
+    reservation = _row_to_reservation(row)
+    if reservation.run_id is not None:
+        raise ResourcesError(
+            f"reservation {reservation_id!r} is already claimed by run "
+            f"{reservation.run_id}; one reservation serves one run"
+        )
+    if reservation.host != host:
+        raise ResourcesError(
+            f"reservation {reservation_id!r} was made for host {reservation.host!r}, "
+            f"not {host!r}; a slice of one host cannot be claimed from another"
+        )
+    return reservation
 
 
 def _row_to_task(row: sqlite3.Row) -> TaskRecord:

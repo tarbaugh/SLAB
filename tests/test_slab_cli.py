@@ -322,3 +322,25 @@ def test_engines_list_names_the_gracemaker_trainer(
         f"gracemaker trainer: tensorpotential 0.5.1 via {bin_dir / 'gracemaker'}"
         in result.output
     )
+
+
+def test_engines_list_marks_a_route_sized_per_launch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("ASE_LAMMPSRUN_COMMAND", "lmp")
+    monkeypatch.setenv("SLAB_CPUS", "0,1")
+    monkeypatch.setenv("SLAB_GPUS", "0")
+    monkeypatch.setenv("SLAB_NTASKS", "1")
+    gpu = {
+        "calculator": "slab.backends.lammps_calculator",
+        "options": {"command": "mpirun -np {ntasks} lmp -k on g {gpus} -sf kk"},
+    }
+    monkeypatch.setenv("SLAB_ENGINES", str(_write_engines(tmp_path, {"lammps-gpu": gpu})))
+    result = runner.invoke(app, ["engines", "list"])
+    assert result.exit_code == 0, result.output
+    assert (
+        "  lammps-gpu     mpirun -np {ntasks} lmp -k on g {gpus} -sf kk  "
+        "(sized per launch: ntasks, gpus; KOKKOS on, 1 GPU(s) per node, -sf kk)"
+    ) in result.output
+    assert "  lammps         lmp  (KOKKOS off: the plain styles run on the host)" in result.output

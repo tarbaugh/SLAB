@@ -105,7 +105,10 @@ def engines_list(registry_path: _RegistryOpt = None) -> None:
     elif lammps.get("routes"):
         typer.echo("lammps routes (engine= for relax, single_point, and run_lammps):")
         for name, route in lammps["routes"].items():
-            typer.echo(f"  {name:<14} {route['command']}  ({_kokkos_text(route['kokkos'])})")
+            sized = ""
+            if route.get("placeholders"):
+                sized = f"sized per launch: {', '.join(route['placeholders'])}; "
+            typer.echo(f"  {name:<14} {route['command']}  ({sized}{_kokkos_text(route['kokkos'])})")
             if route.get("setup"):
                 typer.echo(f"  {'':<14} setup: {'; '.join(route['setup'])}")
     typer.echo(f"qe protocols: {', '.join(overview['qe_protocols'])} ('slab protocols show')")
@@ -290,6 +293,30 @@ def hpc_partitions() -> None:
         detail = f"  {extras}" if extras else ""
         description = f"  {spec.description}" if spec.description else ""
         typer.echo(f"  {name:<12}{default:<10} {time_limit}{detail}{description}")
+        if spec.node is not None:
+            mem = f", mem {spec.node.mem}" if spec.node.mem else ""
+            typer.echo(
+                f"  {'':<12}{'':<10} node: {spec.node.cpus} cpus, {spec.node.gpus} gpus{mem}; "
+                f"up to {spec.max_nodes} node(s) per job"
+            )
+
+
+_NodesOpt = Annotated[
+    int | None, typer.Option("--nodes", help="Size the job: nodes (default 1).")
+]
+_NtasksPerNodeOpt = Annotated[
+    int | None,
+    typer.Option("--ntasks-per-node", help="Size the job: MPI ranks per node (required to size)."),
+]
+_CpusPerTaskOpt = Annotated[
+    int | None, typer.Option("--cpus-per-task", help="Size the job: cpus per rank (default 1).")
+]
+_GpusPerNodeOpt = Annotated[
+    int | None, typer.Option("--gpus-per-node", help="Size the job: gpus per node (default 0).")
+]
+_MemOpt = Annotated[
+    str | None, typer.Option("--mem", help="Size the job: memory per node, e.g. 240G.")
+]
 
 
 @hpc_app.command("render")
@@ -304,13 +331,28 @@ def hpc_render(
     time_limit: Annotated[
         str | None, typer.Option("--time", help="Override the partition's time limit.")
     ] = None,
+    nodes: _NodesOpt = None,
+    ntasks_per_node: _NtasksPerNodeOpt = None,
+    cpus_per_task: _CpusPerTaskOpt = None,
+    gpus_per_node: _GpusPerNodeOpt = None,
+    mem: _MemOpt = None,
 ) -> None:
     """Render the sbatch script that submit would use — read before trusting."""
     from slab.hpc import render_sbatch
+    from slab.resources import job_size
 
     try:
-        script = render_sbatch(command, job_name=name, partition=partition, time_limit=time_limit)
-    except SlabError as e:
+        size = job_size(
+            nodes=nodes,
+            ntasks_per_node=ntasks_per_node,
+            cpus_per_task=cpus_per_task,
+            gpus_per_node=gpus_per_node,
+            mem=mem,
+        )
+        script = render_sbatch(
+            command, job_name=name, partition=partition, time_limit=time_limit, size=size
+        )
+    except (SlabError, ValueError) as e:
         _fail(str(e))
     typer.echo(script)
 
@@ -330,19 +372,37 @@ def hpc_submit(
     directory: Annotated[
         Path | None, typer.Option("--dir", help="Where the job runs (default: cwd).")
     ] = None,
+    nodes: _NodesOpt = None,
+    ntasks_per_node: _NtasksPerNodeOpt = None,
+    cpus_per_task: _CpusPerTaskOpt = None,
+    gpus_per_node: _GpusPerNodeOpt = None,
+    mem: _MemOpt = None,
 ) -> None:
     """Render and submit a job; the exact script is kept next to its outputs."""
     from slab.config import load_config
     from slab.hpc import render_sbatch, submit
+    from slab.resources import job_size
 
     try:
+        size = job_size(
+            nodes=nodes,
+            ntasks_per_node=ntasks_per_node,
+            cpus_per_task=cpus_per_task,
+            gpus_per_node=gpus_per_node,
+            mem=mem,
+        )
         hpc = load_config().hpc
         resolved, _spec = hpc.resolve_partition(partition)
         script = render_sbatch(
-            command, job_name=name, partition=resolved, config=hpc, time_limit=time_limit
+            command,
+            job_name=name,
+            partition=resolved,
+            config=hpc,
+            time_limit=time_limit,
+            size=size,
         )
         job = submit(script, job_name=name, partition=resolved, directory=directory)
-    except SlabError as e:
+    except (SlabError, ValueError) as e:
         _fail(str(e))
     typer.echo(f"submitted job {job.job_id} ({job.job_name}) to {job.partition}")
     typer.echo(f"script: {job.script_path}")

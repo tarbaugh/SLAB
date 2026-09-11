@@ -128,10 +128,12 @@ class QeEngineConfig(BaseModel):
     """Defaults for the built-in ``qe`` engine (``[engines.qe]``).
 
     Two ways to name the code. ``command`` is the full invocation, written
-    by hand. ``bin`` names the install's ``bin`` directory instead, and the
-    command is constructed: ``mpirun -np N <bin>/pw.x``, with N taken from
-    ``$SLURM_NTASKS`` (the allocation a batch job runs in) and 1 outside
-    one, and a bundled ``<bin>/mpirun`` preferred over the PATH's. The two
+    by hand; it may hold the ``{ntasks}``, ``{threads}``, and ``{gpus}``
+    placeholders that :func:`slab.resources.fill` replaces per launch.
+    ``bin`` names the install's ``bin`` directory instead, and the command
+    is constructed: literally ``mpirun -np {ntasks} <bin>/pw.x``, filled
+    per launch (a sized launch's rank count, else ``$SLURM_NTASKS``, else
+    1), with a bundled ``<bin>/mpirun`` preferred over the PATH's. The two
     are exclusive — a command that names a different binary than ``bin``
     would silently win, so declaring both is refused.
 
@@ -301,6 +303,54 @@ class PathsConfig(BaseModel):
     scratch: ExpandedPath | None = None
 
 
+_MEMORY = re.compile(r"^\s*(\d+)\s*([kKmMgGtT]?)[bB]?\s*$")
+_MEMORY_MB = {"": 1, "k": 1 / 1024, "m": 1, "g": 1024, "t": 1024 * 1024}
+
+
+def memory_mb(text: str) -> int:
+    """A SLURM memory string as megabytes: a bare number is MB, K/M/G/T scale it.
+
+    Examples:
+        >>> memory_mb("240G"), memory_mb("4000"), memory_mb("1T"), memory_mb("512M")
+        (245760, 4000, 1048576, 512)
+        >>> memory_mb("lots")
+        Traceback (most recent call last):
+        ...
+        ValueError: memory 'lots' is not a SLURM memory form (e.g. 4000, 240G, 1T)
+    """
+    match = _MEMORY.match(text)
+    if match is None:
+        raise ValueError(f"memory {text!r} is not a SLURM memory form (e.g. 4000, 240G, 1T)")
+    return int(int(match.group(1)) * _MEMORY_MB[match.group(2).lower()])
+
+
+class NodeSpec(BaseModel):
+    """One node of a partition: the cap a sized job is checked against.
+
+    ``cpus`` and ``gpus`` are per node, ``mem`` is the node's memory in
+    SLURM's form. A partition with a ``node`` table can be sized per job
+    (``slab hpc submit --ntasks-per-node 8 --gpus-per-node 2``); one
+    without cannot, and a sized request is refused naming this table.
+
+    Examples:
+        >>> NodeSpec.model_validate({"cpus": 64, "gpus": 4, "mem": "480G"}).gpus
+        4
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    cpus: int = Field(ge=1)
+    gpus: int = Field(default=0, ge=0)
+    mem: str | None = None
+
+    @field_validator("mem")
+    @classmethod
+    def _mem_parses(cls, value: str | None) -> str | None:
+        if value is not None:
+            memory_mb(value)
+        return value
+
+
 class Partition(BaseModel):
     """One SLURM partition as the cluster config declares it.
 
@@ -309,16 +359,22 @@ class Partition(BaseModel):
     sees. ``setup`` lines (module loads, environment) run before the job
     body; ``launcher`` (e.g. ``srun``) prefixes commands that should run
     under the parallel launcher; ``sbatch_extra`` is the explicit escape
-    hatch for directives this schema does not model.
+    hatch for directives this schema does not model. ``node`` declares
+    one node's size and ``max_nodes`` how many a job may take, so a
+    submission can be sized per job within declared caps.
 
     Examples:
         >>> Partition.model_validate({"time_limit": "24:00:00", "gres": "gpu:a100:4"}).gres
         'gpu:a100:4'
+        >>> Partition.model_validate({"node": {"cpus": 64, "gpus": 4}}).node.gpus
+        4
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     description: str = ""
+    node: NodeSpec | None = None
+    max_nodes: int = Field(default=1, ge=1)
     account: str | None = None
     qos: str | None = None
     time_limit: str | None = None
@@ -727,9 +783,9 @@ schema_version = 1
 #                                      # is refused; ASE execs argv directly)
 # bin = "/shared/sw/qe-7.4/bin"        # a custom install by its bin directory,
 #                                      # instead of command: the command becomes
-#                                      # 'mpirun -np N <bin>/pw.x' with N from
-#                                      # $SLURM_NTASKS (1 outside a job), and a
-#                                      # bundled <bin>/mpirun wins over PATH's.
+#                                      # 'mpirun -np {ntasks} <bin>/pw.x', filled
+#                                      # per launch (else $SLURM_NTASKS, else 1);
+#                                      # a bundled <bin>/mpirun wins over PATH's.
 #                                      # 'slab mason sandbox render' binds the
 #                                      # whole install read-only automatically
 # setup = ["module purge", "module load qe/7.4", "export OMP_NUM_THREADS=4"]
@@ -822,6 +878,13 @@ schema_version = 1
 # setup = ["module load cuda/12.4"]    # replaces [hpc] setup for this partition? no:
 #                                      # partition setup runs AFTER the [hpc] setup lines
 # sbatch_extra = ["--exclusive"]       # raw directives the schema does not model
+# max_nodes = 4                        # how many nodes one sized job may take (default 1)
+
+# [hpc.partitions.gpu.node]
+# cpus = 64                            # one node's size: the cap a sized job is
+# gpus = 4                             # checked against ('submit_job' with ntasks_per_node,
+# mem = "480G"                         # cpus_per_task, gpus_per_node, mem). Without this
+#                                      # table a job on the partition cannot be sized.
 
 [agent]
 # provider = "openai"                       # "openai" = any OpenAI-compatible server; "anthropic"

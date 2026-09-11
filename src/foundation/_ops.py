@@ -15,25 +15,31 @@ import json
 import os
 import re
 import runpy
+import shlex
+import subprocess
 import sys
 import traceback
 from collections.abc import Iterable, Sequence
-from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from contextlib import ExitStack, redirect_stderr, redirect_stdout, suppress
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from foundation.errors import (
     FoundationError,
     IllegalTransitionError,
     NestedRunError,
+    ResourcesError,
     ScriptExitError,
     SessionNotFoundError,
     StorageError,
 )
 from foundation.lifecycle import ExecutionStatus, LifecycleState
-from foundation.models import ArtifactRole, Run
+from foundation.models import ArtifactRole, Reservation, Run
 from foundation.retention import DEFAULT_POLICY, RetentionPolicy, _reachable_hashes
 from foundation.runtime import Workspace, describe_liveness
+
+if TYPE_CHECKING:
+    from slab.resources import JobSize
 
 DEFAULT_ROOT = ".slab"
 _DURATION = re.compile(r"^(\d+(?:\.\d+)?)\s*([smhd])$")
@@ -130,7 +136,69 @@ def run_summary(run: Run) -> dict[str, Any]:
         "error": run.error,
         "created_at": run.created_at.isoformat(),
         "state_entered_at": run.state_entered_at.isoformat(),
+        "resources": run.resources,
     }
+
+
+def describe_resources(resources: dict[str, Any] | None) -> str:
+    """One phrase for the slice a run held, for a listing or a transcript.
+
+    Examples:
+        >>> describe_resources({"cpus": [0, 1, 2, 3], "gpus": ["0"], "ntasks": 2, "threads": 2})
+        '4 cpu(s) 0-3, 1 gpu(s) 0; 2 rank(s) x 2 thread(s)'
+        >>> describe_resources({"cpus": [1, 3], "gpus": [], "ntasks": 1, "threads": 1})
+        '2 cpu(s) 1,3, no gpu; 1 rank(s) x 1 thread(s)'
+        >>> describe_resources(None)
+        'not reserved'
+    """
+    if not resources:
+        return "not reserved"
+    cpus = [int(cpu) for cpu in resources.get("cpus") or []]
+    gpus = [str(gpu) for gpu in resources.get("gpus") or []]
+    gpu_text = f"{len(gpus)} gpu(s) {','.join(gpus)}" if gpus else "no gpu"
+    return (
+        f"{len(cpus)} cpu(s) {_id_ranges(cpus)}, {gpu_text}; "
+        f"{resources.get('ntasks', 1)} rank(s) x {resources.get('threads', 1)} thread(s)"
+    )
+
+
+def _id_ranges(ids: list[int]) -> str:
+    """Sorted ids as ranges: ``0-3,6``.
+
+    Examples:
+        >>> _id_ranges([6, 0, 1, 2, 3])
+        '0-3,6'
+        >>> _id_ranges([])
+        ''
+    """
+    pieces: list[str] = []
+    for value in sorted(set(ids)):
+        if pieces and value == _range_end(pieces[-1]) + 1:
+            start = pieces[-1].split("-")[0]
+            pieces[-1] = f"{start}-{value}"
+        else:
+            pieces.append(str(value))
+    return ",".join(pieces)
+
+
+def _range_end(piece: str) -> int:
+    return int(piece.split("-")[-1])
+
+
+def resources_column(resources: dict[str, Any] | None) -> str:
+    """The short form for a listing column: ``8c``, ``8c/2g``, or blank.
+
+    Examples:
+        >>> resources_column({"cpus": [0, 1], "gpus": ["0", "1"]})
+        '2c/2g'
+        >>> resources_column({"cpus": [0], "gpus": []}), resources_column(None)
+        ('1c', '')
+    """
+    if not resources:
+        return ""
+    text = f"{len(resources.get('cpus') or [])}c"
+    gpus = resources.get("gpus") or []
+    return f"{text}/{len(gpus)}g" if gpus else text
 
 
 def run_details(ws: Workspace, run_id: str) -> dict[str, Any]:
@@ -614,6 +682,7 @@ def launch_script(
     session: str | None = None,
     argv: tuple[str, ...] = (),
     capture_output: bool = False,
+    reservation: Reservation | str | None = None,
 ) -> dict[str, Any]:
     """Execute a workflow script inside a fresh run context; return the outcome.
 
@@ -625,7 +694,11 @@ def launch_script(
 
     *session* stamps the run with the client session that launched it; when
     omitted, ``$SLAB_SESSION`` applies (see
-    :func:`foundation.runtime.resolve_session_id`).
+    :func:`foundation.runtime.resolve_session_id`). *reservation* is the
+    slice a session process checked out for this run; the run claims it
+    (see :meth:`foundation.runtime.Workspace.start_run`), and a claim that
+    is refused raises :class:`~foundation.errors.ResourcesError` before
+    any run exists.
 
     The result dict carries ``run_id``, final ``state``/``status``, check
     counts, and — with ``capture_output=True`` — everything the script printed
@@ -662,7 +735,10 @@ def launch_script(
                     stack.enter_context(redirect_stdout(buffer))
                     stack.enter_context(redirect_stderr(buffer))
                 with ws.start_run(
-                    name=name or script_path.stem, intent=intent, session=session
+                    name=name or script_path.stem,
+                    intent=intent,
+                    session=session,
+                    reservation=reservation,
                 ) as active:
                     run_id = active.id
                     # The script is the run's recompute root and its own
@@ -677,6 +753,8 @@ def launch_script(
                 f"execute it with plain 'python {script_path.name}' instead of "
                 f"'slab run'"
             ) from None
+        except ResourcesError:
+            raise
         except Exception:
             error = traceback.format_exc(limit=8)
         finally:
@@ -703,6 +781,124 @@ def launch_script(
         result["traceback"] = error
     if capture_output:
         result["output"] = buffer.getvalue()
+    return result
+
+
+def launch_child(
+    root: Path,
+    script: str | os.PathLike[str],
+    *,
+    reservation: Reservation,
+    name: str | None = None,
+    intent: str | None = None,
+    session: str | None = None,
+    argv: tuple[str, ...] = (),
+    cwd: str | os.PathLike[str] | None = None,
+    env: dict[str, str] | None = None,
+    wait: bool = True,
+    log_path: str | os.PathLike[str] | None = None,
+) -> dict[str, Any]:
+    """Run a workflow script as a child ``foundation run --reservation`` process.
+
+    A sized launch never runs in the session's own process: the child
+    takes the affinity mask and the GPU variables of *reservation*, and
+    every rank it starts inherits them. The reservation is handed to the
+    child's pid as soon as it exists, so a child that dies before claiming
+    leaves a reservation whose holder is dead, which the next reap
+    releases. The child's output goes to *log_path* (default
+    ``<root>/launches/<reservation id>.log``).
+
+    With ``wait=True`` the call blocks and returns the same result dict as
+    :func:`launch_script` plus ``exit_code``, ``log``, and ``output`` (the
+    log text). With ``wait=False`` it returns ``pid``, ``log``,
+    ``reservation``, and ``command`` at once; the run appears in the store
+    once the child claims the reservation. *env* is the base environment
+    for the child (this process's when omitted); the envelope variables
+    are added on top.
+    """
+    from slab.resources import env_for
+
+    script_path = Path(script).resolve()
+    if not script_path.exists():
+        with Workspace(root) as ws:
+            ws.runs.release_reservation(reservation.id)
+        raise FileNotFoundError(f"no such workflow script: {script_path}")
+    log = Path(log_path) if log_path is not None else Path(root) / "launches" / (
+        f"{reservation.id}.log"
+    )
+    log.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        sys.executable,
+        "-m",
+        "foundation.cli",
+        "run",
+        str(script_path),
+        *argv,
+        "--reservation",
+        reservation.id,
+        "-w",
+        str(root),
+    ]
+    if name:
+        command += ["--name", name]
+    if intent:
+        command += ["--intent", intent]
+    if session:
+        command += ["--session", session]
+    child_env = {
+        **(env if env is not None else os.environ),
+        **env_for(reservation.envelope()),
+        "PYTHONUNBUFFERED": "1",
+    }
+    try:
+        with open(log, "ab") as handle:
+            process = subprocess.Popen(
+                command,
+                cwd=None if cwd is None else os.fspath(cwd),
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+                env=child_env,
+            )
+    except OSError as e:
+        with Workspace(root) as ws:
+            ws.runs.release_reservation(reservation.id)
+        raise StorageError(f"could not start the child run: {e}") from e
+    with Workspace(root) as ws, suppress(ResourcesError):
+        # A refusal means the child claimed it already; nothing to hand over.
+        ws.runs.transfer_reservation(reservation.id, holder_pid=process.pid)
+    launched: dict[str, Any] = {
+        "pid": process.pid,
+        "log": str(log),
+        "reservation": reservation.id,
+        "command": shlex.join(command),
+    }
+    if not wait:
+        return launched
+    exit_code = process.wait()
+    output = log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
+    with Workspace(root) as ws:
+        run = ws.runs.run_for_reservation(reservation.id)
+        if run is None:
+            ws.runs.release_reservation(reservation.id)
+            tail = "\n".join(output.strip().splitlines()[-20:])
+            raise StorageError(
+                f"the child run (pid {process.pid}) exited {exit_code} before starting a "
+                f"run; its log {log} ends with:\n{tail}"
+            )
+        checks = ws.runs.list_check_results(run.id)
+        result: dict[str, Any] = run_summary(run) | {
+            "run_id": run.id,
+            "checks_passed": sum(1 for c in checks if c.passed),
+            "checks_total": len(checks),
+            "tasks_recorded": len(ws.runs.list_tasks(run.id)),
+        }
+    if run.failure is not None:
+        result["failure"] = run.failure
+    result.update(launched)
+    result["exit_code"] = exit_code
+    result["output"] = output
     return result
 
 
@@ -944,6 +1140,7 @@ def submit_job(
     time_limit: str | None = None,
     session: str | None = None,
     project: Path | None = None,
+    size: JobSize | None = None,
 ) -> dict[str, Any]:
     """Submit *command* as a SLURM batch job under the workspace's ``jobs/``.
 
@@ -953,9 +1150,10 @@ def submit_job(
     because a cluster may submit with ``--export=NONE``. The prologue
     changes into *project* so the payload runs where the client works,
     while the job files stay under the workspace for ``slab purge``.
+    *size* (a :class:`slab.resources.JobSize`) sizes the job within the
+    partition's declared node; a size that does not fit is refused before
+    anything is written.
     """
-    import shlex
-
     from slab.hpc import render_sbatch, submit
 
     chosen, _spec = hpc.resolve_partition(partition)
@@ -971,6 +1169,7 @@ def submit_job(
         config=hpc,
         time_limit=time_limit,
         prologue=tuple(prologue),
+        size=size,
     )
     job = submit(script, job_name=name, partition=chosen, directory=Path(root) / "jobs")
     return {
@@ -978,6 +1177,7 @@ def submit_job(
         "job_name": job.job_name,
         "partition": job.partition,
         "script_path": str(job.script_path),
+        "size": None if size is None else size.model_dump(),
     }
 
 

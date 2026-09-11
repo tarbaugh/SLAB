@@ -44,6 +44,31 @@ HPC = HpcConfig.model_validate(
     }
 )
 
+SIZED = HpcConfig.model_validate(
+    {
+        "account": "abc-123",
+        "default_partition": "cpu",
+        "partitions": {
+            "cpu": {
+                "time_limit": "04:00:00",
+                "nodes": 1,
+                "ntasks": 64,
+                "mem": "240G",
+                "launcher": "srun",
+                "node": {"cpus": 64, "mem": "240G"},
+                "max_nodes": 4,
+            },
+            "gpu": {
+                "gres": "gpu:a100:4",
+                "mem": "480G",
+                "node": {"cpus": 64, "gpus": 4, "mem": "480G"},
+            },
+            "untyped": {"gres": "gpu:4", "node": {"cpus": 8, "gpus": 4}},
+            "bare": {"gres": "gpu:4"},
+        },
+    }
+)
+
 
 def _fake(bin_dir: Path, name: str, body: str) -> Path:
     bin_dir.mkdir(parents=True, exist_ok=True)
@@ -501,3 +526,188 @@ def test_a_lookalike_command_is_not_a_driver() -> None:
     script = render_sbatch("foundationctl sync", job_name="lookalike", config=hpc)
     assert "srun foundationctl sync" in script
     assert "launcher omitted" not in script
+
+
+# -- sized rendering ---------------------------------------------------------
+
+
+def test_render_without_a_size_is_unchanged() -> None:
+    """The plain form is byte for byte what it was: the size is opt-in."""
+    assert render_sbatch("slab run a.py", job_name="a", config=SIZED) == (
+        "#!/bin/bash -l\n"
+        "#SBATCH --job-name=a\n"
+        "#SBATCH --partition=cpu\n"
+        "#SBATCH --output=a-%j.out\n"
+        "#SBATCH --account=abc-123\n"
+        "#SBATCH --time=04:00:00\n"
+        "#SBATCH --nodes=1\n"
+        "#SBATCH --ntasks=64\n"
+        "#SBATCH --mem=240G\n"
+        "\n"
+        "set -euo pipefail\n"
+        "\n"
+        "# partition launcher omitted: 'slab' is a single-process driver;\n"
+        '# engines bring their own MPI (e.g. [engines.qe] command = "srun pw.x")\n'
+        "slab run a.py"
+    )
+    assert render_sbatch("slab run a.py", job_name="a", config=SIZED, size=None) == (
+        render_sbatch("slab run a.py", job_name="a", config=SIZED)
+    )
+
+
+def test_render_with_a_size_byte_for_byte() -> None:
+    """The size's directives replace the partition's own, and the partition's
+    ntasks is dropped because the size states the whole shape."""
+    from slab.resources import JobSize
+
+    size = JobSize(nodes=2, ntasks_per_node=8, cpus_per_task=4, mem="120G")
+    assert render_sbatch("slab run a.py", job_name="a", config=SIZED, size=size) == (
+        "#!/bin/bash -l\n"
+        "#SBATCH --job-name=a\n"
+        "#SBATCH --partition=cpu\n"
+        "#SBATCH --output=a-%j.out\n"
+        "#SBATCH --account=abc-123\n"
+        "#SBATCH --time=04:00:00\n"
+        "#SBATCH --nodes=2\n"
+        "#SBATCH --ntasks-per-node=8\n"
+        "#SBATCH --cpus-per-task=4\n"
+        "#SBATCH --mem=120G\n"
+        "\n"
+        "set -euo pipefail\n"
+        "\n"
+        "# partition launcher omitted: 'slab' is a single-process driver;\n"
+        '# engines bring their own MPI (e.g. [engines.qe] command = "srun pw.x")\n'
+        "slab run a.py"
+    )
+
+
+def test_render_sized_gres_keeps_the_partition_type() -> None:
+    from slab.resources import JobSize
+
+    size = JobSize(ntasks_per_node=2, gpus_per_node=2)
+    typed = render_sbatch("cmd", job_name="j", partition="gpu", config=SIZED, size=size)
+    assert "#SBATCH --gres=gpu:a100:2\n" in typed
+    assert "#SBATCH --mem=480G\n" in typed  # the size said nothing about mem
+    untyped = render_sbatch("cmd", job_name="j", partition="untyped", config=SIZED, size=size)
+    assert "#SBATCH --gres=gpu:2\n" in untyped
+    none = render_sbatch(
+        "cmd", job_name="j", partition="gpu", config=SIZED, size=JobSize(ntasks_per_node=2)
+    )
+    assert "--gres" not in none
+
+
+def test_render_sized_refuses_before_rendering() -> None:
+    from slab.errors import JobSizeError
+    from slab.resources import JobSize
+
+    with pytest.raises(JobSizeError, match=r"partition 'bare' declares no node"):
+        render_sbatch("cmd", job_name="j", partition="bare", config=SIZED,
+                      size=JobSize(ntasks_per_node=1))
+    with pytest.raises(JobSizeError, match="gpus_per_node=8 exceeds the 4 gpus"):
+        render_sbatch("cmd", job_name="j", partition="gpu", config=SIZED,
+                      size=JobSize(ntasks_per_node=1, gpus_per_node=8))
+
+
+def _sized_config_file(tmp_path: Path) -> None:
+    (tmp_path / "slab.toml").write_text(
+        "[hpc]\n"
+        'default_partition = "gpu"\n'
+        "[hpc.partitions.gpu]\n"
+        'gres = "gpu:a100:4"\n'
+        "max_nodes = 2\n"
+        "[hpc.partitions.gpu.node]\n"
+        "cpus = 64\n"
+        "gpus = 4\n"
+        'mem = "480G"\n'
+        "[hpc.partitions.cpu]\n"
+        'time_limit = "01:00:00"\n'
+    )
+
+
+def test_cli_hpc_render_size_flags(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _sized_config_file(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(
+        app,
+        ["hpc", "render", "slab run md.py", "--ntasks-per-node", "8", "--gpus-per-node", "2",
+         "--cpus-per-task", "4", "--nodes", "2", "--mem", "200G"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "#SBATCH --nodes=2\n#SBATCH --ntasks-per-node=8\n#SBATCH --cpus-per-task=4\n" in (
+        result.output
+    )
+    assert "#SBATCH --mem=200G\n#SBATCH --gres=gpu:a100:2\n" in result.output
+    refused = runner.invoke(app, ["hpc", "render", "cmd", "--gpus-per-node", "8"])
+    assert refused.exit_code == 1 and "pass ntasks_per_node" in refused.output
+    too_big = runner.invoke(app, ["hpc", "render", "cmd", "-n", "j", "--ntasks-per-node", "65"])
+    assert too_big.exit_code == 1 and "exceeds the 64 cpus" in too_big.output
+    unsized = runner.invoke(app, ["hpc", "render", "cmd", "-p", "cpu", "--ntasks-per-node", "1"])
+    assert unsized.exit_code == 1 and "partition 'cpu' declares no node" in unsized.output
+
+
+def test_cli_hpc_submit_size_flags(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scheduler_bin: Path
+) -> None:
+    _sized_config_file(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    _fake(scheduler_bin, "sbatch", 'echo "4242"')
+    result = runner.invoke(
+        app, ["hpc", "submit", "slab run md.py", "--name", "md", "--ntasks-per-node", "4",
+              "--gpus-per-node", "4"]
+    )
+    assert result.exit_code == 0, result.output
+    kept = (tmp_path / "md-4242.sbatch").read_text()
+    assert "#SBATCH --ntasks-per-node=4\n" in kept and "#SBATCH --gres=gpu:a100:4\n" in kept
+    refused = runner.invoke(
+        app, ["hpc", "submit", "cmd", "--ntasks-per-node", "1", "--gpus-per-node", "5"]
+    )
+    assert refused.exit_code == 1 and "exceeds the 4 gpus" in refused.output
+
+
+def test_cli_hpc_partitions_prints_the_node_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _sized_config_file(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["hpc", "partitions"])
+    assert result.exit_code == 0
+    assert "node: 64 cpus, 4 gpus, mem 480G; up to 2 node(s) per job" in result.output
+    assert result.output.count("node:") == 1  # cpu declares none
+
+
+def test_engines_overview_reports_node_caps(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from slab._ops import engines_overview
+
+    _sized_config_file(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("SLAB_ENGINES", raising=False)
+    partitions = engines_overview()["hpc"]["partitions"]
+    assert partitions["gpu"]["node"] == {"cpus": 64, "gpus": 4, "mem": "480G"}
+    assert partitions["gpu"]["max_nodes"] == 2
+    assert partitions["cpu"]["node"] is None and partitions["cpu"]["max_nodes"] == 1
+
+
+def test_sized_gres_forms() -> None:
+    from slab.hpc import sized_gres
+
+    assert sized_gres("gpu:a100:4", 3) == "gpu:a100:3"
+    assert sized_gres("gpu:a100", 1) == "gpu:a100:1"
+    assert sized_gres("gpu", 2) == "gpu:2"
+    assert sized_gres("gpu:2", 1) == "gpu:1"
+    assert sized_gres(None, 2) == "gpu:2"
+    assert sized_gres("gpu:a100:4", 0) is None
+
+
+def test_allocated_tasks_and_cpu_budget_are_thin(monkeypatch: pytest.MonkeyPatch) -> None:
+    from slab.hpc import allocated_tasks, cpu_budget
+    from slab.resources import budget
+
+    for name in ("SLAB_CPUS", "SLAB_GPUS", "SLAB_NTASKS", "SLAB_THREADS"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SLURM_NTASKS", "12")
+    assert allocated_tasks() == 12
+    monkeypatch.setenv("SLAB_NTASKS", "3")
+    assert allocated_tasks() == 3
+    assert cpu_budget() == len(budget().cpus)

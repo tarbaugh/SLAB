@@ -766,3 +766,98 @@ def test_list_and_show_word_the_initial_state_while_running(root: Path) -> None:
     shown = runner.invoke(app, ["show", run.id, "-w", str(root)])
     assert "state:   quarantined    status: completed" in shown.output
     assert "process:" not in shown.output
+
+
+# -- reservations ----------------------------------------------------------------------
+
+
+def _budget(cpus: int = 4):
+    from slab.resources import Budget
+
+    return Budget(cpus=tuple(range(cpus)), gpus=())
+
+
+def test_run_claims_a_reservation(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """'slab run --reservation' takes the slice before the script runs: the
+    script sees the envelope, the run carries the slice, and the listing and
+    the show page print it."""
+    import os
+
+    # The CLI runs in this process here: keep its environment and affinity
+    # out of the rest of the suite.
+    monkeypatch.setattr(os, "environ", os.environ.copy())
+    pinned: list[object] = []
+    monkeypatch.setattr("slab.resources.apply", lambda envelope: pinned.append(envelope))
+    for name in ("SLAB_CPUS", "SLAB_GPUS", "SLAB_NTASKS", "SLAB_THREADS"):
+        monkeypatch.delenv(name, raising=False)
+    script = tmp_path / "wf.py"
+    script.write_text(
+        "import os\nfrom foundation import check\n"
+        "print('cpus', os.environ['SLAB_CPUS'], 'threads', os.environ['OMP_NUM_THREADS'])\n"
+        "@check\ndef ok():\n    return True\n"
+    )
+    with Workspace(root) as ws:
+        held = ws.reserve(ntasks=1, threads=2, budget=_budget())
+    result = runner.invoke(app, ["run", str(script), "-w", str(root), "--reservation", held.id])
+    assert result.exit_code == 0, result.output
+    assert "cpus 0,1 threads 2" in result.output
+    assert [getattr(e, "cpus", None) for e in pinned] == [(0, 1)]
+    with Workspace(root) as ws:
+        (run,) = ws.runs.list_runs()
+        assert run.resources == {
+            "cpus": [0, 1], "gpus": [], "ntasks": 1, "threads": 2, "reservation": held.id,
+        }
+        assert ws.runs.list_reservations() == []
+    listed = runner.invoke(app, ["list", "-w", str(root)])
+    assert "RES" in listed.output and " 2c " in listed.output
+    shown = runner.invoke(app, ["show", run.id, "-w", str(root)])
+    assert "  resources: 2 cpu(s) 0-1, no gpu; 1 rank(s) x 2 thread(s)" in shown.output
+    as_json = runner.invoke(app, ["show", run.id, "-w", str(root), "--json"])
+    assert json.loads(as_json.output)["run"]["resources"]["reservation"] == held.id
+
+
+def test_run_refuses_a_released_reservation(root: Path, tmp_path: Path) -> None:
+    script = tmp_path / "wf.py"
+    script.write_text("pass\n")
+    with Workspace(root) as ws:
+        held = ws.reserve(ntasks=1, budget=_budget())
+        ws.runs.release_reservation(held.id)
+    result = runner.invoke(app, ["run", str(script), "-w", str(root), "--reservation", held.id])
+    assert result.exit_code == 1
+    assert f"error: no reservation '{held.id}'" in result.output
+    with Workspace(root) as ws:
+        assert ws.runs.list_runs() == []
+
+
+def test_runs_reservations_and_reap(root: Path) -> None:
+    """The listing shows every reservation with its holder and age; reap releases
+    the ones whose holder died and says so."""
+    import subprocess
+    import sys
+
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    with Workspace(root) as ws:
+        live = ws.reserve(ntasks=1, budget=_budget())
+        dead = ws.reserve(ntasks=1, budget=_budget(), holder_pid=child.pid)
+    listed = runner.invoke(app, ["reservations", "-w", str(root)], obj=None)
+    assert listed.exit_code == 2  # not a top-level verb: it lives under 'runs'
+    from foundation.cli import runs_app
+
+    listed = runner.invoke(runs_app, ["reservations", "-w", str(root)])
+    assert listed.exit_code == 0, listed.output
+    assert f"{live.id}  1 cpu(s) 0, no gpu; 1 rank(s) x 1 thread(s)  unclaimed, holder" in (
+        listed.output
+    )
+    assert "(alive)" in listed.output and "(gone)" in listed.output
+    assert "free on " in listed.output
+    reaped = runner.invoke(runs_app, ["reap", "-w", str(root)])
+    assert reaped.exit_code == 0, reaped.output
+    assert f"released {dead.id}" in reaped.output
+    assert "0 run(s) marked failed, 1 reservation(s) released" in reaped.output
+    with Workspace(root) as ws:
+        assert [r.id for r in ws.runs.list_reservations()] == [live.id]
+    empty = runner.invoke(runs_app, ["reservations", "-w", str(root / "other")])
+    assert "no reservations" in empty.output
