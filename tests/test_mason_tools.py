@@ -1575,3 +1575,45 @@ def test_list_engines_still_answers_when_the_store_cannot_be_opened(tmp_path: Pa
     assert "builtin" in answer and answer["budget"]["cpus"] >= 1
     assert answer["free"] is None
     assert answer["resources_note"].startswith("run store unavailable: the run store at")
+
+
+# -- edit events and the cut-child hand-back ---------------------------------
+
+
+def _edit_events(session: MasonSession) -> list[dict[str, object]]:
+    if not session.transcript_path.exists():
+        return []
+    events = [json.loads(line) for line in session.transcript_path.read_text().splitlines()]
+    return [event for event in events if event.get("type") == "edit"]
+
+
+def test_write_and_edit_record_the_file_under_the_card(box: Toolbox, tmp_path: Path) -> None:
+    box.dispatch(_call("write_file", path="notes.py", content="x = 1\n"))
+    box.dispatch(_call("read_file", path="notes.py"))
+    box.dispatch(_call("edit_file", path="notes.py", old_string="x = 1", new_string="x = 2"))
+    box.dispatch(_call("edit_file", path="missing.py", old_string="a", new_string="b"))
+    events = _edit_events(box.session)
+    assert [e["tool"] for e in events] == ["write_file", "edit_file"]  # the miss recorded nothing
+    assert all(e["path"] == str(tmp_path / "notes.py") and e["by"] == "pi" for e in events)
+
+
+def test_partial_outcome_names_the_files_and_runs_a_cut_child_left(tmp_path: Path) -> None:
+    """A specialist cut mid-script hands its parent what it did, so the
+    re-brief says 'continue from' instead of starting over."""
+    from mason.tools import partial_outcome
+
+    parent = _session(tmp_path)
+    child = parent.spawn("md-expert", MasonConfig.model_validate({}).agent)
+    assert "wrote no file and launched no run" in partial_outcome(child)
+    box = build_toolbox(child)
+    box.dispatch(_call("write_file", path="md.py", content="print('a')\n"))
+    box.dispatch(_call("read_file", path="md.py"))
+    box.dispatch(_call("edit_file", path="md.py", old_string="'a'", new_string="'b'"))
+    (tmp_path / "wf.py").write_text("x = 1\n")
+    answer = box.dispatch(_call("launch_workflow", script="wf.py"))
+    run_id = answer.split("run ")[1].split(":")[0]
+    outcome = partial_outcome(child)
+    assert outcome.startswith("[partial outcome: the specialist's turn ended cut")
+    assert outcome.count(str(tmp_path / "md.py")) == 1  # two edits, one file
+    assert f"runs it launched: {run_id}" in outcome
+    assert "continue from these" in outcome

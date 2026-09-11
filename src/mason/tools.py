@@ -939,6 +939,7 @@ def _add_file_tools(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         session.read_files.add(path)
+        record_edit(session, tool="write_file", path=path)
         return f"wrote {len(content)} characters to {path}" + _python_syntax_note(path, content)
 
     box.add(
@@ -981,6 +982,7 @@ def _add_file_tools(
             )
         updated = text.replace(old, new)
         path.write_text(updated, encoding="utf-8")
+        record_edit(session, tool="edit_file", path=path)
         return f"replaced {count if replace_all else 1} occurrence(s) in {path}" + (
             _python_syntax_note(path, updated)
         )
@@ -1282,6 +1284,16 @@ def _add_shell_tool(box: Toolbox, session: MasonSession) -> None:
 
 
 # -- workflows (foundation) ---------------------------------------------------
+
+
+def record_edit(session: MasonSession, *, tool: str, path: Path) -> None:
+    """Record one ``edit`` event: a file the session wrote, by which card and tool.
+
+    A specialist whose turn ends cut hands its parent the files it wrote,
+    and the parent re-briefs from them; the transcript is where they are
+    read from (:func:`partial_outcome`).
+    """
+    session.record({"type": "edit", "by": session.agent_name, "tool": tool, "path": str(path)})
 
 
 def record_command(session: MasonSession, **event: Any) -> None:
@@ -1688,19 +1700,23 @@ def _add_workflow_tools(
         driver += ["--session", session.session_id, "-w", str(session.workspace_root)]
         if as_child:
             driver += ["--reservation", reservation.id]
-        record_command(
-            session,
-            kind="launch",
-            tool="launch_workflow",
-            command=shlex.join(driver),
-            script=str(script),
-            args=args,
-            cwd=str(session.cwd),
-            background=background,
-            sized=sized,
-            resources=reservation.slice,
-            reservation=reservation.id,
-        )
+        # The launch record carries the run id once the run has one: a
+        # foreground launch records after it returns, a background launch
+        # before it detaches (its run appears in the store once it starts).
+        launch_event: dict[str, Any] = {
+            "kind": "launch",
+            "tool": "launch_workflow",
+            "command": shlex.join(driver),
+            "script": str(script),
+            "args": args,
+            "cwd": str(session.cwd),
+            "background": background,
+            "sized": sized,
+            "resources": reservation.slice,
+            "reservation": reservation.id,
+        }
+        if background:
+            record_command(session, **launch_event)
         held = _ops.describe_resources(reservation.slice)
         try:
             if background:
@@ -1729,8 +1745,10 @@ def _add_workflow_tools(
                     reservation=reservation,
                 )
         except (FoundationError, SlabError, OSError) as e:
+            record_command(session, **launch_event, error=str(e))
             _release(reservation.id)
             return f"could not start the run: {e}"
+        record_command(session, **launch_event, run_id=result.get("run_id"))
         _record_run_commands(result.get("run_id"), "launch_workflow")
         lines = [
             f"run {result['run_id']}: state={result['state']} status={result['status']} "
@@ -2288,6 +2306,46 @@ def _digest_unless_raw(arguments: dict[str, Any], name: str, text: str, n_lines:
     return f"{digested}\n[digest of {n_lines} lines; pass raw=true, or offset/limit, for the text]"
 
 
+def partial_outcome(child_session: MasonSession) -> str:
+    """What a child whose turn ended cut left behind: the files it wrote and
+    the runs it launched, read from its transcript, for the parent to
+    re-brief from instead of from zero.
+
+    Files come from the child's ``edit`` events and runs from its
+    ``command`` events that carry a run id (a finished foreground launch;
+    a background launch has no id until it starts). Order is kept and
+    repeats are folded.
+    """
+    files: list[str] = []
+    runs: list[str] = []
+    try:
+        lines = child_session.transcript_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("type")
+        if kind == "edit" and event.get("path") and str(event["path"]) not in files:
+            files.append(str(event["path"]))
+        elif kind == "command" and event.get("run_id") and str(event["run_id"]) not in runs:
+            runs.append(str(event["run_id"]))
+    parts = []
+    if files:
+        parts.append("files it wrote: " + ", ".join(files))
+    if runs:
+        parts.append("runs it launched: " + ", ".join(runs))
+    left = "; ".join(parts) or "it wrote no file and launched no run"
+    return (
+        f"[partial outcome: the specialist's turn ended cut at its reply-token "
+        f"ceiling; {left}. Re-brief it to continue from these, not from zero.]"
+    )
+
+
 def _harness_footer(name: str, result: Any, child_session: MasonSession) -> str:
     """The bracketed line a lead reads before trusting a child's report."""
     return (
@@ -2337,7 +2395,10 @@ def _add_delegate_tool(
                 "steps": result.steps,
             }
         )
-        return f"{result.text}\n\n{_harness_footer(name, result, child_session)}"
+        text = result.text
+        if result.truncated:
+            text = f"{text}\n\n{partial_outcome(child_session)}"
+        return f"{text}\n\n{_harness_footer(name, result, child_session)}"
 
     box.add(
         Tool(

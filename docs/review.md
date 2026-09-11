@@ -52,6 +52,7 @@ nothing. Each rule blames one target.
 | `finish-incomplete` | No finish, no structured results, or no run ids. | `card:<agent>` |
 | `no-progress-loop` | Fifteen or more consecutive steps only looked: shell, reads, listings, with no run launched, no plan change, no note, no brief, and no finish. | `card:<agent>` |
 | `reasoning-heavy` | A step was billed 8,000 or more completion tokens and wrote no plan, file, note, or report. The note names the recorded effort. | `prompt` |
+| `cut-reply` | A reply was cut at the reply-token ceiling while it held text or part of a tool call. The note counts the mid-text and mid-call cuts and names the recorded effort. | `prompt` |
 
 The skill in force is the skill loaded most recently before the run
 started. The rule reads the load time from the transcript and the start

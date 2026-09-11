@@ -81,8 +81,8 @@ record carries it. The table is rendered from the code.
 <!-- benchmark:conditions:start -->
 | Condition | Card | Mechanisms on | What it is |
 | --- | --- | --- | --- |
-| `slab` | `pi` | `adaptive-effort`, `budget-hint`, `check-gating`, `context-hygiene`, `critic-gate`, `delegation`, `failure-records`, `identical-result-annotation`, `looking-hint`, `machine-memory`, `skills` | Mason as it is: the PI card, every mechanism on, verification gated in code. |
-| `protocol` | `protocol` | `adaptive-effort`, `budget-hint`, `context-hygiene`, `identical-result-annotation`, `skills` | The skill collection with a file protocol: scripts run with the shell, an append-only provenance log in the project, verification is what the agent writes down. No run tools, no failure records, no critic, no memory. |
+| `slab` | `pi` | `adaptive-effort`, `budget-hint`, `check-gating`, `context-hygiene`, `continue-cut-reply`, `critic-gate`, `delegation`, `failure-records`, `identical-result-annotation`, `looking-hint`, `machine-memory`, `skills` | Mason as it is: the PI card, every mechanism on, verification gated in code. |
+| `protocol` | `protocol` | `adaptive-effort`, `budget-hint`, `context-hygiene`, `continue-cut-reply`, `identical-result-annotation`, `skills` | The skill collection with a file protocol: scripts run with the shell, an append-only provenance log in the project, verification is what the agent writes down. No run tools, no failure records, no critic, no memory. |
 | `bare` | `bare` | none | The model with read, write, shell, and finish, a one-paragraph prompt, and no mechanism at all. |
 <!-- benchmark:conditions:end -->
 
@@ -150,6 +150,7 @@ and the table says which.
 | `skills` | The skill tool loads procedures and tested scripts from the catalog in the Agent Skills format, one line per skill until loaded. | Anthropic, Agent Skills; the skills audit of 2026-09-03. | not yet measured |
 | `delegation` | A lead hands a separable task to a specialist card that runs its own loop one level down and returns a report. | Anthropic's multi-agent research system: context isolation pays for separable subtasks only. | not yet measured |
 | `adaptive-effort` | A reply cut at the token budget is retried once at lower effort with a request for brevity before the turn ends. | Transcripts where a high-effort reply was cut twice and the turn ended with no report. | not yet measured |
+| `continue-cut-reply` | A reply cut at the reply-token ceiling is read before it is nudged. Text with no tool call stays in the history and the model continues from its last complete line, joined on return. A cut inside a tool call's arguments names the tool and asks for the file in parts, and the partial call never runs. A delegate whose turn ends cut hands back the files it wrote and the runs it launched. Off, every cut reply gets the brevity nudge. | One campaign on 2026-09-10 briefed the same specialist three times because its replies were cut two thirds of the way through a script and the brevity nudge discarded them: about thirty minutes and 470,000 tokens. | not yet measured |
 <!-- benchmark:mechanisms:end -->
 
 `[agent] mechanisms` in `slab.toml` lists the switches a session runs

@@ -792,6 +792,16 @@ def _render_event(event: dict[str, Any], full: bool) -> None:
         )
     elif kind == "warning":
         typer.secho(f"[{stamp}] warning: {event.get('text')}", fg=typer.colors.YELLOW)
+    elif kind == "cut":
+        what = {1: "no text and no call", 2: "mid-text", 3: "inside a tool call"}
+        how = "continued" if event.get("continued") else "nudged for brevity"
+        case = what.get(int(event.get("case") or 0), "?")
+        typer.secho(
+            f"[{stamp}] reply cut at the ceiling ({case}); {how}",
+            fg=typer.colors.YELLOW,
+        )
+    elif kind == "edit":
+        typer.secho(f"[{stamp}] {event.get('tool')} wrote {event.get('path')}", dim=True)
     # usage events are accumulated by the caller, not printed per step.
 
 

@@ -45,6 +45,7 @@ from mason.client import (
     ContextOverflowError,
     parse_fenced_calls,
     parse_loose_calls,
+    unfinished_call_name,
 )
 from mason.config import AgentConfig, override_agent, roster_agent_config
 from mason.errors import MasonError
@@ -120,6 +121,26 @@ _TRUNCATED_MARK = (
     "\n\n[truncated: the reply hit the reply-token ceiling twice, the second time "
     "at low effort; the operator can raise [agent] max_reply_tokens or lower the "
     "effort for this agent]"
+)
+#: A cut reply that held text and no tool call was two thirds of an
+#: answer or a script, not a spent think block. The text stays in the
+#: history and the model resumes it; the join on return trims the
+#: incomplete last line the model was told not to repeat. One planner on
+#: 2026-09-10 briefed the same specialist three times because the brevity
+#: nudge threw such replies away: about thirty minutes and 470,000 tokens.
+_CONTINUE_REPLY_NUDGE = (
+    "[harness] your reply was cut at the reply-token ceiling while you were writing "
+    "text; what you wrote is kept above. Continue from your last complete line; do "
+    "not repeat what you wrote."
+)
+#: A cut inside a tool call's arguments: the call is not run, and the
+#: model is told which tool and how to fit the call in the ceiling.
+_CUT_CALL_NUDGE = (
+    "[harness] your reply was cut at the reply-token ceiling inside the arguments "
+    "of your {name} call, so the call did not run. Write the file in parts: "
+    "write_file the first part, then extend it with edit_file (replace its last "
+    "line with that line plus the next part). Or shorten the arguments. Then call "
+    "again."
 )
 #: Messages that must accumulate after a compaction before another may fire.
 _COMPACTION_MIN_NEW_MESSAGES = 4
@@ -630,6 +651,10 @@ class Mason:
         error_streak = 0
         empty_nudged = False
         cut_nudged = False
+        # The text of a reply cut mid-answer, kept for the join once the
+        # continuation arrives (case 2 of the cut-reply cases).
+        cut_prefix: str | None = None
+        continue_cut = enabled(self.session.agent, "continue-cut-reply")
         max_turns = self.session.agent.max_turns
         for step in range(1, max_turns + 1):
             self.steps_taken = step
@@ -643,6 +668,20 @@ class Mason:
                 step_back=enabled(self.session.agent, "looking-hint"),
             )
             reply = self._call_model(hint=hint or None)
+            cut = reply.finish_reason == "max_tokens"
+            cut_call = self._cut_call_name(reply) if cut else None
+            if cut_call is not None and continue_cut and not cut_nudged:
+                # Case 3: the cut fell inside a tool call's arguments. The
+                # partial call never runs; the history keeps the text only,
+                # and the model reads which tool and how to fit the call.
+                cut_nudged = True
+                self._append_assistant(reply, has_calls=False)
+                self._observe_step(reply, interim=False)
+                self.session.record({"type": "cut", "case": 3, "continued": True})
+                self._append(
+                    {"role": "user", "content": _CUT_CALL_NUDGE.format(name=cut_call)}
+                )
+                continue
             calls = list(reply.tool_calls)
             from_text = False
             if not calls:
@@ -658,26 +697,45 @@ class Mason:
             self._observe_step(reply, interim=bool(calls) and not from_text)
             if not calls:
                 text = reply.content or ""
-                if reply.finish_reason == "max_tokens" and not cut_nudged:
-                    # The budget bounds thinking plus text together, so a cut
-                    # reply usually holds no text at all. Ask once for a short
-                    # answer at low effort; a second cut ends the turn below.
+                if cut and not cut_nudged:
                     cut_nudged = True
+                    case = 3 if cut_call is not None else 2 if text.strip() else 1
+                    if case == 2 and continue_cut:
+                        # Case 2: the cut fell mid-text. The text stands in
+                        # the history; the model resumes it, and the join
+                        # below puts the two halves together on return.
+                        cut_prefix = text
+                        self.session.record({"type": "cut", "case": 2, "continued": True})
+                        self._append({"role": "user", "content": _CONTINUE_REPLY_NUDGE})
+                        continue
+                    # Case 1: the budget went to the think block and no text
+                    # arrived. Ask once for a short answer at low effort; a
+                    # second cut ends the turn below. With the switch off,
+                    # every cut reply takes this path.
+                    self.session.record({"type": "cut", "case": case, "continued": False})
                     self._append({"role": "user", "content": _CUT_REPLY_NUDGE})
                     if enabled(self.session.agent, "adaptive-effort"):
                         self._effort_override = _retry_effort(self.session.agent.effort)
                     continue
+                if cut_prefix is not None:
+                    text = _join_cut(cut_prefix, text)
                 if not text.strip() and not empty_nudged and reply.finish_reason != "max_tokens":
                     # No text and no call is a fault, not an answer. Ask once;
                     # a second empty reply ends the turn below.
                     empty_nudged = True
                     self._append({"role": "user", "content": _EMPTY_REPLY_NUDGE})
                     continue
-                truncated = reply.finish_reason == "max_tokens"
-                if truncated:
+                if cut:
                     # A truncated answer must not be passed off as a finished one.
                     text += _TRUNCATED_MARK
-                return TurnResult(text=text, stop_reason="answer", steps=step, truncated=truncated)
+                return TurnResult(text=text, stop_reason="answer", steps=step, truncated=cut)
+            if cut and cut_call is not None:
+                # A second cut inside a call, or one with the switch off: the
+                # malformed call is answered with its JSON error, as before.
+                self.session.record({"type": "cut", "case": 3, "continued": False})
+            # A reply that went on to act was not the answer the cut half
+            # started; the half is not joined onto whatever comes later.
+            cut_prefix = None
             for position, call in enumerate(calls):
                 if call.name == "finish" and call.arguments_error is None:
                     if len(calls) > 1:
@@ -947,6 +1005,18 @@ class Mason:
             or result.startswith(f"tool {call.name} was not approved")
         )
         return result, not hard_failure
+
+    def _cut_call_name(self, reply: ChatReply) -> str | None:
+        """The tool a reply cut at the ceiling was calling, or ``None``.
+
+        A native call cut mid-arguments arrives with ``arguments_error``
+        set (the JSON does not close); a text-protocol call leaves an
+        open fence or an object that does not decode.
+        """
+        for call in reply.tool_calls:
+            if call.arguments_error is not None:
+                return call.name
+        return unfinished_call_name(reply.content, fenced=self.fenced)
 
     def _call_model(self, *, hint: str | None = None) -> ChatReply:
         tools = None if self.fenced else self.toolbox.specs()
@@ -1281,6 +1351,24 @@ class Mason:
         }
         self.session.record({"type": "compaction", "summary": summary})
         return True
+
+
+def _join_cut(prefix: str, rest: str) -> str:
+    """The cut half and its continuation as one text.
+
+    The continuation was asked to resume from the last complete line, so
+    the prefix's unfinished last line is dropped before the join; a prefix
+    with no line break is kept whole.
+
+    Examples:
+        >>> _join_cut("a = 1\\nb = 2\\nc = ", "c = 3\\n")
+        'a = 1\\nb = 2\\nc = 3\\n'
+        >>> _join_cut("one long sen", "tence")
+        'one long sentence'
+    """
+    if prefix.endswith("\n") or "\n" not in prefix:
+        return prefix + rest
+    return prefix[: prefix.rfind("\n") + 1] + rest
 
 
 def _is_error_result(name: str, content: str) -> bool:

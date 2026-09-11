@@ -399,14 +399,176 @@ def test_explicit_compute_profile_wins_over_the_derived_one(tmp_path: Path) -> N
 
 
 def test_truncated_answers_are_reported_not_passed_off_as_finished(tmp_path: Path) -> None:
+    """Cut mid-text, continued, and cut again: the two halves are joined,
+    the turn ends, and the mark says the ceiling was hit twice."""
     cut = ChatReply(content="half an ans", finish_reason="max_tokens", prompt_tokens=10)
-    again = ChatReply(content="still half", finish_reason="max_tokens", prompt_tokens=10)
+    again = ChatReply(content="wer, still cut", finish_reason="max_tokens", prompt_tokens=10)
     result = Mason(_session(tmp_path), client=FakeClient([cut, again])).run_turn("go")
     assert result.stop_reason == "answer"
     assert result.truncated
-    assert result.text.startswith("still half")
+    assert result.text.startswith("half an answer, still cut")
     assert "truncated" in result.text
     assert "max_reply_tokens" in result.text
+
+
+def _cut_events(session: MasonSession) -> list[dict[str, Any]]:
+    events = [json.loads(line) for line in session.transcript_path.read_text().splitlines()]
+    return [e for e in events if e["type"] == "cut"]
+
+
+def test_cut_case_1_no_text_no_call_gets_the_brevity_nudge(tmp_path: Path) -> None:
+    session = _session(tmp_path, effort="high")
+    cut = ChatReply(content="", finish_reason="max_tokens", prompt_tokens=100, completion_tokens=1)
+    client = FakeClient([cut, ChatReply(content="short", prompt_tokens=100, completion_tokens=2)])
+    result = Mason(session, client=client).run_turn("go")
+    assert result.text == "short" and not result.truncated
+    nudge = client.requests[1][0][-2]
+    assert "none of it was received" in nudge["content"]
+    assert client.options[1]["effort"] == "low"
+    assert _cut_events(session) == [
+        {**_cut_events(session)[0], "type": "cut", "case": 1, "continued": False}
+    ]
+
+
+def test_cut_case_2_mid_text_is_continued_and_joined(tmp_path: Path) -> None:
+    """A reply that was two thirds of a script is kept, the model resumes
+    from its last complete line, and the answer is the two halves joined
+    without the unfinished line."""
+    session = _session(tmp_path, effort="high")
+    cut = ChatReply(
+        content="line 1\nline 2\nline 3 is cut he",
+        finish_reason="max_tokens",
+        prompt_tokens=100,
+        completion_tokens=50,
+    )
+    rest = ChatReply(content="line 3 is cut here\nline 4\n", prompt_tokens=100)
+    client = FakeClient([cut, rest])
+    result = Mason(session, client=client).run_turn("go")
+    assert result.text == "line 1\nline 2\nline 3 is cut here\nline 4\n"
+    assert not result.truncated and result.steps == 2
+    history = client.requests[1][0]
+    kept = [m for m in history if m["role"] == "assistant"]
+    assert kept and kept[-1]["content"] == "line 1\nline 2\nline 3 is cut he"
+    nudge = history[-2]
+    assert nudge["role"] == "user"
+    assert "Continue from your last complete line" in nudge["content"]
+    assert "do not repeat" in nudge["content"]
+    assert "effort" not in client.options[1]  # the model was writing, not deliberating
+    (event,) = _cut_events(session)
+    assert event["case"] == 2 and event["continued"] is True
+
+
+def test_cut_case_2_continuation_that_acts_is_not_joined(tmp_path: Path) -> None:
+    """When the continuation is a tool call, the cut half was prose before
+    an action, not half of the answer: the later answer stands alone."""
+    session = _session(tmp_path)
+    cut = ChatReply(content="I will list\nthe dir", finish_reason="max_tokens", prompt_tokens=100)
+    client = FakeClient(
+        [cut, _tool_reply("list_dir"), ChatReply(content="empty", prompt_tokens=100)]
+    )
+    result = Mason(session, client=client).run_turn("go")
+    assert result.text == "empty"
+
+
+def test_cut_case_3_native_call_is_never_run_and_names_the_tool(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    partial = ToolCall(
+        id="w1",
+        name="write_file",
+        arguments_raw='{"path": "script.py", "content": "import ase\\nfrom',
+        arguments_error="arguments were not valid JSON: Unterminated string",
+    )
+    cut = ChatReply(
+        content=None, tool_calls=(partial,), finish_reason="max_tokens", prompt_tokens=100
+    )
+    client = FakeClient([cut, ChatReply(content="will split it", prompt_tokens=100)])
+    result = Mason(session, client=client).run_turn("go")
+    assert result.text == "will split it" and not result.truncated
+    assert not (tmp_path / "script.py").exists()
+    history = client.requests[1][0]
+    assert not any(m.get("tool_calls") for m in history)  # the partial call left the history
+    assert not any(m["role"] == "tool" for m in history)  # and nothing answered it
+    nudge = history[-2]
+    assert nudge["role"] == "user"
+    assert "inside the arguments of your write_file call" in nudge["content"]
+    assert "write_file the first part" in nudge["content"]
+    assert "edit_file" in nudge["content"]
+    (event,) = _cut_events(session)
+    assert event["case"] == 3 and event["continued"] is True
+
+
+def test_cut_case_3_is_read_from_the_text_protocols_too(tmp_path: Path) -> None:
+    """A fenced block the cut left open, and a loose JSON call that does not
+    close, are calls the model meant to make; neither runs."""
+    fenced = _session(tmp_path, tool_protocol="fenced")
+    open_fence = ChatReply(
+        content='```tool\n{"tool": "write_file", "arguments": {"path": "a.py", "content": "x',
+        finish_reason="max_tokens",
+        prompt_tokens=100,
+    )
+    client = FakeClient([open_fence, ChatReply(content="ok", prompt_tokens=100)])
+    Mason(fenced, client=client).run_turn("go")
+    assert "your write_file call" in client.requests[1][0][-2]["content"]
+    assert not (tmp_path / "a.py").exists()
+    fenced.release_session_lock()
+    native = _session(tmp_path)
+    loose = ChatReply(
+        content='{"name": "shell", "parameters": {"command": "cat <<EOF > a.py\nimport',
+        finish_reason="max_tokens",
+        prompt_tokens=100,
+    )
+    client = FakeClient([loose, ChatReply(content="ok", prompt_tokens=100)])
+    Mason(native, client=client).run_turn("go")
+    assert "your shell call" in client.requests[1][0][-2]["content"]
+    assert not any(m["role"] == "tool" for m in client.requests[1][0])
+
+
+def test_a_second_cut_call_is_answered_with_its_json_error_as_before(tmp_path: Path) -> None:
+    """One continuation per reply: after it, a cut call takes the old path,
+    where dispatch reports the malformed arguments."""
+    session = _session(tmp_path)
+    partial = ToolCall(
+        id="w1", name="write_file", arguments_raw='{"path": "a', arguments_error="bad"
+    )
+    cut = ChatReply(
+        content=None, tool_calls=(partial,), finish_reason="max_tokens", prompt_tokens=100
+    )
+    client = FakeClient([cut, cut, ChatReply(content="gave up", prompt_tokens=100)])
+    result = Mason(session, client=client).run_turn("go")
+    assert result.text == "gave up"
+    answered = [m for m in client.requests[2][0] if m["role"] == "tool"]
+    assert len(answered) == 1 and answered[0]["content"] == "tool write_file not run: bad"
+    assert [e["continued"] for e in _cut_events(session)] == [True, False]
+
+
+def test_continue_cut_reply_off_restores_the_brevity_nudge_for_every_cut(tmp_path: Path) -> None:
+    from mason.mechanisms import ALL_MECHANISMS
+
+    off = sorted(ALL_MECHANISMS - {"continue-cut-reply"})
+    session = _session(tmp_path, effort="high", mechanisms=off)
+    cut = ChatReply(content="line 1\nline 2 is c", finish_reason="max_tokens", prompt_tokens=100)
+    client = FakeClient([cut, ChatReply(content="short", prompt_tokens=100)])
+    result = Mason(session, client=client).run_turn("go")
+    assert result.text == "short"  # nothing joined: the cut text was treated as lost
+    assert "none of it was received" in client.requests[1][0][-2]["content"]
+    assert client.options[1]["effort"] == "low"
+    (event,) = _cut_events(session)
+    assert event["case"] == 2 and event["continued"] is False
+    session.release_session_lock()
+    session = _session(tmp_path, mechanisms=off)
+    partial = ToolCall(
+        id="w1", name="write_file", arguments_raw='{"path": "a', arguments_error="bad"
+    )
+    cut_call = ChatReply(
+        content=None, tool_calls=(partial,), finish_reason="max_tokens", prompt_tokens=100
+    )
+    client = FakeClient([cut_call, ChatReply(content="ok", prompt_tokens=100)])
+    Mason(session, client=client).run_turn("go")
+    assert not any("inside the arguments" in m["content"] for m in client.requests[1][0]
+                   if m["role"] == "user")
+    assert [m for m in client.requests[1][0] if m["role"] == "tool"]  # the old path answered it
+    event = _cut_events(session)[-1]  # both sessions of this second share one transcript name
+    assert event["case"] == 3 and event["continued"] is False
 
 
 def test_a_cut_reply_is_asked_again_once_at_low_effort(tmp_path: Path) -> None:

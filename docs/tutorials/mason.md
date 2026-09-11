@@ -793,9 +793,13 @@ under version control, readable by humans:
   carries the server's finish reason, so a review can tell a truncated
   turn from a finished one. A reply with no text and no tool call is a
   fault, not an answer: the loop asks once more. A reply the server cut
-  at the reply-token ceiling is asked once more at low effort, with a
-  request for a short answer, and a second cut ends the turn marked
-  truncated. Also,
+  at the reply-token ceiling is read before it is answered. A cut with
+  no text is asked once more at low effort, with a request for a short
+  answer. A cut mid-text stays in the history, and the model continues
+  from its last complete line. A cut inside a tool call's arguments
+  names the tool and asks for the file in parts, and the partial call
+  never runs. Each cut is a `cut` event with its case, and a second cut
+  ends the turn marked truncated. Also,
   `slab mason chat --resume` replays the newest one. Read one with
   `slab mason read`: without a path it lists the workspace's sessions
   newest first, each by the directory it was launched from and the launch
@@ -861,8 +865,12 @@ Two more controls bound one step's spend. Every request carries a
 `max_tokens` of `[agent] max_reply_tokens`, or 16,000 when unset, reduced
 to the room the window has left after the prompt. A thinking model's
 think block counts toward it, so the cap bounds one step, not the
-campaign. A cut reply is asked once more at low effort, because the
-identical request would be cut the same way, and a second cut is marked.
+campaign. A cut reply with no text is asked once more at low effort,
+because the identical request would be cut the same way. A cut reply
+that held text or a tool call is continued instead, because the text
+was most of an answer or a script. One planner briefed the same
+specialist three times because the brevity nudge discarded such replies,
+and lost about thirty minutes and 470,000 tokens. A second cut is marked.
 And after
 fifteen consecutive steps made only of reading and listing tools, with
 nothing launched, planned, noted, briefed, or finished, the per-step
@@ -993,7 +1001,11 @@ because a planner card once read the bare counter as the progress of the
 MD run it was waiting on, for twenty turns.
 The prompt sets bounded diagnose-then-retry expectations, and
 required-argument validation answers with the tool's schema instead of a
-stack trace. Token usage is accounted per turn from the server's own numbers
+stack trace. A reply cut at the reply-token ceiling is continued when it
+held text, and never run when it held part of a tool call. A delegated
+specialist whose turn ends cut hands back the files it wrote and the runs
+it launched, so the lead re-briefs from them and not from zero. Token
+usage is accounted per turn from the server's own numbers
 and recorded in the transcript. Every mechanism beyond the loop itself is a
 named switch (`[agent] mechanisms`), so the benchmark can turn it off and
 measure it; [the mechanism ledger](../benchmark.md#the-mechanism-ledger)

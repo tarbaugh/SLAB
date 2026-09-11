@@ -95,9 +95,12 @@ MECHANISMS: tuple[Mechanism, ...] = (
     ),
     Mechanism(
         "budget-hint",
-        "An ephemeral step-of-budget line follows every request, stricter near the ceiling.",
+        "An ephemeral line follows every request, naming the model call count "
+        "against the session's budget, stricter near the ceiling.",
         "Transcripts stopped at the call budget mid-inquiry with nothing "
-        "written down; the hint moved the finish earlier.",
+        "written down; the hint moved the finish earlier. A planner then read "
+        "the bare counter as the progress of the MD run it waited on, so the "
+        "line now says what it counts.",
     ),
     Mechanism(
         "looking-hint",
@@ -127,6 +130,20 @@ MECHANISMS: tuple[Mechanism, ...] = (
         "a request for brevity before the turn ends.",
         "Transcripts where a high-effort reply was cut twice and the turn ended with no report.",
     ),
+    Mechanism(
+        "continue-cut-reply",
+        "A reply cut at the reply-token ceiling is read before it is nudged. "
+        "Text with no tool call stays in the history and the model continues "
+        "from its last complete line, joined on return. A cut inside a tool "
+        "call's arguments names the tool and asks for the file in parts, and "
+        "the partial call never runs. A delegate whose turn ends cut hands "
+        "back the files it wrote and the runs it launched. Off, every cut "
+        "reply gets the brevity nudge.",
+        "One campaign on 2026-09-10 briefed the same specialist three times "
+        "because its replies were cut two thirds of the way through a script "
+        "and the brevity nudge discarded them: about thirty minutes and "
+        "470,000 tokens.",
+    ),
 )
 
 MECHANISM_NAMES: frozenset[str] = frozenset(m.name for m in MECHANISMS)
@@ -147,7 +164,13 @@ class Condition:
 #: The mechanisms a general coding harness supplies on its own: the
 #: protocol arm keeps these, because the AICC shape runs inside one.
 _LOOP_MECHANISMS = frozenset(
-    {"context-hygiene", "identical-result-annotation", "budget-hint", "adaptive-effort"}
+    {
+        "context-hygiene",
+        "identical-result-annotation",
+        "budget-hint",
+        "adaptive-effort",
+        "continue-cut-reply",
+    }
 )
 
 CONDITIONS: dict[str, Condition] = {
