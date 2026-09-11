@@ -401,8 +401,8 @@ def test_explicit_compute_profile_wins_over_the_derived_one(tmp_path: Path) -> N
 def test_truncated_answers_are_reported_not_passed_off_as_finished(tmp_path: Path) -> None:
     """Cut mid-text, continued, and cut again: the two halves are joined,
     the turn ends, and the mark says the ceiling was hit twice."""
-    cut = ChatReply(content="half an answer\nand more te", finish_reason="max_tokens", prompt_tokens=10)
-    again = ChatReply(content="and more text, still cut", finish_reason="max_tokens", prompt_tokens=10)
+    cut = ChatReply(content="half an answer\nand more te", finish_reason="max_tokens")
+    again = ChatReply(content="and more text, still cut", finish_reason="max_tokens")
     result = Mason(_session(tmp_path), client=FakeClient([cut, again])).run_turn("go")
     assert result.stop_reason == "answer"
     assert result.truncated
@@ -1600,7 +1600,8 @@ def test_a_cut_inside_quoted_material_is_text_not_a_call(tmp_path: Path) -> None
         finish_reason="max_tokens",
         prompt_tokens=10,
     )
-    client = FakeClient([cut, ChatReply(content='cfg = {"name": "run1", "steps": 10}\n```\n', prompt_tokens=10)])
+    rest = ChatReply(content='cfg = {"name": "run1", "steps": 10}\n```\n', prompt_tokens=10)
+    client = FakeClient([cut, rest])
     result = Mason(session, client=client).run_turn("go")
     assert "Write that line again in full" in client.requests[1][0][-2]["content"]
     assert result.text.startswith("Here is the config:\n```python\ncfg = ")
@@ -1613,7 +1614,9 @@ def test_a_cut_call_beside_a_complete_one_drops_both_and_says_so(tmp_path: Path)
         id="w0", name="write_file", arguments={"path": "one.py", "content": "x\n"},
         arguments_raw=json.dumps({"path": "one.py", "content": "x\n"}),
     )
-    partial = ToolCall(id="w1", name="write_file", arguments_raw='{"path": "two', arguments_error="bad")
+    partial = ToolCall(
+        id="w1", name="write_file", arguments_raw='{"path": "two', arguments_error="bad"
+    )
     cut = ChatReply(
         content=None, tool_calls=(whole, partial), finish_reason="max_tokens", prompt_tokens=10
     )
@@ -1626,8 +1629,10 @@ def test_a_cut_call_beside_a_complete_one_drops_both_and_says_so(tmp_path: Path)
 
 def test_the_cut_call_nudge_offers_parts_only_for_a_write_file(tmp_path: Path) -> None:
     session = _session(tmp_path)
-    partial = ToolCall(id="d1", name="delegate", arguments_raw='{"agent": "md', arguments_error="bad")
-    cut = ChatReply(content=None, tool_calls=(partial,), finish_reason="max_tokens", prompt_tokens=10)
+    partial = ToolCall(
+        id="d1", name="delegate", arguments_raw='{"agent": "md', arguments_error="bad"
+    )
+    cut = ChatReply(content=None, tool_calls=(partial,), finish_reason="max_tokens")
     client = FakeClient([cut, ChatReply(content="ok", prompt_tokens=10)])
     Mason(session, client=client).run_turn("go")
     nudge = client.requests[1][0][-2]["content"]

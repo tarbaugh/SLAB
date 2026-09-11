@@ -713,9 +713,10 @@ def test_launched_runs_carry_the_session_end_to_end(
 def test_read_renders_cut_and_edit_events(capsys: pytest.CaptureFixture[str]) -> None:
     from mason.cli import _render_event
 
-    _render_event({"at": "2026-09-10T10:00:00+00:00", "type": "cut", "case": 2, "continued": True}, False)
-    _render_event({"at": "2026-09-10T10:00:01+00:00", "type": "cut", "case": 3, "continued": False}, False)
-    _render_event({"at": "2026-09-10T10:00:02+00:00", "type": "edit", "tool": "write_file", "path": "/p/a.py"}, False)
+    at = "2026-09-10T10:00:00+00:00"
+    _render_event({"at": at, "type": "cut", "case": 2, "continued": True}, False)
+    _render_event({"at": at, "type": "cut", "case": 3, "continued": False}, False)
+    _render_event({"at": at, "type": "edit", "tool": "write_file", "path": "/p/a.py"}, False)
     out = capsys.readouterr().out
     assert "reply cut at the ceiling (mid-text); continued" in out
     assert "reply cut at the ceiling (inside a tool call); nudged for brevity" in out

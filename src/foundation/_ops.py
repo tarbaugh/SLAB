@@ -1367,23 +1367,3 @@ def cancel_lines(summary: dict[str, Any]) -> list[str]:
             f"('slab memory show {memory['name']}' to review)"
         )
     return lines
-
-
-def age_text(moment: datetime) -> str:
-    """How long ago *moment* was, in one unit: ``12s``, ``3m``, ``5h``, ``2d``.
-
-    Examples:
-        >>> from datetime import timedelta
-        >>> age_text(utcnow() - timedelta(minutes=3))
-        '3m'
-        >>> age_text(utcnow() + timedelta(days=1))
-        '0s'
-    """
-    seconds = max(0.0, (utcnow() - moment).total_seconds())
-    if seconds < 60:
-        return f"{int(seconds)}s"
-    if seconds < 3600:
-        return f"{int(seconds // 60)}m"
-    if seconds < 86_400:
-        return f"{int(seconds // 3600)}h"
-    return f"{int(seconds // 86_400)}d"

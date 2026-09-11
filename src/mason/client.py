@@ -538,7 +538,8 @@ def unfinished_call_name(content: str | None, *, fenced: bool) -> str | None:
         True
         >>> unfinished_call_name('```json\\n{"name": "Al2O3", "sites": [', fenced=False) is None
         True
-        >>> unfinished_call_name('```tools\\nread_file\\n```\\nmore text cut he', fenced=True) is None
+        >>> other = '```tools\\nread_file\\n```\\nmore text cut he'
+        >>> unfinished_call_name(other, fenced=True) is None
         True
         >>> unfinished_call_name('Use a ```tool block like this in your next', fenced=True) is None
         True
