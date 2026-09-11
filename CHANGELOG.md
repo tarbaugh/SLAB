@@ -5,6 +5,14 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- Free resources as a tool. `free_resources`, in Mason and over MCP,
+  returns what `Workspace.free_resources` returns plus one line per live
+  reservation with its slice, its run or holder, and its age, read at
+  call time. Every `list_runs` answer ends with `free now: N cpu(s), M
+  gpu(s)`, and the cpus line of the environment block says to call the
+  tool before a concurrent launch, because its own free amounts were
+  read when the prompt was built. Not a mechanism switch: the shell
+  could already reach the same rows through `slab runs reservations`.
 - A claim is one transaction. `claim_reservation(pid=)` sets `run_id` on
   the reservation, `resources` on the run, and the run's status to
   `running` with its pid and host together, and `start_run(reservation=)`

@@ -264,7 +264,7 @@ ranks an unsized launch runs with, and that a launch names `ntasks`,
 `threads`, and `gpus`. The cpus line reads, for one session:
 
 ```text
-cpus: 16 usable in this session, gpus: 2; free right now: 16 cpu(s), 2 gpu(s); an unsized launch runs with 1 rank(s) and takes every free cpu. Size a launch with ntasks, threads, and gpus; a launch that does not fit what is free is refused with the free amounts, and so is a shell command or script that spells out more ranks.
+cpus: 16 usable in this session, gpus: 2; free right now: 16 cpu(s), 2 gpu(s); an unsized launch runs with 1 rank(s) and takes every free cpu. Size a launch with ntasks, threads, and gpus; a launch that does not fit what is free is refused with the free amounts, and so is a shell command or script that spells out more ranks. The free amounts above were read when this prompt was built; call `free_resources` before a concurrent launch.
 ```
 
 A sized launch holds a slice. Before the run starts, the session reserves
@@ -282,6 +282,16 @@ placeholders fills from the same numbers (see
 reservation is released when the run ends or its holder dies. Free is
 derived from the live reservations, never counted, so there is no
 counter to drift.
+
+The environment block states what was free when the prompt was built.
+The `free_resources` tool reads the store at call time. It returns the
+budget, the free counts, and one line per live reservation with its
+slice, the run that claimed it or the process that holds it, and its
+age. Call it before a concurrent launch, so a third launch is sized
+against what the first two hold and not against a stale line. Every
+`list_runs` answer ends with the same free counts, and `slab runs
+reservations` shows the same rows from the shell. The tool adds
+information and no mechanism, so it has no switch in the ledger.
 
 An unsized launch is accounted for like any other. It reserves every free
 cpu and no gpu, and it runs in the session's own process as before. A
@@ -350,6 +360,7 @@ more than model choice.
 | `launch_workflow` | run a workflow script as a traced, check-gated run; this is how physics happens. `args` reach the script as argv; `background=true` detaches a long run so no tool timeout can touch it. `ntasks`, `threads`, and `gpus` size the run. The slice is reserved before the run starts, the run takes it as an affinity mask plus `CUDA_VISIBLE_DEVICES`, and a slice that does not fit what is free is refused with the free amounts |
 | `wait_for_run` | block until a run (or every running run of this session) finishes, then report its state and task tally; the timeout answer says how far each run has got and whether its process is alive here or on another host; a run whose recorded process is gone is marked failed and answered at once; `run_id` takes an id, a prefix, or a run name from this session |
 | `list_runs`, `show_run`, `list_engines` | the workspace's evidence surface: runs, checks with observed/expected values, failure records, capabilities; `list_runs` takes `session="this"` and `status="running"`, and first marks failed every running run whose recorded process on this host is gone; `show_run` folds finished tasks to one line each, `task=<label or seq>` returns one task's recipe, inputs, and outputs, and `full=true` returns them all; `list_engines` also reports this host's `budget` and what is `free` right now, and each partition's declared `node` |
+| `free_resources` | what is free on this host right now: the budget, the free cpu and gpu counts, and one line per live reservation with its slice, its run or holder, and its age; the environment block's free amounts were read when the prompt was built, so call this before a concurrent launch; `list_runs` ends with the same free counts |
 | `read_artifact` | one of a run's artifacts, by name or hash prefix; the way to read an engine's output file after the run. Digested first like `read_file`; `raw=true`, or `offset`/`limit`, gives the line-numbered text. The workflow script is kept as the run's `input` artifact under its own name |
 | `list_tasks`, `describe_task` | the task vocabulary: every traced task with its signature, and one task's full docstring, so the agent never reads the package source to learn a call |
 | `search_materials`, `get_material`, `query_materials` | the offline Materials Project snapshot, present only when `[builders.mp]` names one: filtered search, one record with its CIF path, and one read-only row-capped SELECT; the structure itself arrives traced via `fetch_structure` in a workflow |

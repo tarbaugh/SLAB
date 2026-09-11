@@ -445,6 +445,19 @@ def build_server(
 
     @server.tool()
     @_surfaced
+    def free_resources() -> dict[str, Any]:
+        """What is free on this host right now. 'budget' and 'free' list the
+        cpu ids and gpu ids, 'reservations' the ids of the live
+        reservations that hold the difference, and 'held' one line per
+        live reservation: its slice, the run that claimed it or the
+        process that holds it, and its age. Call it before a concurrent
+        launch; list_engines and the environment state free amounts from
+        the moment they were read."""
+        with Workspace(root) as ws:
+            return _ops.free_resources(ws)
+
+    @server.tool()
+    @_surfaced
     def list_tasks() -> list[dict[str, str]]:
         """The traced tasks foundation.tasks exposes to workflow scripts: one
         entry per task with its name, signature, and one-sentence summary.

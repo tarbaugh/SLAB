@@ -71,6 +71,7 @@ TOOL_VOCABULARY = frozenset(
         "launch_workflow",
         "wait_for_run",
         "list_engines",
+        "free_resources",
         "list_tasks",
         "describe_task",
         "search_materials",
@@ -108,6 +109,7 @@ LOOKING_TOOLS = frozenset(
         "describe_task",
         "list_tasks",
         "list_engines",
+        "free_resources",
         "get_material",
         "search_materials",
         "query_materials",
@@ -139,6 +141,7 @@ READ_ONLY_TOOLS = frozenset(
         "show_run",
         "read_artifact",
         "list_engines",
+        "free_resources",
         "list_tasks",
         "describe_task",
         "search_materials",
@@ -1449,11 +1452,12 @@ def _add_workflow_tools(
             runs = ws.runs.list_runs(
                 state=state, status=status, session=session_filter, limit=limit
             )
+            free = _ops.free_line(ws.free_resources())
             if not runs:
                 where = f" for session {session_filter!r}" if session_filter else ""
-                return f"{reaped}no runs in this workspace yet{where}"
+                return f"{reaped}no runs in this workspace yet{where}\n{free}"
             lines = [_run_line(run) for run in runs]
-        return reaped + "\n".join(lines)
+        return reaped + "\n".join(lines) + "\n" + free
 
     box.add(
         Tool(
@@ -1914,6 +1918,38 @@ def _add_engine_tools(box: Toolbox, session: MasonSession) -> None:
         overview["budget"] = {key: len(ids) for key, ids in resources["budget"].items()}
         overview["free"] = {key: len(ids) for key, ids in resources["free"].items()}
         return json.dumps(overview, indent=1, ensure_ascii=False)
+
+    def free_resources(arguments: dict[str, Any]) -> str:
+        with _open_workspace(session) as ws:
+            answer = _ops.free_resources(ws)
+        budget = answer["budget"]
+        lines = [
+            f"budget on {answer['host']}: {len(budget['cpus'])} cpu(s), "
+            f"{len(budget['gpus'])} gpu(s)",
+            _ops.free_line(answer),
+        ]
+        if answer["held"]:
+            lines.append("held by live reservations:")
+            lines.extend(f"  {line}" for line in answer["held"])
+        else:
+            lines.append("no live reservation")
+        return "\n".join(lines)
+
+    box.add(
+        Tool(
+            name="free_resources",
+            description=(
+                "What is free on this host right now: the budget, the free cpu and "
+                "gpu counts, and one line per live reservation (its slice, the run "
+                "or the holder, its age). Call it before a concurrent launch; the "
+                "environment block's free amounts were read when the prompt was "
+                "built."
+            ),
+            parameters=_schema({}, []),
+            requires_approval=False,
+            handler=free_resources,
+        )
+    )
 
     box.add(
         Tool(

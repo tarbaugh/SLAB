@@ -308,7 +308,8 @@ def test_truncate_middle_reports_exact_drop() -> None:
 
 
 def test_list_runs_empty_then_launch_then_show(box: Toolbox, tmp_path: Path) -> None:
-    assert box.dispatch(_call("list_runs")) == "no runs in this workspace yet"
+    empty = box.dispatch(_call("list_runs"))
+    assert empty.startswith("no runs in this workspace yet\nfree now: ")
     script = tmp_path / "wf.py"
     script.write_text(
         "from foundation import check, converged\n"
@@ -327,6 +328,7 @@ def test_list_runs_empty_then_launch_then_show(box: Toolbox, tmp_path: Path) -> 
     assert "energy (eV):" in answer  # script output captured
     run_line = box.dispatch(_call("list_runs"))
     assert "verified" in run_line and "wf" in run_line
+    assert run_line.splitlines()[-1].startswith("free now: ")
     run_id = run_line.split()[0]
     details = box.dispatch(_call("show_run", run_id=run_id))
     assert '"intent": "mason test"' in details
@@ -705,6 +707,47 @@ def test_the_environment_states_the_budget_and_what_is_free(
     with Workspace(session.workspace_root) as ws:
         ws.reserve(ntasks=1, holder_pid=os.getpid())
     assert f"free right now: {cpus - 1} cpu(s), 0 gpu(s)" in environment_block(session)
+    assert "call `free_resources` before a concurrent launch" in block
+
+
+def test_free_resources_shrinks_under_a_launch_and_grows_back(
+    box: Toolbox, tmp_path: Path, no_gpus: None
+) -> None:
+    """The tool reads the store at call time: a live slice is held, a finished one is free."""
+    from foundation import Workspace
+
+    cpus = _budget_cpus()
+    before = box.dispatch(_call("free_resources"))
+    assert "budget on " in before and f"free now: {cpus} cpu(s), 0 gpu(s)" in before
+    assert before.endswith("no live reservation")
+    (tmp_path / "slow.py").write_text("import time\ntime.sleep(1.5)\n")
+    launched = box.dispatch(
+        _call("launch_workflow", script="slow.py", name="slow", background=True, ntasks=1)
+    )
+    assert "launched in the background" in launched
+    during = box.dispatch(_call("free_resources"))
+    assert f"free now: {cpus - 1} cpu(s), 0 gpu(s)" in during
+    assert "held by live reservations:" in during
+    held = during.splitlines()[-1]
+    # The child claims its reservation on its own clock; either line names the slice.
+    assert "1 cpu(s)" in held and ("claimed by run " in held or "unclaimed, holder" in held)
+    listed = box.dispatch(_call("list_runs"))
+    assert listed.splitlines()[-1] == f"free now: {cpus - 1} cpu(s), 0 gpu(s)"
+    box.dispatch(_call("wait_for_run", timeout_s=60))
+    after = box.dispatch(_call("free_resources"))
+    assert f"free now: {cpus} cpu(s), 0 gpu(s)" in after and after.endswith("no live reservation")
+    with Workspace(box.session.workspace_root) as ws:
+        assert ws.runs.list_reservations() == []
+
+
+def test_free_resources_names_an_unclaimed_holder(box: Toolbox, no_gpus: None) -> None:
+    from foundation import Workspace
+
+    with Workspace(box.session.workspace_root) as ws:
+        held = ws.reserve(ntasks=1, holder_pid=os.getpid())
+    answer = box.dispatch(_call("free_resources"))
+    assert f"unclaimed, holder {os.getpid()} on {held.host}" in answer
+    assert f"free now: {_budget_cpus() - 1} cpu(s), 0 gpu(s)" in answer
 
 
 # -- sized launches -----------------------------------------------------------

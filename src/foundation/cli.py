@@ -23,7 +23,7 @@ import typer
 from foundation import _ops
 from foundation.errors import FoundationError
 from foundation.lifecycle import LifecycleState
-from foundation.models import Reservation, utcnow
+from foundation.models import Reservation
 from foundation.runtime import Workspace, describe_liveness, run_liveness, this_host
 from foundation.store import process_alive
 from slab.errors import SlabError
@@ -69,14 +69,7 @@ def _state_text(state: str, status: str) -> str:
 
 
 def _age(moment: datetime) -> str:
-    seconds = max(0.0, (utcnow() - moment).total_seconds())
-    if seconds < 60:
-        return f"{int(seconds)}s"
-    if seconds < 3600:
-        return f"{int(seconds // 60)}m"
-    if seconds < 86_400:
-        return f"{int(seconds // 3600)}h"
-    return f"{int(seconds // 86_400)}d"
+    return _ops.age_text(moment)
 
 
 def _open(workspace: Path | None) -> Workspace:
