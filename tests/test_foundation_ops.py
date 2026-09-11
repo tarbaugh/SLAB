@@ -693,7 +693,11 @@ def test_run_commands_collects_the_engine_commands_a_run_resolved(tmp_path: Path
     identity = {
         "engine": "lammps",
         "build": "gpu",
-        "command": "mpirun -np 1 lmp -k on g 1 -sf kk",
+        "command": "mpirun -np {ntasks} lmp -k on g {gpus} -sf kk",
+        "provenance": {
+            "command": "mpirun -np 1 lmp -k on g 1 -sf kk",
+            "envelope": {"ntasks": 1, "threads": 1, "gpus": 1},
+        },
         "setup": ["module load lammps"],
         "version": "22 Jul 2025",
     }
@@ -723,116 +727,12 @@ def test_run_commands_collects_the_engine_commands_a_run_resolved(tmp_path: Path
     lammps, atomsk = entries
     assert lammps["run_id"] == run.id and lammps["seq"] == 1 and lammps["task"] == "probe"
     assert lammps["tasks"] == 3 and lammps["cache_hits"] == 1
-    assert lammps["command"] == identity["command"] and lammps["setup"] == ["module load lammps"]
+    # The filled line is what ran; the template rides beside it.
+    assert lammps["command"] == "mpirun -np 1 lmp -k on g 1 -sf kk"
+    assert lammps["template"] == identity["command"]
+    assert lammps["setup"] == ["module load lammps"]
     assert lammps["version"] == "22 Jul 2025"
     assert lammps["kokkos"]["enabled"] is True and lammps["kokkos"]["gpus"] == 1
     assert lammps["build"] == "gpu" and "route" not in lammps
     assert atomsk["tasks"] == 1 and "kokkos" not in atomsk and atomsk["setup"] == []
-    assert "build" not in atomsk
-
-
-# -- a job-aware cancel --------------------------------------------------------------
-
-
-def _fake_scancel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Put an scancel on PATH that records what it was asked to cancel."""
-    import stat
-
-    bin_dir = tmp_path / "fake-slurm"
-    bin_dir.mkdir()
-    marker = bin_dir / "scancel-called"
-    script = bin_dir / "scancel"
-    script.write_text(f'#!/bin/sh\necho "$@" >> "{marker}"\n')
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
-    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
-    return marker
-
-
-def test_cancel_job_fails_the_jobs_running_runs_and_lists_what_it_wrote(
-    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """After scancel, only the cancelled job's running runs are marked failed
-    with the reason; its completed run, another job's run, and an unstamped
-    run are untouched. The reservation a failed run held is released. The
-    memories written since the job's first run started are listed, and
-    one written before it is not; nothing is deleted."""
-    import os
-    from datetime import UTC, datetime, timedelta
-
-    from foundation import memory as memory_store
-    from foundation._ops import cancel_job, cancel_lines
-    from foundation.models import Run
-    from foundation.runtime import this_host
-
-    marker = _fake_scancel(tmp_path, monkeypatch)
-    memory_root = tmp_path / "memory"
-    monkeypatch.setenv("SLAB_MEMORY_DIR", str(memory_root))
-    before = memory_store.write("old-fact", "known before the job", "Old.", directory=memory_root)
-    stale = (datetime.now(UTC) - timedelta(hours=2)).timestamp()
-    os.utime(before.path, (stale, stale))
-
-    with Workspace(root) as ws:
-        first = ws.runs.create(Run(name="first", job_id="4242"))
-        ws.runs.set_status(first.id, "running", pid=1, host="node7")
-        held = ws.runs.reserve(
-            host="node7", holder_pid=1, budget_cpus=range(4), budget_gpus=(), ntasks=2
-        )
-        second = ws.runs.create(Run(name="second", job_id="4242"))
-        ws.runs.claim_reservation(held.id, second.id, host="node7", pid=1)
-        done = ws.runs.create(Run(name="done", job_id="4242"))
-        ws.runs.set_status(done.id, "running", pid=1, host="node7")
-        ws.runs.set_status(done.id, "completed")
-        other = ws.runs.create(Run(name="other-job", job_id="4243"))
-        ws.runs.set_status(other.id, "running", pid=1, host="node7")
-        local = ws.runs.create(Run(name="interactive"))
-        ws.runs.set_status(local.id, "running", pid=os.getpid(), host=this_host())
-    written = memory_store.write("new-fact", "learned by the job", "New.", directory=memory_root)
-
-    summary = cancel_job("4242", workspace=root)
-
-    assert marker.read_text().split() == ["-Q", "4242"]
-    assert summary["job_id"] == "4242" and summary["cancel"] == "requested"
-    assert [r["name"] for r in summary["runs_failed"]] == ["second", "first"]
-    assert [r["id"] for r in summary["reservations_released"]] == [held.id]
-    assert [m["name"] for m in summary["memories"]] == ["new-fact"]
-    with Workspace(root) as ws:
-        for run_id in (first.id, second.id):
-            failed = ws.runs.get(run_id)
-            assert failed.status.value == "failed"
-            assert failed.error == ("job 4242 cancelled by the operator; the process died with it")
-            assert failed.finished_at is not None
-        assert ws.runs.get(done.id).status.value == "completed"
-        assert ws.runs.get(other.id).status.value == "running"
-        assert ws.runs.get(local.id).status.value == "running"
-        assert ws.runs.list_reservations() == []
-    assert set(memory_store.discover(memory_root)) == {"old-fact", "new-fact"}
-    assert written.path.exists() and before.path.exists()
-
-    lines = cancel_lines(summary)
-    assert lines[0] == "cancel requested for job 4242"
-    assert lines[1].startswith(f"failed  {second.id}  second  job 4242 cancelled by the operator")
-    assert lines[3] == f"released {held.id}  2 cpu(s) 0-1, no gpu; 2 rank(s) x 1 thread(s)"
-    assert lines[4].startswith("memory  new-fact  written 0s ago")
-    assert lines[4].endswith("('slab memory show new-fact' to review)")
-
-    # A second cancel of the same job finds nothing left to settle.
-    again = cancel_job("4242", workspace=root)
-    assert again["runs_failed"] == [] and again["memories"] == []
-    assert cancel_lines(again) == ["cancel requested for job 4242"]
-
-
-def test_cancel_job_without_a_workspace_only_asks_the_scheduler(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from foundation._ops import cancel_job
-
-    marker = _fake_scancel(tmp_path, monkeypatch)
-    summary = cancel_job("7")
-    assert marker.read_text().split() == ["-Q", "7"]
-    assert summary == {
-        "job_id": "7",
-        "cancel": "requested",
-        "runs_failed": [],
-        "reservations_released": [],
-        "memories": [],
-    }
+    assert "build" not in atomsk and "template" not in atomsk

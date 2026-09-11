@@ -177,6 +177,22 @@ cluster's registry file, every cached relax that used it is honestly
 invalidated, and any other spec edit (options, env, calculator path)
 invalidates the same way. See [Engines](engines.md) for the registry itself.
 
+For the `qe` and `lammps` engines, the identity is the command as written,
+the binary's detected version, the setup lines, and for `qe` the
+pseudopotential directory. A command may hold the
+placeholders `{ntasks}`, `{threads}`, and `{gpus}`, and SLAB fills them per
+launch. The filled line does not enter the key, so the same physics at four
+ranks and at eight is one cache entry. The filled line and the launch's
+envelope go into the recipe under `extra["provenance"]` instead, so the run
+record still says what ran. A width written into the command by hand, such
+as `mpirun -np 8 pw.x`, stays identity. A `cache_extra` of your own can use
+the same convention. The tracer keeps every key in the recipe and leaves
+only `provenance` out of the key.
+
+Before this rule, the filled line was the identity. A cache entry from an
+older SLAB is keyed on the filled width, so the first call after the
+upgrade misses once and recomputes. SLAB does not migrate those entries.
+
 ```python
 from ase.build import bulk
 from foundation.tasks import relax
