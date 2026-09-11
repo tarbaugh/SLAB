@@ -1921,3 +1921,53 @@ def test_the_mechanism_list_travels_into_the_sandbox_toml(tmp_path: Path) -> Non
     agent = _agent(mechanisms=["skills", "delegation"])
     text, _warnings = sandbox_toml(_slab_cfg(), agent, tmp_path / "ws")
     assert tomllib.loads(text)["agent"]["mechanisms"] == ["delegation", "skills"]
+
+
+def test_the_gpu_build_is_snapshotted_and_frozen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """[engines.lammps.gpu] is a second binary with setup lines of its own,
+    so it is snapshotted under lammps.gpu and frozen in the rendered toml
+    like a top-level engine; a failed snapshot names its table."""
+    import mason.sandbox as sandbox
+    from mason.sandbox import SetupSnapshot, snapshot_engines
+
+    cfg = _slab_cfg(
+        engines={
+            "lammps": {
+                "command": "mpirun -np {ntasks} lmp",
+                "setup": ["module load lammps/2025.07"],
+                "gpu": {
+                    "command": "mpirun -np {ntasks} lmp -k on g {gpus} -sf kk",
+                    "setup": ["module load lammps/2025.07-kokkos"],
+                },
+            }
+        }
+    )
+    calls: list[tuple[str, tuple[str, ...], str, tuple[str, ...]]] = []
+
+    def fake(
+        engine: str, setup: tuple[str, ...], payload: str, *, extras: tuple[str, ...] = ()
+    ) -> SetupSnapshot:
+        calls.append((engine, tuple(setup), payload, tuple(extras)))
+        return SetupSnapshot(engine, f"/apps/{setup[0].split('/')[-1]}/bin/{payload}", {}, ())
+
+    monkeypatch.setattr(sandbox, "snapshot_setup", fake)
+    snapshots = snapshot_engines(cfg)
+    assert set(snapshots) == {"lammps", "lammps.gpu"}
+    # The placeholder is never taken for the binary, and the launcher is probed.
+    assert calls[1] == ("lammps", ("module load lammps/2025.07-kokkos",), "lmp", ("mpirun",))
+
+    good = SetupSnapshot(
+        "lammps", "/apps/kokkos/bin/lmp", {}, (), path_prepends={"PATH": ("/apps/kokkos/bin",)}
+    )
+    text, warnings = sandbox_toml(cfg, _agent(), tmp_path / "ws", {"lammps.gpu": good})
+    gpu_table = text.split("[engines.lammps.gpu]")[1]
+    assert "module load" not in gpu_table
+    assert "/apps/kokkos/bin${PATH:+:$PATH}" in gpu_table
+    assert any(w.startswith("[engines.lammps.gpu] setup snapshotted") for w in warnings)
+
+    bad = SetupSnapshot("lammps", "", {}, (), error="module: command not found")
+    text, warnings = sandbox_toml(cfg, _agent(), tmp_path / "ws", {"lammps.gpu": bad})
+    assert "module load lammps/2025.07-kokkos" in text
+    assert any(w.startswith("[engines.lammps.gpu] has setup lines") for w in warnings)
