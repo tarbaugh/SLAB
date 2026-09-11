@@ -692,7 +692,7 @@ def test_run_commands_collects_the_engine_commands_a_run_resolved(tmp_path: Path
 
     identity = {
         "engine": "lammps",
-        "route": "lammps-gpu",
+        "build": "gpu",
         "command": "mpirun -np 1 lmp -k on g 1 -sf kk",
         "setup": ["module load lammps"],
         "version": "22 Jul 2025",
@@ -726,6 +726,6 @@ def test_run_commands_collects_the_engine_commands_a_run_resolved(tmp_path: Path
     assert lammps["command"] == identity["command"] and lammps["setup"] == ["module load lammps"]
     assert lammps["version"] == "22 Jul 2025"
     assert lammps["kokkos"]["enabled"] is True and lammps["kokkos"]["gpus"] == 1
-    assert lammps["route"] == "lammps-gpu"
+    assert lammps["build"] == "gpu" and "route" not in lammps
     assert atomsk["tasks"] == 1 and "kokkos" not in atomsk and atomsk["setup"] == []
-    assert "route" not in atomsk
+    assert "build" not in atomsk

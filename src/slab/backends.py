@@ -242,7 +242,7 @@ def describe_engine(
         ambient = _ambient_potential_sources(options)
         if ambient:
             identity["pair_coeff_files"] = ambient
-        lammps_setup = _engine_setup(options.get("setup"), "lammps")
+        lammps_setup = _lammps_setup(options.get("setup"))
         if lammps_setup:
             identity["setup"] = list(lammps_setup)
         if identity["version"] is None:
@@ -806,9 +806,8 @@ def _lammps_calculator(**options: Any) -> Any:
             "'files': ['/path/to/Cu.eam.alloy']} — without them ASE would "
             "silently fall back to a dimensionless lj/cut toy potential"
         )
-    command = str(command) if command is not None else (_lammps_setting("command") or "lmp")
-    command = fill(command, envelope())
-    setup = _engine_setup(options.pop("setup", None), "lammps")
+    command = fill(_lammps_template({"command": command}), envelope())
+    setup = _lammps_setup(options.pop("setup", None))
     _payload_guard(command, "lammps")
     run_command = command
     setup_dir: Path | None = None
@@ -968,14 +967,54 @@ def _lammps_locator(options: dict[str, Any]) -> str:
 
 
 def _lammps_template(options: dict[str, Any]) -> str:
-    """The resolved LAMMPS command as written, placeholders included. Never raises."""
+    """The resolved LAMMPS command as written, placeholders included. Never raises.
+
+    An explicit ``command`` wins. Otherwise the build follows the slice:
+    ``[engines.lammps.gpu] command`` when this launch holds gpus and the
+    table is declared, else ``[engines.lammps] command``, else ASE's
+    convention, else ``lmp``.
+    """
     try:
         command = options.get("command")
         if command is not None:
             return str(command)
+        gpu = _lammps_gpu_build()
+        if gpu is not None:
+            return gpu[0]
         return _lammps_setting("command") or "lmp"
     except Exception:  # pragma: no cover - defensive: hostile option values
         return "lmp"
+
+
+def _lammps_gpu_build() -> tuple[str, tuple[str, ...]] | None:
+    """``[engines.lammps.gpu]`` as ``(command, setup)`` when this launch holds gpus.
+
+    None when the table is not declared or the launch's
+    :func:`slab.resources.envelope` holds no gpu. The slice chooses the
+    build; nothing else does.
+    """
+    from slab.config import config_value
+
+    command = config_value("engines.lammps.gpu.command")
+    if command is None or not envelope().gpus:
+        return None
+    setup = config_value("engines.lammps.gpu.setup") or ()
+    return str(command), tuple(str(line) for line in setup)
+
+
+def _lammps_build_name() -> str:
+    """``gpu`` when the gpu build is chosen for this launch, else ``cpu``."""
+    return "gpu" if _lammps_gpu_build() is not None else "cpu"
+
+
+def _lammps_setup(per_call: Any) -> tuple[str, ...]:
+    """The LAMMPS setup lines: per-call, else the chosen build's, else ``[engines.lammps]``."""
+    if per_call is not None:
+        return _engine_setup(per_call, "lammps")
+    gpu = _lammps_gpu_build()
+    if gpu is not None:
+        return gpu[1]
+    return _engine_setup(None, "lammps")
 
 
 def _lammps_version(options: dict[str, Any]) -> str | None:
@@ -987,7 +1026,7 @@ def _lammps_version(options: dict[str, Any]) -> str | None:
     """
     try:
         command = _lammps_locator(options)
-        setup = _engine_setup(options.get("setup"), "lammps")
+        setup = _lammps_setup(options.get("setup"))
         if setup:
             return _setup_shell_version(setup, command, kind="lammps")
         identity = _executable_identity(command)

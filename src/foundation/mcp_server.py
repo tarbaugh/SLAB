@@ -531,8 +531,10 @@ def build_server(
             jobs/ directory. time_limit is HH:MM:SS. Size the job with
             ntasks_per_node (required to size), cpus_per_task, gpus_per_node,
             nodes, and mem (e.g. 240G): the size replaces the partition's
-            own directives and must fit the node that list_engines reports
-            under hpc.partitions.<name>.node; without a size the partition's
+            own directives and must fit the fields the partition declares
+            (nodes, ntasks_per_node, cpus_per_task, mem, and the gpu count
+            in gres, as list_engines reports under hpc.partitions.<name>);
+            an unset field is no cap. Without a size the partition's
             directives apply as declared."""
             from slab.resources import job_size
 

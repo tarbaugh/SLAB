@@ -101,16 +101,16 @@ def engines_list(registry_path: _RegistryOpt = None) -> None:
             typer.echo(f"  {env_name}: {', '.join(ids)}")
     lammps = overview.get("lammps") or {}
     if lammps.get("error"):
-        typer.echo(f"lammps routes: error — {lammps['error']}")
-    elif lammps.get("routes"):
-        typer.echo("lammps routes (engine= for relax, single_point, and run_lammps):")
-        for name, route in lammps["routes"].items():
+        typer.echo(f"lammps builds: error — {lammps['error']}")
+    elif lammps.get("builds"):
+        typer.echo("lammps builds (gpu build chosen when the launch holds gpus):")
+        for name, build in lammps["builds"].items():
             sized = ""
-            if route.get("placeholders"):
-                sized = f"sized per launch: {', '.join(route['placeholders'])}; "
-            typer.echo(f"  {name:<14} {route['command']}  ({sized}{_kokkos_text(route['kokkos'])})")
-            if route.get("setup"):
-                typer.echo(f"  {'':<14} setup: {'; '.join(route['setup'])}")
+            if build.get("placeholders"):
+                sized = f"sized per launch: {', '.join(build['placeholders'])}; "
+            typer.echo(f"  {name:<14} {build['command']}  ({sized}{_kokkos_text(build['kokkos'])})")
+            if build.get("setup"):
+                typer.echo(f"  {'':<14} setup: {'; '.join(build['setup'])}")
     typer.echo(f"qe protocols: {', '.join(overview['qe_protocols'])} ('slab protocols show')")
     families = overview["pseudo_families"]
     if overview.get("pseudo_families_error"):
@@ -293,12 +293,6 @@ def hpc_partitions() -> None:
         detail = f"  {extras}" if extras else ""
         description = f"  {spec.description}" if spec.description else ""
         typer.echo(f"  {name:<12}{default:<10} {time_limit}{detail}{description}")
-        if spec.node is not None:
-            mem = f", mem {spec.node.mem}" if spec.node.mem else ""
-            typer.echo(
-                f"  {'':<12}{'':<10} node: {spec.node.cpus} cpus, {spec.node.gpus} gpus{mem}; "
-                f"up to {spec.max_nodes} node(s) per job"
-            )
 
 
 _NodesOpt = Annotated[

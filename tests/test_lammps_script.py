@@ -29,8 +29,8 @@ from slab.lammps import (
     error_lines,
     kokkos_report,
     kokkos_switches,
-    lammps_route,
-    lammps_routes,
+    lammps_build,
+    lammps_builds,
     run_lammps_script,
 )
 from slab.outputs import lammps_thermo
@@ -408,7 +408,7 @@ def test_run_lammps_records_what_kokkos_did_and_the_exact_argv(
     assert plain["kokkos"]["switches"]["enabled"] is False
 
 
-def _registry_with_routes(
+def _registry_with_builds(
     tmp_path: Path, fake_lmp: str, monkeypatch: pytest.MonkeyPatch
 ) -> Path:
     """A registry with a KOKKOS LAMMPS alias, a plain alias, and a non-LAMMPS alias."""
@@ -416,11 +416,11 @@ def _registry_with_routes(
     registry.write_text(json.dumps({
         "cluster": "delta",
         "engines": {
-            "lammps-gpu": {
+            "lammps-kokkos": {
                 "calculator": "slab.backends.lammps_calculator",
                 "options": {
                     "command": f"{fake_lmp} -k on g 1 -sf kk",
-                    "setup": ["export FAKE_MARK=gpu"],
+                    "setup": ["export FAKE_MARK=kokkos"],
                 },
                 "version": "22 Jul 2025 - Update 4",
             },
@@ -436,56 +436,116 @@ def _registry_with_routes(
     return registry
 
 
-def test_lammps_routes_name_every_build_and_refuse_the_rest(
+def _gpu_table(tmp_path: Path, fake_lmp: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A slab.toml whose plain build is the fake and whose gpu build is the fake
+    under KOKKOS, asking for the launch's gpus."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "slab.toml").write_text(
+        "[engines.lammps]\n"
+        f'command = "{fake_lmp}"\n'
+        "[engines.lammps.gpu]\n"
+        f'command = "{fake_lmp} -k on g {{gpus}} -sf kk"\n'
+        'setup = ["export FAKE_MARK=gpu"]\n'
+    )
+    monkeypatch.setenv("SLAB_CPUS", "0,1")
+    monkeypatch.setenv("SLAB_NTASKS", "1")
+    monkeypatch.setenv("SLAB_THREADS", "1")
+
+
+def test_lammps_builds_name_every_build_and_refuse_the_rest(
     tmp_path: Path, fake_lmp: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A plain build and a KOKKOS build coexist as routes; a run picks one by name."""
+    """The cpu build and the registry aliases coexist as builds; a script names
+    an alias or lets the slice choose, and nothing else."""
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.delenv("SLAB_ENGINES", raising=False)
+    monkeypatch.setenv("SLAB_GPUS", "")
     monkeypatch.setenv("ASE_LAMMPSRUN_COMMAND", fake_lmp)
-    assert list(lammps_routes()) == ["lammps"]
-    _registry_with_routes(tmp_path, fake_lmp, monkeypatch)
-    routes = lammps_routes()
-    assert list(routes) == ["lammps", "lammps-gpu", "lammps-plain"]
-    assert routes["lammps"]["source"] == "builtin" and routes["lammps"]["command"] == fake_lmp
-    assert routes["lammps"]["kokkos"]["enabled"] is False
-    gpu = routes["lammps-gpu"]
-    assert gpu["source"] == "registry:delta" and gpu["setup"] == ["export FAKE_MARK=gpu"]
-    assert gpu["kokkos"] == {
+    assert list(lammps_builds()) == ["cpu"]
+    _registry_with_builds(tmp_path, fake_lmp, monkeypatch)
+    builds = lammps_builds()
+    assert list(builds) == ["cpu", "lammps-kokkos", "lammps-plain"]
+    assert builds["cpu"]["source"] == "builtin" and builds["cpu"]["command"] == fake_lmp
+    assert builds["cpu"]["kokkos"]["enabled"] is False
+    kokkos = builds["lammps-kokkos"]
+    assert kokkos["source"] == "registry:delta" and kokkos["setup"] == ["export FAKE_MARK=kokkos"]
+    assert kokkos["kokkos"] == {
         "enabled": True, "gpus": 1, "threads": None, "suffix": True, "package": None,
     }
-    assert lammps_route("lammps-gpu")["command"] == f"{fake_lmp} -k on g 1 -sf kk"
-    assert lammps_route(None) == lammps_route("lammps") == lammps_route(" LAMMPS ")
-    with pytest.raises(EngineNotAvailableError, match=r"names no engine here.*lammps-gpu"):
-        lammps_route("lammps-tpu")
-    with pytest.raises(EngineNotAvailableError, match="is not a LAMMPS route"):
-        lammps_route("emt-cluster")
+    assert lammps_build("lammps-kokkos")["command"] == f"{fake_lmp} -k on g 1 -sf kk"
+    assert lammps_build("lammps-kokkos")["build"] == "lammps-kokkos"
+    assert lammps_build(None) == lammps_build("lammps") == lammps_build(" LAMMPS ")
+    assert lammps_build()["build"] == "cpu"
+    with pytest.raises(EngineNotAvailableError, match=r"names no engine here.*cpu, lammps-kokkos"):
+        lammps_build("lammps-tpu")
+    with pytest.raises(EngineNotAvailableError, match="is not a LAMMPS build"):
+        lammps_build("emt-cluster")
 
 
-def test_run_lammps_takes_a_route_by_name_and_records_it(
+def test_run_lammps_takes_a_build_by_alias_and_records_it(
     ws: Workspace, tmp_path: Path, fake_lmp: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """info['build'] is 'cpu' by default and the alias name for engine=<alias>;
+    the cache identity carries the same key, and command= overrides."""
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    _registry_with_routes(tmp_path, fake_lmp, monkeypatch)
-    with ws.start_run(name="gpu") as run:
-        _, gpu = run_lammps(SCRIPT, atoms=_argon(), label="gpu", engine="lammps-gpu")
-    assert gpu["route"] == "lammps-gpu" and gpu["command"] == f"{fake_lmp} -k on g 1 -sf kk"
-    assert gpu["setup"] == ["export FAKE_MARK=gpu"] and gpu["kokkos"]["gpus"] == 1
-    assert "FAKE_MARK=gpu" in ws.artifacts.get(gpu["artifacts"]["gpu.log"]).read_text()
+    monkeypatch.setenv("SLAB_GPUS", "")
+    _registry_with_builds(tmp_path, fake_lmp, monkeypatch)
+    with ws.start_run(name="kokkos") as run:
+        _, kokkos = run_lammps(SCRIPT, atoms=_argon(), label="kk", engine="lammps-kokkos")
+    assert kokkos["build"] == "lammps-kokkos"
+    assert kokkos["command"] == f"{fake_lmp} -k on g 1 -sf kk"
+    assert kokkos["setup"] == ["export FAKE_MARK=kokkos"] and kokkos["kokkos"]["gpus"] == 1
+    assert "FAKE_MARK=kokkos" in ws.artifacts.get(kokkos["artifacts"]["kk.log"]).read_text()
     (task,) = ws.runs.list_tasks(run.id)
-    assert task.recipe["extra"]["route"] == "lammps-gpu"
+    assert task.recipe["extra"]["build"] == "lammps-kokkos"
+    assert "route" not in task.recipe["extra"]
     assert task.recipe["extra"]["command"] == f"{fake_lmp} -k on g 1 -sf kk"
     with ws.start_run(name="plain"):
         _, plain = run_lammps(SCRIPT, atoms=_argon(), label="plain")
-    assert plain["route"] == "lammps" and plain["kokkos"]["enabled"] is False
+    assert plain["build"] == "cpu" and plain["kokkos"]["enabled"] is False
+    assert "route" not in plain
     with ws.start_run(name="override"):
         _, over = run_lammps(
-            SCRIPT, atoms=_argon(), label="o", engine="lammps-gpu", command=fake_lmp
+            SCRIPT, atoms=_argon(), label="o", engine="lammps-kokkos", command=fake_lmp
         )
-    assert over["route"] == "lammps-gpu" and over["command"] == fake_lmp
-    assert over["setup"] == ["export FAKE_MARK=gpu"]
-    with pytest.raises(EngineNotAvailableError, match="is not a LAMMPS route"):
+    assert over["build"] == "lammps-kokkos" and over["command"] == fake_lmp
+    assert over["setup"] == ["export FAKE_MARK=kokkos"]
+    with pytest.raises(EngineNotAvailableError, match="is not a LAMMPS build"):
         run_lammps(SCRIPT, atoms=_argon(), engine="emt-cluster")
+
+
+def test_run_lammps_follows_the_slice_to_the_gpu_build(
+    ws: Workspace, tmp_path: Path, fake_lmp: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With engine='lammps' the build follows the slice: under a launch that
+    holds gpus and a declared [engines.lammps.gpu], info['build'] is 'gpu', the
+    gpu command is filled from the envelope, and the gpu setup ran; without
+    gpus the same call runs the plain build as 'cpu'. command= still wins."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("SLAB_ENGINES", raising=False)
+    _gpu_table(tmp_path, fake_lmp, monkeypatch)
+    monkeypatch.setenv("SLAB_GPUS", "0,1")
+    with ws.start_run(name="gpu") as run:
+        _, gpu = run_lammps(SCRIPT, atoms=_argon(), label="gpu")
+    assert gpu["build"] == "gpu"
+    assert gpu["command"] == f"{fake_lmp} -k on g 2 -sf kk"
+    assert gpu["setup"] == ["export FAKE_MARK=gpu"] and gpu["kokkos"]["gpus"] == 2
+    assert "FAKE_MARK=gpu" in ws.artifacts.get(gpu["artifacts"]["gpu.log"]).read_text()
+    (task,) = ws.runs.list_tasks(run.id)
+    assert task.recipe["extra"]["build"] == "gpu"
+    assert task.recipe["extra"]["command"] == f"{fake_lmp} -k on g 2 -sf kk"
+    monkeypatch.setenv("SLAB_GPUS", "")
+    with ws.start_run(name="cpu") as run:
+        _, cpu = run_lammps(SCRIPT, atoms=_argon(), label="cpu")
+    assert cpu["build"] == "cpu" and cpu["command"] == fake_lmp
+    assert cpu["setup"] == [] and cpu["kokkos"]["enabled"] is False
+    (task,) = ws.runs.list_tasks(run.id)
+    assert task.recipe["extra"]["build"] == "cpu"
+    monkeypatch.setenv("SLAB_GPUS", "0,1")
+    with ws.start_run(name="override"):
+        _, over = run_lammps(SCRIPT, atoms=_argon(), label="o", command=fake_lmp)
+    assert over["build"] == "gpu" and over["command"] == fake_lmp
+    assert over["kokkos"]["enabled"] is False
 
 
 def test_run_lammps_types_follow_specorder_and_warnings_are_collected(

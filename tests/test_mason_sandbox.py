@@ -180,7 +180,7 @@ def test_a_sized_render_sizes_the_sandbox_job_and_the_context(tmp_path: Path) ->
         {
             "default_partition": "gpu",
             "partitions": {
-                "gpu": {"gres": "gpu:a100:4", "node": {"cpus": 64, "gpus": 4}},
+                "gpu": {"gres": "gpu:a100:4", "ntasks_per_node": 64},
             },
         }
     )
@@ -499,7 +499,7 @@ def test_cli_render_takes_the_five_size_flags_and_launch_reuses_them(
     (tmp_path / "slab.toml").write_text(
         '[agent]\nmodel = "m"\n[agent.sandbox]\nimage = "/i.sif"\n'
         '[hpc]\ndefault_partition = "gpu"\n[hpc.partitions.gpu]\ngres = "gpu:a100:4"\n'
-        "[hpc.partitions.gpu.node]\ncpus = 64\ngpus = 4\n"
+        "ntasks_per_node = 64\n"
     )
     workspace = ["-w", str(tmp_path / "ws")]
     result = runner.invoke(
@@ -520,6 +520,7 @@ def test_cli_render_takes_the_five_size_flags_and_launch_reuses_them(
          "--gpus-per-node", "5"],
     )
     assert refused.exit_code != 0 and "gpus_per_node=5 exceeds the 4 gpus" in refused.output
+    assert "([hpc.partitions.gpu] gres)" in refused.output
     partial = runner.invoke(app, ["sandbox", "render", "half", *workspace, "--gpus-per-node", "1"])
     assert partial.exit_code != 0 and "pass ntasks_per_node" in partial.output
     # A bare launch reuses the recorded size: the re-render is sized the same.

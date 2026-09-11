@@ -52,19 +52,20 @@ result, info = run_lammps(SCRIPT, atoms=STRUCTURE, files=["W.eam.fs"], label="w-
 - `files=` stages potential files, data files, and restarts beside the
   script under their basenames. Name each by bare basename in the
   script; the task refuses a file the script never mentions.
-- `engine=` names the LAMMPS route: `lammps` (the plain build under
-  `[engines.lammps]`, the default) or a registry alias such as
-  `lammps-gpu` whose options carry the KOKKOS command and its module.
-  The `lammps` entry of `list_engines` lists every route with its
-  command and the switches parsed from it. Pick the plain route for
-  smoke tests and small cells, and the accelerated route for production
-  MD on the GPU partition. A route whose command holds `{ntasks}`,
-  `{threads}`, or `{gpus}` is filled from the launch's size (the
-  `placeholders` field names them), so size the launch and the route
-  follows. Nothing adds a switch a route lacks: a route whose
-  `kokkos.enabled` is false is a host run whatever the build contains.
-  `command=` and `setup=` override the chosen route, and the route and
-  the filled command enter the cache identity.
+- `engine="lammps"` is all you pass. The build follows the slice: a
+  launch sized with `gpus=` runs the gpu build under
+  `[engines.lammps.gpu]`, and an unsized launch runs the plain build
+  under `[engines.lammps]`. Never name a build. The `lammps` entry of
+  `list_engines` lists every build with its command and the switches
+  parsed from it. Run smoke tests and small cells unsized, and size
+  production MD on the GPU partition with `gpus=`. A build whose
+  command holds `{ntasks}`, `{threads}`, or `{gpus}` is filled from the
+  launch's size (the `placeholders` field names them). Nothing adds a
+  switch a build lacks: a run whose `kokkos.enabled` is false is a host
+  run whatever the build contains. `command=` and `setup=` override the
+  chosen build for that call alone. `info["build"]` names the build
+  that ran, and the build and the filled command enter the cache
+  identity.
 - `timeout_s` kills the process group; the job's time limit is the
   outer guard, and `timer timeout` inside the script (section 7) stops
   the run cleanly before either.
@@ -270,11 +271,12 @@ holds what MPI or the loader printed when LAMMPS never started.
 
 ## 10. KOKKOS and MPI
 
-The route carries the parallel launch; the script stays the same, and
-SLAB adds no switch. A machine keeps a plain build and a KOKKOS build
-as two routes, so choose by name with `engine=` and never put the GPU
-switches on the plain route. Read the `lammps` entry of `list_engines`
-before a GPU run, and `info["kokkos"]` after it.
+The build carries the parallel launch; the script stays the same, and
+SLAB adds no switch. A machine keeps a plain build and a gpu build, and
+the build follows the slice: size the launch with `gpus=` and the gpu
+build runs, leave it unsized and the plain build runs. Read the
+`lammps` entry of `list_engines` before a GPU run, and `info["kokkos"]`
+after it.
 `-sf kk` gives every style in the script its Kokkos version where one
 exists, and a fix or compute without one runs on the host and copies
 data back each step, so keep the script inside Kokkos-enabled styles

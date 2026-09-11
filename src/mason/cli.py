@@ -694,8 +694,8 @@ def _command_line(event: dict[str, Any]) -> str:
     if event.get("task"):
         tasks = int(event.get("tasks") or 1)
         where.append(f"{event['task']} x{tasks}" if tasks > 1 else str(event["task"]))
-    if event.get("route") and event.get("route") != event.get("engine"):
-        where.append(f"route {event['route']}")
+    if event.get("build") and event.get("build") != "cpu":
+        where.append(f"build {event['build']}")
     if event.get("cache_hits"):
         where.append(f"{event['cache_hits']} cached")
     if event.get("job_id"):

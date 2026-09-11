@@ -176,10 +176,9 @@ def render_sbatch(
     size states the whole shape. The gres keeps the type the partition's
     string names (``gpu:a100:4`` sizes to ``gpu:a100:2``), a partition
     whose gres names no type renders ``gpu:N``, and a size without gpus
-    renders no gres. A size the partition's declared node cannot hold is
-    refused by :func:`slab.resources.check_size` before anything renders,
-    and so is a size on a partition without a ``node`` table. Without a
-    size the output is what it always was.
+    renders no gres. A size past the partition's own declared fields is
+    refused by :func:`slab.resources.check_size` before anything renders.
+    Without a size the output is what it always was.
 
     Examples:
         >>> from slab.config import HpcConfig
@@ -204,8 +203,7 @@ def render_sbatch(
         srun pw.x -in si.pwi
         >>> from slab.resources import JobSize
         >>> gpu = HpcConfig.model_validate({
-        ...     "partitions": {"gpu": {"gres": "gpu:a100:4", "mem": "480G",
-        ...                            "node": {"cpus": 64, "gpus": 4, "mem": "480G"}}},
+        ...     "partitions": {"gpu": {"gres": "gpu:a100:4", "mem": "480G"}},
         ... })
         >>> print(render_sbatch("slab run md.py", job_name="md", partition="gpu", config=gpu,
         ...                     size=JobSize(ntasks_per_node=2, cpus_per_task=8, gpus_per_node=2)))
