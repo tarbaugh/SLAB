@@ -725,7 +725,9 @@ def run_campaign(
         without=tuple(without),
     )
     spec, roster = resolve_spec(entry_card(condition, agent))
-    mason = Mason(session, spec=spec, roster=roster)
+    # The question's result keys travel to the loop explicitly, so a finish
+    # under other names is refused at finish time, not failed at scoring.
+    mason = Mason(session, spec=spec, roster=roster, expected_results=dict(question.results))
     try:
         result = mason.run_turn(question.instruction)
     finally:

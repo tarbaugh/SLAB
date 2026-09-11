@@ -32,6 +32,9 @@ questions, in this order, and quote the text you judge.
 2. The observable. Does it say which quantity answers the question,
    with its unit, and how that quantity is read from a run? A plan
    that will "study" or "explore" has not decided what it measures.
+   Does the plan name each result exactly as the goal's reporting
+   clause does, with the unit? A finish under another name is refused
+   by the harness, and a plan that renames the result plans for that.
 3. The contract. Does every step carry a success criterion a reader can
    check from run ids alone: a number, a unit, a tolerance, and the
    check that gates verification? Convergence must be measured, not

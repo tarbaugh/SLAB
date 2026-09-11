@@ -131,6 +131,10 @@ writes nothing. The rules are code, not prompt text:
   that names anything else is refused when the card loads.
 - A critic takes no briefs. `delegate` refuses it and names the `review`
   tool instead, so every review leaves a record.
+- The critic's checklist asks whether the plan names each result exactly
+  as the goal's reporting clause does, with the unit. The harness refuses
+  a `finish` under another name, so a plan that renames the result plans
+  for a refusal.
 - The `review(subject?, focus?, agent?)` tool belongs to the leads. It
   hands `PLAN.md` (the default subject) or a file path to the critic,
   runs the critic's own loop, and returns the findings under a verdict

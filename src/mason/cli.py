@@ -217,6 +217,7 @@ def render_sandbox_files(
     condition: str | None = None,
     without: tuple[str, ...] = (),
     size: JobSize | None = None,
+    expected_results: dict[str, str] | None = None,
 ) -> tuple[Path, str]:
     """Render the sandbox job files for *goal* without submitting (public form).
 
@@ -226,6 +227,8 @@ def render_sandbox_files(
     is the condition's card, else the PI. *condition* and *without* name
     the harness arm and the mechanisms switched off from it. *size* sizes
     the sandbox job itself within the partition's declared node.
+    *expected_results* names the result keys and units the finish must
+    carry; the job passes them as ``--expect`` flags.
     """
     return _render_sandbox_files(
         goal,
@@ -238,6 +241,7 @@ def render_sandbox_files(
         condition=condition,
         without=without,
         size=size,
+        expected_results=expected_results,
     )
 
 
@@ -274,6 +278,34 @@ _WithoutOpt = Annotated[
         help="Switch one mechanism off (repeatable); 'slab benchmark matrix' lists them.",
     ),
 ]
+_ExpectOpt = Annotated[
+    list[str] | None,
+    typer.Option(
+        "--expect",
+        help="A result name and unit the finish must carry, as name:unit (repeatable); "
+        "a finish whose result names differ is refused and asked again.",
+    ),
+]
+
+
+def _parse_expect(expect: list[str] | None) -> dict[str, str] | None:
+    """The ``--expect name:unit`` flags as ``{name: unit}``; None when there are none.
+
+    Examples:
+        >>> _parse_expect(["t_melt:K", "a0:Å"])
+        {'t_melt': 'K', 'a0': 'Å'}
+        >>> _parse_expect(None) is None
+        True
+    """
+    if not expect:
+        return None
+    expected: dict[str, str] = {}
+    for item in expect:
+        name, sep, unit = item.partition(":")
+        if not sep or not name.strip() or not unit.strip():
+            _fail(f"--expect takes name:unit, for example t_melt:K; got {item!r}")
+        expected[name.strip()] = unit.strip()
+    return expected
 
 
 @app.command("chat")
@@ -365,6 +397,7 @@ def mason_run(
     agent: _AgentOpt = None,
     condition: _ConditionOpt = None,
     without: _WithoutOpt = None,
+    expect: _ExpectOpt = None,
 ) -> None:
     """One autonomous goal: loop until finish, an answer, or a harness stop.
 
@@ -375,6 +408,7 @@ def mason_run(
     from mason.mechanisms import entry_card
 
     ablated = tuple(without or ())
+    expected_results = _parse_expect(expect)
     try:
         session = _mason_session(
             workspace,
@@ -388,7 +422,7 @@ def mason_run(
             without=ablated,
         )
         spec, roster = _resolve_spec(entry_card(condition, agent))
-        mason = Mason(session, spec=spec, roster=roster)
+        mason = Mason(session, spec=spec, roster=roster, expected_results=expected_results)
         try:
             result = mason.run_turn(goal)
         finally:
@@ -1114,6 +1148,7 @@ def mason_sandbox_render(
     cpus_per_task: _CpusPerTaskOpt = None,
     gpus_per_node: _GpusPerNodeOpt = None,
     mem: _MemOpt = None,
+    expect: _ExpectOpt = None,
 ) -> None:
     """Write the batch script, slab.toml, context.md, and render.json.
 
@@ -1132,6 +1167,7 @@ def mason_sandbox_render(
         condition=condition,
         without=tuple(without or ()),
         size=_job_size(nodes, ntasks_per_node, cpus_per_task, gpus_per_node, mem),
+        expected_results=_parse_expect(expect),
     )
     typer.echo(
         "read these files, then submit with: "
@@ -1152,6 +1188,7 @@ def _render_sandbox_files(
     condition: str | None = None,
     without: tuple[str, ...] = (),
     size: JobSize | None = None,
+    expected_results: dict[str, str] | None = None,
 ) -> tuple[Path, str]:
     """Render and write the four sandbox files; echo warnings and paths."""
     import json
@@ -1199,6 +1236,7 @@ def _render_sandbox_files(
             entry_condition=condition,
             ablated=without,
             size=size,
+            expected_results=expected_results,
         )
     except (MasonError, FoundationError, SlabError) as e:
         _fail(str(e))
@@ -1218,6 +1256,7 @@ def _render_sandbox_files(
         condition=condition,
         without=without,
         size=size,
+        expected_results=expected_results,
     )
     record_path = out_dir / "render.json"
     record_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
@@ -1265,6 +1304,7 @@ def mason_sandbox_launch(
     cpus_per_task: _CpusPerTaskOpt = None,
     gpus_per_node: _GpusPerNodeOpt = None,
     mem: _MemOpt = None,
+    expect: _ExpectOpt = None,
 ) -> None:
     """Preflight, render fresh, and submit — one motion, never a stale render.
 
@@ -1278,6 +1318,7 @@ def mason_sandbox_launch(
     project = Path.cwd()
     out_dir = (out if out is not None else project / "sandbox").resolve()
     size = _job_size(nodes, ntasks_per_node, cpus_per_task, gpus_per_node, mem)
+    expected_results = _parse_expect(expect)
     if goal is None:
         record = read_render_record(out_dir)
         if record is None:
@@ -1298,6 +1339,10 @@ def mason_sandbox_launch(
             condition = str(record["condition"])
         if not without and record.get("without"):
             without = [str(name) for name in record["without"]]
+        if expected_results is None and isinstance(record.get("expected_results"), dict):
+            expected_results = {
+                str(name): str(unit) for name, unit in record["expected_results"].items()
+            } or None
         if size is None:
             try:
                 size = recorded_size(record)
@@ -1316,6 +1361,7 @@ def mason_sandbox_launch(
             condition=condition,
             without=tuple(without or ()),
             size=size,
+            expected_results=expected_results,
         )
     except (MasonError, FoundationError, SlabError) as e:
         _fail(str(e))
@@ -1337,6 +1383,7 @@ def launch_sandbox(
     condition: str | None = None,
     without: tuple[str, ...] = (),
     size: JobSize | None = None,
+    expected_results: dict[str, str] | None = None,
 ) -> SubmittedJob:
     """Preflight, render fresh into *out_dir*, and submit one sandbox job.
 
@@ -1365,6 +1412,7 @@ def launch_sandbox(
         condition=condition,
         without=without,
         size=size,
+        expected_results=expected_results,
     )
     resolved, _spec = hpc.resolve_partition(partition)
     return submit(script, job_name="mason-sandbox", partition=resolved, directory=out_dir)

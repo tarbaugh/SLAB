@@ -15,6 +15,18 @@ The instruction is the science question plus a reporting clause that
 names the result key the agent must fill in its `finish` call. The
 campaign ends when the agent finishes or the job's time limit stops it.
 
+The result keys also travel to the loop as data. `slab benchmark run`
+hands the question's keys and units to Mason directly, and `slab
+benchmark launch` renders them into the job as `--expect` flags on `slab
+mason run`, one per key, for example `--expect t_melt:K`. The loop
+checks each `finish` against them. A `finish` whose `results` names
+differ from the expected keys is not honored. Its tool result names the
+keys the finish carried and the keys and units the goal asks for, and
+the agent calls `finish` again. The check is a refusal, not a warning,
+so a campaign cannot end under a renamed key and fail only at scoring.
+A harness session over MCP gets no such check, and the scorer fails a
+renamed key there as before.
+
 A campaign **passes** when both conditions hold:
 
 1. The `finish` call carries the result key with a numeric value inside

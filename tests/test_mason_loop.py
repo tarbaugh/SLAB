@@ -621,6 +621,52 @@ def test_finish_without_a_report_is_not_honored(tmp_path: Path) -> None:
     assert any("'report' argument is missing or empty" in s for s in slots)
 
 
+def test_a_finish_under_the_wrong_result_names_is_not_honored(tmp_path: Path) -> None:
+    """The goal names its result keys; a finish under other names is the
+    drift the scorer would fail, so the loop refuses it and names the keys
+    and units it asks for. The matching second finish is honored."""
+    client = FakeClient(
+        [
+            _tool_reply("finish", report="melts at 1350 K", results={"t_m": {"value": 1350}}),
+            _tool_reply("finish", report="melts at 1350 K", results={"t_melt": {"value": 1350}}),
+        ]
+    )
+    mason = Mason(_session(tmp_path), client=client, expected_results={"t_melt": "K"})
+    result = mason.run_turn("estimate the melting point")
+    assert result.stop_reason == "finish"
+    assert result.steps == 2
+    assert set(result.results) == {"t_melt"}
+    followup = client.requests[1][0]
+    slots = [m["content"] for m in followup if m.get("role") == "tool"]
+    assert slots == [
+        "finish not honored: results name t_m; the goal asks for t_melt in K; "
+        "call finish again with results keyed exactly so"
+    ]
+
+
+def test_a_finish_with_no_results_is_refused_when_some_are_expected(tmp_path: Path) -> None:
+    client = FakeClient(
+        [
+            _tool_reply("finish", report="done"),
+            _tool_reply("finish", report="done", results={"a0": {"value": 3.6}}),
+        ]
+    )
+    mason = Mason(_session(tmp_path), client=client, expected_results={"a0": "Å"})
+    result = mason.run_turn("measure a0")
+    assert result.stop_reason == "finish" and result.steps == 2
+    slots = [m["content"] for m in client.requests[1][0] if m.get("role") == "tool"]
+    assert slots[0].startswith(
+        "finish not honored: results name nothing; the goal asks for a0 in Å"
+    )
+
+
+def test_no_expected_results_means_no_check_on_the_names(tmp_path: Path) -> None:
+    client = FakeClient([_tool_reply("finish", report="done", results={"t_m": {"value": 1}})])
+    result = Mason(_session(tmp_path), client=client).run_turn("go")
+    assert result.stop_reason == "finish" and result.steps == 1
+    assert set(result.results) == {"t_m"}
+
+
 # -- the session lock --------------------------------------------------------
 
 
