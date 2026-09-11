@@ -58,10 +58,13 @@ result, info = run_lammps(SCRIPT, atoms=STRUCTURE, files=["W.eam.fs"], label="w-
   The `lammps` entry of `list_engines` lists every route with its
   command and the switches parsed from it. Pick the plain route for
   smoke tests and small cells, and the accelerated route for production
-  MD on the GPU partition. Nothing adds a switch a route lacks: a route
-  whose `kokkos.enabled` is false is a host run whatever the build
-  contains. `command=` and `setup=` override the chosen route, and the
-  route and the command enter the cache identity.
+  MD on the GPU partition. A route whose command holds `{ntasks}`,
+  `{threads}`, or `{gpus}` is filled from the launch's size (the
+  `placeholders` field names them), so size the launch and the route
+  follows. Nothing adds a switch a route lacks: a route whose
+  `kokkos.enabled` is false is a host run whatever the build contains.
+  `command=` and `setup=` override the chosen route, and the route and
+  the filled command enter the cache identity.
 - `timeout_s` kills the process group; the job's time limit is the
   outer guard, and `timer timeout` inside the script (section 7) stops
   the run cleanly before either.
@@ -277,5 +280,10 @@ exists, and a fix or compute without one runs on the host and copies
 data back each step, so keep the script inside Kokkos-enabled styles
 and keep the thermo and dump intervals long. The lammps-potentials
 skill, section 4, has the switches, the one-task-per-GPU rule, and the
-smoke comparison against the plain build. A GPU run is a job on the GPU
-partition through `submit_job`, never login-node work.
+smoke comparison against the plain build. A GPU run is sized where it
+runs: on a login node, a job on the GPU partition through `submit_job`
+with `gpus_per_node`; inside a sandbox or an allocation, a
+`launch_workflow` call with `gpus=` and `ntasks` equal to it, which
+reserves the GPUs and the cpus before the run starts and is refused with
+the free amounts when they are taken. Never login-node work. After the
+run, `info["kokkos"]["gpus"]` must equal what the launch held.

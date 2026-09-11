@@ -98,6 +98,7 @@ from slab.engines import (
     registry_engine_names,
 )
 from slab.errors import EngineNotAvailableError
+from slab.resources import envelope, fill
 
 
 class Calculator(Protocol):
@@ -806,6 +807,7 @@ def _lammps_calculator(**options: Any) -> Any:
             "silently fall back to a dimensionless lj/cut toy potential"
         )
     command = str(command) if command is not None else (_lammps_setting("command") or "lmp")
+    command = fill(command, envelope())
     setup = _engine_setup(options.pop("setup", None), "lammps")
     _payload_guard(command, "lammps")
     run_command = command
@@ -949,15 +951,24 @@ def _is_element_symbol(name: str) -> bool:
 
 
 def _lammps_locator(options: dict[str, Any]) -> str:
-    """The command ``engine="lammps"`` would run.
+    """The command ``engine="lammps"`` would run, its placeholders filled.
 
     Mirrors the calculator's own resolution — explicit option > the slab
     config > ASE's ``$ASE_LAMMPSRUN_COMMAND`` convention > bare ``lmp`` — so
     cache identity and version detection always describe the binary that
     actually runs. An explicit ``command=None`` (a JSON ``null``, an
     ``os.environ.get`` miss) means *absent* here exactly as it does in the
-    factory — key presence must not fork the two resolutions. Never raises.
+    factory — key presence must not fork the two resolutions. The
+    ``{ntasks}``, ``{threads}``, and ``{gpus}`` placeholders are filled
+    from this launch's :func:`slab.resources.envelope`, so the filled line
+    is the cache identity. Raises only when the command asks for
+    ``{gpus}`` and the launch holds none.
     """
+    return fill(_lammps_template(options), envelope())
+
+
+def _lammps_template(options: dict[str, Any]) -> str:
+    """The resolved LAMMPS command as written, placeholders included. Never raises."""
     try:
         command = options.get("command")
         if command is not None:
@@ -1655,7 +1666,7 @@ def _qe_calculator(**options: Any) -> Any:
         # always the binary that actually ran. Guarded before ASE sees it:
         # ASE's own parse failure would be a BadConfiguration whose message
         # points everywhere except the actual problem.
-        command = command or _qe_config_command() or "pw.x"
+        command = fill(command or _qe_config_command() or "pw.x", envelope(), route="qe")
         _payload_guard(command, "qe")
         run_command = command
         if setup:
@@ -1753,7 +1764,10 @@ def _qe_locator(options: dict[str, Any]) -> tuple[str, str | None]:
     Mirrors the calculator's own resolution — ``profile=`` > explicit
     options > the slab config > the ASE config file > bare ``pw.x`` — so
     cache identity and version detection always describe the binary and
-    pseudopotential directory that actually run. Never raises.
+    pseudopotential directory that actually run. The command's
+    placeholders are filled from this launch's
+    :func:`slab.resources.envelope`, as the factory fills them. Raises
+    only when the command asks for ``{gpus}`` and the launch holds none.
     """
     try:
         profile = options.get("profile")
@@ -1771,9 +1785,10 @@ def _qe_locator(options: dict[str, Any]) -> tuple[str, str | None]:
         pseudo_dir = options.get("pseudo_dir")
         if pseudo_dir is None:
             pseudo_dir = _qe_setting("pseudo_dir")
-        return command, None if pseudo_dir is None else str(Path(pseudo_dir).expanduser())
+        resolved_dir = None if pseudo_dir is None else str(Path(pseudo_dir).expanduser())
     except Exception:  # pragma: no cover - defensive: hostile profile attrs
         return "pw.x", None
+    return fill(command, envelope(), route="qe"), resolved_dir
 
 
 def _qe_version(options: dict[str, Any]) -> str | None:
@@ -2019,12 +2034,13 @@ def _qe_config_command() -> str | None:
 
     ``[engines.qe] command`` wins verbatim. ``[engines.qe] bin`` names the
     install's bin directory instead, and the command is constructed here:
-    ``mpirun -np N <bin>/pw.x`` with N from :func:`slab.hpc.allocated_tasks`, so a job
-    uses its whole allocation and a login-node smoke test stays serial. An
+    literally ``mpirun -np {ntasks} <bin>/pw.x``, which the locator and the
+    factory fill through :func:`slab.resources.fill`, so a job uses the
+    rank count of its launch and a login-node smoke test stays serial. An
     ``mpirun`` bundled in the same bin directory wins over the PATH's — a
-    custom QE install usually links against its own MPI. The constructed
-    line enters cache identity exactly as a hand-written command would.
-    The chain ends at ASE's ``[espresso]`` section, as before.
+    custom QE install usually links against its own MPI. The filled line
+    enters cache identity exactly as a hand-written command would. The
+    chain ends at ASE's ``[espresso]`` section, as before.
     """
     from slab.config import config_value
 
@@ -2036,9 +2052,7 @@ def _qe_config_command() -> str | None:
         root = Path(str(bin_dir)).expanduser()
         bundled = root / "mpirun"
         launcher = shlex.quote(str(bundled)) if bundled.is_file() else "mpirun"
-        from slab.hpc import allocated_tasks
-
-        return f"{launcher} -np {allocated_tasks()} {shlex.quote(str(root / 'pw.x'))}"
+        return f"{launcher} -np {{ntasks}} {shlex.quote(str(root / 'pw.x'))}"
     return _qe_configured("command")
 
 

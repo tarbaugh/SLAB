@@ -30,7 +30,7 @@ from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from pathlib import Path
-from typing import TYPE_CHECKING, overload
+from typing import TYPE_CHECKING, Any, overload
 
 from foundation.artifacts import ArtifactStore
 from foundation.checks import Assertion
@@ -39,11 +39,12 @@ from foundation.errors import (
     IllegalTransitionError,
     NestedRunError,
     NoActiveRunError,
+    ResourcesError,
     RunStateError,
     failure_record,
 )
 from foundation.lifecycle import ExecutionStatus, LifecycleState
-from foundation.models import ArtifactRef, ArtifactRole, CheckResult, Run
+from foundation.models import ArtifactRef, ArtifactRole, CheckResult, Reservation, Run
 from foundation.retention import (
     DEFAULT_POLICY,
     GcReport,
@@ -54,10 +55,12 @@ from foundation.retention import (
     purge_expired,
 )
 from foundation.serialize import dumps
-from foundation.store import SQLiteRunStore
+from foundation.store import SQLiteRunStore, process_alive
 
 if TYPE_CHECKING:
     from datetime import datetime
+
+    from slab.resources import Budget
 
 _CURRENT: ContextVar[ActiveRun | None] = ContextVar("slab_active_run", default=None)
 
@@ -384,29 +387,6 @@ def this_host() -> str:
     return socket.gethostname()
 
 
-def process_alive(pid: int) -> bool:
-    """Whether a process with *pid* exists on this host.
-
-    Signal 0 probes without delivering: a process that belongs to another
-    user answers with a permission error, which still means it exists.
-
-    Examples:
-        >>> process_alive(os.getpid())
-        True
-        >>> process_alive(0)
-        False
-    """
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
 def run_liveness(run: Run, *, host: str | None = None) -> str:
     """Where a running run's process stands, as seen from *host* (this one by default).
 
@@ -454,6 +434,21 @@ def describe_liveness(run: Run, *, host: str | None = None) -> str:
             f"liveness not checked from here"
         )
     return "no process recorded; liveness unknown"
+
+
+def _claimable_from(reservation: Reservation, host: str) -> Reservation:
+    """Refuse, before a run exists, a reservation the run could not claim."""
+    if reservation.run_id is not None:
+        raise ResourcesError(
+            f"reservation {reservation.id!r} is already claimed by run "
+            f"{reservation.run_id}; one reservation serves one run"
+        )
+    if reservation.host != host:
+        raise ResourcesError(
+            f"reservation {reservation.id!r} was made for host {reservation.host!r}, "
+            f"not {host!r}; a slice of one host cannot be claimed from another"
+        )
+    return reservation
 
 
 class Workspace:
@@ -506,7 +501,12 @@ class Workspace:
 
     @contextmanager
     def start_run(
-        self, *, name: str = "", intent: str | None = None, session: str | None = None
+        self,
+        *,
+        name: str = "",
+        intent: str | None = None,
+        session: str | None = None,
+        reservation: Reservation | str | None = None,
     ) -> Iterator[ActiveRun]:
         """Open a traced run; yield its :class:`ActiveRun` handle.
 
@@ -522,8 +522,18 @@ class Workspace:
         :func:`resolve_session_id`), so one conversation's runs can be listed
         and promoted together.
 
+        *reservation* (a :class:`~foundation.models.Reservation` or its id)
+        is the slice a session process checked out for this run with
+        :meth:`reserve`. The run claims it: the slice is copied onto the run
+        record as ``resources`` and the reservation is marked as this run's,
+        in one transaction, and the reservation is released when the run
+        ends. A reservation that was released, is already claimed, or was
+        made for another host is refused with :class:`ResourcesError`
+        before the run exists.
+
         Raises:
             NestedRunError: A run is already active in this context.
+            ResourcesError: The reservation cannot be claimed.
 
         Examples:
             >>> import tempfile
@@ -539,12 +549,22 @@ class Workspace:
         """
         if _CURRENT.get() is not None:
             raise NestedRunError()
+        host = this_host()
+        reservation_id = reservation.id if isinstance(reservation, Reservation) else reservation
+        if reservation_id is not None:
+            _claimable_from(self.runs.get_reservation(reservation_id), host)
         created = self.runs.create(
             Run(name=name, intent=intent, session=resolve_session_id(session))
         )
-        self.runs.set_status(
-            created.id, ExecutionStatus.RUNNING, pid=os.getpid(), host=this_host()
-        )
+        if reservation_id is not None:
+            try:
+                self.runs.claim_reservation(reservation_id, created.id, host=host)
+            except ResourcesError as e:
+                self.runs.set_status(
+                    created.id, ExecutionStatus.FAILED, error=f"ResourcesError: {e}"
+                )
+                raise
+        self.runs.set_status(created.id, ExecutionStatus.RUNNING, pid=os.getpid(), host=host)
         active = ActiveRun(self.runs, self.artifacts, created.id)
         token = _CURRENT.set(active)
         try:
@@ -571,6 +591,96 @@ class Workspace:
         finally:
             _CURRENT.reset(token)
 
+    def reserve(
+        self,
+        *,
+        ntasks: int | None = None,
+        threads: int | None = None,
+        gpus: int = 0,
+        host: str | None = None,
+        holder_pid: int | None = None,
+        budget: Budget | None = None,
+    ) -> Reservation:
+        """Check out a slice of this host for a launch that does not exist yet.
+
+        A session process (Mason, the MCP server) calls this before it
+        starts a run, and hands the reservation to the run, which claims
+        it through :meth:`start_run`. The store computes what is free from
+        the live reservations, so two reservers on one store never
+        overlap, and a request that does not fit raises
+        :class:`ResourcesError` carrying the free ids.
+
+        *ntasks* and *threads* size the slice (``ntasks * threads`` cpus)
+        and *gpus* counts the gpus. With neither count the whole free cpu
+        budget is taken, so an unsized launch is accounted for like any
+        other. *budget* is this process's :func:`slab.resources.budget`
+        unless given, and the rank and thread defaults of an unsized slice
+        are this process's :func:`slab.resources.envelope`.
+
+        Examples:
+            >>> import tempfile
+            >>> from slab.resources import Budget
+            >>> ws = Workspace(tempfile.mkdtemp())
+            >>> held = ws.reserve(ntasks=2, gpus=1, budget=Budget(cpus=(0, 1, 2, 3), gpus=("0",)))
+            >>> (held.cpus, held.gpus, held.run_id)
+            ((0, 1), ('0',), None)
+            >>> ws.free_resources(budget=Budget(cpus=(0, 1, 2, 3), gpus=("0",)))["free"]
+            {'cpus': [2, 3], 'gpus': []}
+            >>> ws.close()
+        """
+        from slab.resources import budget as discover_budget
+        from slab.resources import envelope
+
+        found = budget if budget is not None else discover_budget()
+        defaults = envelope()
+        return self.runs.reserve(
+            host=host if host is not None else this_host(),
+            holder_pid=holder_pid if holder_pid is not None else os.getpid(),
+            budget_cpus=found.cpus,
+            budget_gpus=found.gpus,
+            ntasks=ntasks,
+            threads=threads,
+            gpus=gpus,
+            default_ntasks=defaults.ntasks,
+            default_threads=defaults.threads,
+        )
+
+    def free_resources(
+        self, *, host: str | None = None, budget: Budget | None = None
+    ) -> dict[str, Any]:
+        """What this host's budget holds and what is free right now.
+
+        The read side of :meth:`reserve`: ``budget`` and ``free`` each list
+        cpu ids and gpu ids, and ``reservations`` the ids of the live
+        reservations that hold the difference. Derived, never counted.
+        """
+        from slab.resources import budget as discover_budget
+
+        found = budget if budget is not None else discover_budget()
+        where = host if host is not None else this_host()
+        live = self.runs.live_reservations(where)
+        used_cpus = {cpu for row in live for cpu in row.cpus}
+        used_gpus = {gpu for row in live for gpu in row.gpus}
+        return {
+            "host": where,
+            "budget": {"cpus": list(found.cpus), "gpus": list(found.gpus)},
+            "free": {
+                "cpus": [cpu for cpu in found.cpus if cpu not in used_cpus],
+                "gpus": [gpu for gpu in found.gpus if gpu not in used_gpus],
+            },
+            "reservations": [row.id for row in live],
+        }
+
+    def release_dead(self) -> list[Reservation]:
+        """Release every reservation on this host that no live process holds.
+
+        An unclaimed reservation whose holder died, and a claimed one whose
+        run is no longer running and alive, are deleted and returned.
+        :meth:`reap_dead` calls this, so every reap and every wait poll
+        cleans up.
+        """
+        return self.runs.release_dead(this_host())
+
     def reap_dead(self, *, caller: str) -> list[Run]:
         """Mark failed every running run whose process on this host is gone.
 
@@ -580,7 +690,9 @@ class Workspace:
         checked with its pid; a run stamped with another host is left alone,
         because nothing about that host can be seen from here, and so is a
         run from before the stamp existed. *caller* names who marked the run
-        in its error line. Returns the runs marked failed.
+        in its error line. Returns the runs marked failed. The reservations
+        those runs held, and every other dead reservation on this host, are
+        released on the way (:meth:`release_dead`).
 
         Examples:
             >>> import tempfile
@@ -613,6 +725,7 @@ class Workspace:
                         ),
                     )
                 )
+        self.release_dead()
         return reaped
 
     def fail_run(self, run_id: str, *, reason: str) -> Run:

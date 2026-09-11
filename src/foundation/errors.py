@@ -396,6 +396,18 @@ class MemoryStoreError(FoundationError):
     """
 
 
+class ResourcesError(FoundationError):
+    """A launch's slice does not fit, or a reservation cannot be claimed.
+
+    Carries ``free`` (the cpu and gpu ids free on the host when the request
+    was refused) so a caller can size the next request without asking again.
+    """
+
+    def __init__(self, message: str, *, free: dict[str, list[object]] | None = None) -> None:
+        super().__init__(message)
+        self.free = free if free is not None else {"cpus": [], "gpus": []}
+
+
 class StorageError(FoundationError):
     """A storage-layer failure (bad data, I/O, or invariant violation)."""
 

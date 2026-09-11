@@ -852,3 +852,75 @@ def test_lammps_setup_wraps_and_cleans_up(tmp_path: Path) -> None:
     assert identity["command"] == "lmp"
     with pytest.raises(EngineNotAvailableError, match="after its setup lines ran"):
         get_calculator("lammps", command="lmp", setup=["export PATH=/nowhere"], **POTENTIAL)
+
+
+# -- placeholders ----------------------------------------------------------------------
+
+
+def test_lammps_placeholders_fill_from_the_launch_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A route command with {ntasks}/{threads}/{gpus} is filled from the envelope
+    at every resolution point, and the filled line is the cache identity."""
+    from slab.backends import _lammps_locator, _lammps_template
+    from slab.lammps import lammps_command, lammps_routes
+
+    monkeypatch.setenv("SLAB_CPUS", "0,1,2,3")
+    monkeypatch.setenv("SLAB_GPUS", "0,1")
+    monkeypatch.setenv("SLAB_NTASKS", "2")
+    monkeypatch.setenv("SLAB_THREADS", "2")
+    template = "mpirun -np {ntasks} lmp -k on g {gpus} t {threads} -sf kk"
+    assert _lammps_template({"command": template}) == template
+    assert _lammps_locator({"command": template}) == "mpirun -np 2 lmp -k on g 2 t 2 -sf kk"
+    assert lammps_command(template) == "mpirun -np 2 lmp -k on g 2 t 2 -sf kk"
+    identity = describe_engine("lammps", {"command": template})
+    assert identity["command"] == "mpirun -np 2 lmp -k on g 2 t 2 -sf kk"
+    monkeypatch.setenv("SLAB_NTASKS", "4")
+    assert describe_engine("lammps", {"command": template})["command"] != identity["command"]
+    # The plain route holds no placeholder and lists as it always did.
+    monkeypatch.delenv("SLAB_ENGINES", raising=False)
+    monkeypatch.setenv("ASE_LAMMPSRUN_COMMAND", "lmp")
+    assert lammps_routes()["lammps"]["placeholders"] == []
+
+
+def test_a_gpu_placeholder_without_a_gpu_is_refused_at_the_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from slab.backends import _lammps_locator
+
+    monkeypatch.setenv("SLAB_CPUS", "0")
+    monkeypatch.setenv("SLAB_GPUS", "")
+    with pytest.raises(EngineNotAvailableError, match=r"asks for \{gpus\} but this launch"):
+        _lammps_locator({"command": "lmp -k on g {gpus} -sf kk"})
+    with pytest.raises(EngineNotAvailableError, match=r"asks for \{gpus\}"):
+        get_calculator("lammps", command="lmp -k on g {gpus} -sf kk", **POTENTIAL)
+
+
+def test_lammps_routes_report_placeholders_and_the_filled_switches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    from slab.lammps import lammps_routes
+
+    registry = tmp_path / "engines.json"
+    registry.write_text(json.dumps({
+        "cluster": "t",
+        "engines": {
+            "lammps-gpu": {
+                "calculator": "slab.backends.lammps_calculator",
+                "options": {"command": "mpirun -np {ntasks} lmp -k on g {gpus} -sf kk"},
+            }
+        },
+    }))
+    monkeypatch.setenv("SLAB_ENGINES", str(registry))
+    monkeypatch.setenv("ASE_LAMMPSRUN_COMMAND", "lmp")
+    monkeypatch.setenv("SLAB_CPUS", "0,1")
+    monkeypatch.setenv("SLAB_NTASKS", "2")
+    monkeypatch.setenv("SLAB_GPUS", "")
+    route = lammps_routes()["lammps-gpu"]
+    assert route["command"] == "mpirun -np {ntasks} lmp -k on g {gpus} -sf kk"
+    assert route["placeholders"] == ["ntasks", "gpus"]
+    assert route["kokkos"]["enabled"] is True and route["kokkos"]["gpus"] is None  # unfillable
+    monkeypatch.setenv("SLAB_GPUS", "0,1")
+    assert lammps_routes()["lammps-gpu"]["kokkos"]["gpus"] == 2

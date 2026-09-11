@@ -296,7 +296,10 @@ gracemaker as a GPU batch job (see the mlip-training skill), and the result \
 is deployed, never imported. Anything longer \
 than a few minutes goes through `submit_job` (typically wrapping \
 `slab run workflow.py`) rather than running in this process — then poll \
-`job_status`. Keep interactive work on this node small.""",
+`job_status`. Size each job: `submit_job` takes ntasks_per_node, \
+cpus_per_task, gpus_per_node, nodes, and mem, up to the node spec that \
+`list_engines` reports under each partition, and a size past the cap is \
+refused naming it. Keep interactive work on this node small.""",
 }
 
 
@@ -435,6 +438,41 @@ def _sandbox_context_text() -> str:
         return ""
 
 
+def resources_line(session: MasonSession) -> str:
+    """The cpus line of the environment block: budget, free, default ranks, the promise.
+
+    Free is read from the run store, because the live reservations hold
+    the difference; a store that cannot be opened leaves the budget alone
+    on the line, and the tools report the fault when they are called.
+    """
+    import sqlite3
+
+    from foundation.errors import FoundationError
+    from foundation.runtime import Workspace
+    from slab.resources import budget, envelope
+
+    found = budget().counts
+    free: dict[str, int] | None = None
+    try:
+        with Workspace(session.workspace_root) as ws:
+            ws.reap_dead(caller="environment_block")
+            free = {key: len(ids) for key, ids in ws.free_resources()["free"].items()}
+    except (FoundationError, sqlite3.Error, OSError):
+        free = None
+    free_text = (
+        f"free right now: {free['cpus']} cpu(s), {free['gpus']} gpu(s); "
+        if free is not None
+        else ""
+    )
+    return (
+        f"cpus: {found['cpus']} usable in this session, gpus: {found['gpus']}; "
+        f"{free_text}an unsized launch runs with {envelope().ntasks} rank(s) and "
+        f"takes every free cpu. Size a launch with ntasks, threads, and gpus; a "
+        f"launch that does not fit what is free is refused with the free amounts, "
+        f"and so is a shell command or script that spells out more ranks."
+    )
+
+
 def environment_block(
     session: MasonSession,
     skills: dict[str, Skill] | None = None,
@@ -452,8 +490,6 @@ def environment_block(
     session offers the skill tool, and the project conventions. No
     working bounds, no memory, no team, no plan, no notebook.
     """
-    from slab.hpc import allocated_tasks, cpu_budget
-
     lines = [
         "# Environment",
         f"project directory: {session.cwd}",
@@ -461,13 +497,10 @@ def environment_block(
         f"platform: {platform.system()} {platform.machine()}",
         f"date: {datetime.now(UTC).strftime('%Y-%m-%d')}",
         f"compute profile: {session.compute_profile}",
-        # The two parallelism facts the agent must size work within: what
-        # runs here may not exceed the CPU budget, and MPI engines already
-        # launch at the stated width — do not add -np on top of it.
-        f"cpus: {cpu_budget()} usable in this session; MPI engines launch "
-        f"with {allocated_tasks()} rank(s) automatically. Size scripts and "
-        f"delegated tasks within these; a launch requesting more ranks than "
-        f"the budget is refused.",
+        # The parallelism facts the agent must size work within: the
+        # budget, what is free of it right now, the default rank count of
+        # an unsized launch, and the promise the tools keep.
+        resources_line(session),
     ]
     if minimal:
         if skills:

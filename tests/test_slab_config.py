@@ -17,6 +17,7 @@ from slab.config import (
     HpcConfig,
     LammpsEngineConfig,
     MpBuilderConfig,
+    NodeSpec,
     Partition,
     PathsConfig,
     QeEngineConfig,
@@ -275,6 +276,7 @@ def test_every_key_the_template_shows_is_a_key_the_schema_accepts() -> None:
         "[hpc]": HpcConfig,
         "[hpc.partitions.cpu]": Partition,
         "[hpc.partitions.gpu]": Partition,
+        "[hpc.partitions.gpu.node]": NodeSpec,
         "[agent]": AgentConfig,
         "[agent.serve]": ServeConfig,
         "[agent.sandbox]": SandboxConfig,
@@ -590,3 +592,44 @@ def test_rootstock_setup_lines_are_kept_verbatim(
     monkeypatch.chdir(tmp_path)
     config = load_config(tmp_path)
     assert config.engines.rootstock.setup == ("module load cuda", "source $HOME/rs/bin/activate")
+
+
+# -- node tables ---------------------------------------------------------------
+
+
+def test_partition_node_table_validates(tmp_path: Path) -> None:
+    (tmp_path / "slab.toml").write_text(
+        "[hpc.partitions.gpu]\n"
+        'gres = "gpu:a100:4"\n'
+        "max_nodes = 4\n"
+        "[hpc.partitions.gpu.node]\n"
+        "cpus = 64\n"
+        "gpus = 4\n"
+        'mem = "480G"\n'
+        "[hpc.partitions.cpu]\n"
+        "[hpc.partitions.cpu.node]\n"
+        "cpus = 128\n"
+    )
+    hpc = load_config(tmp_path).hpc
+    gpu = hpc.partitions["gpu"]
+    assert gpu.node == NodeSpec(cpus=64, gpus=4, mem="480G") and gpu.max_nodes == 4
+    cpu = hpc.partitions["cpu"]
+    assert cpu.node is not None and (cpu.node.gpus, cpu.node.mem, cpu.max_nodes) == (0, None, 1)
+    assert Partition().node is None
+
+
+@pytest.mark.parametrize(
+    ("body", "field"),
+    [
+        ("[hpc.partitions.gpu.node]\ngpus = 4\n", r"node\.cpus"),
+        ("[hpc.partitions.gpu.node]\ncpus = 0\n", r"node\.cpus"),
+        ("[hpc.partitions.gpu.node]\ncpus = 8\ngpus = -1\n", r"node\.gpus"),
+        ("[hpc.partitions.gpu.node]\ncpus = 8\nmem = \"lots\"\n", r"node\.mem"),
+        ("[hpc.partitions.gpu.node]\ncpus = 8\ncores = 8\n", r"node\.cores"),
+        ("[hpc.partitions.gpu]\nmax_nodes = 0\n", r"max_nodes"),
+    ],
+)
+def test_partition_node_table_refuses_bad_values(tmp_path: Path, body: str, field: str) -> None:
+    (tmp_path / "slab.toml").write_text(body)
+    with pytest.raises(ConfigError, match=field):
+        load_config(tmp_path)

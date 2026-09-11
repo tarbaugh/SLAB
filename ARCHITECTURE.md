@@ -550,6 +550,19 @@ idempotently. There is no remote state machine — the payload is typically
 `slab run workflow.py`, so runs, caching, and verification stay in the
 workspace wherever the process executes.
 
+A sized submission keeps "no silent defaults", because the cap is
+declared data: a partition's `node` table (`cpus`, `gpus`, `mem`) and
+`max_nodes` are the only numbers a size is checked against, a partition
+without the table cannot be sized and says which table to add, and
+without a size the script is byte for byte what it was. Inside an
+allocation the same discipline is a checkout before start: a session
+process reserves cpu ids and gpu ids in the run store inside one
+transaction, the run claims the reservation as it starts and copies the
+slice onto its record, and the reservation is released when the run
+ends or its holder dies. Free is derived from the live reservations,
+never counted, so two launches on one host never overlap and there is
+no counter to drift.
+
 ### 7d. Mason: the harness above the layer
 
 `mason` is the complement of the MCP server: MCP serves *external*

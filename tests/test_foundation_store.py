@@ -454,8 +454,10 @@ def test_migrates_v1_database_in_place(db_path: Path) -> None:
                 started_at=utcnow(),
             )
         )
-    # Rewind the database to schema v1 by dropping the v2, v3, and v4 columns.
+    # Rewind the database to schema v1 by dropping the v2 to v5 additions.
     conn = sqlite3.connect(db_path)
+    conn.execute("DROP TABLE reservations")
+    conn.execute("ALTER TABLE runs DROP COLUMN resources")
     conn.execute("ALTER TABLE runs DROP COLUMN pid")
     conn.execute("ALTER TABLE runs DROP COLUMN host")
     conn.execute("ALTER TABLE runs DROP COLUMN failure")
@@ -475,9 +477,9 @@ def test_migrates_v1_database_in_place(db_path: Path) -> None:
         failed = s2.set_status(run.id, "failed", error="x", failure={"type": "X", "message": "y"})
         assert failed.failure == {"type": "X", "message": "y"}
         assert loaded.session is None  # every later migration ran too
-        assert (loaded.pid, loaded.host) == (None, None)
+        assert (loaded.pid, loaded.host, loaded.resources) == (None, None, None)
         conn = sqlite3.connect(db_path)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
         conn.close()
 
 
@@ -486,8 +488,10 @@ def test_migrates_v2_database_in_place(db_path: Path) -> None:
     the migration adds the column and old rows read back with session=None."""
     with SQLiteRunStore(db_path) as s1:
         run = s1.create(Run(name="pre-session"))
-    # Rewind the database to schema v2 by dropping the v3 and v4 columns.
+    # Rewind the database to schema v2 by dropping the v3 to v5 additions.
     conn = sqlite3.connect(db_path)
+    conn.execute("DROP TABLE reservations")
+    conn.execute("ALTER TABLE runs DROP COLUMN resources")
     conn.execute("ALTER TABLE runs DROP COLUMN pid")
     conn.execute("ALTER TABLE runs DROP COLUMN host")
     conn.execute("DROP INDEX ix_runs_session")
@@ -505,7 +509,7 @@ def test_migrates_v2_database_in_place(db_path: Path) -> None:
         assert s2.get(fresh.id).session == "chat-1"
         assert [r.id for r in s2.list_runs(session="chat-1")] == [fresh.id]
         conn = sqlite3.connect(db_path)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
         indexes = {row[1] for row in conn.execute("PRAGMA index_list(runs)")}
         assert "ix_runs_session" in indexes
         conn.close()
@@ -519,6 +523,8 @@ def test_migrates_v3_database_in_place(db_path: Path) -> None:
         run = s1.create(Run(name="pre-stamp"))
         s1.set_status(run.id, "running")
     conn = sqlite3.connect(db_path)
+    conn.execute("DROP TABLE reservations")
+    conn.execute("ALTER TABLE runs DROP COLUMN resources")
     conn.execute("ALTER TABLE runs DROP COLUMN pid")
     conn.execute("ALTER TABLE runs DROP COLUMN host")
     conn.execute("PRAGMA user_version = 3")
@@ -532,7 +538,39 @@ def test_migrates_v3_database_in_place(db_path: Path) -> None:
         assert (stamped.pid, stamped.host) == (4242, "node7")
         assert s2.get(fresh.id).pid == 4242
         conn = sqlite3.connect(db_path)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        conn.close()
+
+
+def test_migrates_v4_database_in_place(db_path: Path) -> None:
+    """A workspace created before reservations (schema v4) opens cleanly:
+    old rows read back with resources=None, and the reservations table
+    exists and works."""
+    import os
+
+    with SQLiteRunStore(db_path) as s1:
+        run = s1.create(Run(name="pre-reservation"))
+    conn = sqlite3.connect(db_path)
+    conn.execute("DROP TABLE reservations")
+    conn.execute("ALTER TABLE runs DROP COLUMN resources")
+    conn.execute("PRAGMA user_version = 4")
+    conn.close()
+
+    with SQLiteRunStore(db_path) as s2:
+        assert s2.get(run.id).resources is None
+        held = s2.reserve(
+            host="n1", holder_pid=os.getpid(), budget_cpus=range(2), budget_gpus=(), ntasks=1
+        )
+        assert [r.id for r in s2.list_reservations()] == [held.id]
+        claimed = s2.claim_reservation(held.id, run.id, host="n1")
+        assert claimed.run_id == run.id
+        assert s2.get(run.id).resources == {
+            "cpus": [0], "gpus": [], "ntasks": 1, "threads": 1, "reservation": held.id,
+        }
+        conn = sqlite3.connect(db_path)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list(reservations)")}
+        assert "ix_reservations_host" in indexes
         conn.close()
 
 
@@ -1061,3 +1099,82 @@ def test_a_failed_open_closes_its_connection(
     with pytest.raises(sqlite3.OperationalError):
         SQLiteRunStore(tmp_path / "runs.db")
     assert closed == [True]
+
+
+# -- reservations ----------------------------------------------------------------------
+
+
+def test_two_reservers_on_one_store_never_overlap(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second reserver starts inside the first's transaction window and still
+    sees the first's row: BEGIN IMMEDIATE serializes them."""
+    import os
+    import threading
+    import time
+
+    from foundation.store import SQLiteRunStore as Store
+
+    first_inside = threading.Event()
+    original = Store._live_reservations
+
+    def slow(self: Store, conn: sqlite3.Connection, host: str) -> list:  # type: ignore[type-arg]
+        rows = original(self, conn, host)
+        if threading.current_thread().name == "first":
+            first_inside.set()
+            time.sleep(0.4)
+        return rows
+
+    monkeypatch.setattr(Store, "_live_reservations", slow)
+    a, b = Store(db_path), Store(db_path)
+    results: dict[str, object] = {}
+
+    def reserve(store: Store, key: str) -> None:
+        results[key] = store.reserve(
+            host="n1",
+            holder_pid=os.getpid(),
+            budget_cpus=range(4),
+            budget_gpus=("0", "1"),
+            ntasks=2,
+            gpus=1,
+        )
+
+    first = threading.Thread(target=reserve, args=(a, "first"), name="first")
+    second = threading.Thread(target=reserve, args=(b, "second"), name="second")
+    first.start()
+    assert first_inside.wait(5)
+    second.start()
+    first.join()
+    second.join()
+    one, two = results["first"], results["second"]
+    assert {one.cpus, two.cpus} == {(0, 1), (2, 3)}  # type: ignore[union-attr]
+    assert {one.gpus, two.gpus} == {("0",), ("1",)}  # type: ignore[union-attr]
+    assert len(a.list_reservations(host="n1")) == 2
+    a.close()
+    b.close()
+
+
+def test_release_and_transfer(store: SQLiteRunStore) -> None:
+    import os
+
+    from foundation.errors import ResourcesError
+
+    held = store.reserve(host="n1", holder_pid=os.getpid(), budget_cpus=range(2), budget_gpus=())
+    moved = store.transfer_reservation(held.id, holder_pid=1)
+    assert moved.holder_pid == 1 and store.get_reservation(held.id).holder_pid == 1
+    assert store.release_reservation(held.id) == moved
+    assert store.release_reservation(held.id) is None
+    with pytest.raises(ResourcesError, match="no reservation"):
+        store.get_reservation(held.id)
+    assert store.run_for_reservation(held.id) is None
+
+
+def test_deleting_a_run_deletes_its_reservation(store: SQLiteRunStore) -> None:
+    import os
+
+    run = store.create(Run(name="r"))
+    held = store.reserve(host="n1", holder_pid=os.getpid(), budget_cpus=range(2), budget_gpus=())
+    store.claim_reservation(held.id, run.id, host="n1")
+    store.transition(run.id, "expired", actor="ttl")
+    store.delete_run(run.id)
+    assert store.list_reservations() == []

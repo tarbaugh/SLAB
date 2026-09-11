@@ -90,8 +90,14 @@ build is compiled for the node's GPU architecture, so a cluster ships
 it as a separate module. The `-h` banner of the binary lists the
 installed packages, and KOKKOS must be among them. Module loads go in
 `[engines.lammps] setup` or in a registry alias, never in the input. A
-GPU run is a batch job on the GPU partition through `submit_job`, with
-one MPI task per GPU. Never start a GPU run on the login node.
+GPU run is sized where it runs. On a login node it is a batch job on the
+GPU partition through `submit_job` with `gpus_per_node` and
+`ntasks_per_node` equal to it. Inside a sandbox or an allocation it is a
+`launch_workflow` call with `gpus=` and `ntasks=` equal to it, which
+reserves that slice before the run starts; a slice that does not fit
+what is free is refused with the free amounts, so read `list_engines`
+(`budget` and `free`) and size within it. One MPI task per GPU either
+way. Never start a GPU run on the login node itself.
 
 The switches ride in a route's `command`. A machine keeps more than one
 LAMMPS, so each build is a route with a name: `lammps` is the plain
@@ -103,14 +109,21 @@ smoke test or a small EAM cell never queues for a GPU. ASE appends its
 own flags after the switches. SLAB adds no switch: a route without
 `-k on` runs the plain styles on the host, silently, whatever the build
 contains. The `lammps` entry of `list_engines` lists every route with
-its command and the switches parsed from it. Read it before a GPU run.
-When no accelerated route exists, pass `command=` with the switches on
-that call alone, and report the missing route as a machine fact.
+its command and the switches parsed from it. A route whose command
+holds `{ntasks}`, `{threads}`, or `{gpus}` is marked `sized per launch`:
+SLAB fills those from the launch's size, so `gpus=2` on the launch runs
+`-np 2 ... g 2` on such a route, and a route that asks `{gpus}` under a
+launch without one is refused naming the route. A route that hardcodes
+its numbers runs as written whatever the launch held. Read it before a
+GPU run. When no accelerated route exists, pass `command=` with the
+switches on that call alone, and report the missing route as a machine
+fact.
 
 | Hardware | the route's `command` | Meaning |
 | --- | --- | --- |
 | One GPU | `mpirun -np 1 lmp -k on g 1 -sf kk -pk kokkos newton on neigh half` | one MPI task, one GPU |
 | N GPUs on one node | `mpirun -np N lmp -k on g N -sf kk -pk kokkos newton on neigh half` | `-np` equals the number of GPUs on the node |
+| Sized per launch | `mpirun -np {ntasks} lmp -k on g {gpus} -sf kk -pk kokkos newton on neigh half` | the launch's `ntasks` and `gpus` fill in; keep them equal |
 | CPU threads | `env OMP_PROC_BIND=spread OMP_PLACES=threads mpirun -np 2 lmp -k on t 8 -sf kk` | two MPI tasks with eight OpenMP threads each; tasks times threads never exceeds the physical cores |
 
 - `-k on` enables KOKKOS and issues a `package kokkos` command with its
@@ -134,9 +147,11 @@ that call alone, and report the missing route as a machine fact.
   switches there.
 - After a `run_lammps`, `info["kokkos"]` says what the log reported:
   `enabled`, `gpus` per node, `threads` per task, and the `/kk` styles
-  that ran. Check that `gpus` equals what you asked for before you trust
+  that ran. Check that `gpus` equals what the launch held (`gpus=` on
+  `launch_workflow`, `gpus_per_node` on `submit_job`) before you trust
   a timing or a number from a GPU run. The transcript records the
-  command every run resolved, so a reviewer can check it too.
+  command every run resolved and the slice each launch held, so a
+  reviewer can check both.
 
 How SLAB drives MD matters here. The `run_lammps` task (the
 lammps-scripting skill) runs a whole input script inside LAMMPS, so the

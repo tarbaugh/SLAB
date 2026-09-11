@@ -29,7 +29,7 @@ Twenty-four tools, each a thin wrapper over the operations layer, and three more
 
 | Tool | What it does |
 | --- | --- |
-| `launch_workflow` | Execute a plain-Python workflow script in a fresh traced run that carries this server's session id. |
+| `launch_workflow` | Execute a plain-Python workflow script in a fresh traced run that carries this server's session id. `ntasks`, `threads`, and `gpus` size the run. The server reserves the slice, the run takes it as an affinity mask plus `CUDA_VISIBLE_DEVICES`, and a slice that does not fit what is free is refused with the free amounts. |
 | `wait_for_run` | Block until a run finishes or the timeout passes. Takes an id, a prefix, or a run name; without one, waits for every running run of this session. A run whose recorded process on this host is gone is marked failed and answered at once with outcome `process_gone`. |
 | `list_runs` | Runs newest first, filterable by lifecycle `state`, execution `status`, and the `session` that created them. Marks failed every running run whose recorded process on this host is gone before it lists. |
 | `show_run` | Everything about one run: checks, tasks, artifacts, history, failure evidence. |
@@ -38,13 +38,13 @@ Twenty-four tools, each a thin wrapper over the operations layer, and three more
 | `promote_session` | Promote every run one session created, reporting each outcome. |
 | `expire_runs` | Expire unpromoted runs past their TTL. `older_than="0d"` means everything, now. |
 | `gc` | Drop artifact bytes no retention rule demands. `dry_run=True` only reports. |
-| `list_engines` | Built-in engines, the cluster registry's declarations, rootstock checkpoint ids, QE protocols, installed pseudo families, the configured builders. |
+| `list_engines` | Built-in engines, the cluster registry's declarations, rootstock checkpoint ids, QE protocols, installed pseudo families, the configured builders, each partition's declared node, and this host's `budget` with what is `free` right now. |
 | `list_tasks` | The traced tasks a workflow script may call: name, signature, and a one-line summary each. |
 | `describe_task` | One task's full signature and docstring. |
 | `search_materials` | Filtered search over the offline Materials Project snapshot (`[builders.mp]`): elements, ranges, ordering, a row cap. |
 | `get_material` | One snapshot record by material id, with its elements and the resolved CIF path. Absence is reported as absence; there is no online fallback. |
 | `query_materials` | One read-only `SELECT` over the snapshot's metadata database, for what the filters cannot express. |
-| `submit_job`, `job_status`, `cancel_job` | SLURM batch jobs, with the scripts kept under the workspace's `jobs/` directory. Present only when `slab.toml` configures `[hpc]` partitions. |
+| `submit_job`, `job_status`, `cancel_job` | SLURM batch jobs, with the scripts kept under the workspace's `jobs/` directory. Present only when `slab.toml` configures `[hpc]` partitions. `submit_job` takes `nodes`, `ntasks_per_node`, `cpus_per_task`, `gpus_per_node`, and `mem`; the size replaces the partition's directives and must fit the node the partition declares. |
 | `notebook` | Append a dated entry to the project's `NOTEBOOK.md`, or read its latest entries. |
 | `plan` | Rewrite the project's `PLAN.md`, or read it. |
 | `list_memories`, `recall`, `remember` | The machine's memory: what earlier sessions on this machine recorded about its software. See [Machine memory](memory.md). |
@@ -64,7 +64,9 @@ Three of the resident agent's tools are not offered over MCP, because they are m
 
 Files and a shell are not offered either. A harness brings its own. The science review that flags a campaign reads Mason transcripts, so a harness session is scored but not reviewed.
 
-**`launch_workflow(script_path, name=None, intent=None)`** runs a zero-ceremony script inside a fresh run that lands in quarantine. A zero-ceremony script has bare `@task` calls and `@check` declarations, with no `Workspace` or `start_run` of its own. The result carries the `run_id`, the final `state` (`verified` if all checks passed), the check counts, and the captured `output`. On failure, it includes the structured `failure` record, and if even recording the failure failed (storage died mid-crash), a raw `traceback` string appears instead. Always pass `intent`, which says why this run exists.
+**`launch_workflow(script_path, name=None, intent=None, ntasks=None, threads=None, gpus=None)`** runs a zero-ceremony script inside a fresh run that lands in quarantine. A zero-ceremony script has bare `@task` calls and `@check` declarations, with no `Workspace` or `start_run` of its own. The result carries the `run_id`, the final `state` (`verified` if all checks passed), the check counts, the `resources` the run held, and the captured `output`. On failure, it includes the structured `failure` record, and if even recording the failure failed (storage died mid-crash), a raw `traceback` string appears instead. Always pass `intent`, which says why this run exists.
+
+The three size arguments make the launch sized. The server reserves `ntasks x threads` cpu ids and `gpus` gpu ids of its host before the run starts, runs the script as a child process that claims the reservation, and the child takes the slice as its affinity mask and `CUDA_VISIBLE_DEVICES`. A slice that does not fit what is free is refused with the free amounts, and `list_engines` reports `budget` and `free` so a harness sizes within them. An unsized launch runs in the server's process and reserves every free cpu. The Mason tool takes the same three arguments, and the reservation is released when the run ends or the holder dies; see [Mason](mason.md#compute-budget-sizing-the-physics-to-the-machine) for the guarantee.
 
 **`show_run(run_id)`** is the evidence surface. Beyond the run's fields, it returns check results with the observed/expected values their assertions compared, traced tasks with recipes and cache-hit flags, artifacts annotated with `bytes_available` (still stored, or hash-and-discarded), and the full lifecycle history. Failed runs and tasks carry a `failure` record with the exception type, message, trimmed traceback, and diagnostic notes, which is the input for a specific correction instead of a blind retry. Ids accept unique prefixes, git-style, here and in `promote_run`.
 

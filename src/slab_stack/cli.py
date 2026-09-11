@@ -42,7 +42,19 @@ from mason.errors import MasonError
 from mason.serve import mason_dir, read_record
 from mason.session import session_sidecars, transcript_groups
 from slab._version import __version__
-from slab.cli import config_app, engines_app, hpc_app, mp_app, protocols_app, pseudos_app
+from slab.cli import (
+    _CpusPerTaskOpt,
+    _GpusPerNodeOpt,
+    _MemOpt,
+    _NodesOpt,
+    _NtasksPerNodeOpt,
+    config_app,
+    engines_app,
+    hpc_app,
+    mp_app,
+    protocols_app,
+    pseudos_app,
+)
 from slab.errors import SlabError
 from slab.hpc import SchedulerNotAvailableError, active_job_ids
 from slab_stack import benchmark, review
@@ -642,12 +654,29 @@ def benchmark_launch(
     ] = None,
     condition: _ConditionOpt = None,
     without: _WithoutOpt = None,
+    nodes: _NodesOpt = None,
+    ntasks_per_node: _NtasksPerNodeOpt = None,
+    cpus_per_task: _CpusPerTaskOpt = None,
+    gpus_per_node: _GpusPerNodeOpt = None,
+    mem: _MemOpt = None,
 ) -> None:
-    """Submit one campaign as a sandbox job; score it with 'score' after it ends."""
+    """Submit one campaign as a sandbox job; score it with 'score' after it ends.
+
+    The five size flags size the sandbox job itself within the partition's
+    declared node; inside it the agent sizes each launch.
+    """
     from mason.cli import launch_sandbox
+    from slab.resources import job_size
 
     out_dir = (out if out is not None else Path.cwd() / "sandbox").resolve()
     try:
+        size = job_size(
+            nodes=nodes,
+            ntasks_per_node=ntasks_per_node,
+            cpus_per_task=cpus_per_task,
+            gpus_per_node=gpus_per_node,
+            mem=mem,
+        )
         asked = benchmark.find_question(question)
         job = launch_sandbox(
             asked.instruction,
@@ -660,6 +689,7 @@ def benchmark_launch(
             agent=agent,
             condition=condition,
             without=tuple(without or ()),
+            size=size,
         )
     except _BENCH_ERRORS as e:
         _fail(str(e))

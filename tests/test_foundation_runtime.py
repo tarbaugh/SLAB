@@ -428,3 +428,148 @@ def test_fail_run_retires_what_reap_cannot_judge_and_refuses_a_live_process(
 
     with pytest.raises(RunStateError, match="not 'running'"):
         ws.fail_run(away.id, reason="twice")
+
+
+# -- reservations ----------------------------------------------------------------
+
+
+def _budget(cpus: int = 4, gpus: int = 2):
+    from slab.resources import Budget
+
+    return Budget(cpus=tuple(range(cpus)), gpus=tuple(str(n) for n in range(gpus)))
+
+
+def test_reserve_then_claim_round_trip(ws: Workspace) -> None:
+    """A session reserves, the run claims: the slice lands on the run record and
+    the reservation is the run's; when the run ends the reservation is released."""
+    from foundation.runtime import this_host
+
+    held = ws.reserve(ntasks=2, threads=1, gpus=1, budget=_budget())
+    assert (held.cpus, held.gpus, held.host, held.run_id) == ((0, 1), ("0",), this_host(), None)
+    with ws.start_run(name="sized", reservation=held) as run:
+        live = ws.runs.get(run.id)
+        assert live.resources == {
+            "cpus": [0, 1], "gpus": ["0"], "ntasks": 2, "threads": 1, "reservation": held.id,
+        }
+        assert ws.runs.get_reservation(held.id).run_id == run.id
+        assert ws.free_resources(budget=_budget())["free"] == {"cpus": [2, 3], "gpus": ["1"]}
+        assert ws.runs.run_for_reservation(held.id).id == run.id
+    assert ws.runs.get(run.id).resources["reservation"] == held.id  # provenance stays
+    assert ws.runs.list_reservations() == []  # the run ended: released
+    assert ws.free_resources(budget=_budget())["free"] == {"cpus": [0, 1, 2, 3], "gpus": ["0", "1"]}
+    assert ws.runs.run_for_reservation(held.id).id == run.id
+
+
+def test_start_run_accepts_the_reservation_id(ws: Workspace) -> None:
+    held = ws.reserve(ntasks=1, budget=_budget())
+    with ws.start_run(name="by-id", reservation=held.id) as run:
+        assert ws.runs.get(run.id).resources["cpus"] == [0]
+
+
+def test_a_reservation_that_does_not_fit_is_refused_with_the_free_amounts(ws: Workspace) -> None:
+    from foundation.errors import ResourcesError
+
+    ws.reserve(ntasks=3, budget=_budget())
+    with pytest.raises(ResourcesError, match=r"2 rank\(s\) x 1 thread\(s\) = 2 cpus asked") as e:
+        ws.reserve(ntasks=2, budget=_budget())
+    assert e.value.free == {"cpus": [3], "gpus": ["0", "1"]}
+    with pytest.raises(ResourcesError, match=r"3 gpu\(s\) asked, but only 2") as e:
+        ws.reserve(ntasks=1, gpus=3, budget=_budget())
+    assert e.value.free["cpus"] == [3]
+
+
+def test_an_unsized_reservation_takes_the_whole_free_budget(
+    ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("SLAB_CPUS", "SLAB_GPUS", "SLAB_NTASKS", "SLAB_THREADS", "SLURM_CPUS_PER_TASK"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SLURM_NTASKS", "2")
+    first = ws.reserve(ntasks=1, budget=_budget())
+    whole = ws.reserve(budget=_budget())
+    assert whole.cpus == (1, 2, 3) and whole.gpus == () and whole.ntasks == 2
+    assert whole.threads == 1
+    from foundation.errors import ResourcesError
+
+    with pytest.raises(ResourcesError, match="no cpu is free"):
+        ws.reserve(budget=_budget())
+    ws.runs.release_reservation(first.id)
+    ws.runs.release_reservation(whole.id)
+    monkeypatch.setenv("SLURM_NTASKS", "8")
+    monkeypatch.setenv("SLURM_CPUS_PER_TASK", "4")
+    shrunk = ws.reserve(budget=_budget())
+    assert (shrunk.ntasks, shrunk.threads, shrunk.cpus) == (4, 1, (0, 1, 2, 3))
+
+
+def test_a_reservation_whose_holder_died_is_released_by_reap(ws: Workspace) -> None:
+    """The holder's death frees the slice at once (free is derived), and the
+    next reap deletes the row; a claim of the released reservation is refused."""
+    from foundation.errors import ResourcesError
+
+    gone = _vanished_pid()
+    dead = ws.reserve(ntasks=2, budget=_budget(), holder_pid=gone)
+    assert ws.free_resources(budget=_budget())["free"]["cpus"] == [0, 1, 2, 3]
+    again = ws.reserve(ntasks=2, budget=_budget())  # overlaps the dead row, by design
+    assert again.cpus == (0, 1)
+    assert ws.reap_dead(caller="test") == []
+    assert [r.id for r in ws.runs.list_reservations()] == [again.id]
+    with (
+        pytest.raises(ResourcesError, match=f"no reservation '{dead.id}'"),
+        ws.start_run(name="late", reservation=dead.id),
+    ):
+        pass
+    assert ws.runs.list_runs() == []  # refused before any run existed
+
+
+def test_a_claimed_or_foreign_reservation_is_refused(ws: Workspace) -> None:
+    from foundation.errors import ResourcesError
+    from foundation.models import Run
+
+    held = ws.reserve(ntasks=1, budget=_budget())
+    other = ws.runs.create(Run(name="other"))
+    ws.runs.claim_reservation(held.id, other.id, host=held.host)
+    with (
+        pytest.raises(ResourcesError, match="already claimed by run"),
+        ws.start_run(name="second", reservation=held.id),
+    ):
+        pass
+    away = ws.runs.reserve(
+        host="another-node", holder_pid=1, budget_cpus=range(2), budget_gpus=(), ntasks=1
+    )
+    with (
+        pytest.raises(ResourcesError, match="made for host 'another-node'"),
+        ws.start_run(name="elsewhere", reservation=away.id),
+    ):
+        pass
+    with pytest.raises(ResourcesError, match="a claimed reservation belongs to its run"):
+        ws.runs.transfer_reservation(held.id, holder_pid=2)
+
+
+def test_free_shrinks_and_grows_as_runs_start_and_end(ws: Workspace) -> None:
+    def free() -> list[int]:
+        return ws.free_resources(budget=_budget(cpus=6, gpus=0))["free"]["cpus"]
+
+    assert free() == [0, 1, 2, 3, 4, 5]
+    a = ws.reserve(ntasks=2, budget=_budget(cpus=6, gpus=0))
+    assert free() == [2, 3, 4, 5]
+    with ws.start_run(name="a", reservation=a):
+        b = ws.reserve(ntasks=3, budget=_budget(cpus=6, gpus=0))
+        assert b.cpus == (2, 3, 4) and free() == [5]
+    assert free() == [0, 1, 5]  # a ended; b is still held, unclaimed
+    with pytest.raises(RuntimeError), ws.start_run(name="b", reservation=b):
+        assert free() == [0, 1, 5]
+        raise RuntimeError("boom")
+    assert free() == [0, 1, 2, 3, 4, 5]  # a failed run releases too
+
+
+def test_a_reaped_run_releases_its_reservation(ws: Workspace) -> None:
+    from foundation.models import Run
+    from foundation.runtime import this_host
+
+    held = ws.reserve(ntasks=1, budget=_budget())
+    run = ws.runs.create(Run(name="killed"))
+    ws.runs.claim_reservation(held.id, run.id, host=held.host)
+    ws.runs.set_status(run.id, "running", pid=_vanished_pid(), host=this_host())
+    assert ws.free_resources(budget=_budget())["free"]["cpus"] == [0, 1, 2, 3]
+    assert [r.id for r in ws.reap_dead(caller="test")] == [run.id]
+    assert ws.runs.list_reservations() == []
+    assert ws.runs.get(run.id).resources["reservation"] == held.id

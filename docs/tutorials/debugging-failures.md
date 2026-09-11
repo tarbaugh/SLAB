@@ -348,6 +348,39 @@ trouble. Every run is born quarantined and stays there until its checks
 pass, so the listings word it as `quarantined (initial state)` while the
 status is `running`.
 
+## A reservation whose holder died
+
+A sized launch reserves its slice of cpus and gpus before the run exists,
+and a session process holds the reservation until the run claims it. A
+session that dies in that window leaves a reservation with no run. It
+holds nothing, because free is derived from the reservations whose
+holder is alive, but `slab runs reservations` shows it so an operator can
+see a stuck one. The workspace below holds two reservations on a 16-cpu,
+2-gpu budget. The first holder is gone, the second is alive:
+
+```text
+$ slab runs reservations -w .slab
+01m26z8304mrj3823kr38qnt4t  8 cpu(s) 0-7, 1 gpu(s) 0; 4 rank(s) x 2 thread(s)  unclaimed, holder 51033 on node1 (gone)  0s
+01m26z8305yqqt3h0sm2na1b0w  2 cpu(s) 0-1, 1 gpu(s) 0; 2 rank(s) x 1 thread(s)  unclaimed, holder 51032 on node1 (alive)  0s
+free on node1: 14 of 16 cpu(s), 1 of 2 gpu(s)
+```
+
+The free line already omits the dead holder's slice. `slab runs reap`
+releases every reservation on this host that no live process holds, and
+then marks failed the running runs whose process is gone as before:
+
+```text
+$ slab runs reap -w .slab
+released 01m26z8304mrj3823kr38qnt4t  8 cpu(s) 0-7, 1 gpu(s) 0; 4 rank(s) x 2 thread(s)  unclaimed, holder 51033 on node1 (gone)  0s
+0 run(s) marked failed, 1 reservation(s) released
+```
+
+Mason and the MCP server run the same release before every launch and
+on every `list_runs` and `wait_for_run` call, so a crashed session never
+keeps a slice from the next one. A reservation claimed by a run is
+released when the run ends, and `slab show` prints the slice the run
+held under `resources`.
+
 ## The surfaces
 
 `slab show` renders each traceback under its owner. The run's `failure`

@@ -51,13 +51,35 @@ class LammpsOutcome:
 def lammps_command(command: str | None = None) -> str:
     """The command that runs LAMMPS: per-call, else the engine's own resolution.
 
+    The ``{ntasks}``, ``{threads}``, and ``{gpus}`` placeholders are
+    filled from this launch's :func:`slab.resources.envelope`.
+
     Examples:
         >>> lammps_command("/opt/lammps/bin/lmp")
         '/opt/lammps/bin/lmp'
+        >>> import os
+        >>> os.environ.update(SLAB_CPUS="0,1,2,3", SLAB_GPUS="0,1")
+        >>> os.environ.update(SLAB_NTASKS="2", SLAB_THREADS="2")
+        >>> lammps_command("mpirun -np {ntasks} lmp -k on g {gpus} t {threads} -sf kk")
+        'mpirun -np 2 lmp -k on g 2 t 2 -sf kk'
+        >>> for name in ("SLAB_CPUS", "SLAB_GPUS", "SLAB_NTASKS", "SLAB_THREADS"):
+        ...     del os.environ[name]
     """
     from slab.backends import _lammps_locator
 
     return _lammps_locator({"command": command})
+
+
+def lammps_template(command: str | None = None) -> str:
+    """The LAMMPS command as written, placeholders unfilled: what a listing shows.
+
+    Examples:
+        >>> lammps_template("mpirun -np {ntasks} lmp")
+        'mpirun -np {ntasks} lmp'
+    """
+    from slab.backends import _lammps_template
+
+    return _lammps_template({"command": command})
 
 
 def lammps_setup(setup: str | tuple[str, ...] | list[str] | None = None) -> tuple[str, ...]:
@@ -144,16 +166,23 @@ def lammps_routes() -> dict[str, dict[str, Any]]:
     """Every LAMMPS route on this machine, resolved: command, setup, KOKKOS switches.
 
     The built-in ``lammps`` first, then each registry alias that runs the
-    LAMMPS factory, in name order. The switches are parsed from each
-    resolved command because SLAB adds none. No binary is probed.
+    LAMMPS factory, in name order. ``command`` is the route's command as
+    written and ``placeholders`` the ``{ntasks}``, ``{threads}``, and
+    ``{gpus}`` it asks for, which a launch fills. The switches are parsed
+    from the command filled for this process's envelope, or from the
+    template when it cannot be filled here, because SLAB adds none. No
+    binary is probed.
 
     Examples:
         >>> import os
         >>> os.environ.pop("SLAB_ENGINES", None) and None
         >>> list(lammps_routes())
         ['lammps']
+        >>> lammps_routes()["lammps"]["placeholders"]
+        []
     """
     from slab.engines import load_registry
+    from slab.resources import envelope, fill, placeholders
 
     routes: dict[str, dict[str, Any]] = {}
     names = ["lammps"]
@@ -164,12 +193,17 @@ def lammps_routes() -> dict[str, dict[str, Any]]:
         )
     for name in names:
         route = lammps_route(name)
-        command = lammps_command(route["command"])
+        template = lammps_template(route["command"])
+        try:
+            filled = fill(template, envelope(), route=name)
+        except EngineNotAvailableError:
+            filled = template
         routes[name] = {
             "source": route["source"],
-            "command": command,
+            "command": template,
+            "placeholders": placeholders(template),
             "setup": list(lammps_setup(route["setup"])),
-            "kokkos": kokkos_switches(command),
+            "kokkos": kokkos_switches(filled),
         }
     return routes
 

@@ -25,6 +25,7 @@ Contracts the primitives enforce in code, not prompt text:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -43,12 +44,14 @@ if TYPE_CHECKING:
 from foundation import _ops
 from foundation import memory as memory_store
 from foundation.errors import FoundationError, MemoryStoreError
+from foundation.models import Reservation
 from foundation.project import plan_write
 from foundation.runtime import describe_liveness
 from mason.client import ToolCall
 from mason.mechanisms import enabled
 from mason.session import MasonSession
 from mason.skills import Skill, discover_skills, listing, visible_catalog
+from slab.errors import SlabError
 
 #: Every tool name any session can build. Agent cards validate their
 #: ``tools:`` allowlists against this set, so a typo is refused even when the
@@ -1092,29 +1095,65 @@ def _add_file_tools(
 _RANK_FLAG = re.compile(r"\b(?:mpirun|mpiexec|srun)\b[^\n;|&]*?(?:-np|--ntasks|-n)[=\s]+(\d+)")
 
 
-def _rank_overcommit(text: str) -> str | None:
-    """A refusal when *text* asks for more MPI ranks than this session has.
+def _rank_overcommit(text: str, *, limit: int | None = None) -> str | None:
+    """A refusal when *text* asks for more MPI ranks than *limit* cpus.
 
     Guards the two surfaces that execute HERE (the shell and
     launch_workflow); submit_job is deliberately exempt, because its
-    payload runs in its own allocation with its own budget. The refusal is
-    a tool result the model reads and adapts to, never an exception.
+    payload runs in its own allocation with its own budget. The shell
+    compares against the session's whole cpu budget (the default); a
+    launch compares against its own slice, because that slice is all the
+    run may use whatever the budget holds. The refusal is a tool result
+    the model reads and adapts to, never an exception.
     """
     from slab.hpc import cpu_budget
 
     requested = max(
         (int(m.group(1)) for m in _RANK_FLAG.finditer(text)), default=0
     )
-    budget = cpu_budget()
+    budget = cpu_budget() if limit is None else limit
     if requested > budget:
+        where = "usable in this session" if limit is None else "in this launch's slice"
         return (
             f"refused: this launches {requested} MPI rank(s) but only {budget} "
-            f"cpu(s) are usable in this session. Size the launch within that "
+            f"cpu(s) are {where}. Size the launch within that "
             f"budget — and prefer the configured engine (engine='qe' with "
             f"calculator_options) over a hand-written mpirun: it already "
             f"launches at the right width."
         )
     return None
+
+
+# The run driver spelled out in a shell command. A run the shell starts
+# holds no reservation, so the store could not account for it, and every
+# other launch on this host would size itself against a free count that
+# omits it. The rule matches the existing one: physics goes through
+# launch_workflow.
+_DRIVER_INVOCATION = re.compile(
+    r"(?:\b(?:slab|foundation)\s+run\b|\bfoundation\.cli\s+run\b)"
+)
+
+
+def _driver_in_shell(command: str) -> str | None:
+    """A refusal when a shell *command* invokes the run driver by hand.
+
+    Examples:
+        >>> _driver_in_shell("slab run wf.py") is not None
+        True
+        >>> _driver_in_shell("python -m foundation.cli run wf.py") is not None
+        True
+        >>> _driver_in_shell("slab list") is None
+        True
+    """
+    if _DRIVER_INVOCATION.search(command) is None:
+        return None
+    return (
+        "refused: 'slab run' from the shell starts a run that holds no reservation, "
+        "so the store cannot account for its cpus and gpus, and every other launch "
+        "on this host would size itself against a free count that omits it. Use "
+        "launch_workflow (with ntasks, threads, and gpus to size it; background=true "
+        "for a long run) instead."
+    )
 
 
 # -- shell -------------------------------------------------------------------
@@ -1124,6 +1163,8 @@ def _add_shell_tool(box: Toolbox, session: MasonSession) -> None:
     def shell(arguments: dict[str, Any]) -> str:
         command = str(arguments["command"])
         if refused := _rank_overcommit(command):
+            return refused
+        if refused := _driver_in_shell(command):
             return refused
         if refused := _store_mutation(command, Path(session.workspace_root)):
             return refused
@@ -1242,6 +1283,63 @@ def record_command(session: MasonSession, **event: Any) -> None:
     session.record({"type": "command", "by": session.agent_name, **event})
 
 
+def describe_size(size: dict[str, Any] | None) -> str:
+    """One phrase for a job's size, for a tool result or a transcript line.
+
+    Examples:
+        >>> describe_size({"nodes": 1, "ntasks_per_node": 8, "cpus_per_task": 1,
+        ...                "gpus_per_node": 2, "mem": None})
+        '1 node(s) x 8 rank(s) x 1 cpu(s), 2 gpu(s) per node'
+        >>> describe_size({"nodes": 2, "ntasks_per_node": 64, "cpus_per_task": 2,
+        ...                "gpus_per_node": 0, "mem": "240G"})
+        '2 node(s) x 64 rank(s) x 2 cpu(s), mem 240G'
+        >>> describe_size(None)
+        'not sized'
+    """
+    if not size:
+        return "not sized"
+    text = (
+        f"{size.get('nodes', 1)} node(s) x {size.get('ntasks_per_node', 1)} rank(s) x "
+        f"{size.get('cpus_per_task', 1)} cpu(s)"
+    )
+    if size.get("gpus_per_node"):
+        text += f", {size['gpus_per_node']} gpu(s) per node"
+    if size.get("mem"):
+        text += f", mem {size['mem']}"
+    return text
+
+
+def _reserve_for(session: MasonSession, arguments: dict[str, Any]) -> Reservation | str:
+    """Check out the slice a launch asks for, or the refusal text.
+
+    ``ntasks``, ``threads``, and ``gpus`` size the slice; with none of
+    them the whole free cpu budget is taken, so an unsized launch is
+    accounted for like any other. The session process is the holder
+    until the run claims the reservation, and the dead are reaped first
+    so a crashed launch never keeps a slice. A slice that does not fit
+    comes back as text carrying the free amounts, never as an exception.
+    """
+    from foundation.errors import ResourcesError
+
+    def _count(key: str) -> int | None:
+        value = arguments.get(key)
+        return None if value is None else int(value)
+
+    try:
+        with _open_workspace(session) as ws:
+            ws.reap_dead(caller="launch_workflow")
+            return ws.reserve(
+                ntasks=_count("ntasks"),
+                threads=_count("threads"),
+                gpus=_count("gpus") or 0,
+                holder_pid=os.getpid(),
+            )
+    except ResourcesError as e:
+        return f"refused: {e}"
+    except RunStoreUnavailable as e:
+        return str(e)
+
+
 def _add_workflow_tools(
     box: Toolbox, session: MasonSession, read_roots: tuple[Path, ...]
 ) -> None:
@@ -1252,8 +1350,6 @@ def _add_workflow_tools(
         if not run_id or run_id in recorded_runs:
             return
         recorded_runs.add(run_id)
-        from slab.errors import SlabError
-
         try:
             with _open_workspace(session) as ws:
                 entries = _ops.run_commands(ws, run_id)
@@ -1461,49 +1557,49 @@ def _add_workflow_tools(
         )
     )
 
-    def _launch_background(
-        script: Path, name: str | None, intent: str | None, args: list[str]
-    ) -> str:
-        """Detach the run as its own process so no shell timeout can kill it."""
-        import sys
+    def _release(reservation_id: str) -> None:
+        """Give a reservation back when the launch it was made for never claims it."""
+        with (
+            contextlib.suppress(FoundationError, sqlite3.Error, OSError),
+            _open_workspace(session) as ws,
+        ):
+            ws.runs.release_reservation(reservation_id)
 
-        log_path = Path(script).with_suffix(".launch.log")
-        command = [sys.executable, "-m", "foundation.cli", "run", str(script), *args]
-        if name:
-            command += ["--name", name]
-        if intent:
-            command += ["--intent", intent]
-        command += ["--session", session.session_id, "-w", str(session.workspace_root)]
-        record_command(
-            session,
-            kind="launch",
-            tool="launch_workflow",
-            command=shlex.join(command),
-            script=str(script),
-            args=args,
-            cwd=str(session.cwd),
-            background=True,
-        )
-        try:
-            with open(log_path, "ab") as log:
-                process = subprocess.Popen(
-                    command,
-                    cwd=session.cwd,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    stdin=subprocess.DEVNULL,
-                    start_new_session=True,
-                    # Block-buffered stdout reaches the log only at exit; a
-                    # real session polled an empty log eight times while
-                    # the run was labeling structures. Line by line instead.
-                    env={**_subprocess_env(session), "PYTHONUNBUFFERED": "1"},
-                )
-        except OSError as e:
-            return f"could not start the background run: {e}"
-        return (
-            f"launched in the background: pid {process.pid}, output -> {log_path}\n"
-            f"the run appears in list_runs (session='this') once it starts; "
-            f"block on it with wait_for_run instead of polling in shell."
+    def _launch_child(
+        script: Path,
+        reservation: Reservation,
+        *,
+        name: str | None,
+        intent: str | None,
+        args: list[str],
+        wait: bool,
+    ) -> dict[str, Any]:
+        """Run the script as a child 'foundation run --reservation' process.
+
+        A sized launch never runs in this process: the child takes the
+        affinity mask and the GPU variables of its slice, and every rank
+        it starts inherits them. A background launch is the same child,
+        detached (:func:`foundation._ops.launch_child`), so no tool
+        timeout can kill it. The log sits next to the script.
+        """
+        return _ops.launch_child(
+            session.workspace_root,
+            script,
+            reservation=reservation,
+            name=name,
+            intent=intent,
+            session=session.session_id,
+            argv=tuple(args),
+            cwd=session.cwd,
+            # Block-buffered stdout reaches the log only at exit; a real
+            # session polled an empty log eight times while the run was
+            # labeling structures. launch_child asks for line by line.
+            env=_subprocess_env(session),
+            wait=wait,
+            # A background log sits next to the script, where the agent
+            # has always found it; a waited launch gets a fresh log per
+            # reservation, so its answer carries this run's output alone.
+            log_path=Path(script).with_suffix(".launch.log") if not wait else None,
         )
 
     def launch_workflow(arguments: dict[str, Any]) -> str:
@@ -1516,19 +1612,29 @@ def _add_workflow_tools(
             script_text = Path(script).read_text(encoding="utf-8", errors="replace")
         except OSError:
             script_text = ""  # launch_script reports the unreadable file itself
-        if refused := _rank_overcommit(script_text):
-            return refused
         args = [str(a) for a in arguments.get("args") or []]
-        if arguments.get("background"):
-            return _launch_background(
-                Path(script), arguments.get("name"), arguments.get("intent"), args
-            )
+        name = str(arguments["name"]) if arguments.get("name") else None
+        intent = str(arguments["intent"]) if arguments.get("intent") else None
+        background = bool(arguments.get("background"))
+        sized = any(arguments.get(key) is not None for key in ("ntasks", "threads", "gpus"))
+        reserved = _reserve_for(session, arguments)
+        if isinstance(reserved, str):
+            return reserved
+        reservation = reserved
+        # A hand-written mpirun in the script is judged against the slice
+        # the run will hold, not the whole budget: the mask bounds it.
+        if refused := _rank_overcommit(script_text, limit=len(reservation.cpus)):
+            _release(reservation.id)
+            return refused
+        as_child = sized or background
         driver = ["slab", "run", str(script), *args]
-        if arguments.get("name"):
-            driver += ["--name", str(arguments["name"])]
-        if arguments.get("intent"):
-            driver += ["--intent", str(arguments["intent"])]
+        if name:
+            driver += ["--name", name]
+        if intent:
+            driver += ["--intent", intent]
         driver += ["--session", session.session_id, "-w", str(session.workspace_root)]
+        if as_child:
+            driver += ["--reservation", reservation.id]
         record_command(
             session,
             kind="launch",
@@ -1537,17 +1643,41 @@ def _add_workflow_tools(
             script=str(script),
             args=args,
             cwd=str(session.cwd),
-            background=False,
+            background=background,
+            sized=sized,
+            resources=reservation.slice,
+            reservation=reservation.id,
         )
-        result = launch_script(
-            session.workspace_root,
-            script,
-            name=arguments.get("name"),
-            intent=arguments.get("intent"),
-            session=session.session_id,
-            argv=tuple(args),
-            capture_output=True,
-        )
+        held = _ops.describe_resources(reservation.slice)
+        try:
+            if background:
+                launched = _launch_child(
+                    script, reservation, name=name, intent=intent, args=args, wait=False
+                )
+                return (
+                    f"launched in the background: pid {launched['pid']}, output -> "
+                    f"{launched['log']}; holding {held}\n"
+                    f"the run appears in list_runs (session='this') once it starts; "
+                    f"block on it with wait_for_run instead of polling in shell."
+                )
+            if sized:
+                result = _launch_child(
+                    script, reservation, name=name, intent=intent, args=args, wait=True
+                )
+            else:
+                result = launch_script(
+                    session.workspace_root,
+                    script,
+                    name=name,
+                    intent=intent,
+                    session=session.session_id,
+                    argv=tuple(args),
+                    capture_output=True,
+                    reservation=reservation,
+                )
+        except (FoundationError, SlabError, OSError) as e:
+            _release(reservation.id)
+            return f"could not start the run: {e}"
         _record_run_commands(result.get("run_id"), "launch_workflow")
         lines = [
             f"run {result['run_id']}: state={result['state']} status={result['status']} "
@@ -1560,6 +1690,7 @@ def _add_workflow_tools(
                 lines.append(json.dumps(result["failure"], indent=1, ensure_ascii=False))
         elif result.get("traceback"):
             lines.append(str(result["traceback"]))
+        lines.append(f"resources held: {held}")
         output = str(result.get("output") or "").rstrip()
         if output:
             lines.append(f"script output:\n{output}")
@@ -1572,6 +1703,13 @@ def _add_workflow_tools(
                 "Execute a SLAB workflow script (plain Python with @task calls and "
                 "@check verification) as a traced run. This is how calculations "
                 "run: results get provenance, caching, and verification gates. "
+                "Size the run with ntasks (MPI ranks), threads (per rank), and gpus: "
+                "the slice is reserved on this host before the run starts, the run "
+                "takes it as an affinity mask plus CUDA_VISIBLE_DEVICES, and an "
+                "engine command with {ntasks}/{threads}/{gpus} placeholders fills "
+                "from it. A size that does not fit what is free is refused with the "
+                "free amounts (list_engines reports budget and free). An unsized "
+                "launch takes every free cpu and no gpu. "
                 "For work longer than a few minutes, pass background=true: the "
                 "run detaches from this process (no tool timeout can kill it) "
                 "and wait_for_run blocks until it finishes."
@@ -1591,6 +1729,18 @@ def _add_workflow_tools(
                         "description": (
                             "detach and return immediately; follow with wait_for_run"
                         ),
+                    },
+                    "ntasks": {
+                        "type": "integer",
+                        "description": "MPI ranks the run may start (cpus = ntasks x threads)",
+                    },
+                    "threads": {
+                        "type": "integer",
+                        "description": "threads per rank (OMP_NUM_THREADS); default 1",
+                    },
+                    "gpus": {
+                        "type": "integer",
+                        "description": "gpus the run holds (CUDA_VISIBLE_DEVICES); default 0",
                     },
                 },
                 ["script"],
@@ -1692,14 +1842,22 @@ def _add_engine_tools(box: Toolbox, session: MasonSession) -> None:
     def list_engines(arguments: dict[str, Any]) -> str:
         from slab._ops import engines_overview
 
-        return json.dumps(engines_overview(), indent=1, ensure_ascii=False)
+        overview = engines_overview()
+        with _open_workspace(session) as ws:
+            ws.reap_dead(caller="list_engines")
+            resources = ws.free_resources()
+        overview["budget"] = {key: len(ids) for key, ids in resources["budget"].items()}
+        overview["free"] = {key: len(ids) for key, ids in resources["free"].items()}
+        return json.dumps(overview, indent=1, ensure_ascii=False)
 
     box.add(
         Tool(
             name="list_engines",
             description=(
                 "What can be computed here: engines, QE protocols, pseudopotential "
-                "families, HPC partitions. Call this BEFORE choosing an engine — "
+                "families, HPC partitions with each node's declared size, and this "
+                "host's cpu/gpu 'budget' with what is 'free' right now (size "
+                "launch_workflow within it). Call this BEFORE choosing an engine — "
                 "there is no in-process MLIP fallback, so the available checkpoint "
                 "ids are the entire runnable-MLIP surface on this machine "
                 "(training a new one is the train_potential task, not an engine)."
@@ -1866,16 +2024,37 @@ def _add_mp_tools(box: Toolbox, snapshot_root: Path) -> None:
 
 def _add_hpc_tools(box: Toolbox, session: MasonSession) -> None:
     def submit_job(arguments: dict[str, Any]) -> str:
-        job = _ops.submit_job(
-            session.workspace_root,
-            hpc=session.hpc,
-            command=str(arguments["command"]),
-            name=str(arguments["name"]),
-            partition=arguments.get("partition"),
-            time_limit=arguments.get("time_limit"),
-            session=session.session_id,
-            project=session.cwd,
-        )
+        from slab.errors import JobSizeError
+        from slab.resources import job_size
+
+        def _count(key: str) -> int | None:
+            value = arguments.get(key)
+            return None if value is None else int(value)
+
+        # A size the node cannot hold, or a size on a partition without a
+        # node table, is a refusal the model reads: it names the cap and
+        # the config field, so the next call fits or the operator adds it.
+        try:
+            size = job_size(
+                nodes=_count("nodes"),
+                ntasks_per_node=_count("ntasks_per_node"),
+                cpus_per_task=_count("cpus_per_task"),
+                gpus_per_node=_count("gpus_per_node"),
+                mem=None if arguments.get("mem") is None else str(arguments["mem"]),
+            )
+            job = _ops.submit_job(
+                session.workspace_root,
+                hpc=session.hpc,
+                command=str(arguments["command"]),
+                name=str(arguments["name"]),
+                partition=arguments.get("partition"),
+                time_limit=arguments.get("time_limit"),
+                session=session.session_id,
+                project=session.cwd,
+                size=size,
+            )
+        except JobSizeError as e:
+            return f"refused: {e}"
         record_command(
             session,
             kind="job",
@@ -1886,10 +2065,13 @@ def _add_hpc_tools(box: Toolbox, session: MasonSession) -> None:
             partition=str(job["partition"]),
             script=str(job["script_path"]),
             cwd=str(session.cwd),
+            size=job["size"],
         )
+        sized = f"; sized {describe_size(job['size'])}" if job["size"] else ""
         return (
             f"submitted job {job['job_id']} ({job['job_name']}) to partition "
-            f"{job['partition']}; script kept at {job['script_path']}; poll with job_status"
+            f"{job['partition']}{sized}; script kept at {job['script_path']}; "
+            f"poll with job_status"
         )
 
     box.add(
@@ -1897,7 +2079,12 @@ def _add_hpc_tools(box: Toolbox, session: MasonSession) -> None:
             name="submit_job",
             description=(
                 "Submit a command as a SLURM batch job (typically 'slab run "
-                "workflow.py' so the result is still a traced, verified run)."
+                "workflow.py' so the result is still a traced, verified run). "
+                "Size the job with ntasks_per_node (required to size), cpus_per_task, "
+                "gpus_per_node, nodes, and mem (e.g. 240G): the size replaces the "
+                "partition's own directives and must fit the node that list_engines "
+                "reports under hpc.partitions.<name>.node; without a size the "
+                "partition's directives apply as declared."
             ),
             parameters=_schema(
                 {
@@ -1905,6 +2092,14 @@ def _add_hpc_tools(box: Toolbox, session: MasonSession) -> None:
                     "name": {"type": "string"},
                     "partition": {"type": "string"},
                     "time_limit": {"type": "string", "description": "HH:MM:SS"},
+                    "nodes": {"type": "integer", "description": "nodes (default 1)"},
+                    "ntasks_per_node": {
+                        "type": "integer",
+                        "description": "MPI ranks per node; naming it makes the job sized",
+                    },
+                    "cpus_per_task": {"type": "integer", "description": "cpus per rank"},
+                    "gpus_per_node": {"type": "integer", "description": "gpus per node"},
+                    "mem": {"type": "string", "description": "memory per node, e.g. 240G"},
                 },
                 ["command", "name"],
             ),

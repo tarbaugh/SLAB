@@ -39,6 +39,7 @@ from pydantic import BaseModel, ConfigDict
 
 from slab.config import HpcConfig, load_config
 from slab.errors import SlabError
+from slab.resources import JobSize, budget, check_size, envelope
 
 _SBATCH_TIMEOUT_S = 60
 _SQUEUE_TIMEOUT_S = 60
@@ -141,6 +142,7 @@ def render_sbatch(
     prologue: Iterable[str] = (),
     use_launcher: bool = True,
     include_global_setup: bool = True,
+    size: JobSize | None = None,
 ) -> str:
     """A complete sbatch script for *command* on the given partition.
 
@@ -168,6 +170,17 @@ def render_sbatch(
     environment (the model-serve job's venv) that global engine module loads
     would fight.
 
+    *size* sizes the job: its ``nodes``, ``ntasks-per-node``,
+    ``cpus-per-task``, ``mem``, and ``gres`` directives replace the
+    partition's own, and the partition's ``ntasks`` is dropped because the
+    size states the whole shape. The gres keeps the type the partition's
+    string names (``gpu:a100:4`` sizes to ``gpu:a100:2``), a partition
+    whose gres names no type renders ``gpu:N``, and a size without gpus
+    renders no gres. A size the partition's declared node cannot hold is
+    refused by :func:`slab.resources.check_size` before anything renders,
+    and so is a size on a partition without a ``node`` table. Without a
+    size the output is what it always was.
+
     Examples:
         >>> from slab.config import HpcConfig
         >>> hpc = HpcConfig.model_validate({
@@ -189,6 +202,26 @@ def render_sbatch(
         set -euo pipefail
         <BLANKLINE>
         srun pw.x -in si.pwi
+        >>> from slab.resources import JobSize
+        >>> gpu = HpcConfig.model_validate({
+        ...     "partitions": {"gpu": {"gres": "gpu:a100:4", "mem": "480G",
+        ...                            "node": {"cpus": 64, "gpus": 4, "mem": "480G"}}},
+        ... })
+        >>> print(render_sbatch("slab run md.py", job_name="md", partition="gpu", config=gpu,
+        ...                     size=JobSize(ntasks_per_node=2, cpus_per_task=8, gpus_per_node=2)))
+        #!/bin/bash -l
+        #SBATCH --job-name=md
+        #SBATCH --partition=gpu
+        #SBATCH --output=md-%j.out
+        #SBATCH --nodes=1
+        #SBATCH --ntasks-per-node=2
+        #SBATCH --cpus-per-task=8
+        #SBATCH --mem=480G
+        #SBATCH --gres=gpu:a100:2
+        <BLANKLINE>
+        set -euo pipefail
+        <BLANKLINE>
+        slab run md.py
     """
     _validate_job_name(job_name)
     if time_limit is not None and not _TIME_LIMIT.fullmatch(time_limit):
@@ -199,6 +232,8 @@ def render_sbatch(
         raise SchedulerError(f"output path {output!r} must not contain whitespace")
     hpc = config if config is not None else load_config().hpc
     name, spec = hpc.resolve_partition(partition)
+    if size is not None:
+        check_size(size, name, spec)
     lines = ["#!/bin/bash -l", f"#SBATCH --job-name={job_name}", f"#SBATCH --partition={name}"]
     lines.append(f"#SBATCH --output={output or f'{job_name}-%j.out'}")
 
@@ -209,12 +244,19 @@ def render_sbatch(
     directive("account", spec.account or hpc.account)
     directive("qos", spec.qos)
     directive("time", time_limit or spec.time_limit)
-    directive("nodes", spec.nodes)
-    directive("ntasks", spec.ntasks)
-    directive("ntasks-per-node", spec.ntasks_per_node)
-    directive("cpus-per-task", spec.cpus_per_task)
-    directive("mem", spec.mem)
-    directive("gres", spec.gres)
+    if size is None:
+        directive("nodes", spec.nodes)
+        directive("ntasks", spec.ntasks)
+        directive("ntasks-per-node", spec.ntasks_per_node)
+        directive("cpus-per-task", spec.cpus_per_task)
+        directive("mem", spec.mem)
+        directive("gres", spec.gres)
+    else:
+        directive("nodes", size.nodes)
+        directive("ntasks-per-node", size.ntasks_per_node)
+        directive("cpus-per-task", size.cpus_per_task)
+        directive("mem", size.mem or spec.mem)
+        directive("gres", sized_gres(spec.gres, size.gpus_per_node))
     directive("constraint", spec.constraint)
     directive("reservation", spec.reservation)
     lines.extend(f"#SBATCH {extra}" for extra in spec.sbatch_extra)
@@ -234,6 +276,24 @@ def render_sbatch(
         launcher = None
     body.append(f"{launcher} {command}" if launcher else command)
     return "\n".join(lines + body)
+
+
+def sized_gres(gres: str | None, gpus_per_node: int) -> str | None:
+    """The gres directive for a sized job: the partition's type, the size's count.
+
+    Examples:
+        >>> sized_gres("gpu:a100:4", 2)
+        'gpu:a100:2'
+        >>> sized_gres("gpu:4", 1), sized_gres(None, 1), sized_gres("gpu:a100:4", 0)
+        ('gpu:1', 'gpu:1', None)
+    """
+    if gpus_per_node <= 0:
+        return None
+    pieces = (gres or "gpu").split(":")
+    resource = pieces[0] or "gpu"
+    if len(pieces) >= 2 and pieces[1] and not pieces[1].isdigit():
+        return f"{resource}:{pieces[1]}:{gpus_per_node}"
+    return f"{resource}:{gpus_per_node}"
 
 
 _DRIVERS = frozenset({"slab"})
@@ -430,45 +490,26 @@ def _collapse(raw: str) -> JobState:
 
 
 def allocated_tasks() -> int:
-    """The current allocation's task count, or 1 outside one.
+    """This launch's rank count: :attr:`slab.resources.Envelope.ntasks`.
 
-    ``$SLURM_NTASKS`` inside a batch job; 1 on a login node or laptop, so
-    an interactive smoke test stays serial. The bin-form qe command sizes
-    its ``mpirun`` from this, and Mason's prompt states it so the agent
-    sizes its scripts to the same number.
-
-    Examples:
-        >>> import os
-        >>> os.environ["SLURM_NTASKS"] = "16"
-        >>> allocated_tasks()
-        16
-        >>> os.environ["SLURM_NTASKS"] = "not-a-number"
-        >>> allocated_tasks()
-        1
-        >>> del os.environ["SLURM_NTASKS"]
+    ``SLAB_NTASKS`` when a parent sized the launch, else ``$SLURM_NTASKS``
+    inside a batch job, else 1, so an interactive smoke test stays serial.
+    The bin-form qe command sizes its ``mpirun`` from this, and Mason's
+    prompt states it so the agent sizes its scripts to the same number.
+    The discovery and its doctests live in :func:`slab.resources.envelope`.
     """
-    try:
-        count = int(os.environ.get("SLURM_NTASKS", ""))
-    except ValueError:
-        return 1
-    return count if count > 0 else 1
+    return envelope().ntasks
 
 
 def cpu_budget() -> int:
-    """How many CPUs this process may actually use.
+    """How many CPUs this process may actually use: the :func:`slab.resources.budget`.
 
     CPU affinity where the platform reports it (a SLURM cgroup shrinks
     this to the allocation), the machine's count otherwise. The ceiling
     for any parallel launch that runs in-process rather than through the
     scheduler.
     """
-    getter = getattr(os, "sched_getaffinity", None)
-    if getter is not None:
-        try:
-            return len(getter(0)) or 1
-        except OSError:  # pragma: no cover - platform quirk
-            pass
-    return os.cpu_count() or 1
+    return len(budget().cpus)
 
 
 def active_job_ids() -> frozenset[str]:

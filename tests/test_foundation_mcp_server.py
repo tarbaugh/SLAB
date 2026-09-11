@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -153,7 +154,11 @@ def test_launch_workflow_records_the_commands_the_run_resolved(root: Path, tmp_p
     launched = _call(server, "launch_workflow", {"script_path": str(script), "intent": "cmds"})
     _call(server, "wait_for_run", {"run_id": launched["run_id"]})
     events = find_session_record(root, "chat-cmd").events()
-    commands = [event for event in events if event.get("type") == "command"]
+    launches = [e for e in events if e.get("type") == "command" and e["kind"] == "launch"]
+    (launch,) = launches
+    assert launch["tool"] == "launch_workflow" and launch["command"].startswith("slab run ")
+    assert launch["sized"] is False and launch["resources"]["cpus"]  # the whole free budget
+    commands = [e for e in events if e.get("type") == "command" and e["kind"] == "engine"]
     assert len(commands) == 1
     (command,) = commands
     assert command["kind"] == "engine" and command["tool"] == "launch_workflow"
@@ -321,6 +326,56 @@ def test_materials_tools_unconfigured_surface_the_fix(
 # -- parity with the resident agent -------------------------------------------
 
 
+def test_the_size_arguments_match_the_resident_agents(root: Path, tmp_path: Path) -> None:
+    """Both tool surfaces name the sizes the same way, so a skill that says
+    'pass ntasks, threads, gpus' or 'ntasks_per_node ... mem' is true over MCP
+    and in Mason alike."""
+    from mason.session import MasonSession
+    from mason.tools import build_toolbox
+    from slab.config import HpcConfig
+
+    (tmp_path / "slab.toml").write_text('[hpc]\ndefault_partition = "cpu"\n[hpc.partitions.cpu]\n')
+    server = build_server(root, project=tmp_path)
+    over_mcp = {
+        tool.name: set((getattr(tool, "input_schema", None) or tool.inputSchema)["properties"])
+        for tool in asyncio.run(server.list_tools())
+    }
+    hpc = HpcConfig.model_validate({"default_partition": "cpu", "partitions": {"cpu": {}}})
+    session = MasonSession(tmp_path, workspace_root=root, hpc=hpc, auto_approve=True)
+    in_mason = {
+        name: set(tool.parameters["properties"])
+        for name, tool in build_toolbox(session).tools.items()
+    }
+    launch = {"ntasks", "threads", "gpus"}
+    assert launch <= over_mcp["launch_workflow"] and launch <= in_mason["launch_workflow"]
+    sizes = {"nodes", "ntasks_per_node", "cpus_per_task", "gpus_per_node", "mem"}
+    assert sizes <= over_mcp["submit_job"] and sizes <= in_mason["submit_job"]
+
+
+def test_the_server_holds_the_reservation_until_the_child_claims_it(
+    root: Path, tmp_path: Path, no_gpus: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The holder of a fresh reservation is the server's own pid, so a server
+    that dies before its child starts leaves a reservation the next reap
+    releases, never one that outlives everything."""
+    import foundation._ops as ops
+
+    seen: dict[str, object] = {}
+    real = ops.launch_child
+
+    def spy(root_arg: Path, script: object, **kwargs: Any) -> dict[str, Any]:
+        with Workspace(root) as ws:
+            seen["holder"] = ws.runs.get_reservation(kwargs["reservation"].id).holder_pid
+        return real(root_arg, script, **kwargs)
+
+    monkeypatch.setattr(ops, "launch_child", spy)
+    script = tmp_path / "wf.py"
+    script.write_text("print('ok')\n")
+    server = build_server(root, project=tmp_path, session="mcp-holder")
+    result = _call(server, "launch_workflow", {"script_path": str(script), "ntasks": 1})
+    assert seen["holder"] == os.getpid() and result["run_id"] and result["exit_code"] == 0
+
+
 def test_hpc_tools_appear_only_with_partitions(root: Path, tmp_path: Path) -> None:
     server = build_server(root, project=tmp_path)
     assert not HPC_TOOLS & {t.name for t in asyncio.run(server.list_tools())}
@@ -465,3 +520,139 @@ def test_report_results_validates_then_records_the_answer(root: Path, tmp_path: 
     assert record.results()["results"] == {"a0": {"value": 3.6, "unit": "Å"}}
     assert record.results()["run_ids"] == [run_id]
     assert Path(answer["recorded"]) == root / "sessions" / "mcp-answer.jsonl"
+
+
+# -- resource sizing --------------------------------------------------------------------
+
+
+@pytest.fixture()
+def no_gpus(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("SLAB_CPUS", "SLAB_GPUS", "SLAB_NTASKS", "SLAB_THREADS", "SLURM_NTASKS"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+
+
+def test_list_engines_reports_budget_and_free(root: Path, no_gpus: None) -> None:
+    import os
+
+    server = build_server(root)
+    answer = _call(server, "list_engines")
+    assert answer["budget"]["gpus"] == 0 and answer["budget"]["cpus"] >= 1
+    assert answer["free"] == answer["budget"]
+    with Workspace(root) as ws:
+        ws.reserve(ntasks=1, holder_pid=os.getpid())
+    after = _call(server, "list_engines")
+    assert after["free"]["cpus"] == answer["budget"]["cpus"] - 1
+
+
+def test_sized_launch_runs_as_a_child_and_the_run_carries_resources(
+    root: Path, tmp_path: Path, no_gpus: None
+) -> None:
+    """A sized launch is a child 'foundation run --reservation': the run's record
+    holds the slice, the child's environment carried it, and the reservation is
+    released when the run ends."""
+    script = tmp_path / "wf.py"
+    script.write_text(
+        "import os\n"
+        "from foundation import check\n"
+        "print('env', os.environ['SLAB_NTASKS'], os.environ['OMP_NUM_THREADS'],"
+        " repr(os.environ['CUDA_VISIBLE_DEVICES']))\n"
+        "@check\ndef ok():\n    return True\n"
+    )
+    server = build_server(root, project=tmp_path, session="mcp-sized")
+    result = _call(
+        server,
+        "launch_workflow",
+        {"script_path": str(script), "intent": "sized", "ntasks": 1, "threads": 1},
+    )
+    assert result["state"] == "verified" and result["exit_code"] == 0
+    assert result["resources"]["ntasks"] == 1 and len(result["resources"]["cpus"]) == 1
+    assert "env 1 1 ''" in result["output"]
+    assert Path(result["log"]).exists()
+    with Workspace(root) as ws:
+        run = ws.runs.get(result["run_id"])
+        assert run.session == "mcp-sized" and run.pid != os.getpid()
+        assert run.resources["reservation"] == result["reservation"]
+        assert ws.runs.list_reservations() == []
+
+
+def test_unsized_launch_reserves_the_whole_free_budget_in_process(
+    root: Path, tmp_path: Path, no_gpus: None
+) -> None:
+    script = tmp_path / "wf.py"
+    script.write_text("from foundation import check\n@check\ndef ok():\n    return True\n")
+    server = build_server(root, project=tmp_path)
+    budget = _call(server, "list_engines")["budget"]
+    result = _call(server, "launch_workflow", {"script_path": str(script), "intent": "x"})
+    assert len(result["resources"]["cpus"]) == budget["cpus"]
+    with Workspace(root) as ws:
+        assert ws.runs.get(result["run_id"]).pid == os.getpid()
+        assert ws.runs.list_reservations() == []
+
+
+def test_a_launch_that_does_not_fit_is_refused_with_the_free_amounts(
+    root: Path, tmp_path: Path, no_gpus: None
+) -> None:
+    script = tmp_path / "wf.py"
+    script.write_text("pass\n")
+    server = build_server(root, project=tmp_path)
+    budget = _call(server, "list_engines")["budget"]
+    with pytest.raises(Exception, match=r"1 gpu\(s\) asked, but only 0 of 0"):
+        _call(server, "launch_workflow", {"script_path": str(script), "gpus": 1})
+    with pytest.raises(Exception, match=rf"only {budget['cpus']} of {budget['cpus']} cpu"):
+        _call(server, "launch_workflow", {"script_path": str(script), "ntasks": budget["cpus"] + 1})
+    with Workspace(root) as ws:
+        assert ws.runs.list_reservations() == []  # nothing leaked
+        assert ws.runs.list_runs() == []
+
+
+def test_a_failed_sized_launch_releases_its_reservation(
+    root: Path, tmp_path: Path, no_gpus: None
+) -> None:
+    server = build_server(root, project=tmp_path)
+    with pytest.raises(Exception, match="no such workflow script"):
+        _call(server, "launch_workflow", {"script_path": str(tmp_path / "nope.py"), "ntasks": 1})
+    with Workspace(root) as ws:
+        assert ws.runs.list_reservations() == []
+
+
+def test_submit_job_takes_a_size(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import stat
+
+    (tmp_path / "slab.toml").write_text(
+        "[hpc]\n"
+        'default_partition = "gpu"\n'
+        "[hpc.partitions.gpu]\n"
+        'gres = "gpu:a100:4"\n'
+        "[hpc.partitions.gpu.node]\n"
+        "cpus = 64\n"
+        "gpus = 4\n"
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    sbatch = fake_bin / "sbatch"
+    sbatch.write_text("#!/bin/sh\necho 777\n")
+    sbatch.chmod(sbatch.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{fake_bin}:/usr/bin:/bin")
+    server = build_server(root, project=tmp_path, session="mcp-job")
+    job = _call(
+        server,
+        "submit_job",
+        {"command": "slab run md.py", "name": "md", "ntasks_per_node": 4, "gpus_per_node": 2},
+    )
+    assert job["job_id"] == "777"
+    assert job["size"] == {
+        "nodes": 1, "ntasks_per_node": 4, "cpus_per_task": 1, "gpus_per_node": 2, "mem": None,
+    }
+    kept = Path(job["script_path"]).read_text()
+    assert "#SBATCH --ntasks-per-node=4\n" in kept and "#SBATCH --gres=gpu:a100:2\n" in kept
+    with pytest.raises(Exception, match="gpus_per_node=5 exceeds the 4 gpus"):
+        _call(server, "submit_job", {"command": "c", "name": "n", "ntasks_per_node": 1,
+                                     "gpus_per_node": 5})
+    with pytest.raises(Exception, match="pass ntasks_per_node"):
+        _call(server, "submit_job", {"command": "c", "name": "n", "gpus_per_node": 1})
+    events = find_session_record(root, "mcp-job").events()
+    (event,) = [e for e in events if e.get("type") == "command" and e["kind"] == "job"]
+    assert event["size"]["gpus_per_node"] == 2

@@ -308,6 +308,7 @@ def _freshness_row(agent: AgentConfig, workspace: Path | None) -> tuple[str, str
     """
     from mason.sandbox import (
         read_render_record,
+        recorded_size,
         render_sandbox_script,
         sandbox_toml,
         snapshot_engines,
@@ -328,6 +329,7 @@ def _freshness_row(agent: AgentConfig, workspace: Path | None) -> tuple[str, str
         toml_text, _warnings = sandbox_toml(slab_cfg, agent, root.resolve(), snapshots)
         engine_tasks = record.get("engine_tasks")
         entry_agent = record.get("agent")
+        size = recorded_size(record)
         script, _binds, context = render_sandbox_script(
             agent,
             hpc=slab_cfg.hpc,
@@ -341,6 +343,7 @@ def _freshness_row(agent: AgentConfig, workspace: Path | None) -> tuple[str, str
             snapshots=snapshots,
             engine_tasks=int(str(engine_tasks)) if engine_tasks is not None else None,
             entry_agent=str(entry_agent) if entry_agent else None,
+            size=size,
         )
     except _ERRORS as e:
         return ("x", f"rendered job: no longer renders ({e}) — stale; re-render")

@@ -23,8 +23,9 @@ import typer
 from foundation import _ops
 from foundation.errors import FoundationError
 from foundation.lifecycle import LifecycleState
-from foundation.models import utcnow
-from foundation.runtime import Workspace, describe_liveness, run_liveness
+from foundation.models import Reservation, utcnow
+from foundation.runtime import Workspace, describe_liveness, run_liveness, this_host
+from foundation.store import process_alive
 from slab.errors import SlabError
 
 app = typer.Typer(
@@ -112,6 +113,14 @@ def run(
             help="Stamp the run with the client session that launched it.",
         ),
     ] = None,
+    reservation: Annotated[
+        str | None,
+        typer.Option(
+            "--reservation",
+            help="Claim this reservation (made by the launching session) and run inside "
+            "its slice: affinity mask, OMP_NUM_THREADS, CUDA_VISIBLE_DEVICES.",
+        ),
+    ] = None,
 ) -> None:
     """Execute a workflow script; the run lands in quarantine.
 
@@ -119,14 +128,18 @@ def run(
     declarations gate verification. Scripts that call ``start_run`` themselves
     should be executed with plain ``python`` instead.
     """
+    root = _ops.resolve_root(workspace)
+    if reservation is not None:
+        _enter_reservation(root, reservation)
     try:
         result = _ops.launch_script(
-            _ops.resolve_root(workspace),
+            root,
             script,
             name=name,
             intent=intent,
             session=session,
             argv=tuple(args or ()),
+            reservation=reservation,
         )
     except (FoundationError, SlabError, FileNotFoundError) as e:
         _fail(str(e))
@@ -145,6 +158,22 @@ def run(
     # status 'running' because recording its failure itself failed.
     if result["status"] != "completed":
         raise typer.Exit(code=1)
+
+
+def _enter_reservation(root: Path, reservation_id: str) -> None:
+    """Take the reservation's slice before the script runs, so every rank inherits it."""
+    import os
+
+    from slab.resources import apply, env_for
+
+    with _open(root) as ws:
+        try:
+            held = ws.runs.get_reservation(reservation_id)
+        except FoundationError as e:
+            _fail(str(e))
+    envelope = held.envelope()
+    os.environ.update(env_for(envelope))
+    apply(envelope)
 
 
 @app.command("list")
@@ -176,14 +205,17 @@ def list_(
         if not runs:
             typer.echo("no runs")
             return
-        header = f"{'ID':<12} {'STATE':<12} {'STATUS':<10} {'AGE':>5}  {'NAME':<20} INTENT"
+        header = (
+            f"{'ID':<12} {'STATE':<12} {'STATUS':<10} {'AGE':>5}  {'RES':<7} {'NAME':<20} INTENT"
+        )
         typer.echo(header)
         for item in runs:
             intent_text = (item.intent or "")[:40]
             state_text = _state_text(item.state.value, item.status.value)
             typer.echo(
                 f"{item.id[:10]:<12} {state_text:<12} {item.status.value:<10} "
-                f"{_age(item.created_at):>5}  {item.name[:20]:<20} {intent_text}"
+                f"{_age(item.created_at):>5}  {_ops.resources_column(item.resources):<7} "
+                f"{item.name[:20]:<20} {intent_text}"
             )
 
 
@@ -215,6 +247,9 @@ def _render_details(details: dict[str, object]) -> None:
     typer.echo(f"  state:   {state_text}    status: {run['status']}")
     if run["status"] == "running" and run.get("pid") is not None:
         typer.echo(f"  process: {run['pid']} on {run['host']}")
+    resources = run.get("resources")
+    if isinstance(resources, dict):
+        typer.echo(f"  resources: {_ops.describe_resources(resources)}")
     if run.get("error"):
         typer.echo(f"  error:   {run['error']}")
     # The run's failure renders here unless a failed task carries the SAME
@@ -527,14 +562,49 @@ runs_app = typer.Typer(
 
 @runs_app.command("reap")
 def runs_reap(workspace: _WorkspaceOpt = None) -> None:
-    """Mark failed every running run whose recorded process on this host is gone."""
+    """Mark failed every running run whose recorded process on this host is gone,
+    and release every reservation no live process holds."""
     with _open(workspace) as ws:
+        released = ws.release_dead()
+        for held in released:
+            typer.echo(f"released {held.id}  {_describe_reservation(held)}")
         reaped = ws.reap_dead(caller="slab runs reap")
         for item in reaped:
             typer.echo(f"failed  {item.id}  {item.name}  {item.error}")
         for item in ws.runs.list_runs(status="running"):
             typer.echo(f"running {item.id}  {item.name}  {describe_liveness(item)}")
-    typer.echo(f"{len(reaped)} run(s) marked failed")
+    typer.echo(f"{len(reaped)} run(s) marked failed, {len(released)} reservation(s) released")
+
+
+@runs_app.command("reservations")
+def runs_reservations(workspace: _WorkspaceOpt = None) -> None:
+    """List the reservations in the store: the slice, the holder, the run, the age."""
+    with _open(workspace) as ws:
+        rows = ws.runs.list_reservations()
+        if not rows:
+            typer.echo("no reservations")
+            return
+        free = ws.free_resources()
+        for held in rows:
+            typer.echo(f"{held.id}  {_describe_reservation(held)}")
+        typer.echo(
+            f"free on {free['host']}: {len(free['free']['cpus'])} of "
+            f"{len(free['budget']['cpus'])} cpu(s), {len(free['free']['gpus'])} of "
+            f"{len(free['budget']['gpus'])} gpu(s)"
+        )
+
+
+def _describe_reservation(held: Reservation) -> str:
+    """One line for a reservation: slice, then who holds it and for how long."""
+    slice_text = _ops.describe_resources(held.slice)
+    age = _age(held.created_at)
+    if held.run_id is not None:
+        return f"{slice_text}  claimed by run {held.run_id}  {age}"
+    if held.host != this_host():
+        alive = "not this host"
+    else:
+        alive = "alive" if process_alive(held.holder_pid) else "gone"
+    return f"{slice_text}  unclaimed, holder {held.holder_pid} on {held.host} ({alive})  {age}"
 
 
 @runs_app.command("fail")

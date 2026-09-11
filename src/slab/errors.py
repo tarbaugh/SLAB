@@ -22,6 +22,11 @@ class EngineNotAvailableError(SlabError):
     """A requested calculation engine is unknown, or known but not installed."""
 
 
+class JobSizeError(SlabError):
+    """A requested job size does not fit the partition's declared node, or the
+    partition declares no node to size against."""
+
+
 class BuilderNotAvailableError(SlabError):
     """A structure builder's executable cannot be found on this machine."""
 

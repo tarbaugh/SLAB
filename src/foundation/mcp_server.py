@@ -25,6 +25,7 @@ Requires the ``mcp`` extra: ``pip install 'slab-stack[mcp]'``.
 from __future__ import annotations
 
 import functools
+import os
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
@@ -255,19 +256,85 @@ def build_server(
     @server.tool()
     @_surfaced
     def launch_workflow(
-        script_path: str, name: str | None = None, intent: str | None = None
+        script_path: str,
+        name: str | None = None,
+        intent: str | None = None,
+        ntasks: int | None = None,
+        threads: int | None = None,
+        gpus: int | None = None,
     ) -> dict[str, Any]:
         """Execute a plain-Python workflow script in a fresh traced run that
         carries this server's session id. Always pass intent — why this run
-        exists. The result includes the run id, final state (verified if all
-        checks passed), and captured output; on failure it includes the
-        structured 'failure' record (traceback and diagnostic notes). If
-        recording the failure itself failed (storage died mid-crash), a raw
-        'traceback' string appears instead and the run may be left at status
-        'running'. Use show_run for per-task failure evidence."""
-        result = _ops.launch_script(
-            root, script_path, name=name, intent=intent, session=session_id, capture_output=True
+        exists. Size the launch with ntasks (MPI ranks), threads (per rank),
+        and gpus: the server reserves that slice of this host before the
+        run starts, the run takes it as an affinity mask plus
+        CUDA_VISIBLE_DEVICES, and a slice that does not fit is refused with
+        the free amounts (list_engines reports 'budget' and 'free'). A
+        sized launch runs as a child process; an unsized one runs here and
+        reserves every free cpu. The result includes the run id, final
+        state (verified if all checks passed), the 'resources' it held, and
+        captured output; on failure it includes the structured 'failure'
+        record (traceback and diagnostic notes). If recording the failure
+        itself failed (storage died mid-crash), a raw 'traceback' string
+        appears instead and the run may be left at status 'running'. Use
+        show_run for per-task failure evidence."""
+        import shlex
+
+        sized = any(value is not None for value in (ntasks, threads, gpus))
+        with Workspace(root) as ws:
+            ws.reap_dead(caller="launch_workflow")
+            reservation = ws.reserve(
+                ntasks=ntasks, threads=threads, gpus=gpus or 0, holder_pid=os.getpid()
+            )
+        driver = ["slab", "run", script_path]
+        if name:
+            driver += ["--name", name]
+        if intent:
+            driver += ["--intent", intent]
+        driver += ["--session", session_id, "-w", str(root)]
+        if sized:
+            driver += ["--reservation", reservation.id]
+        record.record(
+            {
+                "type": "command",
+                "kind": "launch",
+                "tool": "launch_workflow",
+                "command": shlex.join(driver),
+                "script": script_path,
+                "args": [],
+                "cwd": str(project_dir),
+                "background": False,
+                "sized": sized,
+                "resources": reservation.slice,
+                "reservation": reservation.id,
+            }
         )
+        try:
+            if sized:
+                result = _ops.launch_child(
+                    root,
+                    script_path,
+                    reservation=reservation,
+                    name=name,
+                    intent=intent,
+                    session=session_id,
+                    cwd=project_dir,
+                    wait=True,
+                )
+            else:
+                result = _ops.launch_script(
+                    root,
+                    script_path,
+                    name=name,
+                    intent=intent,
+                    session=session_id,
+                    capture_output=True,
+                    reservation=reservation,
+                )
+        except BaseException:
+            with Workspace(root) as ws:
+                ws.runs.release_reservation(reservation.id)
+            raise
         _record_run_commands(result.get("run_id"), "launch_workflow")
         return result
 
@@ -324,8 +391,17 @@ def build_server(
         null off-cluster; jobs submit via submit_job when partitions are
         configured). An 'mp' key names the offline Materials Project snapshot
         when one is configured (search it with search_materials /
-        get_material / query_materials)."""
-        return engines_overview()
+        get_material / query_materials). 'budget' is what this server's
+        process may use on this host (cpu and gpu counts) and 'free' what
+        no live reservation holds right now; size launch_workflow within
+        'free'."""
+        with Workspace(root) as ws:
+            ws.reap_dead(caller="list_engines")
+            resources = ws.free_resources()
+        return engines_overview() | {
+            "budget": {key: len(ids) for key, ids in resources["budget"].items()},
+            "free": {key: len(ids) for key, ids in resources["free"].items()},
+        }
 
     @server.tool()
     @_surfaced
@@ -402,12 +478,31 @@ def build_server(
             name: str,
             partition: str | None = None,
             time_limit: str | None = None,
+            nodes: int | None = None,
+            ntasks_per_node: int | None = None,
+            cpus_per_task: int | None = None,
+            gpus_per_node: int | None = None,
+            mem: str | None = None,
         ) -> dict[str, Any]:
             """Submit a command as a SLURM batch job (typically 'slab run
             workflow.py' so the result is still a traced, verified run). The
             job exports this server's session id, so the runs it launches
             join this session; the script is kept under the workspace's
-            jobs/ directory. time_limit is HH:MM:SS."""
+            jobs/ directory. time_limit is HH:MM:SS. Size the job with
+            ntasks_per_node (required to size), cpus_per_task, gpus_per_node,
+            nodes, and mem (e.g. 240G): the size replaces the partition's
+            own directives and must fit the node that list_engines reports
+            under hpc.partitions.<name>.node; without a size the partition's
+            directives apply as declared."""
+            from slab.resources import job_size
+
+            size = job_size(
+                nodes=nodes,
+                ntasks_per_node=ntasks_per_node,
+                cpus_per_task=cpus_per_task,
+                gpus_per_node=gpus_per_node,
+                mem=mem,
+            )
             job = _ops.submit_job(
                 root,
                 hpc=hpc,
@@ -417,6 +512,7 @@ def build_server(
                 time_limit=time_limit,
                 session=session_id,
                 project=project_dir,
+                size=size,
             )
             record.record(
                 {
@@ -428,6 +524,7 @@ def build_server(
                     "job_name": str(job["job_name"]),
                     "partition": str(job["partition"]),
                     "script": str(job["script_path"]),
+                    "size": job["size"],
                 }
             )
             return job

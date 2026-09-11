@@ -258,13 +258,55 @@ own. Every choice it leads to still lands in explicit, traced
 cutoffs and k-mesh rather than a profile name.
 
 The parallelism budget is stated and enforced separately. The environment
-block tells the agent how many CPUs the session may use and at how many
-MPI ranks the configured engines launch, so scripts and delegated tasks
-get sized to real numbers instead of guesses. The enforcement matches the
-statement: a `shell` command or `launch_workflow` script that spells out
-an `mpirun`, `mpiexec`, or `srun` with more ranks than the CPU budget is
-refused as a tool result that names the limit. `submit_job` is exempt,
-because its payload runs in its own allocation with its own budget.
+block tells the agent the budget of this session, the cpus and gpus its
+process may use, and what is free of it right now. It also says how many
+ranks an unsized launch runs with, and that a launch names `ntasks`,
+`threads`, and `gpus`. The cpus line reads, for one session:
+
+```text
+cpus: 16 usable in this session, gpus: 2; free right now: 16 cpu(s), 2 gpu(s); an unsized launch runs with 1 rank(s) and takes every free cpu. Size a launch with ntasks, threads, and gpus; a launch that does not fit what is free is refused with the free amounts, and so is a shell command or script that spells out more ranks.
+```
+
+A sized launch holds a slice. Before the run starts, the session reserves
+`ntasks x threads` cpu ids and `gpus` gpu ids in the run store, inside one
+transaction, so two launches on one host never overlap. The run then
+starts as a child process that claims the reservation. It takes the cpu
+ids as its affinity mask and the gpu ids as `CUDA_VISIBLE_DEVICES`, and
+it exports `SLAB_NTASKS`, `SLAB_THREADS`, and `OMP_NUM_THREADS`, so every
+rank a script starts inherits the slice. An engine command with the
+`{ntasks}`, `{threads}`, and `{gpus}` placeholders fills from the same
+numbers (see [Engines](engines.md#lammps)). The run record copies the
+slice as `resources`, `slab list` shows it in the `RES` column, and the
+reservation is released when the run ends or its holder dies. Free is
+derived from the live reservations, never counted, so there is no
+counter to drift.
+
+An unsized launch is accounted for like any other. It reserves every free
+cpu and no gpu, and it runs in the session's own process as before. A
+`background=true` launch is always the child, sized or not, so no tool
+timeout can reach it.
+
+The enforcement matches the statement. A slice that does not fit what is
+free is refused as a tool result that carries the free amounts, and the
+refused launch runs nothing. A `shell` command that spells out an
+`mpirun`, `mpiexec`, or `srun` with more ranks than the whole budget is
+refused, and a `launch_workflow` script that spells one out is judged
+against the launch's own slice, because the mask bounds it. The shell
+also refuses `slab run` and `foundation run`, because a run the shell
+starts holds no reservation and every other launch would size itself
+against a free count that omits it. `submit_job` is exempt from the
+rank check, because its payload runs in its own allocation. It is sized
+instead. The five size arguments replace the partition's directives, and
+a size past the node the partition declares is refused naming the cap
+(see [Configuring SLAB for your HPC](hpc-config.md#size-a-job)).
+
+The guarantee is this. A launch can oversubscribe only its own slice,
+never a neighbour's. The affinity mask bounds every rank a script
+starts, `CUDA_VISIBLE_DEVICES` bounds its GPUs, and the reservation was
+taken before the process existed. The remaining escape is a shell
+command the agent types by hand. The rank check catches one that names
+a launcher, and the refusal of `slab run` catches one that names the
+driver.
 
 ## Software notes: curated context for the engines
 
@@ -301,13 +343,13 @@ more than model choice.
 | `write_file` / `edit_file` | edit is exact-string replacement, unique match or `replace_all`; Python files get an immediate syntax check after every write |
 | `list_dir`, `search` | listing and recursive regex search, output-capped |
 | `shell` | one command, merged output + exit code, timeout-capped; the timeout kills the whole process group, so nothing backgrounded survives it; **not** for long calculations |
-| `launch_workflow` | run a workflow script as a traced, check-gated run; this is how physics happens. `args` reach the script as argv; `background=true` detaches a long run so no tool timeout can touch it |
+| `launch_workflow` | run a workflow script as a traced, check-gated run; this is how physics happens. `args` reach the script as argv; `background=true` detaches a long run so no tool timeout can touch it. `ntasks`, `threads`, and `gpus` size the run. The slice is reserved before the run starts, the run takes it as an affinity mask plus `CUDA_VISIBLE_DEVICES`, and a slice that does not fit what is free is refused with the free amounts |
 | `wait_for_run` | block until a run (or every running run of this session) finishes, then report its state and task tally; the timeout answer says how far each run has got and whether its process is alive here or on another host; a run whose recorded process is gone is marked failed and answered at once; `run_id` takes an id, a prefix, or a run name from this session |
-| `list_runs`, `show_run`, `list_engines` | the workspace's evidence surface: runs, checks with observed/expected values, failure records, capabilities; `list_runs` takes `session="this"` and `status="running"`, and first marks failed every running run whose recorded process on this host is gone; `show_run` folds finished tasks to one line each, `task=<label or seq>` returns one task's recipe, inputs, and outputs, and `full=true` returns them all |
+| `list_runs`, `show_run`, `list_engines` | the workspace's evidence surface: runs, checks with observed/expected values, failure records, capabilities; `list_runs` takes `session="this"` and `status="running"`, and first marks failed every running run whose recorded process on this host is gone; `show_run` folds finished tasks to one line each, `task=<label or seq>` returns one task's recipe, inputs, and outputs, and `full=true` returns them all; `list_engines` also reports this host's `budget` and what is `free` right now, and each partition's declared `node` |
 | `read_artifact` | one of a run's artifacts, by name or hash prefix; the way to read an engine's output file after the run. Digested first like `read_file`; `raw=true`, or `offset`/`limit`, gives the line-numbered text. The workflow script is kept as the run's `input` artifact under its own name |
 | `list_tasks`, `describe_task` | the task vocabulary: every traced task with its signature, and one task's full docstring, so the agent never reads the package source to learn a call |
 | `search_materials`, `get_material`, `query_materials` | the offline Materials Project snapshot, present only when `[builders.mp]` names one: filtered search, one record with its CIF path, and one read-only row-capped SELECT; the structure itself arrives traced via `fetch_structure` in a workflow |
-| `submit_job`, `job_status`, `cancel_job` | SLURM plumbing, present only when the config declares partitions |
+| `submit_job`, `job_status`, `cancel_job` | SLURM plumbing, present only when the config declares partitions. `submit_job` takes `nodes`, `ntasks_per_node`, `cpus_per_task`, `gpus_per_node`, and `mem`; the size replaces the partition's directives and must fit the node the partition declares |
 | `notebook`, `plan` | the memory instruments (below) |
 | `recall`, `remember` | the machine's memory across sessions, described in [Memory](memory.md) |
 | `skill` | load a skill: its instructions, root path, and bundled files; the catalog is per-agent |
@@ -547,10 +589,33 @@ slab mason sandbox launch                  # the same campaign again
 slab mason sandbox launch --engine-tasks 8 # same goal, one change
 ```
 
+`render` and `launch` take the five job-size flags of `slab hpc render`
+(`--nodes`, `--ntasks-per-node`, `--cpus-per-task`, `--gpus-per-node`,
+`--mem`), and so does `slab benchmark launch`. They size the sandbox job
+itself, within the node the partition declares, and `render.json`
+records the size so a bare `launch` repeats it. Inside the job the agent
+sizes each launch against what that allocation holds.
+
 The partition also decides GPU visibility. When the target partition
 declares a `gres` that names gpus, the rendered `apptainer exec` adds
 `--nv`, so a torch-backed served engine (a rootstock MLIP worker) sees the
-device the job holds. A CPU partition renders without it.
+device the job holds. A CPU partition renders without it. `--cleanenv`
+strips the variables the scheduler set, so the script re-exports
+`CUDA_VISIBLE_DEVICES` (from `SLURM_JOB_GPUS` when the job did not set
+it) and `SLURM_CPUS_PER_TASK` into the container. The budget inside
+reads exactly these. The script also sets
+`OMPI_MCA_hwloc_base_binding_policy=none`, so two concurrent launches
+bind inside their own affinity masks instead of both to core 0. The
+context file states how many GPUs the job holds and that their ids are
+the ones in `CUDA_VISIBLE_DEVICES`.
+
+Two launches share one allocation like this. On a node with four GPUs,
+the agent calls `launch_workflow` with `ntasks=2, gpus=2,
+background=true` for one script and the same for a second. The first
+reserves cpus 0 and 1 and gpus 0 and 1, the second cpus 2 and 3 and gpus
+2 and 3, and each child sees only its own. A third such call is refused
+with the free amounts until one of them ends. `list_engines` reports the
+budget and what is free, and `wait_for_run` collects both.
 
 The machine's memory travels into the job. `--no-home` hides
 `~/.config`, so the render binds the memory directory read-write and
@@ -584,6 +649,8 @@ install automatically; the render warns when a hand-written command uses
 `srun`. And because no `[hpc]` would otherwise derive a `laptop` compute
 profile, the rendered config pins `compute_profile = "workstation"`, the
 honest size for one owned node, unless your own config sets a profile.
+`--engine-tasks` keeps its meaning as the rank count of an unsized
+launch; a sized launch names its own.
 
 ## Reading a campaign afterwards
 
@@ -636,8 +703,10 @@ benchmark scorer copies the numbers into the record as `retention`.
 The transcript also records every command that ran, as `command` events,
 so a reader can check what was run without opening the run store. The
 `shell` tool records its command line and directory. `launch_workflow`
-records the driver's own command, and `submit_job` the payload it
-submitted with the job id, the partition, and the kept batch script.
+records the driver's own command and the slice the launch held (its cpu
+ids, gpu ids, ranks, and threads), and `submit_job` the payload it
+submitted with the job id, the partition, the kept batch script, and the
+size when the job was sized.
 When a run finishes, whether under `launch_workflow` or under
 `wait_for_run`, the engine commands its tasks resolved are recorded from
 the run's recipes: one event per distinct command, with the engine, the
@@ -670,6 +739,32 @@ kind on one line:
 ```console
 commands recorded: 3 (shell 1, launch 1, engine 1); 'slab mason read --full' shows each
 ```
+
+A sized launch shows its slice under the `launch` event, and the driver
+line carries the reservation the child claimed. This session, driven by
+hand through the tools again, launched an EMT relax with `ntasks=2`:
+
+```console
+$ slab mason read --full .slab/mason/sessions/20260911-005331-51339.jsonl
+[00:53:31] launch command by pi (sized): slab run /private/tmp/claude-501/-Users-tom-SLAB/82ae44c5-5378-41dc-9d2d-584bf2e8b327/scratchpad/size-demo/cu_relax.py --name cu-relax --intent 'Cu fcc lattice constant, EMT, sized to two ranks' --session 20260911-005331-51339 -w /private/tmp/claude-501/-Users-tom-SLAB/82ae44c5-5378-41dc-9d2d-584bf2e8b327/scratchpad/size-demo/.slab --reservation 01m26z94v214dam13j42fmxw24
+    script /private/tmp/claude-501/-Users-tom-SLAB/82ae44c5-5378-41dc-9d2d-584bf2e8b327/scratchpad/size-demo/cu_relax.py
+    resources 2 cpu(s) 0-1, no gpu; 2 rank(s) x 1 thread(s)
+    cwd /private/tmp/claude-501/-Users-tom-SLAB/82ae44c5-5378-41dc-9d2d-584bf2e8b327/scratchpad/size-demo
+
+[0 model call(s); tokens 0+0]
+```
+
+The run record holds the same slice, and `slab list` shows it in the
+`RES` column:
+
+```console
+$ slab list -w .slab
+ID           STATE        STATUS       AGE  RES     NAME                 INTENT
+01m26z94yd   verified     completed     0s  2c      cu-relax             Cu fcc lattice constant, EMT, sized to t
+```
+
+A `job` event shows `size` the same way, as the nodes, ranks, cpus per
+rank, gpus per node, and memory the job asked for.
 
 ## Memory that outlives the context window
 

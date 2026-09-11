@@ -43,9 +43,9 @@ schema_version = 1
 #                                      # is refused; ASE execs argv directly)
 # bin = "/shared/sw/qe-7.4/bin"        # a custom install by its bin directory,
 #                                      # instead of command: the command becomes
-#                                      # 'mpirun -np N <bin>/pw.x' with N from
-#                                      # $SLURM_NTASKS (1 outside a job), and a
-#                                      # bundled <bin>/mpirun wins over PATH's.
+#                                      # 'mpirun -np {ntasks} <bin>/pw.x', filled
+#                                      # per launch (else $SLURM_NTASKS, else 1);
+#                                      # a bundled <bin>/mpirun wins over PATH's.
 #                                      # 'slab mason sandbox render' binds the
 #                                      # whole install read-only automatically
 # setup = ["module purge", "module load qe/7.4", "export OMP_NUM_THREADS=4"]
@@ -138,6 +138,13 @@ schema_version = 1
 # setup = ["module load cuda/12.4"]    # replaces [hpc] setup for this partition? no:
 #                                      # partition setup runs AFTER the [hpc] setup lines
 # sbatch_extra = ["--exclusive"]       # raw directives the schema does not model
+# max_nodes = 4                        # how many nodes one sized job may take (default 1)
+
+# [hpc.partitions.gpu.node]
+# cpus = 64                            # one node's size: the cap a sized job is
+# gpus = 4                             # checked against ('submit_job' with ntasks_per_node,
+# mem = "480G"                         # cpus_per_task, gpus_per_node, mem). Without this
+#                                      # table a job on the partition cannot be sized.
 
 [agent]
 # provider = "openai"                       # "openai" = any OpenAI-compatible server; "anthropic"

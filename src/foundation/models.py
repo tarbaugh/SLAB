@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from foundation._ids import new_run_id
 from foundation.lifecycle import ExecutionStatus, LifecycleState
+from slab.resources import Envelope
 
 
 def utcnow() -> datetime:
@@ -90,6 +91,10 @@ class Run(BaseModel):
             process leaves its run at ``running`` with no one to advance it;
             :meth:`foundation.runtime.Workspace.reap_dead` reads these two
             fields to tell such a run from a live one.
+        resources: The slice the run held (``cpus``, ``gpus``, ``ntasks``,
+            ``threads``, and the ``reservation`` id it claimed), copied from
+            the reservation when the run claimed it; None for a run that
+            was never reserved. A record for provenance, not a live count.
 
     Examples:
         >>> run = Run(name="si-relax", intent="baseline lattice constant")
@@ -119,6 +124,7 @@ class Run(BaseModel):
     failure: dict[str, Any] | None = None
     pid: int | None = None
     host: str | None = None
+    resources: dict[str, Any] | None = None
 
     @field_validator("created_at", "updated_at", "state_entered_at", "started_at", "finished_at")
     @classmethod
@@ -312,3 +318,48 @@ class CheckResult(BaseModel):
     observed: Any = None
     expected: Any = None
     at: datetime = Field(default_factory=utcnow)
+
+
+class Reservation(BaseModel):
+    """A slice of one host checked out for a launch, before the launch exists.
+
+    A session process (Mason, the MCP server) reserves cpu ids and gpu ids
+    in the run store, hands the id to the run it starts, and the run
+    claims it: ``run_id`` is None until then. A reservation is live while
+    its holder process is alive and unclaimed, or claimed by a run that is
+    running and alive; the store derives what is free from the live rows
+    and keeps no counter.
+
+    Examples:
+        >>> r = Reservation(host="n1", cpus=(0, 1), gpus=("0",), ntasks=2, holder_pid=1)
+        >>> r.slice
+        {'cpus': [0, 1], 'gpus': ['0'], 'ntasks': 2, 'threads': 1}
+        >>> r.envelope().ntasks
+        2
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    id: str = Field(default_factory=new_run_id)
+    host: str
+    cpus: tuple[int, ...]
+    gpus: tuple[str, ...] = ()
+    ntasks: int = Field(default=1, ge=1)
+    threads: int = Field(default=1, ge=1)
+    holder_pid: int
+    created_at: datetime = Field(default_factory=utcnow)
+    run_id: str | None = None
+
+    @property
+    def slice(self) -> dict[str, Any]:
+        """The JSON form a run record copies."""
+        return {
+            "cpus": list(self.cpus),
+            "gpus": list(self.gpus),
+            "ntasks": self.ntasks,
+            "threads": self.threads,
+        }
+
+    def envelope(self) -> Envelope:
+        """The :class:`slab.resources.Envelope` a process runs under with this slice."""
+        return Envelope(cpus=self.cpus, gpus=self.gpus, ntasks=self.ntasks, threads=self.threads)
