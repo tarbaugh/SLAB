@@ -28,6 +28,11 @@ constants at the top:
   you trust for the liquid, whose provenance goes in the report. The
   lammps-potentials skill gives the lines for a potential file or a
   GRACE model; pass the file in `files=` and name it by bare basename.
+- The start is a crystal, so nothing overlaps. If you begin instead
+  from a random placement or a merged cell, run the atomsk-structures
+  skill's `check_structure.py` on it and push close contacts apart
+  under the soft repulsion in the lammps-scripting skill before the
+  melt, or the first steps under the real potential lose atoms.
 - `T_MELT` and `MELT_STEPS`: hold well above melting until the crystal is
   gone. Confirm the melt with the radial-distribution skill (no sharp
   second-shell peaks) and the msd-diffusion skill (D of order

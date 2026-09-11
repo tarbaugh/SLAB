@@ -5,6 +5,14 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- Close contacts are pushed apart before the real potential sees a
+  cell. The md-expert card and the atomsk-structures, atomsk-defects,
+  atomsk-interfaces, melt-quench, and lammps-scripting skills say to
+  check the minimum interatomic distance of every built configuration,
+  to rebuild a crystal that has a close contact, and to push the
+  contacts of a disordered cell apart under `pair_style soft` with a
+  ramped prefactor and `fix nve/limit` before minimizing under the
+  real potential. The lammps-scripting skill carries the recipe.
 - The Kokkos GRACE styles are named, not derived. The lammps-potentials
   skill states that `-sf kk` cannot turn `pair_style grace` into a
   Kokkos style, because those styles are `grace/1l/kk`, `grace/2l/kk`,

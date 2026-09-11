@@ -1940,3 +1940,88 @@ def test_pair_style_for_refuses_what_it_cannot_classify(
     missing = tmp_path / "missing.eam"
     code, _ = _run(PAIR_STYLE, str(missing), monkeypatch=monkeypatch, capsys=capsys)
     assert code == 2
+
+
+# -- close contacts and the push-off -----------------------------------------
+
+OVERLAP = DATA / "lammps-ar-random-overlap.data"
+PUSHED = DATA / "lammps-ar-pushoff-final.data"
+PUSHOFF_IN = DATA / "lammps-ar-pushoff.in"
+
+
+def test_check_structure_reads_a_lammps_data_file_by_species(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Real data: 108 argon atoms placed at random in a 17 A box, one pair
+    0.3 A apart, and the same cell after the push-off recipe in the
+    lammps-scripting skill ran under a real LAMMPS. The data file carries
+    type 1, so `--species Ar` is what makes the expected bond argon's."""
+    code, out = _run(
+        CHECK, str(OVERLAP), "--json", "--format", "lammps-data", "--species", "Ar",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert isinstance(code, str) and "push a disordered cell apart" in code
+    report = json.loads(out)
+    assert report["formula"] == "Ar108"
+    assert report["min_distance_A"] == pytest.approx(0.3, abs=1e-3)
+    assert report["shortest_expected_bond_A"] == pytest.approx(2.12, abs=0.01)
+
+    code, out = _run(
+        CHECK, str(PUSHED), "--json", "--format", "lammps-data", "--species", "Ar",
+        "--expect-atoms", "108",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    report = json.loads(out)
+    assert report["min_distance_A"] > 3.5
+    assert report["close_pairs"] == 0
+
+
+def test_close_contact_guidance_reaches_the_builder_and_the_runner() -> None:
+    """The rule lives where a configuration is built and where it first runs."""
+    card = (Path(__file__).parent.parent / "src" / "mason" / "agents" / "md-expert.md").read_text()
+    assert "check_structure.py" in card
+    assert "pair_style soft" in card
+    scripting = (SKILLS / "lammps-scripting" / "SKILL.md").read_text()
+    for line in (
+        "pair_style soft 2.5",
+        "fix push all adapt 1 pair soft a * * v_prefactor",
+        "fix lim all nve/limit 0.05",
+        "--format lammps-data --species",
+    ):
+        assert line in scripting, line
+    for skill in ("atomsk-structures", "atomsk-defects", "atomsk-interfaces", "melt-quench"):
+        text = (SKILLS / skill / "SKILL.md").read_text()
+        assert "lammps-scripting" in text and "check_structure.py" in text, skill
+    # The recipe in the skill is the recipe the fixture ran.
+    recipe = PUSHOFF_IN.read_text()
+    for line in (
+        "pair_coeff * * 0.0",
+        "variable prefactor equal ramp(0.0,30.0)",
+        "velocity all create 300.0 4928459 dist gaussian",
+        "run 5000",
+    ):
+        assert line in recipe and line in scripting, line
+
+
+@pytest.mark.skipif(not os.environ.get("SLAB_TEST_LMP"), reason="needs a real lmp")
+def test_pushoff_recipe_separates_random_overlaps(tmp_path: Path) -> None:
+    """Under a real LAMMPS the skill's push-off takes the overlapping argon
+    cell to a minimum distance above the expected bond with no atoms lost."""
+    import shutil
+    import subprocess
+
+    from ase.io import read
+
+    shutil.copy(OVERLAP, tmp_path / "random.data")
+    proc = subprocess.run(
+        [os.environ["SLAB_TEST_LMP"], "-in", str(PUSHOFF_IN), "-log", "none"],
+        cwd=tmp_path, capture_output=True, text=True, check=False,
+    )
+    assert proc.returncode == 0, proc.stdout[-2000:]
+    assert "Lost atoms" not in proc.stdout
+    atoms = read(tmp_path / "pushed.data", format="lammps-data", Z_of_type={1: 18})
+    distances = atoms.get_all_distances(mic=True)
+    np.fill_diagonal(distances, np.inf)
+    assert distances.min() > 3.0
+    assert len(atoms) == 108

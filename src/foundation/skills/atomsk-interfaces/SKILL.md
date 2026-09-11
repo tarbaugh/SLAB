@@ -113,7 +113,10 @@ invocations.
 - Check the assembled cell with the atomsk-structures skill's
   `check_structure.py --expect-atoms N`: merges and polycrystal seams
   create overlapping atoms, and an optimizer given overlapping atoms
-  diverges or welds artifacts. Remove doubles or rebuild instead.
+  diverges or welds artifacts. Remove doubles with `-remove-doubles`,
+  then push the remaining close contacts apart under the soft
+  repulsion the lammps-scripting skill gives before the real potential
+  sees the cell, and check again.
 - Relax the assembly before measuring anything across it.
 - Report the orientation relationship (both grains' Miller indices or
   Euler angles), the in-plane strain state (which slab, how much), the

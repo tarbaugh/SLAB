@@ -21,11 +21,28 @@ from typing import Any
 import numpy as np
 
 
-def analyze(path: str, threshold: float) -> dict[str, Any]:
+def analyze(
+    path: str,
+    threshold: float,
+    *,
+    fmt: str | None = None,
+    species: list[str] | None = None,
+) -> dict[str, Any]:
     from ase.data import atomic_numbers, covalent_radii
     from ase.io import read
 
-    atoms = read(path)
+    kwargs: dict[str, Any] = {}
+    if fmt:
+        kwargs["format"] = fmt
+    if species:
+        # LAMMPS files carry numeric types; map type i to the i-th species.
+        if fmt == "lammps-data":
+            kwargs["Z_of_type"] = {
+                i: atomic_numbers[name] for i, name in enumerate(species, 1)
+            }
+        else:
+            kwargs["specorder"] = list(species)
+    atoms = read(path, **kwargs)
     if isinstance(atoms, list):  # multi-frame file: judge the last frame
         atoms = atoms[-1]
     report: dict[str, Any] = {
@@ -122,13 +139,29 @@ def main() -> None:
         default=None,
         help="exit with an error when the atom count differs from this",
     )
+    parser.add_argument(
+        "--format",
+        default=None,
+        help="ASE format name when the extension does not say (lammps-data, "
+        "lammps-dump-text, ...)",
+    )
+    parser.add_argument(
+        "--species",
+        nargs="+",
+        default=None,
+        metavar="EL",
+        help="element per LAMMPS type, in type order (type 1 first); needed "
+        "with a LAMMPS data or dump file, which carries types, not elements",
+    )
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     options = parser.parse_args()
     if options.fail_below_fraction < 0:
         parser.error("--fail-below-fraction must be 0 or positive")
 
     try:
-        report = analyze(options.file, options.min_distance)
+        report = analyze(
+            options.file, options.min_distance, fmt=options.format, species=options.species
+        )
     except FileNotFoundError:
         sys.exit(f"no such file: {options.file}")
     except Exception as e:
@@ -166,7 +199,8 @@ def main() -> None:
     if options.fail_below is not None and minimum is not None and minimum < options.fail_below:
         sys.exit(
             f"minimum interatomic distance {minimum} A is below "
-            f"{options.fail_below} A: atoms overlap; rebuild the structure"
+            f"{options.fail_below} A: atoms overlap; rebuild a crystal, push a "
+            f"disordered cell apart first"
         )
     fraction = report["min_distance_fraction"]
     if (
@@ -178,7 +212,7 @@ def main() -> None:
             f"minimum interatomic distance {minimum} A is {fraction} of the "
             f"{report['shortest_expected_bond_A']} A bond the closest pair's covalent "
             f"radii predict, below {options.fail_below_fraction}: atoms overlap; "
-            f"rebuild the structure"
+            f"rebuild a crystal, push a disordered cell apart first"
         )
     sys.exit(0)
 

@@ -90,8 +90,17 @@ If atomsk writes more than one file, name the result with `output=`.
   that minimum with the shortest bond the closest pair's covalent radii
   predict. It fails when the minimum is below 0.6 of that bond (set
   `--fail-below-fraction`, or an absolute `--fail-below` in Å), and when
-  the atom count differs from `--expect-atoms`. Overlapping atoms mean
-  rebuild, not relax.
+  the atom count differs from `--expect-atoms`. A LAMMPS data or dump
+  file carries types, not elements, so pass `--format lammps-data` (or
+  `lammps-dump-text`) and `--species` with one element per type in
+  type order. A data file with a `Masses` section identifies its
+  elements by mass; a dump file never does, and without the element
+  the expected bond is wrong.
+  Overlapping atoms in a
+  crystal mean rebuild, not relax. In a disordered cell (a merge, a
+  polycrystal, a hand-placed interstitial) they mean the soft-repulsion
+  push-off in the lammps-scripting skill before any relaxation under
+  the real potential, and this check again afterwards.
 - Compare the density against the known value for the phase. A wrong
   lattice constant or a doubled cell shows up here first.
 - Record the run id and the exact atomsk argument list in the notebook;

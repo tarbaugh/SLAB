@@ -221,6 +221,48 @@ criterion` line says why it stopped, and the task's log digest reports
 it. Minimize before MD when the structure came from a builder, so the
 first steps do not blow up.
 
+### Close contacts and the push-off
+
+A minimization under the real potential cannot repair a cell whose
+atoms overlap: a pair a fraction of a bond apart carries a force the
+optimizer follows off a cliff, and the log says `Lost atoms` or ends in
+a welded cluster. Check the minimum interatomic distance before the
+first run with the atomsk-structures skill's `check_structure.py`, and
+treat anything below 0.6 of the shortest expected bond as a close
+contact. A crystal with close contacts is a wrong build, so rebuild it.
+A disordered cell (random placement, a liquid or amorphous start, a
+merge, a polycrystal seam, an interstitial dropped by hand) almost
+always has some, so push them apart first under a soft repulsion,
+before the real potential sees the cell:
+
+```
+pair_style soft 2.5
+pair_coeff * * 0.0
+variable prefactor equal ramp(0.0,30.0)
+fix push all adapt 1 pair soft a * * v_prefactor
+fix lim all nve/limit 0.05
+velocity all create 300.0 4928459 dist gaussian
+timestep 0.001
+run 5000
+unfix push
+unfix lim
+```
+
+`pair_style soft` is a bounded cosine repulsion with no force above its
+cutoff, so the cutoff is the distance at which two atoms stop counting
+as too close: the shortest bond you expect in the cell, 2.5 to 3 Å for
+a metal, 1.5 Å for a hydride. The prefactor ramps from zero to about
+30 eV under `units metal`, so the first steps move overlapping pairs
+gently and the last steps separate them fully. `fix nve/limit` caps
+every atom's displacement per step at 0.05 Å, which is the guard that
+keeps a strongly overlapping pair from flying out of the box. Then set
+the real `pair_style` and `pair_coeff`, minimize as above, and run
+`check_structure.py --format lammps-data --species <elements in type
+order>` on the written data to confirm no contact remains below the
+threshold. The push-off is not part of the physics; the
+report lists it as a preparation step, and the trajectory that counts
+begins after the minimization under the real potential.
+
 ## 7. Guards inside the script
 
 - `neigh_modify every 1 delay 0 check yes`: rebuild when an atom moved

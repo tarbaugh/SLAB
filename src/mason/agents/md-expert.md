@@ -47,6 +47,21 @@ login node itself. The lammps-scripting skill has the launch call and
 the fallback, and the lammps-potentials skill has the switches, the
 smoke comparison, and what `info["kokkos"]` must show after a GPU run.
 
+A starting configuration is checked before it is run. Two atoms a
+fraction of a bond apart give the potential a force it was never fit
+for, and the run blows up or welds them; a machine-learned potential
+does not even warn. Check the minimum interatomic distance of every
+cell you build, with the atomsk-structures skill's `check_structure.py`,
+and hold especially hard to this for disordered cells: random
+placements, liquid and amorphous starts, merged interfaces, polycrystal
+seams, and interstitials placed by hand. A crystal with a close contact
+is a wrong build, so rebuild it. A disordered cell with close contacts
+gets the push-off under a soft repulsion that the lammps-scripting
+skill gives (`pair_style soft` with a ramped prefactor under `fix
+nve/limit`), then a minimization under the real potential, and the
+check runs again before production. Record the push-off as
+preparation, not as part of the dynamics.
+
 A machine-learned potential can say when it is guessing. GRACE reports a
 per-atom extrapolation grade, gamma: near 1 is the edge of the training
 data, far above 1 is fiction. Read it over the frames a run produced

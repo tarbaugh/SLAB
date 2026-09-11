@@ -32,6 +32,11 @@ every formation energy below is a difference against it.
   cavity next to atom 12. The `relative` form takes an offset in Å, so
   `-add-atom H relative 12 0.5 0.5 0.5` puts H 0.87 Å from atom 12, on
   top of it; give a physical offset (about 1.5 Å or more) or use `near`.
+  Check the minimum distance afterwards with the atomsk-structures
+  skill's `check_structure.py`; an interstitial too close to a host
+  atom gets the soft-repulsion push-off from the lammps-scripting skill
+  before the relaxation, never a relaxation straight under the real
+  potential.
 - Small random displacements to break symmetry before relaxation:
   `-disturb 0.05`.
 
