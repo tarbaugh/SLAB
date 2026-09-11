@@ -5,6 +5,23 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- Dynamics run inside LAMMPS, at every level the agent reads. The core
+  prompt every card shares now states the rule: when `list_engines`
+  shows `lammps`, every molecular dynamics run goes through `run_lammps`
+  as a whole script, a Python dynamics loop under any engine is not a
+  route, and a served MLIP checkpoint id is for `relax` and
+  `single_point` only. The planner's briefing rule names `run_lammps`
+  and the pair style for a dynamics step and treats an ASE-loop result
+  as a step to redo, and the md-expert card says the same of a served
+  checkpoint. The melt-quench and thermal-response templates, which
+  drove NPT from `ase.md`, now run their melt, ramps, holds, and
+  ladders inside LAMMPS through `run_lammps` (argon under Lennard-Jones
+  as the shakeout, `pair_style grace` a constant away), read the dumps
+  and thermo tables back from the run's artifacts, and write the same
+  `.traj` files and `ramp.json` the report scripts read. Their tests run
+  under `$SLAB_TEST_LMP`, and a new test refuses any bundled template
+  that imports `ase.md`. The msd-diffusion skill names the LAMMPS dump
+  columns that keep positions unwrapped.
 - Purge leaves nothing behind. After `slab fast-forward --include-running`
   and `slab purge --all-sessions --yes` the workspace holds the promoted
   and archived rows with the blobs they reach, the serve record of a

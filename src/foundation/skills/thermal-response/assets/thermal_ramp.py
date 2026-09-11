@@ -1,16 +1,21 @@
-"""Temperature ladder under NPT: mean enthalpy, volume, and cell at each rung.
+"""Temperature ladder under NPT inside LAMMPS: mean enthalpy, volume, and cell per rung.
 
-Runs as-is (EMT copper, a short hot ladder) as a shakeout. For real work,
-adapt the constants below and launch it as a traced run. The ladder writes
-``ramp.json`` for ``scripts/fit_thermal_ramp.py``: heat capacity from
-dH/dT, thermal expansion from dV/dT (per axis when the cell is not
-cubic), and latent heat between two phases' ladders.
+Runs as-is as a shakeout: 108 argon atoms under a Lennard-Jones potential
+that needs no potential file, a short cold ladder. For real work change
+STRUCTURE, the POTENTIAL lines (the lammps-potentials skill gives them,
+`pair_style grace` included), the rungs, and the lengths, and keep the
+checks. The ladder writes ``ramp.json`` for ``scripts/fit_thermal_ramp.py``:
+heat capacity from dH/dT, thermal expansion from dV/dT (per axis when the
+cell is not cubic), and latent heat between two phases' ladders.
 
-Each rung is approached under Berendsen, which reaches a target quickly
-but samples no ensemble, and then sampled under ASE's isotropic
-Martyna-Tobias-Klein NPT, which does. Every row carries the atom count,
-the pressure, H = E + PV, the measured temperature, the mean cell
-lengths, and block standard errors, so the fit can use them.
+One ``run_lammps`` call runs the whole ladder as one continuous
+trajectory. Each rung is two ``run`` commands under Nose-Hoover NPT
+(``fix npt``): an equilibration whose rows are discarded, and an
+averaging span whose thermo rows the workflow reads back from the run's
+``-thermo.json`` artifact. Every row of ``ramp.json`` carries the atom
+count, the pressure, H = E + PV at the set pressure, the measured
+temperature, the mean cell lengths, and block standard errors, so the
+fit can use them.
 """
 
 import itertools
@@ -19,139 +24,134 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from ase import Atoms, units
+from ase import units
 from ase.build import bulk
-from ase.md.nose_hoover_chain import IsotropicMTKNPT
-from ase.md.nptberendsen import Inhomogeneous_NPTBerendsen, NPTBerendsen
-from ase.md.velocitydistribution import Stationary, thermalize_momenta
 
 from foundation import check, current_run
-from slab.backends import close_calculator, get_calculator
+from foundation.tasks import run_lammps
 
-STRUCTURE = bulk("Cu", "fcc", a=3.58, cubic=True) * (2, 2, 2)
-ENGINE = "emt"
-TIMESTEP_FS = 2.0
+STRUCTURE = bulk("Ar", "fcc", a=5.26, cubic=True) * (3, 3, 3)
+# Argon: epsilon 0.0104 eV, sigma 3.40 A, in metal units. The masses ride
+# in structure.data, which run_lammps writes from STRUCTURE.
+POTENTIAL = """\
+pair_style lj/cut 8.5
+pair_coeff 1 1 0.0104 3.40
+pair_modify shift yes
+"""
+TIMESTEP_PS = 0.002
 # One rung per row of ramp.json, walked in order. Five or more rungs per
 # fitted window for a real number; three is the shakeout.
-TEMPERATURES = (500.0, 800.0, 1100.0)
+TEMPERATURES = (20.0, 40.0, 60.0)
 # Walk back down after the top rung and record the descent too, so the fit
 # can test for hysteresis (superheating on the way up, supercooling down).
 WALK_DOWN = False
 # Shakeout lengths. Equilibrate for at least ten barostat time constants,
 # and average long enough that the block error is small against the slope.
-EQUILIBRATION_STEPS = 200
-AVERAGING_STEPS = 200
+EQUILIBRATION_STEPS = 500
+AVERAGING_STEPS = 500
 SAMPLE_EVERY = 5
 BLOCKS = 4
 PRESSURE_BAR = 1.0
-TAUT_FS = 100.0
-TAUP_FS = 500.0
-# Isothermal compressibility per bar (copper: about 7e-7 solid).
-COMPRESSIBILITY_PER_BAR = 7e-7
-# True lets each cell axis breathe on its own during the Berendsen approach,
-# for hexagonal, tetragonal, or orthorhombic phases; the fit then reports
-# an expansion coefficient per axis.
+TDAMP_PS = 0.1  # thermostat time constant, about 100 timesteps
+PDAMP_PS = 1.0  # barostat time constant, about 1000 timesteps
+# `aniso` lets each cell length breathe on its own (hexagonal, tetragonal,
+# orthorhombic phases), so the fit reports an expansion coefficient per axis.
 ANISOTROPIC = False
-HOLD_TDAMP_FS = 100.0
-HOLD_PDAMP_FS = 1000.0
-RNG_SEED = 20  # seeds the initial velocities, so a rerun reproduces the run
+SEED = 20  # seeds the initial velocities, so a rerun reproduces the run
+LABEL = "ramp"
+
+ladder = list(TEMPERATURES)
+if WALK_DOWN:
+    ladder += list(reversed(TEMPERATURES[:-1]))
+coupling = "aniso" if ANISOTROPIC else "iso"
+rungs = "".join(
+    f"""
+# rung {i + 1}: {temperature:g} K, {EQUILIBRATION_STEPS} steps discarded, {AVERAGING_STEPS} averaged
+fix integrate all npt temp {temperature} {temperature} {TDAMP_PS} &
+    {coupling} {PRESSURE_BAR} {PRESSURE_BAR} {PDAMP_PS}
+run {EQUILIBRATION_STEPS}
+run {AVERAGING_STEPS}
+"""
+    for i, temperature in enumerate(ladder)
+)
+SCRIPT = f"""\
+units metal
+atom_style atomic
+boundary p p p
+read_data structure.data
+
+{POTENTIAL}
+neighbor 2.0 bin
+neigh_modify every 1 delay 0 check yes
+
+timestep {TIMESTEP_PS}
+thermo {SAMPLE_EVERY}
+thermo_style custom step temp pe ke etotal press vol lx ly lz
+thermo_modify flush yes
+velocity all create {TEMPERATURES[0]} {SEED} mom yes rot yes dist gaussian
+{rungs}
+write_data {LABEL}-final.data
+"""
 
 
-def _approach(atoms: Atoms, temperature_k: float) -> NPTBerendsen:
-    cls = Inhomogeneous_NPTBerendsen if ANISOTROPIC else NPTBerendsen
-    return cls(
-        atoms,
-        timestep=TIMESTEP_FS * units.fs,
-        temperature_K=temperature_k,
-        pressure_au=PRESSURE_BAR * units.bar,
-        taut=TAUT_FS * units.fs,
-        taup=TAUP_FS * units.fs,
-        compressibility_au=COMPRESSIBILITY_PER_BAR / units.bar,
-    )
-
-
-def _sampler(atoms: Atoms, temperature_k: float) -> IsotropicMTKNPT:
-    return IsotropicMTKNPT(
-        atoms,
-        timestep=TIMESTEP_FS * units.fs,
-        temperature_K=temperature_k,
-        pressure_au=PRESSURE_BAR * units.bar,
-        tdamp=HOLD_TDAMP_FS * units.fs,
-        pdamp=HOLD_PDAMP_FS * units.fs,
-    )
-
-
-def _block_se(values: list[float]) -> float:
-    blocks = [float(np.mean(b)) for b in np.array_split(np.asarray(values), BLOCKS)]
+def _block_se(values: np.ndarray) -> float:
+    blocks = [float(np.mean(b)) for b in np.array_split(values, BLOCKS)]
     return float(np.std(blocks, ddof=1) / np.sqrt(len(blocks)))
 
 
-def _rung(system: Atoms, temperature: float, direction: str) -> dict[str, Any]:
-    _approach(system, temperature).run(EQUILIBRATION_STEPS)
-    sampler = _sampler(system, temperature)
-    enthalpies: list[float] = []
-    volumes: list[float] = []
-    measured: list[float] = []
-    lengths: list[np.ndarray] = []
+def _rung(table: dict[str, Any], temperature: float, direction: str) -> dict[str, Any]:
+    """One ramp.json row from the averaging table's rows, its first row dropped."""
+    columns = table["columns"]
+    block = np.asarray(table["rows"][1:], dtype=float)
+    column = {name: block[:, index] for index, name in enumerate(columns)}
     pressure_ev_a3 = PRESSURE_BAR * units.bar
-    for _ in range(AVERAGING_STEPS // SAMPLE_EVERY):
-        sampler.run(SAMPLE_EVERY)
-        volume = system.get_volume()
-        energy = system.get_potential_energy() + system.get_kinetic_energy()
-        enthalpies.append(energy + pressure_ev_a3 * volume)
-        volumes.append(volume)
-        measured.append(system.get_temperature())
-        lengths.append(np.asarray(system.cell.lengths()))
+    volumes = column["Volume"]
+    enthalpies = column["TotEng"] + pressure_ev_a3 * volumes
+    lengths = np.stack([column["Lx"], column["Ly"], column["Lz"]], axis=1)
     return {
         "T": temperature,
-        "T_measured": float(np.mean(measured)),
+        "T_measured": float(np.mean(column["Temp"])),
         "direction": direction,
-        "N": len(system),
-        "mass_amu": float(system.get_masses().sum()),
+        "N": len(STRUCTURE),
+        "mass_amu": float(STRUCTURE.get_masses().sum()),
         "P_bar": PRESSURE_BAR,
         "H": float(np.mean(enthalpies)),
         "H_se": _block_se(enthalpies),
-        "E": float(np.mean(enthalpies) - pressure_ev_a3 * np.mean(volumes)),
+        "E": float(np.mean(column["TotEng"])),
         "V": float(np.mean(volumes)),
         "V_se": _block_se(volumes),
         "L": [float(x) for x in np.mean(lengths, axis=0)],
     }
 
 
-calculator = get_calculator(ENGINE)
-try:
-    system: Atoms = STRUCTURE.copy()
-    system.calc = calculator
-    thermalize_momenta(
-        system, temperature_K=TEMPERATURES[0], rng=np.random.default_rng(RNG_SEED)
+result, info = run_lammps(SCRIPT, atoms=STRUCTURE, label=LABEL)
+active = current_run()
+assert active is not None, "run this template through launch_workflow"
+tables = json.loads(
+    active.artifacts.get(info["artifacts"][f"{LABEL}-thermo.json"]).read_text(encoding="utf-8")
+)
+print(
+    f"LAMMPS {info['version']}: {result['steps']} steps over {len(ladder)} rung(s), "
+    f"{len(tables)} thermo tables"
+)
+rows: list[dict[str, Any]] = []
+for i, temperature in enumerate(ladder):
+    direction = "up" if i < len(TEMPERATURES) else "down"
+    rows.append(_rung(tables[2 * i + 1], temperature, direction))
+    print(
+        f"T = {temperature:.0f} K ({direction}): <H> = {rows[-1]['H']:.4f} eV, "
+        f"<V> = {rows[-1]['V']:.2f} A^3 (measured {rows[-1]['T_measured']:.0f} K)"
     )
-    Stationary(system)
-    rows: list[dict[str, Any]] = []
-    ladder = list(TEMPERATURES)
-    if WALK_DOWN:
-        ladder += list(reversed(TEMPERATURES[:-1]))
-    for i, temperature in enumerate(ladder):
-        direction = "up" if i < len(TEMPERATURES) else "down"
-        rows.append(_rung(system, temperature, direction))
-        print(
-            f"T = {temperature:.0f} K ({direction}): <H> = {rows[-1]['H']:.4f} eV, "
-            f"<V> = {rows[-1]['V']:.2f} A^3 (measured {rows[-1]['T_measured']:.0f} K)"
-        )
-finally:
-    close_calculator(calculator)
 
 with open("ramp.json", "w", encoding="utf-8") as handle:
     json.dump(rows, handle, indent=1)
 print(f"wrote ramp.json with {len(rows)} rung(s)")
-
-active = current_run()
-if active is not None:
-    active.keep("ramp.json", Path("ramp.json"))
+active.keep("ramp.json", Path("ramp.json"))
 
 
 @check
 def one_row_per_rung() -> bool:
-    return len(rows) == len(ladder)
+    return len(rows) == len(ladder) and len(tables) == 2 * len(ladder)
 
 
 @check

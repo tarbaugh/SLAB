@@ -12,20 +12,24 @@ metadata:
 # Thermal response
 
 The procedure has two parts. A workflow walks one phase up a temperature
-ladder under NPT and records the mean enthalpy, volume, and cell at each
-rung with block errors. A bundled script fits the slopes, and compares
-two phases' ladders for a latent heat.
+ladder under NPT inside LAMMPS through `run_lammps` and records the mean
+enthalpy, volume, and cell at each rung with block errors. A bundled
+script fits the slopes, and compares two phases' ladders for a latent
+heat.
 
 ## 1. Run a ladder per phase
 
 Copy `assets/thermal_ramp.py` into the project directory and adapt the
 constants at the top:
 
-- `STRUCTURE` and `ENGINE`: one phase per ladder. For a latent heat you
-  run the template twice, once from the crystal and once from the
-  amorphous or liquid cell, with the same atom count and everything else
-  identical. The amorphous branch depends on its quench rate and age
-  (melt-quench skill); state both.
+- `STRUCTURE` and `POTENTIAL`: one phase per ladder, and the
+  `pair_style` and `pair_coeff` lines from the lammps-potentials skill
+  (pass a potential file in `files=` and name it by bare basename). The
+  template runs as-is on 108 argon atoms under a Lennard-Jones potential
+  as a shakeout. For a latent heat you run the template twice, once
+  from the crystal and once from the amorphous or liquid cell, with the
+  same atom count and everything else identical. The amorphous branch
+  depends on its quench rate and age (melt-quench skill); state both.
 - `TEMPERATURES`: the rungs, walked in order as one continuous
   trajectory. Use five or more per window you will fit, spaced closely
   enough that H(T) is linear between neighbours.
@@ -34,20 +38,25 @@ constants at the top:
   (superheating on the way up, supercooling down), which means the
   slopes across that range are not equilibrium values.
 - `EQUILIBRATION_STEPS` and `AVERAGING_STEPS`: the template's values are
-  shakeout lengths. Equilibrate for at least ten barostat time constants
-  per rung, and average until the block error on H is small against the
-  slope times the rung spacing.
+  shakeout lengths. Each rung is two `run` commands under one `fix npt`:
+  the equilibration, whose rows are discarded, and the averaging span.
+  Equilibrate for at least ten barostat time constants per rung, and
+  average until the block error on H is small against the slope times
+  the rung spacing.
 - `ANISOTROPIC`: set `True` for hexagonal, tetragonal, or orthorhombic
-  phases so each axis breathes on its own; the fit then reports an
-  expansion coefficient per axis, which is the number to quote.
-- Each rung is approached under Berendsen and sampled under ASE's
-  isotropic Martyna–Tobias–Klein NPT, because Berendsen suppresses the
-  volume fluctuations and samples no ensemble.
+  phases so each cell length breathes on its own (`fix npt ... aniso`);
+  the fit then reports an expansion coefficient per axis, which is the
+  number to quote.
+- `TDAMP_PS` and `PDAMP_PS`: the Nose-Hoover time constants, about 100
+  and 1000 timesteps. Record them with the result.
 
-Run it with `launch_workflow` and give an intent. The ladder writes
-`ramp.json`, the run keeps it, and the checks gate the run: one row per
-rung, enthalpy rising with temperature on the way up, volumes physical.
-Every row carries the atom count, the pressure, H = E + PV, the measured
+Run it with `launch_workflow` and give an intent, sized with `gpus=`
+when the machine declares a gpu build. The workflow reads the thermo
+rows of every averaging span back from the run's `-thermo.json`
+artifact and writes `ramp.json` in the project directory, which the run
+keeps, and the checks gate the run: one row per rung, enthalpy rising
+with temperature on the way up, volumes physical. Every row carries the
+atom count, the pressure, H = E + PV at the set pressure, the measured
 temperature, the mean cell lengths, and block errors.
 
 ## 2. Fit

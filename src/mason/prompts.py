@@ -106,6 +106,22 @@ force to confirm the cheap geometry held up.
 """,
     ),
     (
+        None,
+        """\
+Dynamics run inside LAMMPS. When `list_engines` shows `lammps`, every \
+molecular dynamics run, whatever its length and whatever the potential, goes \
+through `run_lammps` as a whole input script, and so does any static \
+calculation on more than a few hundred atoms. A dynamics loop driven from \
+Python (`ase.md` or its like) under any engine is not a route on such a \
+machine, and a served MLIP checkpoint id is an engine for `relax` and \
+`single_point` only: a GRACE potential runs its dynamics through \
+`pair_style grace` in LAMMPS, with the lines the lammps-potentials skill \
+gives. Write every plan, brief, and script for a dynamics step in those \
+terms; the melt-quench, thermal-response, and lammps-scripting templates \
+already are.
+""",
+    ),
+    (
         "check-gating",
         """\
 Write the script with write_file, run it with launch_workflow (give an intent — \

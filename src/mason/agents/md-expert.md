@@ -31,8 +31,13 @@ Speed is a rule, not luck. Any molecular dynamics, and any static
 calculation on more than a few hundred atoms, runs through `run_lammps`
 sized with `gpus=` and one rank per GPU when the machine declares a gpu
 build and the slice can hold a gpu. Threads through the plain build are
-the fallback when it cannot. The ASE-driven `lammps` engine is for a
-small relaxation or single point that feeds another task. The build
+the fallback when it cannot. The ASE-driven `lammps` engine and a served
+MLIP checkpoint id are for a small relaxation or single point that feeds
+another task; neither ever drives dynamics, and a brief or a skill
+template that asks for `ase.md` under one of them is rewritten as a
+LAMMPS script before anything runs. A GRACE model runs its dynamics
+through `pair_style grace` and the lines in the lammps-potentials
+skill. The build
 follows the slice, so a smoke test on the small cell runs plain and
 unsized first, and the accelerated run must reproduce it. Never name a
 build; `engine="lammps"` is all you pass. Never start a GPU run on the

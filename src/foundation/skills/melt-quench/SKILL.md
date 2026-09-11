@@ -11,9 +11,9 @@ metadata:
 ---
 # Melt-quench
 
-The procedure has two parts. A workflow melts the cell under NPT,
-quenches copies of the melt at a ladder of rates, and holds each at the
-final temperature. A bundled script turns the recorded holds into
+The procedure has two parts. A workflow runs the melt, the quench ladder,
+and the holds inside LAMMPS through `run_lammps`, and reads the recorded
+holds back as trajectories. A bundled script turns those holds into
 densities with errors and the rate law.
 
 ## 1. Run the quench ladder
@@ -21,10 +21,13 @@ densities with errors and the rate law.
 Copy `assets/melt_quench.py` into the project directory and adapt the
 constants at the top:
 
-- `STRUCTURE` and `ENGINE`: the cell and the potential. The template runs
-  as-is under `emt` with 32 atoms as a shakeout; a reportable density
-  wants 500 to 1000 atoms or more, and an interatomic potential you
-  trust for the liquid, whose provenance goes in the report.
+- `STRUCTURE` and `POTENTIAL`: the cell and the `pair_style` and
+  `pair_coeff` lines. The template runs as-is on 108 argon atoms under
+  a Lennard-Jones potential at 1 kbar as a shakeout; a reportable
+  density wants 500 to 1000 atoms or more, and an interatomic potential
+  you trust for the liquid, whose provenance goes in the report. The
+  lammps-potentials skill gives the lines for a potential file or a
+  GRACE model; pass the file in `files=` and name it by bare basename.
 - `T_MELT` and `MELT_STEPS`: hold well above melting until the crystal is
   gone. Confirm the melt with the radial-distribution skill (no sharp
   second-shell peaks) and the msd-diffusion skill (D of order
@@ -33,27 +36,31 @@ constants at the top:
   speeds. Real glasses are made at 0.01 to 10 K/ps (1e10 to 1e13 K/s);
   1800 to 300 K at 0.1 K/ps is 15 ns, routine with an EAM or MLIP. The
   rate always accompanies the number, because glass properties depend on
-  it.
-- `HOLD_STEPS`: the isothermal hold at `T_FINAL`. The density is
-  measured over the hold, never over the end of the ramp, which spans a
-  range of temperatures. Hold long past the barostat time constant, and
-  longer when the report shows a drift.
-- `REPLICAS`: independent melts per rate from different seeds. Two or
-  more give the spread that tells a rate-to-rate difference of a percent
-  from noise.
-- `COMPRESSIBILITY_PER_BAR`: the material's isothermal compressibility;
-  it sets the Berendsen barostat's effective time constant.
-- The melt and the ramp run under Berendsen, which reaches a target
-  quickly and samples no ensemble; the hold runs under ASE's isotropic
-  Martyna–Tobias–Klein NPT, which does. The barostat is isotropic. That
-  is right for melts and glasses; do not use this template to cool a
-  crystal through an anisotropic transition.
+  it. The script turns each rate into a `fix npt temp T_MELT T_FINAL`
+  run of the matching length.
+- `HOLD_STEPS` and `DUMP_EVERY`: the isothermal hold at `T_FINAL` and
+  how often the hold dump records a frame. The density is measured over
+  the hold, never over the end of the ramp, which spans a range of
+  temperatures. Hold long past the barostat time constant, and longer
+  when the report shows a drift.
+- `REPLICAS`: independent melts per rate from different seeds, one
+  `run_lammps` call each. Two or more give the spread that tells a
+  rate-to-rate difference of a percent from noise.
+- `TDAMP_PS` and `PDAMP_PS`: the Nose-Hoover thermostat and barostat
+  time constants, about 100 and 1000 timesteps. Every stage runs under
+  the same `fix npt`, which samples the isothermal-isobaric ensemble.
+  The barostat is isotropic. That is right for melts and glasses; do
+  not use this template to cool a crystal through an anisotropic
+  transition.
 
-Run it with `launch_workflow` and give an intent. Each rate and replica
-writes `quench-<rate>Kps-r<k>.traj`, the run keeps the trajectories and
-a `quench.json` summary with `hold_frames`, and the checks gate the run:
-every quench reached the final temperature, no volume exploded, every
-hold was recorded.
+Run it with `launch_workflow` and give an intent, sized with `gpus=`
+when the machine declares a gpu build. The run keeps the LAMMPS input,
+log, thermo tables, restart, and hold dumps as artifacts. The workflow
+reads each hold dump back with the element masses and writes it as
+`quench-<rate>Kps-r<k>.traj` in the project directory, together with a
+`quench.json` summary that records `hold_frames`, and the checks gate
+the run: every hold sat below half the melt temperature, no volume
+exploded, every hold was recorded in full.
 
 ## 2. Measure
 

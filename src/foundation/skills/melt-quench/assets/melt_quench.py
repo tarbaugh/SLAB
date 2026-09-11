@@ -1,147 +1,175 @@
-"""Melt-quench: NPT melt, a ladder of quench rates, and an isothermal hold.
+"""Melt-quench inside LAMMPS: NPT melt, a ladder of quench rates, a hold.
 
-Runs as-is (EMT copper, absurdly fast rates, one replica) as a shakeout.
-For real work, adapt the constants below and launch it as a traced run.
-Each rate and replica writes ``quench-<rate>Kps-r<k>.traj`` for
-``scripts/quench_report.py``; the run keeps every trajectory plus a
-``quench.json`` summary that records the hold length.
+Runs as-is as a shakeout: 108 argon atoms under a Lennard-Jones potential
+that needs no potential file, held at 1 kbar so the fluid stays dense
+above its boiling point, with absurdly fast rates and one replica. For
+real work change STRUCTURE, the POTENTIAL lines (the lammps-potentials
+skill gives them, `pair_style grace` included), the temperatures, the
+rates, and the lengths, and keep the checks.
 
-Integrators: the melt and the ramp use the Berendsen thermostat and
-barostat, which reach a target quickly but sample no ensemble. The hold
-at the final temperature, where the density is measured, uses ASE's
-isotropic Martyna-Tobias-Klein NPT, which samples the isothermal-isobaric
-ensemble.
+One ``run_lammps`` call per replica. The script melts the cell under
+``fix npt``, writes a restart, and then for each rate reads the melt
+back, ramps the thermostat target linearly to the final temperature
+(``fix npt temp T_MELT T_FINAL``), and holds at the final temperature
+under the same Nose-Hoover NPT while a dump records the hold. The
+workflow reads each hold dump back from the run's artifacts and writes it
+as ``quench-<rate>Kps-r<k>.traj`` with the masses, the form
+``scripts/quench_report.py`` reads, plus a ``quench.json`` summary that
+records the hold length in frames.
 """
 
 import json
 from pathlib import Path
+from typing import Any
 
-import numpy as np
-from ase import Atoms, units
 from ase.build import bulk
-from ase.io.trajectory import Trajectory
-from ase.md.nose_hoover_chain import IsotropicMTKNPT
-from ase.md.nptberendsen import NPTBerendsen
-from ase.md.velocitydistribution import Stationary, thermalize_momenta
+from ase.io import read, write
 
 from foundation import check, current_run
-from slab.backends import close_calculator, get_calculator
+from foundation.tasks import run_lammps
 
-# The shakeout cell is 32 atoms. A reportable density wants 500 to 1000
+# The shakeout cell is 108 atoms. A reportable density wants 500 to 1000
 # atoms or more, so a glass has room for medium-range order.
-STRUCTURE = bulk("Cu", "fcc", a=3.58, cubic=True) * (2, 2, 2)
-ENGINE = "emt"
-TIMESTEP_FS = 2.0
-T_MELT = 1800.0
+STRUCTURE = bulk("Ar", "fcc", a=5.26, cubic=True) * (3, 3, 3)
+# Argon: epsilon 0.0104 eV, sigma 3.40 A, in metal units. The masses ride
+# in structure.data, which run_lammps writes from STRUCTURE.
+POTENTIAL = """\
+pair_style lj/cut 8.5
+pair_coeff 1 1 0.0104 3.40
+pair_modify shift yes
+"""
+TIMESTEP_PS = 0.002
+T_MELT = 200.0
 MELT_STEPS = 400
-T_FINAL = 300.0
+T_FINAL = 20.0
 # Shakeout rates. Real glasses are made at 0.01 to 10 K/ps (1e10 to 1e13
 # K/s); 1800 -> 300 K at 0.1 K/ps is 15 ns, routine with an EAM or MLIP.
 QUENCH_RATES_K_PER_PS = (2500.0, 1250.0)
 # Independent melts per rate (different seeds). Two or more for a spread.
 REPLICAS = 1
-SEGMENT_STEPS = 10  # temperature target updates (and frames) every this many steps
 HOLD_STEPS = 100  # isothermal steps at T_FINAL; the density is averaged over these
-PRESSURE_BAR = 1.0
-TAUT_FS = 100.0
-TAUP_FS = 500.0
-# Isothermal compressibility of the material, per bar: copper is about
-# 7e-7 solid and 1.5e-6 liquid. It sets the Berendsen barostat's effective
-# time constant together with TAUP_FS.
-COMPRESSIBILITY_PER_BAR = 1.5e-6
-HOLD_TDAMP_FS = 100.0
-HOLD_PDAMP_FS = 1000.0
-RNG_SEED = 20  # seeds the initial velocities, so a rerun reproduces the run
+DUMP_EVERY = 10  # hold frames every this many steps
+THERMO_EVERY = 10
+PRESSURE_BAR = 1000.0
+TDAMP_PS = 0.1  # thermostat time constant, about 100 timesteps
+PDAMP_PS = 1.0  # barostat time constant, about 1000 timesteps
+SEED = 20  # seeds the initial velocities; replica k adds k, so a rerun reproduces the run
+LABEL = "quench"
 
 
-def _berendsen(atoms: Atoms, temperature_k: float) -> NPTBerendsen:
-    return NPTBerendsen(
-        atoms,
-        timestep=TIMESTEP_FS * units.fs,
-        temperature_K=temperature_k,
-        pressure_au=PRESSURE_BAR * units.bar,
-        taut=TAUT_FS * units.fs,
-        taup=TAUP_FS * units.fs,
-        compressibility_au=COMPRESSIBILITY_PER_BAR / units.bar,
+def _npt(t_start: float, t_stop: float) -> str:
+    """Nose-Hoover NPT, isotropic, ramping the target from *t_start* to *t_stop*."""
+    return (
+        f"fix integrate all npt temp {t_start} {t_stop} {TDAMP_PS} "
+        f"iso {PRESSURE_BAR} {PRESSURE_BAR} {PDAMP_PS}"
     )
 
 
-def _hold(atoms: Atoms, temperature_k: float) -> IsotropicMTKNPT:
-    return IsotropicMTKNPT(
-        atoms,
-        timestep=TIMESTEP_FS * units.fs,
-        temperature_K=temperature_k,
-        pressure_au=PRESSURE_BAR * units.bar,
-        tdamp=HOLD_TDAMP_FS * units.fs,
-        pdamp=HOLD_PDAMP_FS * units.fs,
+def _script(replica: int) -> str:
+    """The whole input for one replica: melt, restart, then each rate."""
+    head = f"""\
+units metal
+atom_style atomic
+boundary p p p
+read_data structure.data
+
+{POTENTIAL}
+neighbor 2.0 bin
+neigh_modify every 1 delay 0 check yes
+
+timestep {TIMESTEP_PS}
+thermo {THERMO_EVERY}
+thermo_style custom step temp pe ke etotal press vol
+thermo_modify flush yes
+
+velocity all create {T_MELT} {SEED + replica} mom yes rot yes dist gaussian
+{_npt(T_MELT, T_MELT)}
+run {MELT_STEPS}
+write_restart melt.restart
+"""
+    blocks = []
+    for rate in QUENCH_RATES_K_PER_PS:
+        ramp_steps = round((T_MELT - T_FINAL) / (rate * TIMESTEP_PS))
+        name = f"quench-{rate:g}Kps-r{replica}"
+        blocks.append(f"""\
+
+# rate {rate:g} K/ps: {ramp_steps} steps from {T_MELT:g} K to {T_FINAL:g} K, then the hold
+clear
+read_restart melt.restart
+{POTENTIAL}
+neighbor 2.0 bin
+neigh_modify every 1 delay 0 check yes
+timestep {TIMESTEP_PS}
+thermo {THERMO_EVERY}
+thermo_style custom step temp pe ke etotal press vol
+thermo_modify flush yes
+{_npt(T_MELT, T_FINAL)}
+run {ramp_steps}
+unfix integrate
+reset_timestep 1
+{_npt(T_FINAL, T_FINAL)}
+dump hold all custom {DUMP_EVERY} {name}.dump id type x y z
+dump_modify hold sort id
+run {HOLD_STEPS}
+undump hold
+""")
+    return head + "".join(blocks)
+
+
+def _kept_path(info: dict[str, Any], suffix: str) -> Path:
+    """The stored file of the artifact whose kept name ends with *suffix*."""
+    active = current_run()
+    assert active is not None, "run this template through launch_workflow"
+    matches = [name for name in info["artifacts"] if name.endswith(suffix)]
+    assert len(matches) == 1, f"{suffix}: kept as {matches}"
+    return active.artifacts.get(info["artifacts"][matches[0]])
+
+
+hold_frames = HOLD_STEPS // DUMP_EVERY
+summaries: dict[str, dict[str, Any]] = {}
+melt_volumes: list[float] = []
+trajectories: list[Path] = []
+for replica in range(1, REPLICAS + 1):
+    result, info = run_lammps(_script(replica), atoms=STRUCTURE, label=f"{LABEL}-r{replica}")
+    specorder = [info["types"][key] for key in sorted(info["types"], key=int)]
+    tables = result["tables"]
+    melt = tables[0]
+    melt_volumes.append(float(melt["last"]["Volume"]))
+    print(
+        f"replica {replica}: melted {melt['loop']['atoms']} atoms at {T_MELT:g} K "
+        f"and {PRESSURE_BAR:g} bar; V = {melt_volumes[-1]:.2f} A^3 "
+        f"(LAMMPS {info['version']}, {result['steps']} steps in all)"
     )
-
-
-def _row(system: Atoms, step: int, target: float, phase: str) -> dict[str, float | str]:
-    return {
-        "t_ps": step * TIMESTEP_FS / 1000.0,
-        "T_target": target,
-        "T": system.get_temperature(),
-        "V": system.get_volume(),
-        "E": system.get_potential_energy() + system.get_kinetic_energy(),
-        "phase": phase,
-    }
-
-
-calculator = get_calculator(ENGINE)
-hold_frames = HOLD_STEPS // SEGMENT_STEPS
-try:
-    summaries: dict[str, list[dict[str, float | str]]] = {}
-    melt_volumes: list[float] = []
-    trajectories: list[Path] = []
-    for replica in range(1, REPLICAS + 1):
-        melt = STRUCTURE.copy()
-        melt.calc = calculator
-        rng = np.random.default_rng(RNG_SEED + replica)
-        thermalize_momenta(melt, temperature_K=T_MELT, rng=rng)
-        Stationary(melt)
-        _berendsen(melt, T_MELT).run(MELT_STEPS)
-        melt_volumes.append(melt.get_volume())
-        print(
-            f"replica {replica}: melted {len(melt)} atoms at {T_MELT:.0f} K; "
-            f"V = {melt_volumes[-1]:.2f} A^3"
+    for index, rate in enumerate(QUENCH_RATES_K_PER_PS):
+        ramp, hold = tables[1 + 2 * index], tables[2 + 2 * index]
+        name = f"quench-{rate:g}Kps-r{replica}"
+        frames = read(
+            _kept_path(info, f"{name}.dump"),
+            index=":",
+            format="lammps-dump-text",
+            specorder=specorder,
         )
-        for rate in QUENCH_RATES_K_PER_PS:
-            system = melt.copy()  # positions, cell, and momenta of this replica's melt
-            system.calc = calculator
-            dynamics = _berendsen(system, T_MELT)
-            name = f"quench-{rate:g}Kps-r{replica}.traj"
-            writer = Trajectory(name, "w", system)
-            trajectories.append(Path(name))
-            rows: list[dict[str, float | str]] = []
-            kelvin_per_step = rate * TIMESTEP_FS / 1000.0
-            target = T_MELT
-            step = 0
-            while target > T_FINAL:
-                target = max(T_FINAL, target - kelvin_per_step * SEGMENT_STEPS)
-                dynamics.set_temperature(temperature_K=target)
-                dynamics.run(SEGMENT_STEPS)
-                step += SEGMENT_STEPS
-                writer.write(system)
-                rows.append(_row(system, step, target, "ramp"))
-            hold = _hold(system, T_FINAL)
-            for _ in range(hold_frames):
-                hold.run(SEGMENT_STEPS)
-                step += SEGMENT_STEPS
-                writer.write(system)
-                rows.append(_row(system, step, T_FINAL, "hold"))
-            writer.close()
-            summaries[f"{rate:g}-r{replica}"] = rows
-            print(
-                f"rate {rate:g} K/ps, replica {replica}: {step} steps to {T_FINAL:.0f} K "
-                f"and {HOLD_STEPS} held, final V = {rows[-1]['V']:.2f} A^3 ({name})"
-            )
-finally:
-    close_calculator(calculator)
+        traj = Path(f"{name}.traj")
+        write(traj, frames)
+        trajectories.append(traj)
+        summaries[f"{rate:g}-r{replica}"] = {
+            "ramp_steps": ramp["loop"]["steps"],
+            "T_end_of_ramp": float(ramp["last"]["Temp"]),
+            "hold_T_mean": float(hold["tail"]["mean"]["Temp"]),
+            "hold_V_mean": float(hold["tail"]["mean"]["Volume"]),
+            "V_max": max(float(table["last"]["Volume"]) for table in (ramp, hold)),
+            "frames": len(frames),
+        }
+        print(
+            f"rate {rate:g} K/ps, replica {replica}: {ramp['loop']['steps']} steps to "
+            f"{T_FINAL:g} K and {HOLD_STEPS} held, hold <V> = "
+            f"{summaries[f'{rate:g}-r{replica}']['hold_V_mean']:.2f} A^3 ({traj})"
+        )
 
 with open("quench.json", "w", encoding="utf-8") as handle:
     summary = {
-        "engine": ENGINE,
+        "engine": "lammps",
+        "potential": POTENTIAL,
         "n_atoms": len(STRUCTURE),
         "pressure_bar": PRESSURE_BAR,
         "melt_volumes_A3": melt_volumes,
@@ -161,23 +189,15 @@ if active is not None:
 
 @check
 def every_quench_reached_the_final_temperature() -> bool:
-    return all(
-        rows[-1]["T_target"] == T_FINAL and float(rows[-1]["T"]) < T_MELT / 2.0
-        for rows in summaries.values()
-    )
+    return all(row["hold_T_mean"] < T_MELT / 2.0 for row in summaries.values())
 
 
 @check
 def volumes_stay_physical() -> bool:
     largest = max(melt_volumes)
-    return all(
-        0.0 < float(row["V"]) < 3.0 * largest for rows in summaries.values() for row in rows
-    )
+    return all(0.0 < row["V_max"] < 3.0 * largest for row in summaries.values())
 
 
 @check
 def every_hold_was_recorded() -> bool:
-    return all(
-        sum(1 for row in rows if row["phase"] == "hold") == hold_frames
-        for rows in summaries.values()
-    )
+    return all(row["frames"] == hold_frames for row in summaries.values())

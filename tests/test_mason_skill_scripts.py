@@ -5,6 +5,7 @@ they stay under coverage and cannot collide as same-named modules.
 """
 
 import json
+import os
 import runpy
 import sys
 from pathlib import Path
@@ -1556,50 +1557,61 @@ def test_the_strain_template_runs_verified_and_fits_emt_copper(
     assert fit["warnings"] == []
 
 
-def test_the_quench_template_runs_verified_and_reports_densities(
+@pytest.mark.skipif(not os.environ.get("SLAB_TEST_LMP"), reason="set $SLAB_TEST_LMP to a real lmp")
+def test_the_quench_template_runs_verified_under_a_real_lammps(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """The skill's own promise, executed: the ladder runs inside LAMMPS through
+    run_lammps, the hold dumps come back as .traj files, and the report reads them."""
     from foundation._ops import launch_script
 
     monkeypatch.chdir(tmp_path)
+    (tmp_path / "slab.toml").write_text(
+        f'[engines.lammps]\ncommand = "{os.environ["SLAB_TEST_LMP"]}"\n'
+    )
     template = SKILLS / "melt-quench" / "assets" / "melt_quench.py"
     result = launch_script(
         tmp_path / ".slab", template, name="quench-shakeout",
-        intent="skill template shakeout (EMT melt-quench)", capture_output=True,
+        intent="skill template shakeout (argon LJ melt-quench)", capture_output=True,
     )
-    assert result["state"] == "verified"
+    assert result["state"] == "verified", result
     assert result["checks_passed"] == result["checks_total"] == 3
     trajectories = sorted(tmp_path.glob("quench-*.traj"))
     assert len(trajectories) == 2
     summary = json.loads((tmp_path / "quench.json").read_text())
-    assert summary["hold_frames"] == 10
+    assert summary["hold_frames"] == 10 and summary["engine"] == "lammps"
 
     code, out = _run(
         QUENCH_REPORT, *(str(t) for t in trajectories), "--hold-frames", "10",
-        "--rho-c", "9.12", "--json", monkeypatch=monkeypatch, capsys=capsys,
+        "--rho-c", "1.77", "--json", monkeypatch=monkeypatch, capsys=capsys,
     )
     assert code == 0
     result = json.loads(out)
     reports = result["reports"]
-    # EMT copper glass/quenched solid lands near the crystal's 9.1 g/cm^3.
-    assert all(7.0 < r["rho_g_cm3"] < 9.6 for r in reports)
-    assert all(-0.1 < r["delta_v"] < 0.25 for r in reports)
+    # Dense argon at 1 kbar and 20 K lands near 1.3 g/cm^3, below the 1.77 crystal.
+    assert all(r["frames"] == 10 for r in reports)
+    assert all(1.0 < r["rho_g_cm3"] < 1.8 for r in reports)
+    assert all(-0.1 < r["delta_v"] < 0.5 for r in reports)
     assert all(r["rho_se_g_cm3"] is not None for r in reports)
     assert len(result["rates"]) == 2 and result["log_rate_law"] is not None
 
 
+@pytest.mark.skipif(not os.environ.get("SLAB_TEST_LMP"), reason="set $SLAB_TEST_LMP to a real lmp")
 def test_the_ramp_template_runs_verified_and_yields_a_classical_cp(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from foundation._ops import launch_script
 
     monkeypatch.chdir(tmp_path)
+    (tmp_path / "slab.toml").write_text(
+        f'[engines.lammps]\ncommand = "{os.environ["SLAB_TEST_LMP"]}"\n'
+    )
     template = SKILLS / "thermal-response" / "assets" / "thermal_ramp.py"
     result = launch_script(
         tmp_path / ".slab", template, name="ramp-shakeout",
-        intent="skill template shakeout (EMT NPT ladder)", capture_output=True,
+        intent="skill template shakeout (argon LJ NPT ladder)", capture_output=True,
     )
-    assert result["state"] == "verified"
+    assert result["state"] == "verified", result
     assert result["checks_passed"] == result["checks_total"] == 3
 
     code, out = _run(
@@ -1607,13 +1619,22 @@ def test_the_ramp_template_runs_verified_and_yields_a_classical_cp(
     )
     assert code == 0
     fit = json.loads(out)
-    # Classical solid: c_p near 3 kB/atom. 32 atoms in ~1500 A^3 puts the
-    # volumetric value in the couple-of-1e6 J/(m^3 K) range.
-    assert 1.5e6 < fit["cp_vol_J_m3K"] < 8.0e6
+    # Classical solid: c_p near 3 kB/atom. 108 argon atoms in ~4000 A^3 put the
+    # volumetric value near 1e6 J/(m^3 K).
+    assert 0.5e6 < fit["cp_vol_J_m3K"] < 5.0e6
     assert 2.0 < fit["cp_kB_per_atom"] < 4.5
     assert fit["cte_per_K"] > 0
-    assert fit["fitted_temperature"] == "measured" and fit["n_atoms"] == 32
+    assert fit["fitted_temperature"] == "measured" and fit["n_atoms"] == 108
     assert len(fit["cte_per_axis_per_K"]) == 3
+
+
+def test_no_skill_template_drives_dynamics_from_python() -> None:
+    """Every bundled asset that runs dynamics hands LAMMPS a whole script."""
+    for asset in sorted(SKILLS.glob("*/assets/*.py")):
+        source = asset.read_text()
+        assert "ase.md" not in source, f"{asset.relative_to(SKILLS)} imports ase.md"
+        if "run_lammps" in source:
+            assert "fix integrate all n" in source, f"{asset.relative_to(SKILLS)}: no fix"
 
 
 # -- check_structure (atomsk-structures) --------------------------------------

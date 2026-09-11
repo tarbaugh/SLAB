@@ -301,7 +301,9 @@ the script, and the script version ships with the package. Some skills
 also bundle an `assets/` workflow template (`eos_scan.py`,
 `strain_scan.py`, `melt_quench.py`, `thermal_ramp.py`); the agent copies
 the template into the project, edits the constants at the top, and
-launches it as a traced run.
+launches it as a traced run. The templates that run dynamics
+(`md_nvt.py`, `melt_quench.py`, `thermal_ramp.py`) hand LAMMPS a whole
+input script through `run_lammps`; none drives dynamics from Python.
 
 ## Discovery: three layers
 

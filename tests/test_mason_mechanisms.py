@@ -214,6 +214,8 @@ def test_the_core_prompt_follows_the_switches() -> None:
     assert "Failures are evidence" not in without_records and "launch_workflow" in without_records
     for text in (without_gate, without_records, core_prompt([])):
         assert "Do not fabricate" in text and "# Tool discipline" in text
+        # The dynamics rule is not a switch: every card sees it, the planner included.
+        assert "Dynamics run inside LAMMPS" in text and "`run_lammps`" in text
 
 
 def test_bare_is_the_card_and_a_minimal_environment(tmp_path: Path) -> None:

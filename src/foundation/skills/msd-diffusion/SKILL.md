@@ -59,8 +59,9 @@ nothing.
 ## Caveats the number carries
 
 - Positions must be unwrapped: frames whose coordinates were wrapped
-  back into the cell corrupt MSD at every boundary crossing. ASE's MD
-  writes unwrapped positions unless something wrapped them explicitly.
+  back into the cell corrupt MSD at every boundary crossing. Dump
+  `xu yu zu` from LAMMPS, not `x y z`, and read the dump with
+  `format="lammps-dump-text"` and `specorder=` so the masses are right.
 - Use an NVE or NVT production run. An NPT trajectory carries the
   barostat's rescaling in its positions and inflates the MSD at long
   lags; the script warns when the cell changes between frames.
