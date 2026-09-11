@@ -425,6 +425,38 @@ def test_cache_extra_contributes_to_key_and_recipe(ws: Workspace) -> None:
     assert ws.runs.list_tasks(third.id)[0].cache_hit is False
 
 
+def test_provenance_is_recorded_and_not_keyed(ws: Workspace) -> None:
+    """The recipe keeps every extra key. The key drops ``provenance``: the
+    line a sized engine command filled for this launch, so the same physics
+    at a different width is a cache hit."""
+    CALLS["provenance"] = 0
+    envelope = {"ntasks": 4}
+
+    @task(
+        cache_extra=lambda arguments: {
+            "command": "mpirun -np {ntasks} pw.x",
+            "provenance": {
+                "command": f"mpirun -np {envelope['ntasks']} pw.x",
+                "envelope": dict(envelope),
+            },
+        }
+    )
+    def compute(x: int) -> int:
+        CALLS["provenance"] += 1
+        return x * 2
+
+    with ws.start_run() as first:
+        assert compute(5) == 10
+    envelope["ntasks"] = 8
+    with ws.start_run() as second:
+        assert compute(5) == 10
+    assert CALLS["provenance"] == 1
+    tasks = ws.runs.list_tasks(first.id) + ws.runs.list_tasks(second.id)
+    assert tasks[0].recipe["extra"]["provenance"]["command"] == "mpirun -np 4 pw.x"
+    assert tasks[1].recipe["extra"]["provenance"]["command"] == "mpirun -np 8 pw.x"
+    assert tasks[1].cache_hit is True and tasks[0].cache_key == tasks[1].cache_key
+
+
 def test_provisional_row_visible_during_execution(ws: Workspace) -> None:
     """The tracer commits a running row before executing, so a concurrent
     reader (retention, a dashboard) sees the task and its input references."""

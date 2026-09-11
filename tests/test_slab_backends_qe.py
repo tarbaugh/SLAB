@@ -193,7 +193,9 @@ def test_qe_explicit_directory_is_respected_and_kept(tmp_path: Path) -> None:
 def test_qe_version_parsed_from_banner(tmp_path: Path) -> None:
     script = _script(tmp_path / "pw.x", 'echo "     Program PWSCF v.9.9.9 starts"\n')
     assert _qe_version({"command": str(script)}) == "9.9.9"
-    assert describe_engine("qe", {"command": str(script), "pseudo_dir": "~/ps"}) == {
+    identity = describe_engine("qe", {"command": str(script), "pseudo_dir": "~/ps"})
+    assert identity.pop("provenance")["command"] == str(script)
+    assert identity == {
         "engine": "qe",
         "source": "builtin",
         "version": "9.9.9",
@@ -1192,14 +1194,44 @@ def test_bin_constructs_the_command_sized_to_the_allocation(
     # A sized launch's envelope wins over the allocation's count.
     monkeypatch.setenv("SLAB_NTASKS", "4")
     assert _qe_locator({})[0] == f"mpirun -np 4 {bin_dir}/pw.x"
-    # An explicit command with a placeholder is filled the same way, and its
-    # cache identity is the filled line.
+    # An explicit command with a placeholder is filled the same way. The
+    # filled line is provenance and the template is the cache identity.
     assert _qe_locator({"command": "srun -n {ntasks} pw.x"})[0] == "srun -n 4 pw.x"
     from slab.backends import describe_engine
 
-    assert describe_engine("qe", {"command": "srun -n {ntasks} pw.x"})["command"] == (
-        "srun -n 4 pw.x"
+    identity = describe_engine("qe", {"command": "srun -n {ntasks} pw.x"})
+    assert identity["command"] == "srun -n {ntasks} pw.x"
+    assert identity["provenance"] == {
+        "command": "srun -n 4 pw.x",
+        "envelope": {"ntasks": 4, "threads": 1, "gpus": 0},
+    }
+
+
+def test_qe_width_is_provenance_and_the_template_is_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two envelopes, one identity; two templates, two identities; a
+    hand-written width stays identity."""
+
+    def identity_of(command: str) -> dict:
+        described = describe_engine("qe", {"command": command})
+        return {key: value for key, value in described.items() if key != "provenance"}
+
+    monkeypatch.setenv("SLAB_CPUS", "0,1,2,3")
+    monkeypatch.setenv("SLAB_GPUS", "")
+    monkeypatch.setenv("SLAB_THREADS", "1")
+    template = "mpirun -np {ntasks} pw.x"
+    monkeypatch.setenv("SLAB_NTASKS", "4")
+    four = describe_engine("qe", {"command": template})
+    monkeypatch.setenv("SLAB_NTASKS", "8")
+    eight = describe_engine("qe", {"command": template})
+    assert four["provenance"]["command"] == "mpirun -np 4 pw.x"
+    assert eight["provenance"]["command"] == "mpirun -np 8 pw.x"
+    assert {k: v for k, v in four.items() if k != "provenance"} == (
+        {k: v for k, v in eight.items() if k != "provenance"}
     )
+    assert identity_of("srun -n {ntasks} pw.x") != identity_of(template)
+    assert identity_of("mpirun -np 4 pw.x") != identity_of("mpirun -np 8 pw.x")
 
 
 def test_bin_prefers_a_bundled_mpirun(

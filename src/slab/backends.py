@@ -197,6 +197,13 @@ def describe_engine(
     calculator — changes the fingerprint and honestly invalidates cached
     results, not just version bumps.
 
+    For ``qe`` and ``lammps`` the ``command`` is the line as written,
+    placeholders unfilled, so the same physics at four ranks and at eight
+    shares one identity. The line filled for this launch's envelope rides
+    under ``provenance``, which the tracer keeps in the recipe and leaves
+    out of the cache key. A hand-written width (``mpirun -np 8 pw.x``) is
+    identity, as it always was; only the placeholders are exempt.
+
     A name that resolves as a rootstock checkpoint id reports
     ``source="rootstock"`` with the rootstock *client* version. The identity
     is deliberately the checkpoint id plus client version, not the serving
@@ -226,11 +233,15 @@ def describe_engine(
         # absolute paths are stamped here — the traced options alone carry
         # only the literal relative string. File *contents* are not hashed,
         # exactly like a bare pseudo_dir.
+        # The command as written is the identity; the line filled for this
+        # launch's envelope is provenance (:func:`_command_provenance`).
+        lammps_template = _lammps_template(options)
         identity: dict[str, Any] = {
             "engine": "lammps",
             "source": "builtin",
             "version": _lammps_version(options),
-            "command": _lammps_locator(options),
+            "command": lammps_template,
+            "provenance": _command_provenance(lammps_template, _lammps_locator(options)),
         }
         sources = _lammps_file_sources(options)
         if sources is not None:
@@ -246,9 +257,7 @@ def describe_engine(
         if lammps_setup:
             identity["setup"] = list(lammps_setup)
         if identity["version"] is None:
-            identity.update(
-                _versionless_fingerprint(str(identity["command"]), lammps_setup)
-            )
+            identity.update(_versionless_fingerprint(lammps_template, lammps_setup))
         return identity
     if normalized == "qe":
         # The detected pw.x version, the resolved command, and the resolved
@@ -263,13 +272,14 @@ def describe_engine(
         # of its per-element checksums, portable across machines and roots.
         # An unknown family raises here, loudly: a name that cannot resolve
         # must never produce a cache key.
-        command, pseudo_dir = _qe_locator(options)
+        command, pseudo_dir = _qe_template(options)
         identity = {
             "engine": "qe",
             "source": "builtin",
             "version": _qe_version(options),
             "command": command,
             "pseudo_dir": pseudo_dir,
+            "provenance": _command_provenance(command, _qe_locator(options)[0]),
         }
         if "pseudo_family" in options:
             from slab.pseudos import family_digest, find_family
@@ -313,6 +323,28 @@ def describe_engine(
             "checkpoint": normalized,
         }
     return {"engine": engine, "source": "unknown", "version": None}
+
+
+def _command_provenance(template: str, filled: str) -> dict[str, Any]:
+    """The provenance half of a sized command: the filled line and the envelope.
+
+    The tracer folds an identity's ``provenance`` key into the recipe and
+    not into the cache key (see :func:`foundation.tracing.task`), so this
+    is where a per-launch width lives.
+
+    Examples:
+        >>> import os
+        >>> os.environ.update(SLAB_CPUS="0,1", SLAB_GPUS="", SLAB_NTASKS="2", SLAB_THREADS="1")
+        >>> _command_provenance("mpirun -np {ntasks} pw.x", "mpirun -np 2 pw.x")
+        {'command': 'mpirun -np 2 pw.x', 'envelope': {'ntasks': 2, 'threads': 1, 'gpus': 0}}
+        >>> for name in ("SLAB_CPUS", "SLAB_GPUS", "SLAB_NTASKS", "SLAB_THREADS"):
+        ...     del os.environ[name]
+    """
+    env = envelope()
+    return {
+        "command": filled,
+        "envelope": {"ntasks": env.ntasks, "threads": env.threads, "gpus": len(env.gpus)},
+    }
 
 
 def _resolve_rootstock_checkpoint(
@@ -960,9 +992,10 @@ def _lammps_locator(options: dict[str, Any]) -> str:
     ``os.environ.get`` miss) means *absent* here exactly as it does in the
     factory — key presence must not fork the two resolutions. The
     ``{ntasks}``, ``{threads}``, and ``{gpus}`` placeholders are filled
-    from this launch's :func:`slab.resources.envelope`, so the filled line
-    is the cache identity. Raises only when the command asks for
-    ``{gpus}`` and the launch holds none.
+    from this launch's :func:`slab.resources.envelope`. The filled line is
+    what runs and what provenance records; the template from
+    :func:`_lammps_template` is the cache identity. Raises only when the
+    command asks for ``{gpus}`` and the launch holds none.
     """
     return fill(_lammps_template(options), envelope())
 
@@ -1297,7 +1330,8 @@ def _launcher_payload(argv: list[str]) -> list[str] | None:
     """The payload behind an MPI launcher, when it can be read without a guess.
 
     Only rank-count flags with a separate integer value (``-n 1``,
-    ``-np 4``) are stepped over: they mean the same thing to every launcher,
+    ``-np 4``, or the unfilled ``-np {ntasks}`` of a command as written)
+    are stepped over: they mean the same thing to every launcher,
     so skipping them cannot mistake a flag's value for the payload — and
     ``mpirun -np 1 pw.x`` is the common login-node form on real clusters.
     Any other flag would need launcher-specific knowledge of whether it
@@ -1305,7 +1339,11 @@ def _launcher_payload(argv: list[str]) -> list[str] | None:
     degrades rather than guesses.
     """
     i = 1
-    while i + 1 < len(argv) and argv[i] in ("-n", "-np") and argv[i + 1].isdigit():
+    while (
+        i + 1 < len(argv)
+        and argv[i] in ("-n", "-np")
+        and (argv[i + 1].isdigit() or argv[i + 1] == "{ntasks}")
+    ):
         i += 2
     if i >= len(argv) or argv[i].startswith("-"):
         return None
@@ -1759,15 +1797,26 @@ def _qe_calculator(**options: Any) -> Any:
 
 
 def _qe_locator(options: dict[str, Any]) -> tuple[str, str | None]:
-    """``(command, pseudo_dir)`` that ``engine="qe"`` would resolve to.
+    """``(command, pseudo_dir)`` that ``engine="qe"`` would run.
+
+    The template from :func:`_qe_template` with its placeholders filled
+    from this launch's :func:`slab.resources.envelope`, as the factory
+    fills them: the line that runs, that the version probe runs, and that
+    provenance records. Raises only when the command asks for ``{gpus}``
+    and the launch holds none.
+    """
+    command, pseudo_dir = _qe_template(options)
+    return fill(command, envelope(), route="qe"), pseudo_dir
+
+
+def _qe_template(options: dict[str, Any]) -> tuple[str, str | None]:
+    """``(command, pseudo_dir)`` that ``engine="qe"`` resolves to, as written.
 
     Mirrors the calculator's own resolution — ``profile=`` > explicit
     options > the slab config > the ASE config file > bare ``pw.x`` — so
     cache identity and version detection always describe the binary and
-    pseudopotential directory that actually run. The command's
-    placeholders are filled from this launch's
-    :func:`slab.resources.envelope`, as the factory fills them. Raises
-    only when the command asks for ``{gpus}`` and the launch holds none.
+    pseudopotential directory that actually run. The command keeps its
+    placeholders: this is the cache identity. Never raises.
     """
     try:
         profile = options.get("profile")
@@ -1788,7 +1837,7 @@ def _qe_locator(options: dict[str, Any]) -> tuple[str, str | None]:
         resolved_dir = None if pseudo_dir is None else str(Path(pseudo_dir).expanduser())
     except Exception:  # pragma: no cover - defensive: hostile profile attrs
         return "pw.x", None
-    return fill(command, envelope(), route="qe"), resolved_dir
+    return command, resolved_dir
 
 
 def _qe_version(options: dict[str, Any]) -> str | None:

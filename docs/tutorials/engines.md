@@ -127,11 +127,13 @@ The details that keep runs honest and directories clean:
 - **The `pw.x` identity is detected and cached against.** SLAB probes the
   binary once per executable and parses the `Program PWSCF v.7.4.1` banner.
   The probe is memoized on the binary's path and mtime, and it runs under a
-  timeout. The version, the resolved command, and `pseudo_dir` go into
+  timeout. The version, the command as written, and `pseudo_dir` go into
   provenance (`info["engine_version"]`) and the cache key, so an executable
   upgrade or a pseudopotential-library switch honestly invalidates cached
   results. Pseudo file contents are not hashed, because the directory path
-  is the identity.
+  is the identity. A command's `{ntasks}`, `{threads}`, and `{gpus}`
+  placeholders stay unfilled in the identity, so a launch width does not
+  fork the cache. The filled line is provenance.
 - **Forces default on.** `pw.x` omits forces unless `tprnfor` is set, and
   SLAB's tasks drive optimizers with forces, so the factory sets it. An
   explicit `tprnfor` in `input_data` still wins.
@@ -207,9 +209,9 @@ The details that keep runs honest and directories clean:
   `<command> -h` once per executable and parses the `Large-scale
   Atomic/Molecular Massively Parallel Simulator - 22 Jul 2025` banner. The
   probe is memoized on the binary's path and mtime, and it runs under a
-  timeout. The version and the resolved command go into provenance and the
-  cache key. Potential file contents are not hashed, because their paths,
-  which ride in the traced options, are the identity.
+  timeout. The version and the command as written go into provenance and
+  the cache key. Potential file contents are not hashed, because their
+  paths, which ride in the traced options, are the identity.
 - **Accelerated builds ride in the command.** A KOKKOS build of LAMMPS
   takes its switches on the command line, so put them in `command`.
   `mpirun -np 1 lmp -k on g 1 -sf kk -pk kokkos newton on neigh half`
@@ -225,8 +227,12 @@ The details that keep runs honest and directories clean:
   placeholders the command asks for, so a command without one runs as
   written. A command that asks `{gpus}` under a launch without a GPU is
   refused naming the route, because `g 0` would fail later and less
-  clearly. The filled command enters the cache identity, as a hand-written
-  one would. [Mason](mason.md#compute-budget-sizing-the-physics-to-the-machine)
+  clearly. The command as written is the cache identity, and the filled
+  line is provenance, so the same script at two widths is one cache entry.
+  A width written by hand, such as `mpirun -np 8 lmp`, is identity. The
+  plain and the GPU builds keep distinct identities because their
+  templates and setup lines differ.
+  [Mason](mason.md#compute-budget-sizing-the-physics-to-the-machine)
   says how a launch gets its size.
 - **Nothing adds a switch the command lacks.** The command runs as
   written. `-k on` is what enables the KOKKOS package, so a KOKKOS build
@@ -381,8 +387,9 @@ count, else `$SLURM_NTASKS`, else 1. So a batch job uses its whole allocation
 and a login-node smoke test stays serial. An `mpirun` bundled in the same bin
 directory wins over the one on `PATH`, because a custom install usually
 links against its own MPI. `bin` and `command` are exclusive, and the
-constructed line enters cache identity exactly as a hand-written command
-would. `slab mason sandbox render` also binds the whole install read-only
+constructed line enters cache identity with its `{ntasks}` unfilled, exactly
+as a hand-written command with the placeholder would. The filled line is
+provenance. `slab mason sandbox render` also binds the whole install read-only
 automatically, so the bin form needs no `[agent.sandbox]` entry.
 
 Sometimes an engine's install needs more than variables, such as a

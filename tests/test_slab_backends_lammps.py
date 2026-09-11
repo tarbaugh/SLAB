@@ -395,7 +395,9 @@ def test_lammps_version_parsed_from_banner(tmp_path: Path) -> None:
         ' Simulator - 2 Apr 2038 - Update 9"\n',
     )
     assert _lammps_version({"command": str(script)}) == "2 Apr 2038 - Update 9"
-    assert describe_engine("lammps", {"command": str(script)}) == {
+    identity = describe_engine("lammps", {"command": str(script)})
+    assert identity.pop("provenance")["command"] == str(script)
+    assert identity == {
         "engine": "lammps",
         "source": "builtin",
         "version": "2 Apr 2038 - Update 9",
@@ -861,7 +863,8 @@ def test_lammps_placeholders_fill_from_the_launch_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A route command with {ntasks}/{threads}/{gpus} is filled from the envelope
-    at every resolution point, and the filled line is the cache identity."""
+    at every resolution point. The filled line is provenance; the template is
+    the cache identity."""
     from slab.backends import _lammps_locator, _lammps_template
     from slab.lammps import lammps_command, lammps_routes
 
@@ -874,9 +877,11 @@ def test_lammps_placeholders_fill_from_the_launch_envelope(
     assert _lammps_locator({"command": template}) == "mpirun -np 2 lmp -k on g 2 t 2 -sf kk"
     assert lammps_command(template) == "mpirun -np 2 lmp -k on g 2 t 2 -sf kk"
     identity = describe_engine("lammps", {"command": template})
-    assert identity["command"] == "mpirun -np 2 lmp -k on g 2 t 2 -sf kk"
-    monkeypatch.setenv("SLAB_NTASKS", "4")
-    assert describe_engine("lammps", {"command": template})["command"] != identity["command"]
+    assert identity["command"] == template
+    assert identity["provenance"] == {
+        "command": "mpirun -np 2 lmp -k on g 2 t 2 -sf kk",
+        "envelope": {"ntasks": 2, "threads": 2, "gpus": 2},
+    }
     # The plain route holds no placeholder and lists as it always did.
     monkeypatch.delenv("SLAB_ENGINES", raising=False)
     monkeypatch.setenv("ASE_LAMMPSRUN_COMMAND", "lmp")
@@ -924,3 +929,58 @@ def test_lammps_routes_report_placeholders_and_the_filled_switches(
     assert route["kokkos"]["enabled"] is True and route["kokkos"]["gpus"] is None  # unfillable
     monkeypatch.setenv("SLAB_GPUS", "0,1")
     assert lammps_routes()["lammps-gpu"]["kokkos"]["gpus"] == 2
+
+
+def test_lammps_width_is_provenance_and_the_template_is_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two envelopes, one identity; two templates, two identities; a
+    hand-written width stays identity."""
+
+    def identity_of(command: str) -> dict:
+        described = describe_engine("lammps", {"command": command})
+        return {key: value for key, value in described.items() if key != "provenance"}
+
+    monkeypatch.setenv("SLAB_CPUS", "0,1,2,3")
+    monkeypatch.setenv("SLAB_GPUS", "0,1")
+    monkeypatch.setenv("SLAB_THREADS", "1")
+    template = "mpirun -np {ntasks} lmp -k on g {gpus} -sf kk"
+    monkeypatch.setenv("SLAB_NTASKS", "4")
+    four = describe_engine("lammps", {"command": template})
+    monkeypatch.setenv("SLAB_NTASKS", "8")
+    eight = describe_engine("lammps", {"command": template})
+    assert four["provenance"]["command"] == "mpirun -np 4 lmp -k on g 2 -sf kk"
+    assert eight["provenance"]["command"] == "mpirun -np 8 lmp -k on g 2 -sf kk"
+    assert identity_of(template) == {k: v for k, v in four.items() if k != "provenance"}
+    assert identity_of(template) == {k: v for k, v in eight.items() if k != "provenance"}
+    # A different template is a different identity, at the same width.
+    assert identity_of("mpirun -np {ntasks} lmp -k on g {gpus} t {threads} -sf kk") != (
+        identity_of(template)
+    )
+    # A literal width in the command is identity, as it always was.
+    assert identity_of("mpirun -np 4 lmp") != identity_of("mpirun -np 8 lmp")
+    literal = describe_engine("lammps", {"command": "mpirun -np 4 lmp"})
+    assert literal["command"] == literal["provenance"]["command"] == "mpirun -np 4 lmp"
+
+
+def test_a_versionless_lammps_fingerprints_the_template_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without a detectable version the identity falls back to the binary's
+    path and mtime, resolved from the template: the width never enters."""
+    from slab.backends import _versionless_fingerprint
+
+    lmp = tmp_path / "lmp"
+    lmp.write_text("#!/bin/sh\nexit 1\n")
+    lmp.chmod(0o755)
+    monkeypatch.setenv("SLAB_CPUS", "0,1")
+    monkeypatch.setenv("SLAB_GPUS", "")
+    template = f"mpirun -np {{ntasks}} {lmp}"
+    monkeypatch.setenv("SLAB_NTASKS", "2")
+    two = describe_engine("lammps", {"command": template})
+    monkeypatch.setenv("SLAB_NTASKS", "8")
+    eight = describe_engine("lammps", {"command": template})
+    assert two["version"] is None
+    assert two["executable_fingerprint"] == eight["executable_fingerprint"]
+    stats = _versionless_fingerprint(template, ())["executable_fingerprint"]
+    assert any(str(lmp) == str(piece) for piece in stats)

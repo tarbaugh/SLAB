@@ -693,7 +693,11 @@ def test_run_commands_collects_the_engine_commands_a_run_resolved(tmp_path: Path
     identity = {
         "engine": "lammps",
         "route": "lammps-gpu",
-        "command": "mpirun -np 1 lmp -k on g 1 -sf kk",
+        "command": "mpirun -np {ntasks} lmp -k on g {gpus} -sf kk",
+        "provenance": {
+            "command": "mpirun -np 1 lmp -k on g 1 -sf kk",
+            "envelope": {"ntasks": 1, "threads": 1, "gpus": 1},
+        },
         "setup": ["module load lammps"],
         "version": "22 Jul 2025",
     }
@@ -723,9 +727,12 @@ def test_run_commands_collects_the_engine_commands_a_run_resolved(tmp_path: Path
     lammps, atomsk = entries
     assert lammps["run_id"] == run.id and lammps["seq"] == 1 and lammps["task"] == "probe"
     assert lammps["tasks"] == 3 and lammps["cache_hits"] == 1
-    assert lammps["command"] == identity["command"] and lammps["setup"] == ["module load lammps"]
+    # The filled line is what ran; the template rides beside it.
+    assert lammps["command"] == "mpirun -np 1 lmp -k on g 1 -sf kk"
+    assert lammps["template"] == identity["command"]
+    assert lammps["setup"] == ["module load lammps"]
     assert lammps["version"] == "22 Jul 2025"
     assert lammps["kokkos"]["enabled"] is True and lammps["kokkos"]["gpus"] == 1
     assert lammps["route"] == "lammps-gpu"
     assert atomsk["tasks"] == 1 and "kokkos" not in atomsk and atomsk["setup"] == []
-    assert "route" not in atomsk
+    assert "route" not in atomsk and "template" not in atomsk
