@@ -111,8 +111,9 @@ own flags after the switches. SLAB adds no switch: a route without
 contains. The `lammps` entry of `list_engines` lists every route with
 its command and the switches parsed from it. A route whose command
 holds `{ntasks}`, `{threads}`, or `{gpus}` is marked `sized per launch`:
-SLAB fills those from the launch's size, so `gpus=2` on the launch runs
-`-np 2 ... g 2` on such a route, and a route that asks `{gpus}` under a
+SLAB fills those from the launch's size, so `ntasks=2, gpus=2` on the
+launch runs `-np 2 ... g 2` on such a route (`gpus=2` alone takes every
+free cpu and two gpus), and a route that asks `{gpus}` under a
 launch without one is refused naming the route. A route that hardcodes
 its numbers runs as written whatever the launch held. Read it before a
 GPU run. When no accelerated route exists, pass `command=` with the

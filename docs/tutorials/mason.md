@@ -268,40 +268,44 @@ cpus: 16 usable in this session, gpus: 2; free right now: 16 cpu(s), 2 gpu(s); a
 ```
 
 A sized launch holds a slice. Before the run starts, the session reserves
-`ntasks x threads` cpu ids and `gpus` gpu ids in the run store, inside one
-transaction, so two launches on one host never overlap. The run then
-starts as a child process that claims the reservation. It takes the cpu
-ids as its affinity mask and the gpu ids as `CUDA_VISIBLE_DEVICES`, and
-it exports `SLAB_NTASKS`, `SLAB_THREADS`, and `OMP_NUM_THREADS`, so every
-rank a script starts inherits the slice. An engine command with the
-`{ntasks}`, `{threads}`, and `{gpus}` placeholders fills from the same
-numbers (see [Engines](engines.md#lammps)). The run record copies the
-slice as `resources`, `slab list` shows it in the `RES` column, and the
+`ntasks x threads` cpu ids and `gpus` gpu ids in the run store. The
+reservation is one transaction, so two launches on one host never
+overlap. The run then starts as a child process that claims the
+reservation, and the claim starts the run in the same transaction. It
+takes the cpu ids as its affinity mask and the gpu ids as
+`CUDA_VISIBLE_DEVICES`. It also exports `SLAB_NTASKS`, `SLAB_THREADS`,
+and `OMP_NUM_THREADS`, so every rank a script starts inherits the slice.
+An engine command with the `{ntasks}`, `{threads}`, and `{gpus}`
+placeholders fills from the same numbers (see
+[Engines](engines.md#lammps)). The run record copies the slice as
+`resources`, and `slab list` shows it in the `RES` column. The
 reservation is released when the run ends or its holder dies. Free is
 derived from the live reservations, never counted, so there is no
 counter to drift.
 
 An unsized launch is accounted for like any other. It reserves every free
 cpu and no gpu, and it runs in the session's own process as before. A
-`background=true` launch is always the child, sized or not, so no tool
-timeout can reach it.
+launch that names `gpus` but no `ntasks` takes every free cpu and the
+gpus asked. A `background=true` launch is always the child, sized or
+not, so no tool timeout can reach it.
 
 The enforcement matches the statement. A slice that does not fit what is
 free is refused as a tool result that carries the free amounts, and the
 refused launch runs nothing. A `shell` command that spells out an
 `mpirun`, `mpiexec`, or `srun` with more ranks than the whole budget is
-refused, and a `launch_workflow` script that spells one out is judged
-against the launch's own slice, because the mask bounds it. The shell
-also refuses `slab run` and `foundation run`, because a run the shell
-starts holds no reservation and every other launch would size itself
-against a free count that omits it. `submit_job` is exempt from the
+refused. A `launch_workflow` script that spells one out is judged
+against the launch's own slice, because the mask bounds it. A comment
+that names an `mpirun` is not one. The shell also refuses `slab run`
+and `foundation run`. A run the shell starts holds no reservation, so
+every other launch would size itself against a free count that omits
+it. `submit_job` is exempt from the
 rank check, because its payload runs in its own allocation. It is sized
 instead. The five size arguments replace the partition's directives, and
 a size past the node the partition declares is refused naming the cap
 (see [Configuring SLAB for your HPC](hpc-config.md#size-a-job)).
 
 The guarantee is this. A launch can oversubscribe only its own slice,
-never a neighbour's. The affinity mask bounds every rank a script
+never a neighbor's. The affinity mask bounds every rank a script
 starts, `CUDA_VISIBLE_DEVICES` bounds its GPUs, and the reservation was
 taken before the process existed. The remaining escape is a shell
 command the agent types by hand. The rank check catches one that names
@@ -601,9 +605,12 @@ declares a `gres` that names gpus, the rendered `apptainer exec` adds
 `--nv`, so a torch-backed served engine (a rootstock MLIP worker) sees the
 device the job holds. A CPU partition renders without it. `--cleanenv`
 strips the variables the scheduler set, so the script re-exports
-`CUDA_VISIBLE_DEVICES` (from `SLURM_JOB_GPUS` when the job did not set
-it) and `SLURM_CPUS_PER_TASK` into the container. The budget inside
-reads exactly these. The script also sets
+`CUDA_VISIBLE_DEVICES` and `SLURM_CPUS_PER_TASK` into the container.
+When the job did not set `CUDA_VISIBLE_DEVICES`, the script counts the
+devices that `SLURM_JOB_GPUS` names and exports the ids `0,1,...`
+instead of SLURM's own. SLURM's ids are the node's global ids, and a
+job under cgroup device constraints sees its devices renumbered from
+zero. The budget inside reads exactly these. The script also sets
 `OMPI_MCA_hwloc_base_binding_policy=none`, so two concurrent launches
 bind inside their own affinity masks instead of both to core 0. The
 context file states how many GPUs the job holds and that their ids are
@@ -718,13 +725,14 @@ the tools, with no model, against a LAMMPS build without the KOKKOS
 package:
 
 ```console
-$ slab mason read --full .slab/mason/sessions/20260910-220448-36135.jsonl
-[22:04:48] shell command by pi: lmp -h | grep -m1 Large-scale
-    cwd /private/tmp/claude-501/-Users-tom-SLAB/82ae44c5-5378-41dc-9d2d-584bf2e8b327/scratchpad/cmd-demo
-[22:04:48] launch command by pi: slab run /private/tmp/claude-501/-Users-tom-SLAB/82ae44c5-5378-41dc-9d2d-584bf2e8b327/scratchpad/cmd-demo/ar_nvt.py --name ar-nvt --intent 'argon NVT, 500 steps' --session 20260910-220448-36135 -w /private/tmp/claude-501/-Users-tom-SLAB/82ae44c5-5378-41dc-9d2d-584bf2e8b327/scratchpad/cmd-demo/.slab
-    script /private/tmp/claude-501/-Users-tom-SLAB/82ae44c5-5378-41dc-9d2d-584bf2e8b327/scratchpad/cmd-demo/ar_nvt.py
-    cwd /private/tmp/claude-501/-Users-tom-SLAB/82ae44c5-5378-41dc-9d2d-584bf2e8b327/scratchpad/cmd-demo
-[22:04:49] engine command by pi (run 01m26nm7n1, run_lammps): lmp
+$ slab mason read --full .slab/mason/sessions/20260911-022626-58901.jsonl
+[02:26:26] shell command by pi: lmp -h | grep -m1 Large-scale
+    cwd /private/tmp/cmd-demo
+[02:26:26] launch command by pi: slab run /private/tmp/cmd-demo/ar_nvt.py --name ar-nvt --intent 'argon NVT, 500 steps' --session 20260911-022626-58901 -w /private/tmp/cmd-demo/.slab
+    script /private/tmp/cmd-demo/ar_nvt.py
+    resources 14 cpu(s) 0-13, no gpu; 1 rank(s) x 1 thread(s)
+    cwd /private/tmp/cmd-demo
+[02:26:26] engine command by pi (run 01m274k9nt, run_lammps): lmp
     engine lammps 22 Jul 2025 - Update 4
     kokkos: off, the plain styles run on the host
 
@@ -745,11 +753,11 @@ line carries the reservation the child claimed. This session, driven by
 hand through the tools again, launched an EMT relax with `ntasks=2`:
 
 ```console
-$ slab mason read --full .slab/mason/sessions/20260911-005331-51339.jsonl
-[00:53:31] launch command by pi (sized): slab run /private/tmp/claude-501/-Users-tom-SLAB/82ae44c5-5378-41dc-9d2d-584bf2e8b327/scratchpad/size-demo/cu_relax.py --name cu-relax --intent 'Cu fcc lattice constant, EMT, sized to two ranks' --session 20260911-005331-51339 -w /private/tmp/claude-501/-Users-tom-SLAB/82ae44c5-5378-41dc-9d2d-584bf2e8b327/scratchpad/size-demo/.slab --reservation 01m26z94v214dam13j42fmxw24
-    script /private/tmp/claude-501/-Users-tom-SLAB/82ae44c5-5378-41dc-9d2d-584bf2e8b327/scratchpad/size-demo/cu_relax.py
+$ slab mason read --full .slab/mason/sessions/20260911-022628-58918.jsonl
+[02:26:28] launch command by pi (sized): slab run /private/tmp/size-demo/cu_relax.py --name cu-relax --intent 'Cu fcc lattice constant, EMT, sized to two ranks' --session 20260911-022628-58918 -w /private/tmp/size-demo/.slab --reservation 01m274kbdj9wgxspjr6p1bz6b9
+    script /private/tmp/size-demo/cu_relax.py
     resources 2 cpu(s) 0-1, no gpu; 2 rank(s) x 1 thread(s)
-    cwd /private/tmp/claude-501/-Users-tom-SLAB/82ae44c5-5378-41dc-9d2d-584bf2e8b327/scratchpad/size-demo
+    cwd /private/tmp/size-demo
 
 [0 model call(s); tokens 0+0]
 ```
@@ -760,7 +768,7 @@ The run record holds the same slice, and `slab list` shows it in the
 ```console
 $ slab list -w .slab
 ID           STATE        STATUS       AGE  RES     NAME                 INTENT
-01m26z94yd   verified     completed     0s  2c      cu-relax             Cu fcc lattice constant, EMT, sized to t
+01m274kbga   verified     completed    13s  2c      cu-relax             Cu fcc lattice constant, EMT, sized to t
 ```
 
 A `job` event shows `size` the same way, as the nodes, ranks, cpus per

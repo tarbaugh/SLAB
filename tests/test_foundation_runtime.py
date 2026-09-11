@@ -573,3 +573,69 @@ def test_a_reaped_run_releases_its_reservation(ws: Workspace) -> None:
     assert [r.id for r in ws.reap_dead(caller="test")] == [run.id]
     assert ws.runs.list_reservations() == []
     assert ws.runs.get(run.id).resources["reservation"] == held.id
+
+
+def test_start_run_with_a_reservation_claims_and_starts_in_one_call(
+    ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The claim sets the run running itself; a separate set_status(running)
+    would open a window in which the slice counts as free."""
+    import os
+
+    from slab.resources import Budget
+
+    budget = Budget(cpus=(0, 1), gpus=())
+    held = ws.reserve(ntasks=1, budget=budget)
+    started_separately: list[object] = []
+    original = ws.runs.set_status
+
+    def spy(run_id: str, status: object, **kwargs: object) -> object:
+        started_separately.append(status)
+        return original(run_id, status, **kwargs)
+
+    monkeypatch.setattr(ws.runs, "set_status", spy)
+    with ws.start_run(name="sized", reservation=held) as run:
+        record = ws.runs.get(run.id)
+        assert record.status.value == "running" and record.pid == os.getpid()
+        assert ws.free_resources(budget=budget)["free"]["cpus"] == [1]
+        assert ws.release_dead() == []
+    assert started_separately == [ExecutionStatus.COMPLETED]  # never RUNNING on its own
+    assert ws.runs.list_reservations() == []
+
+
+def test_a_hard_killed_child_is_reaped_and_its_slice_freed(ws: Workspace) -> None:
+    """A background launch abandons its Popen, so a child that SIGKILL (or an
+    OOM kill) ended stays a zombie, and a zombie still answers signal 0.
+    process_alive reaps it and reports it dead, so reap_dead and
+    release_dead free its slice without waiting for an unrelated Popen."""
+    import contextlib
+    import os
+    import signal
+    import subprocess
+    import time
+
+    from foundation.models import Run
+    from foundation.runtime import this_host
+    from foundation.store import process_alive
+    from slab.resources import Budget
+
+    budget = Budget(cpus=(0, 1), gpus=())
+    child = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    try:
+        held = ws.reserve(ntasks=1, holder_pid=child.pid, budget=budget)
+        assert process_alive(child.pid)
+        assert ws.free_resources(budget=budget)["free"]["cpus"] == [1]
+        os.kill(child.pid, signal.SIGKILL)
+        deadline = time.monotonic() + 5.0
+        while process_alive(child.pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not process_alive(child.pid)  # reaped by the probe, no wait() here
+        assert [r.id for r in ws.release_dead()] == [held.id]
+        assert ws.free_resources(budget=budget)["free"]["cpus"] == [0, 1]
+        run = ws.runs.create(Run(name="killed"))
+        ws.runs.set_status(run.id, "running", pid=child.pid, host=this_host())
+        assert [r.id for r in ws.reap_dead(caller="test")] == [run.id]
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            child.kill()
+        child.wait()

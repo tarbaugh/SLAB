@@ -656,3 +656,59 @@ def test_submit_job_takes_a_size(
     events = find_session_record(root, "mcp-job").events()
     (event,) = [e for e in events if e.get("type") == "command" and e["kind"] == "job"]
     assert event["size"]["gpus_per_node"] == 2
+
+
+def test_an_interrupt_propagates_without_releasing_a_claimed_row(
+    root: Path, tmp_path: Path, no_gpus: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a launch that could not start gives its slice back. An interrupt
+    propagates and leaves the row: the child may be running on that slice,
+    and the reap releases it when nothing is."""
+    import foundation._ops as ops
+    from foundation.models import Run
+
+    def claim_then_interrupt(root_arg: Path, script: object, **kwargs: Any) -> dict[str, Any]:
+        with Workspace(root) as ws:
+            run = ws.runs.create(Run(name="child"))
+            ws.runs.claim_reservation(
+                kwargs["reservation"].id, run.id, host=ws.runs.get_reservation(
+                    kwargs["reservation"].id
+                ).host, pid=os.getpid(),
+            )
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(ops, "launch_child", claim_then_interrupt)
+    script = tmp_path / "wf.py"
+    script.write_text("print('ok')\n")
+    server = build_server(root, project=tmp_path, session="mcp-interrupt")
+    with pytest.raises(KeyboardInterrupt):
+        _call(server, "launch_workflow", {"script_path": str(script), "ntasks": 1})
+    with Workspace(root) as ws:
+        (held,) = ws.runs.list_reservations()
+        assert held.run_id is not None and ws.runs.get(held.run_id).status.value == "running"
+
+
+def test_size_arguments_below_one_are_refused(root: Path, tmp_path: Path, no_gpus: None) -> None:
+    script = tmp_path / "wf.py"
+    script.write_text("print('never')\n")
+    server = build_server(root, project=tmp_path)
+    with pytest.raises(Exception, match="ntasks must be a positive integer, not 0"):
+        _call(server, "launch_workflow", {"script_path": str(script), "ntasks": 0})
+    with pytest.raises(Exception, match="gpus must be zero or a positive integer, not -1"):
+        _call(server, "launch_workflow", {"script_path": str(script), "gpus": -1})
+    with Workspace(root) as ws:
+        assert ws.runs.list_reservations() == [] and ws.runs.list_runs() == []
+
+
+def test_list_engines_still_answers_when_the_store_cannot_be_opened(tmp_path: Path) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory permissions")
+    sealed = tmp_path / "sealed"
+    sealed.mkdir()
+    sealed.chmod(0o500)
+    try:
+        answer = _call(build_server(sealed / "ws"), "list_engines")
+    finally:
+        sealed.chmod(0o700)
+    assert "builtin" in answer and answer["free"] is None
+    assert answer["resources_note"].startswith("run store unavailable:")

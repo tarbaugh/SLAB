@@ -45,13 +45,15 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_budget_gpus_precedence(clean_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
     """CUDA_VISIBLE_DEVICES first (empty means none), then SLURM's job or step
-    gpus, then the probe, then none."""
+    gpus, then the probe, then none. SLURM's variables hold the node's global
+    ids, which a cgroup-constrained job sees renumbered from zero, so only
+    their count is taken and the ids become 0, 1, ..."""
     monkeypatch.setattr("slab.resources._probed_gpus", lambda: ("0", "1", "2", "3"))
     assert budget().gpus == ("0", "1", "2", "3")
     monkeypatch.setenv("SLURM_STEP_GPUS", "2,3")
-    assert budget().gpus == ("2", "3")
-    monkeypatch.setenv("SLURM_JOB_GPUS", "0-1")
     assert budget().gpus == ("0", "1")
+    monkeypatch.setenv("SLURM_JOB_GPUS", "4-6")
+    assert budget().gpus == ("0", "1", "2")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
     assert budget().gpus == ("1",)
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")

@@ -354,8 +354,8 @@ A sized launch reserves its slice of cpus and gpus before the run exists,
 and a session process holds the reservation until the run claims it. A
 session that dies in that window leaves a reservation with no run. It
 holds nothing, because free is derived from the reservations whose
-holder is alive, but `slab runs reservations` shows it so an operator can
-see a stuck one. The workspace below holds two reservations on a 16-cpu,
+holder is alive. `slab runs reservations` still shows it, so an operator
+can see a stuck one. The workspace below holds two reservations on a 16-cpu,
 2-gpu budget. The first holder is gone, the second is alive:
 
 ```text
