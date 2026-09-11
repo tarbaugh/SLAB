@@ -398,10 +398,12 @@ KOKKOS_PACKAGE_KEYWORDS: frozenset[str] = frozenset(
         "sort",
         "atom/map",
         "gpu/aware",
+        "cuda/aware",
         "pair/only",
     }
 )
-"""The keywords the ``package kokkos`` command documents."""
+"""The keywords the ``package kokkos`` command documents, and ``cuda/aware``,
+the earlier spelling of ``gpu/aware`` that LAMMPS still accepts."""
 
 
 def check_kokkos_package(command: str) -> None:

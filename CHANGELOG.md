@@ -5,6 +5,14 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- The loader checks each keyword after `-pk kokkos` in both LAMMPS
+  commands against the keywords `package kokkos` documents, and refuses
+  a typo at load naming the table, because LAMMPS would refuse it at
+  every run. `slab doctor` gains three kinds of row: one per partition
+  with the caps a sized job is checked against, one for a plain LAMMPS
+  command with no launcher and no `{ntasks}`, and one for an
+  openai-provider `[agent]` with `context_window` unset. Each states a
+  choice the config made without saying so, and none fails the doctor.
 - The LAMMPS skills state one rule for speed. Any molecular dynamics,
   and any static calculation on more than a few hundred atoms, runs
   through `run_lammps` sized with `gpus=` when the machine declares a

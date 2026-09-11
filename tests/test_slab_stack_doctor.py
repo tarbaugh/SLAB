@@ -324,6 +324,14 @@ def test_the_doctor_names_the_lammps_plain_build_launcher(project: Path) -> None
     assert "[+] lammps plain build: mpiexec launches it; a CPU run takes its ranks" in (
         result.output
     )
+    (project / "slab.toml").write_text(
+        base + '[engines.lammps]\ncommand = "mpirun.hydra -n 8 lmp"\n'
+    )
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert "[+] lammps plain build: mpirun.hydra launches it" in result.output
+    (project / "slab.toml").write_text(base + '[engines.lammps]\ncommand = "jsrun -n 8 lmp"\n')
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert "[+] lammps plain build: jsrun launches it" in result.output
     (project / "slab.toml").write_text(base + '[engines.lammps]\ncommand = "lmp -np {ntasks}"\n')
     result = runner.invoke(app, ["doctor", "--offline"])
     assert "[+] lammps plain build: sized per launch ({ntasks})" in result.output
@@ -356,6 +364,10 @@ def test_the_doctor_names_the_context_window_the_loop_assumes(project: Path) -> 
     (project / "slab.toml").write_text(base + '[agent]\nmodel = "m"\nprovider = "anthropic"\n')
     result = runner.invoke(app, ["doctor", "--offline"])
     assert "context_window" not in result.output
+    # The cluster form: no endpoint, because the serve job records the URL.
+    (project / "slab.toml").write_text(base + '[agent]\nmodel = "m"\nprovider = "openai"\n')
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert "[=] [agent] context_window: unset, 65536 assumed" in result.output
 
 
 def test_the_doctor_prints_each_partitions_caps(project: Path) -> None:

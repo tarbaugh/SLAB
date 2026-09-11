@@ -261,10 +261,11 @@ The details that keep runs honest and directories clean:
   tables in the message, because the plain build runs when a launch holds
   no gpu. The `[engines.lammps.gpu]` command must name `{gpus}` or turn
   KOKKOS on with `-k on`. The loader also checks each keyword after
-  `-pk kokkos` against the set `package kokkos` documents, and refuses a
-  typo such as `negh` at load naming the table and the allowed keywords,
-  because LAMMPS would refuse it at every run. Values are not checked. A smoke test on the login node and a small EAM
-  cell run unsized, so they take the plain build, and a launch sized with
+  `-pk kokkos` against the keywords that `package kokkos` documents. It
+  refuses a typo such as `negh` at load, and names the table and the
+  allowed keywords, because LAMMPS would refuse it at every run. It does
+  not check values. A smoke test on the login node and a small EAM cell
+  run unsized, so they take the plain build, and a launch sized with
   `gpus=` takes the gpu build. `command=` and `setup=` in
   `calculator_options`, or on `run_lammps`, override the chosen build for
   that call alone. `slab engines list` and the MCP `list_engines` tool

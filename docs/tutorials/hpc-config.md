@@ -393,7 +393,10 @@ and `time_limit`, so the agent knows the caps before it submits.
    pre-downloaded on the login node, with `HF_HUB_OFFLINE=1`.
    `slab mason doctor` is how they confirm the parser name was right.
 7. Run `slab doctor` and read its `=` rows. Three of them name a choice
-   the config made without saying so:
+   the config made without saying so. The rows below come from a config
+   that is not the one above. It declares a `cpu` and a `gpu` partition
+   with `gres = "gpu:1"`, a plain `lmp` command under `[engines.lammps]`,
+   and an openai-provider `[agent]` with no `context_window`:
 
    ```text
    [+] partition cpu: caps 96 cores, 180G per node, 4 nodes per job
@@ -405,9 +408,8 @@ and `time_limit`, so the agent knows the caps before it submits.
    The partition rows print the caps a sized job is checked against, so
    you see what the agent will be allowed to ask for. A `gres` that names
    one gpu caps every job at one, so declare the node's count if the node
-   holds more.
-   The LAMMPS row says a plain `command` with no `mpirun`, `mpiexec`,
-   `srun`, or `{ntasks}` runs one rank, whatever the launch reserved. The
+   holds more. The LAMMPS row says a plain `command` with no launcher
+   and no `{ntasks}` runs one rank, whatever the launch reserved. The
    context window row says the loop compacts against a default the
    endpoint may not serve. Each is a legitimate choice, so the doctor
    states it and does not fail.

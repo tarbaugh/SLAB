@@ -148,14 +148,22 @@ def _hpc_row(slab_cfg: SlabConfig | None) -> tuple[str, str]:
     return ("+", f"scheduler: sbatch found; partitions {', '.join(sorted(hpc.partitions))}")
 
 
-_LAUNCHERS = ("mpirun", "mpiexec", "srun")
+_LAUNCHERS = frozenset({"srun", "aprun", "jsrun", "orterun", "prun"})
+_LAUNCHER_PREFIXES = ("mpirun", "mpiexec")
+
+
+def _is_launcher(name: str) -> bool:
+    """``mpirun.hydra``, ``mpirun_rsh``, ``mpiexec.hydra`` and the exact names."""
+    return name in _LAUNCHERS or name.startswith(_LAUNCHER_PREFIXES)
 
 
 def _lammps_plain_row(slab_cfg: SlabConfig | None) -> tuple[str, str] | None:
     """Say whether a CPU run of LAMMPS takes the ranks it reserved.
 
     The plain build runs whenever a launch holds no gpu. A command with no
-    launcher and no ``{ntasks}`` is one rank, whatever the reservation held.
+    launcher (mpirun, mpiexec, srun, aprun, jsrun, orterun, prun, and their
+    hydra and rsh forms) and no ``{ntasks}`` is one rank, whatever the
+    reservation held.
     A serial build is a legitimate choice, so the row is a fact, not a
     failure. No row when ``[engines.lammps]`` sets no command.
     """
@@ -166,7 +174,7 @@ def _lammps_plain_row(slab_cfg: SlabConfig | None) -> tuple[str, str] | None:
     if "{ntasks}" in command:
         return ("+", "lammps plain build: sized per launch ({ntasks}); a CPU run takes its ranks")
     names = (Path(word).name for word in command.split())
-    launcher = next((name for name in names if name in _LAUNCHERS), None)
+    launcher = next((name for name in names if _is_launcher(name)), None)
     if launcher is None:
         return (
             "=",
@@ -177,10 +185,15 @@ def _lammps_plain_row(slab_cfg: SlabConfig | None) -> tuple[str, str] | None:
 
 
 def _context_window_row(agent: AgentConfig) -> tuple[str, str] | None:
-    """Name the window the loop compacts against, or the default it assumed."""
+    """Name the window the loop compacts against, or the default it assumed.
+
+    The row fires for every openai-provider config, endpoint or not: on a
+    cluster ``[agent]`` names no endpoint, because the serve job records
+    the URL it lands on, and that is the config the default hurts most.
+    """
     if "context_window" in agent.model_fields_set:
         return ("+", f"[agent] context_window: {agent.context_window}")
-    if agent.provider == "openai" and agent.endpoint:
+    if agent.provider == "openai":
         return (
             "=",
             f"[agent] context_window: unset, {agent.context_window} assumed; set it to what "
