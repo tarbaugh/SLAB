@@ -84,23 +84,24 @@ def engines_overview(registry_path: str | os.PathLike[str] | None = None) -> dic
 
 
 def _lammps_overview() -> dict[str, Any]:
-    """Every LAMMPS route: the command each would run, and what it asks of KOKKOS.
+    """Every LAMMPS build: the command each would run, and what it asks of KOKKOS.
 
-    The built-in ``lammps`` and each registry alias that runs the LAMMPS
-    factory. The switches are read from each command as configured,
-    because SLAB adds none: a command without ``-k on`` runs the plain
-    styles on the host, whatever the build contains. No binary is probed.
+    The ``cpu`` build, the ``gpu`` build when ``[engines.lammps.gpu]`` is
+    declared, and each registry alias that runs the LAMMPS factory. The
+    switches are read from each command as configured, because SLAB adds
+    none: a command without ``-k on`` runs the plain styles on the host,
+    whatever the build contains. No binary is probed.
 
     Examples:
         >>> import os
         >>> os.environ.pop("SLAB_ENGINES", None) and None
-        >>> _lammps_overview()["routes"]["lammps"]["kokkos"]["enabled"]
+        >>> _lammps_overview()["builds"]["cpu"]["kokkos"]["enabled"]
         False
     """
-    from slab.lammps import lammps_routes
+    from slab.lammps import lammps_builds
 
     try:
-        return {"routes": lammps_routes()}
+        return {"builds": lammps_builds()}
     except Exception as e:  # a malformed config or registry: report it, keep the overview
         return {"error": str(e)}
 
@@ -243,8 +244,10 @@ def _hpc_overview(overview: dict[str, Any]) -> dict[str, Any] | None:
                 "description": spec.description,
                 "time_limit": spec.time_limit,
                 "gres": spec.gres,
-                "node": None if spec.node is None else spec.node.model_dump(),
-                "max_nodes": spec.max_nodes,
+                "nodes": spec.nodes,
+                "ntasks_per_node": spec.ntasks_per_node,
+                "cpus_per_task": spec.cpus_per_task,
+                "mem": spec.mem,
             }
             for name, spec in sorted(hpc.partitions.items())
         },

@@ -49,22 +49,25 @@ SIZED = HpcConfig.model_validate(
         "account": "abc-123",
         "default_partition": "cpu",
         "partitions": {
+            # A partition's own fields are its caps: nodes, ranks per node
+            # (ntasks when only that is set), cores per rank, the gpu count in
+            # gres, and mem. An unset field is no cap.
             "cpu": {
                 "time_limit": "04:00:00",
                 "nodes": 1,
                 "ntasks": 64,
                 "mem": "240G",
                 "launcher": "srun",
-                "node": {"cpus": 64, "mem": "240G"},
-                "max_nodes": 4,
             },
             "gpu": {
+                "nodes": 2,
+                "ntasks_per_node": 4,
+                "cpus_per_task": 16,
                 "gres": "gpu:a100:4",
                 "mem": "480G",
-                "node": {"cpus": 64, "gpus": 4, "mem": "480G"},
             },
-            "untyped": {"gres": "gpu:4", "node": {"cpus": 8, "gpus": 4}},
-            "bare": {"gres": "gpu:4"},
+            "untyped": {"gres": "gpu:4"},
+            "bare": {"gres": "gpu:4", "mem": "100G"},
         },
     }
 )
@@ -560,7 +563,7 @@ def test_render_with_a_size_byte_for_byte() -> None:
     ntasks is dropped because the size states the whole shape."""
     from slab.resources import JobSize
 
-    size = JobSize(nodes=2, ntasks_per_node=8, cpus_per_task=4, mem="120G")
+    size = JobSize(nodes=1, ntasks_per_node=8, cpus_per_task=4, mem="120G")
     assert render_sbatch("slab run a.py", job_name="a", config=SIZED, size=size) == (
         "#!/bin/bash -l\n"
         "#SBATCH --job-name=a\n"
@@ -568,7 +571,7 @@ def test_render_with_a_size_byte_for_byte() -> None:
         "#SBATCH --output=a-%j.out\n"
         "#SBATCH --account=abc-123\n"
         "#SBATCH --time=04:00:00\n"
-        "#SBATCH --nodes=2\n"
+        "#SBATCH --nodes=1\n"
         "#SBATCH --ntasks-per-node=8\n"
         "#SBATCH --cpus-per-task=4\n"
         "#SBATCH --mem=120G\n"
@@ -579,6 +582,43 @@ def test_render_with_a_size_byte_for_byte() -> None:
         '# engines bring their own MPI (e.g. [engines.qe] command = "srun pw.x")\n'
         "slab run a.py"
     )
+
+
+def test_render_with_a_multi_node_size_byte_for_byte() -> None:
+    """On a partition that declares nodes, ntasks_per_node, and cpus_per_task,
+    a size within them replaces every one of those directives."""
+    from slab.resources import JobSize
+
+    size = JobSize(nodes=2, ntasks_per_node=2, cpus_per_task=8, gpus_per_node=2)
+    assert render_sbatch("cmd", job_name="j", partition="gpu", config=SIZED, size=size) == (
+        "#!/bin/bash -l\n"
+        "#SBATCH --job-name=j\n"
+        "#SBATCH --partition=gpu\n"
+        "#SBATCH --output=j-%j.out\n"
+        "#SBATCH --account=abc-123\n"
+        "#SBATCH --nodes=2\n"
+        "#SBATCH --ntasks-per-node=2\n"
+        "#SBATCH --cpus-per-task=8\n"
+        "#SBATCH --mem=480G\n"
+        "#SBATCH --gres=gpu:a100:2\n"
+        "\n"
+        "set -euo pipefail\n"
+        "\n"
+        "cmd"
+    )
+
+
+def test_render_sized_on_a_partition_with_only_gres_and_mem() -> None:
+    """A partition that declares only gres and mem caps only those; the rest of
+    the size renders as asked."""
+    from slab.resources import JobSize
+
+    size = JobSize(nodes=8, ntasks_per_node=128, cpus_per_task=2, gpus_per_node=4, mem="100G")
+    rendered = render_sbatch("cmd", job_name="j", partition="bare", config=SIZED, size=size)
+    assert (
+        "#SBATCH --nodes=8\n#SBATCH --ntasks-per-node=128\n#SBATCH --cpus-per-task=2\n"
+        "#SBATCH --mem=100G\n#SBATCH --gres=gpu:4\n"
+    ) in rendered
 
 
 def test_render_sized_gres_keeps_the_partition_type() -> None:
@@ -596,16 +636,72 @@ def test_render_sized_gres_keeps_the_partition_type() -> None:
     assert "--gres" not in none
 
 
-def test_render_sized_refuses_before_rendering() -> None:
+@pytest.mark.parametrize(
+    ("partition", "size", "message"),
+    [
+        (
+            "cpu",
+            {"nodes": 2, "ntasks_per_node": 1},
+            r"nodes=2 exceeds the 1 node\(s\) cpu declares \(\[hpc\.partitions\.cpu\] nodes\)",
+        ),
+        (
+            "gpu",
+            {"ntasks_per_node": 5},
+            r"ntasks_per_node=5 exceeds the 4 ranks per node gpu declares "
+            r"\(\[hpc\.partitions\.gpu\] ntasks_per_node\)",
+        ),
+        (
+            "cpu",
+            {"ntasks_per_node": 65},
+            r"ntasks_per_node=65 exceeds the 64 ranks per node cpu declares "
+            r"\(\[hpc\.partitions\.cpu\] ntasks\)",
+        ),
+        (
+            "gpu",
+            {"ntasks_per_node": 4, "cpus_per_task": 17},
+            r"= 68 exceeds the 64 cores per node gpu declares "
+            r"\(\[hpc\.partitions\.gpu\] ntasks_per_node x cpus_per_task\)",
+        ),
+        (
+            "gpu",
+            {"ntasks_per_node": 1, "gpus_per_node": 8},
+            r"gpus_per_node=8 exceeds the 4 gpus per node gpu declares "
+            r"\(\[hpc\.partitions\.gpu\] gres\)",
+        ),
+        (
+            "cpu",
+            {"ntasks_per_node": 1, "gpus_per_node": 1},
+            r"gpus_per_node=1 asks for gpus on cpu, which declares no gres "
+            r"\(\[hpc\.partitions\.cpu\] gres\)",
+        ),
+        (
+            "bare",
+            {"ntasks_per_node": 1, "mem": "101G"},
+            r"mem=101G exceeds the 100G per node bare declares \(\[hpc\.partitions\.bare\] mem\)",
+        ),
+    ],
+)
+def test_render_sized_refuses_before_rendering(partition: str, size: dict, message: str) -> None:
+    """Each capped field refuses a size past it, naming the partition field,
+    before anything renders."""
     from slab.errors import JobSizeError
     from slab.resources import JobSize
 
-    with pytest.raises(JobSizeError, match=r"partition 'bare' declares no node"):
-        render_sbatch("cmd", job_name="j", partition="bare", config=SIZED,
-                      size=JobSize(ntasks_per_node=1))
-    with pytest.raises(JobSizeError, match="gpus_per_node=8 exceeds the 4 gpus"):
-        render_sbatch("cmd", job_name="j", partition="gpu", config=SIZED,
-                      size=JobSize(ntasks_per_node=1, gpus_per_node=8))
+    with pytest.raises(JobSizeError, match=message):
+        render_sbatch("cmd", job_name="j", partition=partition, config=SIZED, size=JobSize(**size))
+
+
+def test_render_sized_leaves_unset_fields_uncapped() -> None:
+    """untyped declares a gres count only, so nodes, ranks, cores, and mem are
+    whatever the size asks."""
+    from slab.resources import JobSize
+
+    size = JobSize(nodes=16, ntasks_per_node=8, cpus_per_task=32, gpus_per_node=4, mem="2T")
+    rendered = render_sbatch("cmd", job_name="j", partition="untyped", config=SIZED, size=size)
+    assert "#SBATCH --nodes=16\n#SBATCH --ntasks-per-node=8\n#SBATCH --cpus-per-task=32\n" in (
+        rendered
+    )
+    assert "#SBATCH --mem=2T\n#SBATCH --gres=gpu:4\n" in rendered
 
 
 def _sized_config_file(tmp_path: Path) -> None:
@@ -613,11 +709,10 @@ def _sized_config_file(tmp_path: Path) -> None:
         "[hpc]\n"
         'default_partition = "gpu"\n'
         "[hpc.partitions.gpu]\n"
+        "nodes = 2\n"
+        "ntasks_per_node = 8\n"
+        "cpus_per_task = 8\n"
         'gres = "gpu:a100:4"\n'
-        "max_nodes = 2\n"
-        "[hpc.partitions.gpu.node]\n"
-        "cpus = 64\n"
-        "gpus = 4\n"
         'mem = "480G"\n'
         "[hpc.partitions.cpu]\n"
         'time_limit = "01:00:00"\n'
@@ -639,10 +734,25 @@ def test_cli_hpc_render_size_flags(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     assert "#SBATCH --mem=200G\n#SBATCH --gres=gpu:a100:2\n" in result.output
     refused = runner.invoke(app, ["hpc", "render", "cmd", "--gpus-per-node", "8"])
     assert refused.exit_code == 1 and "pass ntasks_per_node" in refused.output
-    too_big = runner.invoke(app, ["hpc", "render", "cmd", "-n", "j", "--ntasks-per-node", "65"])
-    assert too_big.exit_code == 1 and "exceeds the 64 cpus" in too_big.output
-    unsized = runner.invoke(app, ["hpc", "render", "cmd", "-p", "cpu", "--ntasks-per-node", "1"])
-    assert unsized.exit_code == 1 and "partition 'cpu' declares no node" in unsized.output
+    too_big = runner.invoke(app, ["hpc", "render", "cmd", "-n", "j", "--ntasks-per-node", "9"])
+    assert too_big.exit_code == 1
+    assert "exceeds the 8 ranks per node gpu declares ([hpc.partitions.gpu] ntasks_per_node)" in (
+        too_big.output
+    )
+    # cpu declares no caps, so a size on it renders as asked.
+    uncapped = runner.invoke(
+        app, ["hpc", "render", "cmd", "-n", "j", "-p", "cpu", "--ntasks-per-node", "256"]
+    )
+    assert uncapped.exit_code == 0, uncapped.output
+    assert "#SBATCH --ntasks-per-node=256\n" in uncapped.output
+    no_gres = runner.invoke(
+        app, ["hpc", "render", "cmd", "-n", "j", "-p", "cpu", "--ntasks-per-node", "1",
+              "--gpus-per-node", "1"]
+    )
+    assert no_gres.exit_code == 1
+    assert "asks for gpus on cpu, which declares no gres ([hpc.partitions.cpu] gres)" in (
+        no_gres.output
+    )
 
 
 def test_cli_hpc_submit_size_flags(
@@ -661,21 +771,24 @@ def test_cli_hpc_submit_size_flags(
     refused = runner.invoke(
         app, ["hpc", "submit", "cmd", "--ntasks-per-node", "1", "--gpus-per-node", "5"]
     )
-    assert refused.exit_code == 1 and "exceeds the 4 gpus" in refused.output
+    assert refused.exit_code == 1
+    assert "exceeds the 4 gpus per node gpu declares ([hpc.partitions.gpu] gres)" in refused.output
 
 
-def test_cli_hpc_partitions_prints_the_node_line(
+def test_cli_hpc_partitions_prints_no_node_line(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """The caps are the partition's own fields, so there is no separate node line."""
     _sized_config_file(tmp_path)
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["hpc", "partitions"])
     assert result.exit_code == 0
-    assert "node: 64 cpus, 4 gpus, mem 480G; up to 2 node(s) per job" in result.output
-    assert result.output.count("node:") == 1  # cpu declares none
+    assert "node:" not in result.output and "node(s) per job" not in result.output
+    assert "gpu:a100:4, mem 480G" in result.output
+    assert len(result.output.strip().splitlines()) == 2  # one line per partition
 
 
-def test_engines_overview_reports_node_caps(
+def test_engines_overview_reports_partition_caps(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from slab._ops import engines_overview
@@ -684,9 +797,14 @@ def test_engines_overview_reports_node_caps(
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("SLAB_ENGINES", raising=False)
     partitions = engines_overview()["hpc"]["partitions"]
-    assert partitions["gpu"]["node"] == {"cpus": 64, "gpus": 4, "mem": "480G"}
-    assert partitions["gpu"]["max_nodes"] == 2
-    assert partitions["cpu"]["node"] is None and partitions["cpu"]["max_nodes"] == 1
+    gpu = partitions["gpu"]
+    assert (gpu["nodes"], gpu["ntasks_per_node"], gpu["cpus_per_task"]) == (2, 8, 8)
+    assert (gpu["gres"], gpu["mem"]) == ("gpu:a100:4", "480G")
+    cpu = partitions["cpu"]
+    assert (cpu["nodes"], cpu["ntasks_per_node"], cpu["cpus_per_task"], cpu["mem"]) == (
+        None, None, None, None,
+    )
+    assert "node" not in gpu and "max_nodes" not in gpu
 
 
 def test_sized_gres_forms() -> None:

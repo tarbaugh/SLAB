@@ -862,7 +862,9 @@ def _clustered(
         {
             "default_partition": "gpu",
             "partitions": {
-                "gpu": {"gres": "gpu:a100:4", "node": {"cpus": 64, "gpus": 4, "mem": "480G"}},
+                "gpu": {
+                    "ntasks_per_node": 4, "cpus_per_task": 16, "gres": "gpu:a100:4", "mem": "480G",
+                },
                 "cpu": {},
             },
         }
@@ -891,23 +893,39 @@ def test_submit_job_takes_a_size_and_records_it(
     assert event["size"]["ntasks_per_node"] == 4 and event["size"]["nodes"] == 1
 
 
-def test_submit_job_refuses_a_size_the_node_cannot_hold(
+def test_submit_job_refuses_a_size_the_partition_cannot_hold(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Each refusal names the partition field that caps it; a partition that
+    declares no gres has no gpus to give, and one that declares nothing else
+    caps nothing else."""
     box, captured = _clustered(tmp_path, monkeypatch)
     answer = box.dispatch(
         _call("submit_job", command="c", name="n", ntasks_per_node=1, gpus_per_node=5)
     )
     assert answer.startswith("refused:") and "gpus_per_node=5 exceeds the 4 gpus" in answer
-    assert "[hpc.partitions.gpu.node] gpus" in answer
+    assert "([hpc.partitions.gpu] gres)" in answer
     answer = box.dispatch(_call("submit_job", command="c", name="n", gpus_per_node=1))
     assert answer.startswith("refused:") and "pass ntasks_per_node" in answer
     answer = box.dispatch(
-        _call("submit_job", command="c", name="n", partition="cpu", ntasks_per_node=1)
+        _call("submit_job", command="c", name="n", ntasks_per_node=4, cpus_per_task=17)
     )
-    assert answer.startswith("refused:") and "declares no node" in answer
-    assert "[hpc.partitions.cpu.node]" in answer
+    assert answer.startswith("refused:") and "= 68 exceeds the 64 cores per node" in answer
+    assert "([hpc.partitions.gpu] ntasks_per_node x cpus_per_task)" in answer
+    answer = box.dispatch(
+        _call("submit_job", command="c", name="n", partition="cpu", ntasks_per_node=1,
+              gpus_per_node=1)
+    )
+    assert answer.startswith("refused:")
+    assert "asks for gpus on cpu, which declares no gres" in answer
+    assert "([hpc.partitions.cpu] gres)" in answer
     assert "script" not in captured and _command_events(box.session) == []
+    # cpu declares no other field, so a large size on it is not refused.
+    answer = box.dispatch(
+        _call("submit_job", command="c", name="n", partition="cpu", ntasks_per_node=512, nodes=8)
+    )
+    assert "submitted job 7" in answer
+    assert "#SBATCH --nodes=8\n#SBATCH --ntasks-per-node=512\n" in str(captured["script"])
 
 
 # -- session stamps ----------------------------------------------------------

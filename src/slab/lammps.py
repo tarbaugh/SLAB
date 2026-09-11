@@ -83,10 +83,10 @@ def lammps_template(command: str | None = None) -> str:
 
 
 def lammps_setup(setup: str | tuple[str, ...] | list[str] | None = None) -> tuple[str, ...]:
-    """Setup lines for the LAMMPS subprocess: per-call, else ``[engines.lammps]``."""
-    from slab.backends import _engine_setup
+    """Setup lines for the LAMMPS subprocess: per-call, else the chosen build's."""
+    from slab.backends import _lammps_setup
 
-    return _engine_setup(setup, "lammps")
+    return _lammps_setup(setup)
 
 
 def describe_lammps(
@@ -115,97 +115,125 @@ def describe_lammps(
 LAMMPS_FACTORY = "slab.backends.lammps_calculator"
 
 
-def lammps_route(engine: str | None = None) -> dict[str, Any]:
-    """The LAMMPS a route name stands for: its command and setup lines.
+def lammps_build(engine: str | None = None) -> dict[str, Any]:
+    """The LAMMPS build a launch runs: its name, command, and setup lines.
 
     A machine keeps more than one LAMMPS: a plain build for smoke tests
-    and small cells, a KOKKOS build for the GPU partition. Each is a
-    route with a name. ``lammps`` is the built-in route, and its command
-    and setup come from ``[engines.lammps]``. Every other route is a
-    registry alias whose calculator is ``slab.backends.lammps_calculator``,
-    and its command and setup come from the alias's ``options``. A name
-    that is neither is refused with the routes that exist, so a script
-    never runs under a binary nobody named. A route's ``command`` or
-    ``setup`` is None where the route leaves it to the engine's own
+    and small cells, a KOKKOS build for the GPU partition. With *engine*
+    unset or ``lammps`` the build follows the slice: the ``gpu`` build
+    from ``[engines.lammps.gpu]`` when this launch's reservation holds
+    gpus and the table is declared, else the ``cpu`` build from
+    ``[engines.lammps]``. The agent never names a build. A registry alias
+    whose calculator is ``slab.backends.lammps_calculator`` is a further
+    build under the alias's name, with the command and setup of its
+    ``options``. A name that is neither is refused with the builds that
+    exist, so a script never runs under a binary nobody named. ``command``
+    or ``setup`` is None where the build leaves it to the engine's own
     resolution.
 
     Examples:
         >>> import os
         >>> os.environ.pop("SLAB_ENGINES", None) and None
-        >>> lammps_route()["engine"]
+        >>> lammps_build()["engine"]
         'lammps'
-        >>> lammps_route("lammps")["source"]
+        >>> lammps_build("lammps")["source"]
         'builtin'
     """
+    from slab.backends import _lammps_gpu_build
     from slab.engines import load_registry
 
     name = (engine or "lammps").strip()
     if name.lower() == "lammps":
-        return {"engine": "lammps", "source": "builtin", "command": None, "setup": None}
+        gpu = _lammps_gpu_build()
+        if gpu is not None:
+            return {
+                "engine": "lammps",
+                "build": "gpu",
+                "source": "builtin",
+                "command": gpu[0],
+                "setup": list(gpu[1]),
+            }
+        return {
+            "engine": "lammps",
+            "build": "cpu",
+            "source": "builtin",
+            "command": None,
+            "setup": None,
+        }
     registry = load_registry()
     spec = registry.engines.get(name) if registry is not None else None
     if spec is None or spec.calculator != LAMMPS_FACTORY:
-        known = ", ".join(lammps_routes())
-        what = "is not a LAMMPS route" if spec is not None else "names no engine here"
+        known = ", ".join(lammps_builds())
+        what = "is not a LAMMPS build" if spec is not None else "names no engine here"
         raise EngineNotAvailableError(
-            f"engine {name!r} {what}; the LAMMPS routes on this machine are: {known}. "
-            f"A route is the built-in 'lammps' or a registry alias with calculator "
-            f"{LAMMPS_FACTORY!r}"
+            f"engine {name!r} {what}; the LAMMPS builds on this machine are: {known}. "
+            f"Pass engine='lammps' (the gpu build follows a launch that holds gpus) "
+            f"or the name of a registry alias with calculator {LAMMPS_FACTORY!r}"
         )
     cluster = registry.cluster if registry is not None else None
     source = f"registry:{cluster}" if cluster else "registry"
     return {
         "engine": name,
+        "build": name,
         "source": source,
         "command": spec.options.get("command"),
         "setup": spec.options.get("setup"),
     }
 
 
-def lammps_routes() -> dict[str, dict[str, Any]]:
-    """Every LAMMPS route on this machine, resolved: command, setup, KOKKOS switches.
+def lammps_builds() -> dict[str, dict[str, Any]]:
+    """Every LAMMPS build on this machine, resolved: command, setup, KOKKOS switches.
 
-    The built-in ``lammps`` first, then each registry alias that runs the
-    LAMMPS factory, in name order. ``command`` is the route's command as
-    written and ``placeholders`` the ``{ntasks}``, ``{threads}``, and
-    ``{gpus}`` it asks for, which a launch fills. The switches are parsed
-    from the command filled for this process's envelope, or from the
-    template when it cannot be filled here, because SLAB adds none. No
-    binary is probed.
+    ``cpu`` first, ``gpu`` when ``[engines.lammps.gpu]`` is declared, then
+    each registry alias that runs the LAMMPS factory, in name order.
+    ``command`` is the build's command as written and ``placeholders`` the
+    ``{ntasks}``, ``{threads}``, and ``{gpus}`` it asks for, which a launch
+    fills. The switches are parsed from the command filled for this
+    process's envelope, or from the template when it cannot be filled
+    here, because SLAB adds none. No binary is probed.
 
     Examples:
         >>> import os
         >>> os.environ.pop("SLAB_ENGINES", None) and None
-        >>> list(lammps_routes())
-        ['lammps']
-        >>> lammps_routes()["lammps"]["placeholders"]
+        >>> list(lammps_builds())[:1]
+        ['cpu']
+        >>> lammps_builds()["cpu"]["placeholders"]
         []
     """
+    from slab.backends import _engine_setup, _lammps_setting
+    from slab.config import config_value
     from slab.engines import load_registry
     from slab.resources import envelope, fill, placeholders
 
-    routes: dict[str, dict[str, Any]] = {}
-    names = ["lammps"]
+    builds: dict[str, dict[str, Any]] = {}
+    entries: list[tuple[str, str, str, list[str]]] = [
+        ("cpu", "builtin", _lammps_setting("command") or "lmp", list(_engine_setup(None, "lammps")))
+    ]
+    gpu_command = config_value("engines.lammps.gpu.command")
+    if gpu_command is not None:
+        gpu_setup = [str(line) for line in (config_value("engines.lammps.gpu.setup") or ())]
+        entries.append(("gpu", "builtin", str(gpu_command), gpu_setup))
     registry = load_registry()
     if registry is not None:
-        names += sorted(
+        for name in sorted(
             name for name, spec in registry.engines.items() if spec.calculator == LAMMPS_FACTORY
-        )
-    for name in names:
-        route = lammps_route(name)
-        template = lammps_template(route["command"])
+        ):
+            alias = lammps_build(name)
+            template = lammps_template(alias["command"])
+            entries.append((name, alias["source"], template, list(lammps_setup(alias["setup"]))))
+    for name, source, template, setup in entries:
         try:
             filled = fill(template, envelope(), route=name)
         except EngineNotAvailableError:
             filled = template
-        routes[name] = {
-            "source": route["source"],
+        builds[name] = {
+            "source": source,
             "command": template,
             "placeholders": placeholders(template),
-            "setup": list(lammps_setup(route["setup"])),
+            "setup": setup,
             "kokkos": kokkos_switches(filled),
         }
-    return routes
+    return builds
 
 
 def script_scratch_dir() -> Path:

@@ -36,33 +36,98 @@ def test_engines_list_without_registry(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert "none configured" in result.output
 
 
-def test_engines_list_shows_every_lammps_route_and_its_kokkos_switches(
+def test_engines_list_shows_every_lammps_build_and_its_kokkos_switches(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Each route runs its command as written, so the listing says what each asks of KOKKOS."""
+    """The cpu build, the gpu build from [engines.lammps.gpu], and each LAMMPS
+    alias run their command as written, so the listing says what each asks
+    of KOKKOS."""
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("ASE_LAMMPSRUN_COMMAND", "lmp")
-    gpu = {
+    monkeypatch.setenv("SLAB_CPUS", "0,1")
+    monkeypatch.setenv("SLAB_GPUS", "")
+    monkeypatch.setenv("SLAB_NTASKS", "1")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "slab.toml").write_text(
+        "[engines.lammps]\n"
+        'command = "lmp"\n'
+        'setup = ["module load lammps/2025.07"]\n'
+        "[engines.lammps.gpu]\n"
+        'command = "mpirun -np {ntasks} lmp -k on g {gpus} -sf kk"\n'
+        'setup = ["module load lammps/2025.07-kokkos"]\n'
+    )
+    legacy = {
         "calculator": "slab.backends.lammps_calculator",
         "options": {
             "command": "mpirun -np 2 lmp -k on g 2 -sf kk",
-            "setup": ["module load lammps/kokkos"],
+            "setup": ["module load lammps/2024.08-kokkos"],
         },
         "version": "22 Jul 2025",
     }
     monkeypatch.setenv(
-        "SLAB_ENGINES", str(_write_engines(tmp_path, {"lammps-gpu": gpu, "emt-cluster": EMT_ENTRY}))
+        "SLAB_ENGINES",
+        str(_write_engines(tmp_path, {"lammps-legacy": legacy, "emt-cluster": EMT_ENTRY})),
     )
     result = runner.invoke(app, ["engines", "list"])
     assert result.exit_code == 0, result.output
-    assert "lammps routes (engine= for relax, single_point, and run_lammps):" in result.output
-    assert "  lammps         lmp  (KOKKOS off: the plain styles run on the host)" in result.output
+    assert "lammps builds (gpu build chosen when the launch holds gpus):" in result.output
+    block = result.output.split("lammps builds")[1]
+    assert "  cpu            lmp  (KOKKOS off: the plain styles run on the host)" in block
+    assert "                 setup: module load lammps/2025.07\n" in block
     assert (
-        "  lammps-gpu     mpirun -np 2 lmp -k on g 2 -sf kk  "
+        "  gpu            mpirun -np {ntasks} lmp -k on g {gpus} -sf kk  "
+        "(sized per launch: ntasks, gpus; KOKKOS on, -sf kk)"
+    ) in block
+    assert "                 setup: module load lammps/2025.07-kokkos" in block
+    assert (
+        "  lammps-legacy  mpirun -np 2 lmp -k on g 2 -sf kk  "
         "(KOKKOS on, 2 GPU(s) per node, -sf kk)"
-    ) in result.output
-    assert "                 setup: module load lammps/kokkos" in result.output
-    assert "emt-cluster" not in result.output.split("lammps routes")[1]
+    ) in block
+    assert "                 setup: module load lammps/2024.08-kokkos" in block
+    assert block.index("  cpu ") < block.index("  gpu ") < block.index("  lammps-legacy ")
+    assert "emt-cluster" not in block
+    assert "lammps routes" not in result.output and "route" not in block
+
+
+def test_engines_list_shows_no_gpu_build_when_none_is_declared(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("ASE_LAMMPSRUN_COMMAND", "lmp")
+    monkeypatch.delenv("SLAB_ENGINES", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "slab.toml").write_text("schema_version = 1\n")
+    result = runner.invoke(app, ["engines", "list"])
+    assert result.exit_code == 0, result.output
+    block = result.output.split("lammps builds")[1]
+    assert "  cpu            lmp  (KOKKOS off: the plain styles run on the host)" in block
+    assert "  gpu " not in block
+
+
+def test_hpc_partitions_prints_no_node_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A partition's caps are its own fields, so the listing carries no node line."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "slab.toml").write_text(
+        "[hpc]\n"
+        'default_partition = "gpu"\n'
+        "[hpc.partitions.gpu]\n"
+        "nodes = 2\n"
+        "ntasks_per_node = 4\n"
+        "cpus_per_task = 16\n"
+        'gres = "gpu:a100:4"\n'
+        'mem = "480G"\n'
+        "[hpc.partitions.cpu]\n"
+        'time_limit = "01:00:00"\n'
+    )
+    result = runner.invoke(app, ["hpc", "partitions"])
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert len(lines) == 2
+    assert lines[0].startswith("  cpu") and "01:00:00" in lines[0]
+    assert lines[1].startswith("  gpu") and "(default)" in lines[1]
+    assert "gpu:a100:4, mem 480G" in lines[1]
+    assert "node" not in result.output
 
 
 def test_engines_list_with_registry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -324,7 +389,7 @@ def test_engines_list_names_the_gracemaker_trainer(
     )
 
 
-def test_engines_list_marks_a_route_sized_per_launch(
+def test_engines_list_marks_a_build_sized_per_launch(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
@@ -336,11 +401,11 @@ def test_engines_list_marks_a_route_sized_per_launch(
         "calculator": "slab.backends.lammps_calculator",
         "options": {"command": "mpirun -np {ntasks} lmp -k on g {gpus} -sf kk"},
     }
-    monkeypatch.setenv("SLAB_ENGINES", str(_write_engines(tmp_path, {"lammps-gpu": gpu})))
+    monkeypatch.setenv("SLAB_ENGINES", str(_write_engines(tmp_path, {"lammps-kokkos": gpu})))
     result = runner.invoke(app, ["engines", "list"])
     assert result.exit_code == 0, result.output
     assert (
-        "  lammps-gpu     mpirun -np {ntasks} lmp -k on g {gpus} -sf kk  "
+        "  lammps-kokkos  mpirun -np {ntasks} lmp -k on g {gpus} -sf kk  "
         "(sized per launch: ntasks, gpus; KOKKOS on, 1 GPU(s) per node, -sf kk)"
     ) in result.output
-    assert "  lammps         lmp  (KOKKOS off: the plain styles run on the host)" in result.output
+    assert "  cpu            lmp  (KOKKOS off: the plain styles run on the host)" in result.output

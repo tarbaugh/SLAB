@@ -297,9 +297,10 @@ is deployed, never imported. Anything longer \
 than a few minutes goes through `submit_job` (typically wrapping \
 `slab run workflow.py`) rather than running in this process — then poll \
 `job_status`. Size each job: `submit_job` takes ntasks_per_node, \
-cpus_per_task, gpus_per_node, nodes, and mem, up to the node spec that \
-`list_engines` reports under each partition, and a size past the cap is \
-refused naming it. Keep interactive work on this node small.""",
+cpus_per_task, gpus_per_node, nodes, and mem, up to the fields the \
+partition declares as `list_engines` reports them, and a size past a \
+declared field is refused naming it. Keep interactive work on this node \
+small.""",
 }
 
 

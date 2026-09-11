@@ -625,10 +625,9 @@ def test_submit_job_takes_a_size(
         "[hpc]\n"
         'default_partition = "gpu"\n'
         "[hpc.partitions.gpu]\n"
+        "ntasks_per_node = 4\n"
+        "cpus_per_task = 16\n"
         'gres = "gpu:a100:4"\n'
-        "[hpc.partitions.gpu.node]\n"
-        "cpus = 64\n"
-        "gpus = 4\n"
     )
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -648,7 +647,18 @@ def test_submit_job_takes_a_size(
     }
     kept = Path(job["script_path"]).read_text()
     assert "#SBATCH --ntasks-per-node=4\n" in kept and "#SBATCH --gres=gpu:a100:2\n" in kept
-    with pytest.raises(Exception, match="gpus_per_node=5 exceeds the 4 gpus"):
+    # The overview reports the partition's own fields as the caps, not a node table.
+    monkeypatch.chdir(tmp_path)  # engines_overview reads the config from the cwd
+    gpu = _call(server, "list_engines")["hpc"]["partitions"]["gpu"]
+    assert (gpu["nodes"], gpu["ntasks_per_node"], gpu["cpus_per_task"], gpu["mem"]) == (
+        None, 4, 16, None,
+    )
+    assert gpu["gres"] == "gpu:a100:4" and "node" not in gpu and "max_nodes" not in gpu
+    with pytest.raises(
+        Exception,
+        match=r"gpus_per_node=5 exceeds the 4 gpus per node gpu declares "
+        r"\(\[hpc\.partitions\.gpu\] gres\)",
+    ):
         _call(server, "submit_job", {"command": "c", "name": "n", "ntasks_per_node": 1,
                                      "gpus_per_node": 5})
     with pytest.raises(Exception, match="pass ntasks_per_node"):

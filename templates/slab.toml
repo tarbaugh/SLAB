@@ -69,6 +69,16 @@ schema_version = 1
 #                                      # same per-engine setup rule as qe —
 #                                      # purge first so whatever the job (or
 #                                      # your profile) loaded can't reach it
+#                                      # Keep this command plain (no '-k on g'):
+#                                      # it runs when a launch holds no gpu.
+
+# [engines.lammps.gpu]                 # the build a launch runs when its
+#                                      # reservation holds gpus; the agent sizes
+#                                      # the launch with gpus= and never names a build
+# command = "mpirun -np {ntasks} lmp -k on g {gpus} -sf kk -pk kokkos newton on neigh half"
+#                                      # {ntasks}, {threads}, {gpus} are filled
+#                                      # from the launch's reservation
+# setup = ["module purge", "module load lammps/2025.07-kokkos"]
 
 [builders.atomsk]
 # command = "atomsk"                   # atomsk builds and transforms structures
@@ -138,13 +148,12 @@ schema_version = 1
 # setup = ["module load cuda/12.4"]    # replaces [hpc] setup for this partition? no:
 #                                      # partition setup runs AFTER the [hpc] setup lines
 # sbatch_extra = ["--exclusive"]       # raw directives the schema does not model
-# max_nodes = 4                        # how many nodes one sized job may take (default 1)
-
-# [hpc.partitions.gpu.node]
-# cpus = 64                            # one node's size: the cap a sized job is
-# gpus = 4                             # checked against ('submit_job' with ntasks_per_node,
-# mem = "480G"                         # cpus_per_task, gpus_per_node, mem). Without this
-#                                      # table a job on the partition cannot be sized.
+#                                      # The fields a partition declares (nodes,
+#                                      # ntasks_per_node, cpus_per_task, mem, and the
+#                                      # gpu count in gres) are also the caps a sized
+#                                      # job ('submit_job' with ntasks_per_node,
+#                                      # gpus_per_node, ...) is checked against. An
+#                                      # unset field is no cap.
 
 [agent]
 # provider = "openai"                       # "openai" = any OpenAI-compatible server; "anthropic"
