@@ -54,6 +54,17 @@ def _span_seconds(started: str | None, ended: str | None) -> float | None:
         return None
 
 
+def _budget_of(header: dict[str, Any]) -> dict[str, int] | None:
+    """The ``budget: {cpus, gpus}`` counts of a header, or None before they existed."""
+    raw = header.get("budget")
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return {"cpus": int(raw.get("cpus") or 0), "gpus": int(raw.get("gpus") or 0)}
+    except (TypeError, ValueError):
+        return None
+
+
 def _tally(transcript: Path) -> dict[str, Any]:
     """Counts for one transcript file; the shared core of the summary."""
     steps = prompt_tokens = completion_tokens = cached_prompt_tokens = 0
@@ -155,6 +166,7 @@ def _tally(transcript: Path) -> dict[str, Any]:
         "agent": header.get("agent"),
         "condition": header.get("condition"),
         "mechanisms": header.get("mechanisms"),
+        "budget": _budget_of(header),
         "steps": steps,
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
@@ -189,12 +201,21 @@ def _tally(transcript: Path) -> dict[str, Any]:
     }
 
 
-def summarize(transcript: Path, siblings: list[Path] | None = None) -> dict[str, Any]:
+def summarize(
+    transcript: Path,
+    siblings: list[Path] | None = None,
+    runs: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Digest one conversation transcript, delegation siblings included.
 
     *siblings* are the ``<stem>-<agent>-<n>.jsonl`` files the conversation's
     delegations wrote (:func:`mason.session.transcript_groups` finds them).
     Their steps and tokens are reported per child and rolled into totals.
+
+    *runs* are the session's run rows from :func:`session_runs`. With them
+    the summary carries the resource hours those runs held
+    (:func:`utilisation`); without them those fields are None, because
+    "held nothing" and "not looked up" are different answers.
     """
     summary = _tally(transcript)
     summary["transcript"] = str(transcript)
@@ -225,11 +246,100 @@ def summarize(transcript: Path, siblings: list[Path] | None = None) -> dict[str,
     summary["total_prompt_tokens"] = total_prompt
     summary["total_completion_tokens"] = total_completion
     summary["total_cached_prompt_tokens"] = total_cached
+    summary.update(
+        utilisation(summary, runs) if runs is not None else dict.fromkeys(UTILISATION_KEYS)
+    )
     return summary
 
 
-def session_runs(ws: Workspace, session: str) -> list[dict[str, str]]:
+UTILISATION_KEYS = (
+    "cpu_hours_held",
+    "gpu_hours_held",
+    "wall_hours",
+    "runs_sized",
+    "runs_unsized",
+    "runs_open",
+    "utilisation",
+)
+
+
+def utilisation(summary: dict[str, Any], runs: list[dict[str, Any]]) -> dict[str, Any]:
+    """The cpu-hours and gpu-hours a session's runs held, against its budget.
+
+    A run holds its slice (the ``resources`` on its record) from
+    ``started_at`` to ``finished_at``, so its cpu-hours held are the size of
+    the slice's cpu list times that span, and its gpu-hours the same over
+    the gpu list. "Held" is the word: nothing here measures whether the
+    cores were busy. The sums go over the runs that have both a slice and a
+    closed span. ``runs_unsized`` counts runs without a slice (never
+    reserved, or from before the store kept one) and ``runs_open`` counts
+    sized runs that have not finished; both contribute nothing.
+
+    ``utilisation`` is held over the budget times the session's wall time,
+    per resource: ``{"cpu": 0.13, "gpu": 0.26}``. It is None when the
+    header records no budget, and a resource the budget has none of reads
+    None inside it. ``wall_hours`` is the transcript span.
+
+    Examples:
+        >>> rows = [
+        ...     {"resources": {"cpus": [0, 1], "gpus": ["0"]}, "seconds": 1800.0},
+        ...     {"resources": {"cpus": [2], "gpus": []}, "seconds": 3600.0},
+        ...     {"resources": None, "seconds": 10.0},
+        ...     {"resources": {"cpus": [3], "gpus": []}, "seconds": None},
+        ... ]
+        >>> held = utilisation({"budget": {"cpus": 4, "gpus": 2}, "span_s": 7200.0}, rows)
+        >>> held["cpu_hours_held"], held["gpu_hours_held"], held["wall_hours"]
+        (2.0, 0.5, 2.0)
+        >>> held["runs_sized"], held["runs_unsized"], held["runs_open"]
+        (2, 1, 1)
+        >>> held["utilisation"]
+        {'cpu': 0.25, 'gpu': 0.125}
+        >>> utilisation({"budget": None, "span_s": 7200.0}, rows)["utilisation"] is None
+        True
+    """
+    cpu_seconds = gpu_seconds = 0.0
+    sized = unsized = open_ = 0
+    for run in runs:
+        slice_ = run.get("resources")
+        if not isinstance(slice_, dict):
+            unsized += 1
+            continue
+        seconds = run.get("seconds")
+        if seconds is None:
+            open_ += 1
+            continue
+        sized += 1
+        cpu_seconds += len(slice_.get("cpus") or ()) * float(seconds)
+        gpu_seconds += len(slice_.get("gpus") or ()) * float(seconds)
+    span_s = summary.get("span_s")
+    wall_hours = float(span_s) / 3600 if span_s is not None else None
+    budget = summary.get("budget")
+    shares: dict[str, float | None] | None = None
+    if budget is not None:
+        shares = {}
+        for resource, held in (("cpu", cpu_seconds), ("gpu", gpu_seconds)):
+            capacity = int(budget.get(f"{resource}s") or 0)
+            shares[resource] = (
+                held / (capacity * float(span_s)) if capacity and span_s else None
+            )
+    return {
+        "cpu_hours_held": cpu_seconds / 3600,
+        "gpu_hours_held": gpu_seconds / 3600,
+        "wall_hours": wall_hours,
+        "runs_sized": sized,
+        "runs_unsized": unsized,
+        "runs_open": open_,
+        "utilisation": shares,
+    }
+
+
+def session_runs(ws: Workspace, session: str) -> list[dict[str, Any]]:
     """The runs a session created, as report rows; empty when it made none.
+
+    Each row carries the slice the run held (``resources``, None for a run
+    that was never reserved), its ``started`` and ``ended`` timestamps, and
+    the ``seconds`` between them (None until the run has both), which is
+    what :func:`utilisation` sums.
 
     ``list_runs`` refuses an unknown session id, but for a report "this
     session launched nothing" is an answer, not an error.
@@ -240,12 +350,20 @@ def session_runs(ws: Workspace, session: str) -> list[dict[str, str]]:
         runs = ws.runs.list_runs(session=session, limit=100)
     except SessionNotFoundError:
         return []
-    return [
-        {
-            "id": run.id,
-            "name": run.name,
-            "state": run.state.value,
-            "status": run.status.value,
-        }
-        for run in runs
-    ]
+    rows = []
+    for run in runs:
+        started = run.started_at.isoformat() if run.started_at else None
+        ended = run.finished_at.isoformat() if run.finished_at else None
+        rows.append(
+            {
+                "id": run.id,
+                "name": run.name,
+                "state": run.state.value,
+                "status": run.status.value,
+                "resources": dict(run.resources) if run.resources else None,
+                "started": started,
+                "ended": ended,
+                "seconds": _span_seconds(started, ended),
+            }
+        )
+    return rows

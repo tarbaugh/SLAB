@@ -424,6 +424,32 @@ def test_the_retention_table_reads_each_records_numbers() -> None:
     assert benchmark.retention_table([]) == "No campaign has been scored yet."
 
 
+def test_the_utilisation_table_reads_each_records_hours() -> None:
+    table = benchmark.utilisation_table(
+        [
+            _record(),
+            _record(
+                session="s2",
+                utilisation={"budget": {"cpus": 64, "gpus": 4}, "cpu_hours_held": 12.3,
+                             "gpu_hours_held": 1.5, "wall_hours": 1.45, "runs_sized": 2,
+                             "runs_unsized": 1, "runs_open": 0,
+                             "utilisation": {"cpu": 0.1326, "gpu": 0.2586}},
+            ),
+            _record(
+                session="s3",
+                utilisation={"budget": None, "cpu_hours_held": 0.002, "gpu_hours_held": 0.0,
+                             "wall_hours": 0.01, "runs_sized": 1, "runs_unsized": 0,
+                             "runs_open": 0, "utilisation": None},
+            ),
+        ]
+    )
+    lines = table.splitlines()
+    assert lines[2].endswith("| " + " | ".join(["not recorded"] * 7) + " |")
+    assert lines[3].endswith("| 1.45 h | 64 cpus, 4 gpus | 12.3 | 1.5 | 13 % | 26 % | 1 |")
+    assert lines[4].endswith("| 0.01 h | not recorded | 0.002 | 0 |  |  | 0 |")
+    assert benchmark.utilisation_table([]) == "No campaign has been scored yet."
+
+
 def test_render_with_no_records_says_so(tmp_path: Path) -> None:
     readme = tmp_path / "README.md"
     readme.write_text("<!-- benchmark:summary:start -->\n<!-- benchmark:summary:end -->\n")
@@ -497,6 +523,16 @@ def test_cli_list_score_and_render(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         in retention.output
     )
     assert records[0]["retention"]["runs_promoted"] == 1
+
+    # A transcript written by hand carries no budget and its runs no slice:
+    # the record still says what was held (nothing) rather than nothing at all.
+    held = records[0]["utilisation"]
+    assert held["budget"] is None and held["utilisation"] is None
+    assert held["cpu_hours_held"] == 0.0 and held["runs_unsized"] == 1
+    utilisation = runner.invoke(app, ["benchmark", "tables", "--utilisation"])
+    assert utilisation.exit_code == 0, utilisation.output
+    assert "| 20260901-100000-7 | big-70b | hpc-a | slab | Q1 |" in utilisation.output
+    assert "| not recorded | 0 | 0 |  |  | 1 |" in utilisation.output
 
     unknown = runner.invoke(app, ["benchmark", "score", "--session", "1999"])
     assert unknown.exit_code == 1 and "no session transcript matches" in unknown.output
@@ -711,6 +747,12 @@ def test_the_slab_condition_passes_with_a_verified_run(
         1, 1, 0
     )
     assert retention["mode"] == "expire" and retention["bytes_promoted"] > 0
+    # The loop wrote the budget into the header and the launch reserved a
+    # slice, so the record says what share of the machine the run held.
+    held = record["utilisation"]
+    assert held["budget"]["cpus"] >= 1 and held["runs_sized"] == 1 and held["runs_unsized"] == 0
+    assert held["cpu_hours_held"] > 0 and held["wall_hours"] > 0
+    assert 0 < held["utilisation"]["cpu"] <= 1
 
 
 def test_the_protocol_condition_logs_its_provenance_and_still_fails_unverified(

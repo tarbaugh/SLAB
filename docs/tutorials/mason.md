@@ -707,6 +707,45 @@ line, and `slab mason read` shows it after the final report. A finish
 that cited an unverified run shows that run under `skipped`. The
 benchmark scorer copies the numbers into the record as `retention`.
 
+The report also says how much of the machine the session's runs held.
+Each run record keeps the slice the run claimed and when it ran, so the
+report sums cpu-hours and gpu-hours held over the session's runs. The
+session header records the budget the session started with, as
+`budget: {cpus, gpus}`, and the report divides the hours held by that
+budget over the session's wall time. The word is "held". A run that
+reserved two cpus for a minute held two cpu-minutes, whether or not the
+cores were busy. This laptop session was driven by a scripted model
+through the real loop. It wrote an EMT relax, launched it on two ranks,
+and finished:
+
+```console
+$ slab mason report -w .slab
+session 20260911-032218-68537 — 3 step(s), tokens 0+0, 6s
+  transcript .slab/mason/sessions/20260911-032218-68537.jsonl
+  context: peak prompt 0 tokens, 0 clearing(s), 0 compaction(s)
+runs this session created:
+  01m277skdz   cu_relax                 promoted     completed
+held 0.00362 cpu-h and 0 gpu-h over 6s on 14 cpus and 0 gpus (14 % cpu)
+tool calls (3):
+  write_file             1
+  launch_workflow        1
+  finish                 1
+memory: 0 recall, 0 remember
+first launch at step 2
+finish reported: a0 = 3.60 Å for fcc Cu with EMT (run 01m277skdzw49pnq50p844wb29)
+retire: 1 promoted, 0 expired of 1 run(s); bytes 1264151 of 1264151 kept
+commands recorded: 1 (launch 1); 'slab mason read --full' shows each
+```
+
+The `held` line reads: the one run held two of fourteen cpus for most of
+a six-second session, so 14 % of the cpu budget over the wall time. A
+run without a slice, from a launch that did not reserve one, contributes
+nothing and is counted at the end of the line as `without a slice`. A
+transcript from before the header carried a budget shows the hours held
+and says `budget not recorded`. The benchmark scorer copies the same
+numbers into the record as `utilisation`, and `slab benchmark tables
+--utilisation` prints one row per campaign.
+
 The transcript also records every command that ran, as `command` events,
 so a reader can check what was run without opening the run store. The
 `shell` tool records its command line and directory. `launch_workflow`

@@ -244,6 +244,106 @@ def test_cli_reports_the_newest_conversation_and_its_runs(tmp_path: Path) -> Non
     ) in result.output
 
 
+def _header(at: str, budget: dict[str, int] | None) -> dict[str, Any]:
+    event: dict[str, Any] = {"at": at, "type": "session", "agent": "pi", "model": "m"}
+    if budget is not None:
+        event["budget"] = budget
+    return event
+
+
+def _row(cpus: list[int], gpus: list[str], seconds: float | None) -> dict[str, Any]:
+    return {"id": "x", "name": "r", "state": "verified", "status": "completed",
+            "resources": {"cpus": cpus, "gpus": gpus, "ntasks": 1, "threads": 1},
+            "started": None, "ended": None, "seconds": seconds}
+
+
+def test_two_sized_runs_sum_their_held_hours_against_the_budget(tmp_path: Path) -> None:
+    """Two runs, 2 cpus + 1 gpu for 30 min and 1 cpu for 1 h, in a 2 h session
+    on a 4-cpu, 2-gpu budget: 2 cpu-h of 8 and 0.5 gpu-h of 4."""
+    transcript = _write(
+        tmp_path / "s.jsonl",
+        [
+            _header("2026-09-10T10:00:00+00:00", {"cpus": 4, "gpus": 2}),
+            _usage("2026-09-10T12:00:00+00:00"),
+        ],
+    )
+    rows = [_row([0, 1], ["0"], 1800.0), _row([2], [], 3600.0)]
+    summary = summarize(transcript, runs=rows)
+    assert summary["budget"] == {"cpus": 4, "gpus": 2}
+    assert (summary["cpu_hours_held"], summary["gpu_hours_held"]) == (2.0, 0.5)
+    assert summary["wall_hours"] == 2.0
+    assert summary["utilisation"] == {"cpu": 0.25, "gpu": 0.125}
+    assert (summary["runs_sized"], summary["runs_unsized"], summary["runs_open"]) == (2, 0, 0)
+    # Without the rows the fields are absent, not zero: nothing was looked up.
+    assert summarize(transcript)["utilisation"] is None
+    assert summarize(transcript)["cpu_hours_held"] is None
+
+
+def test_a_run_without_a_slice_contributes_nothing_and_is_counted(tmp_path: Path) -> None:
+    transcript = _write(
+        tmp_path / "s.jsonl",
+        [
+            _header("2026-09-10T10:00:00+00:00", {"cpus": 4, "gpus": 0}),
+            _usage("2026-09-10T11:00:00+00:00"),
+        ],
+    )
+    unsized = {**_row([0], [], 3600.0), "resources": None}
+    still_running = _row([0, 1, 2, 3], [], None)
+    summary = summarize(transcript, runs=[_row([0], [], 3600.0), unsized, still_running])
+    assert summary["cpu_hours_held"] == 1.0
+    assert (summary["runs_sized"], summary["runs_unsized"], summary["runs_open"]) == (1, 1, 1)
+    # A budget with no gpus gives no gpu share; the cpu share stands.
+    assert summary["utilisation"] == {"cpu": 0.25, "gpu": None}
+
+
+def test_no_header_budget_means_hours_held_but_no_percentage(tmp_path: Path) -> None:
+    transcript = _write(
+        tmp_path / "s.jsonl",
+        [_header("2026-09-10T10:00:00+00:00", None), _usage("2026-09-10T11:00:00+00:00")],
+    )
+    summary = summarize(transcript, runs=[_row([0, 1], [], 1800.0)])
+    assert summary["budget"] is None
+    assert summary["cpu_hours_held"] == 1.0
+    assert summary["utilisation"] is None
+
+
+def test_cli_reads_the_slice_and_the_span_from_the_run_record(tmp_path: Path) -> None:
+    from slab.resources import Budget
+
+    root = tmp_path / "ws"
+    session = "20260910-100000-5"
+    _write(
+        root / "mason" / "sessions" / f"{session}.jsonl",
+        [
+            _header("2026-09-10T10:00:00+00:00", {"cpus": 4, "gpus": 1}),
+            _usage("2026-09-10T10:00:30+00:00"),
+        ],
+    )
+    budget = Budget(cpus=(0, 1, 2, 3), gpus=("0",))
+    with Workspace(root) as ws:
+        held = ws.reserve(ntasks=2, threads=1, gpus=1, budget=budget)
+        with ws.start_run(name="sized", session=session, reservation=held) as run:
+            run.keep("answer", 1)
+        with ws.start_run(name="plain", session=session) as run:
+            run.keep("answer", 2)
+    result = runner.invoke(app, ["report", "-w", str(root), "--json"])
+    assert result.exit_code == 0, result.output
+    summary = json.loads(result.output)
+    by_name = {row["name"]: row for row in summary["runs"]}
+    sized, plain = by_name["sized"], by_name["plain"]
+    assert sized["resources"]["cpus"] == [0, 1] and sized["resources"]["gpus"] == ["0"]
+    assert sized["started"] and sized["ended"] and sized["seconds"] >= 0
+    assert plain["resources"] is None and plain["seconds"] >= 0
+    assert summary["cpu_hours_held"] == 2 * sized["seconds"] / 3600
+    assert summary["gpu_hours_held"] == sized["seconds"] / 3600
+    assert (summary["runs_sized"], summary["runs_unsized"]) == (1, 1)
+    assert summary["utilisation"]["cpu"] == 2 * sized["seconds"] / (4 * 30)
+    text = runner.invoke(app, ["report", "-w", str(root)])
+    assert text.exit_code == 0, text.output
+    assert "cpu-h and" in text.output and "over 30s on 4 cpus and 1 gpus (" in text.output
+    assert text.output.rstrip().count("1 run(s) without a slice") == 1
+
+
 def test_cli_json_is_machine_readable(tmp_path: Path) -> None:
     root = tmp_path / "ws"
     _campaign(root / "mason" / "sessions" / "20260831-100000-11.jsonl")
