@@ -304,3 +304,78 @@ def test_doctor_runs_the_rootstock_setup_lines(project: Path) -> None:
     result = runner.invoke(app, ["doctor", "--offline"])
     assert "[x] rootstock setup: [engines.rootstock] setup exited" in result.output
     assert result.exit_code != 0
+
+
+def test_the_doctor_names_the_lammps_plain_build_launcher(project: Path) -> None:
+    """A plain command with no launcher and no {ntasks} runs one rank whatever
+    the launch reserved. That is a legitimate choice, so the row is a fact."""
+    base = '[agent]\nmodel = "m"\n[hpc]\ndefault_partition = "cpu"\n[hpc.partitions.cpu]\n'
+    (project / "slab.toml").write_text(base + '[engines.lammps]\ncommand = "lmp"\n')
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert result.exit_code == 0, result.output
+    assert (
+        "[=] lammps plain build: serial (no launcher and no {ntasks}); a CPU run takes "
+        "one rank whatever it reserved" in result.output
+    )
+    (project / "slab.toml").write_text(
+        base + '[engines.lammps]\ncommand = "/opt/mpi/bin/mpiexec -n 8 lmp"\n'
+    )
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert "[+] lammps plain build: mpiexec launches it; a CPU run takes its ranks" in (
+        result.output
+    )
+    (project / "slab.toml").write_text(base + '[engines.lammps]\ncommand = "lmp -np {ntasks}"\n')
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert "[+] lammps plain build: sized per launch ({ntasks})" in result.output
+    (project / "slab.toml").write_text(base)
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert "lammps plain build" not in result.output
+
+
+def test_the_doctor_names_the_context_window_the_loop_assumes(project: Path) -> None:
+    """An openai endpoint with no context_window silently compacts against
+    65536; the row says so. A set window, or a provider whose window the
+    client knows, is a plain fact."""
+    base = '[hpc]\ndefault_partition = "cpu"\n[hpc.partitions.cpu]\n'
+    (project / "slab.toml").write_text(
+        base + '[agent]\nmodel = "m"\nprovider = "openai"\nendpoint = "http://h:8000/v1"\n'
+    )
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert result.exit_code == 0, result.output
+    assert (
+        "[=] [agent] context_window: unset, 65536 assumed; set it to what the endpoint "
+        "serves" in result.output
+    )
+    (project / "slab.toml").write_text(
+        base
+        + '[agent]\nmodel = "m"\nprovider = "openai"\nendpoint = "http://h:8000/v1"\n'
+        "context_window = 131072\n"
+    )
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert "[+] [agent] context_window: 131072" in result.output
+    (project / "slab.toml").write_text(base + '[agent]\nmodel = "m"\nprovider = "anthropic"\n')
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert "context_window" not in result.output
+
+
+def test_the_doctor_prints_each_partitions_caps(project: Path) -> None:
+    """The caps are the partition's own fields, the ones check_size reads,
+    so the operator sees what the agent will be allowed to ask for."""
+    (project / "slab.toml").write_text(
+        '[agent]\nmodel = "m"\n[hpc]\ndefault_partition = "cpu"\n'
+        "[hpc.partitions.cpu]\nntasks_per_node = 48\ncpus_per_task = 2\nmem = \"180G\"\n"
+        "nodes = 4\n"
+        "[hpc.partitions.A40]\nntasks_per_node = 96\ngres = \"gpu:a40:1\"\nmem = \"96G\"\n"
+        "nodes = 1\n"
+        "[hpc.partitions.big]\nntasks = 32\ngres = \"gpu:a100:4\"\n"
+        "[hpc.partitions.open]\n"
+    )
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert result.exit_code == 0, result.output
+    assert (
+        "[=] partition A40: caps 96 cores, 1 gpu, 96G per node, 1 node per job "
+        "(one gpu per job; declare the node's count to size beyond it)" in result.output
+    )
+    assert "[+] partition big: caps 32 cores, 4 gpus per node" in result.output
+    assert "[+] partition cpu: caps 96 cores, 180G per node, 4 nodes per job" in result.output
+    assert "[+] partition open: no caps declared; SLURM enforces its own limits" in result.output

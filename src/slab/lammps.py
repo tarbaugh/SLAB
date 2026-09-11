@@ -380,6 +380,72 @@ def kokkos_switches(command: str) -> dict[str, Any]:
     return switches
 
 
+KOKKOS_PACKAGE_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "neigh",
+        "neigh/qeq",
+        "neigh/thread",
+        "neigh/transpose",
+        "newton",
+        "binsize",
+        "comm",
+        "comm/exchange",
+        "comm/forward",
+        "comm/pair/forward",
+        "comm/fix/forward",
+        "comm/reverse",
+        "comm/pair/reverse",
+        "sort",
+        "atom/map",
+        "gpu/aware",
+        "pair/only",
+    }
+)
+"""The keywords the ``package kokkos`` command documents."""
+
+
+def check_kokkos_package(command: str) -> None:
+    """Refuse a ``-pk kokkos`` option list whose keyword LAMMPS does not know.
+
+    LAMMPS refuses an unknown ``package kokkos`` keyword at every run, so
+    the check happens once, at config load, and the message names the
+    fix. It reads the text :func:`kokkos_switches` reports as ``package``
+    and walks it as keyword-value pairs. Keywords are checked against
+    :data:`KOKKOS_PACKAGE_KEYWORDS`; values are not checked. An odd token
+    count is a keyword without a value. A command with no ``-pk kokkos``
+    passes.
+
+    Examples:
+        >>> check_kokkos_package("lmp -k on g 1 -sf kk -pk kokkos newton on neigh half")
+        >>> check_kokkos_package("lmp")
+        >>> check_kokkos_package("lmp -k on g 1 -sf kk -pk kokkos newton on negh half")
+        Traceback (most recent call last):
+        ...
+        slab.errors.EngineNotAvailableError: 'negh' at position 2 of '-pk kokkos ...
+        >>> check_kokkos_package("lmp -pk kokkos newton")
+        Traceback (most recent call last):
+        ...
+        slab.errors.EngineNotAvailableError: 'newton' at position 1 of '-pk kokkos ...
+    """
+    package = kokkos_switches(command)["package"]
+    if package is None:
+        return
+    tokens = package.split()
+    allowed = ", ".join(sorted(KOKKOS_PACKAGE_KEYWORDS))
+    for position, keyword in enumerate(tokens[0::2], start=1):
+        if keyword not in KOKKOS_PACKAGE_KEYWORDS:
+            raise EngineNotAvailableError(
+                f"{keyword!r} at position {position} of '-pk kokkos {package}' is not a "
+                f"package kokkos keyword; LAMMPS refuses it at every run. The keywords "
+                f"are: {allowed}"
+            )
+    if len(tokens) % 2:
+        raise EngineNotAvailableError(
+            f"{tokens[-1]!r} at position {len(tokens) // 2 + 1} of '-pk kokkos {package}' "
+            f"is a keyword without a value; package kokkos takes keyword value pairs"
+        )
+
+
 def kokkos_report(log: str) -> dict[str, Any]:
     r"""What the log says KOKKOS did: the facts a GPU run has to show.
 

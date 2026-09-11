@@ -392,6 +392,25 @@ and `time_limit`, so the agent knows the caps before it submits.
    activate the vLLM venv and point `HF_HOME` at a model cache
    pre-downloaded on the login node, with `HF_HUB_OFFLINE=1`.
    `slab mason doctor` is how they confirm the parser name was right.
+7. Run `slab doctor` and read its `=` rows. Three of them name a choice
+   the config made without saying so:
+
+   ```text
+   [+] partition cpu: caps 96 cores, 180G per node, 4 nodes per job
+   [=] partition gpu: caps 16 cores, 1 gpu, 96G per node, 1 node per job (one gpu per job; declare the node's count to size beyond it)
+   [=] lammps plain build: serial (no launcher and no {ntasks}); a CPU run takes one rank whatever it reserved
+   [=] [agent] context_window: unset, 65536 assumed; set it to what the endpoint serves
+   ```
+
+   The partition rows print the caps a sized job is checked against, so
+   you see what the agent will be allowed to ask for. A `gres` that names
+   one gpu caps every job at one, so declare the node's count if the node
+   holds more.
+   The LAMMPS row says a plain `command` with no `mpirun`, `mpiexec`,
+   `srun`, or `{ntasks}` runs one rank, whatever the launch reserved. The
+   context window row says the loop compacts against a default the
+   endpoint may not serve. Each is a legitimate choice, so the doctor
+   states it and does not fail.
 
 Users then override per project in `slab.toml`, and nothing about a
 cluster is baked into anyone's Python.

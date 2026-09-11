@@ -54,6 +54,7 @@ from pydantic import (
 )
 
 from slab.errors import SlabError
+from slab.lammps import check_kokkos_package
 
 SCHEMA_VERSION = 1
 CONFIG_ENV_VAR = "SLAB_CONFIG"
@@ -161,18 +162,39 @@ class QeEngineConfig(BaseModel):
         return self
 
 
+def _check_kokkos_package(field: str, command: str) -> None:
+    """Turn the lammps keyword refusal into a ValueError pydantic reports."""
+    try:
+        check_kokkos_package(command)
+    except SlabError as e:
+        raise ValueError(f"{field}: {e}") from None
+
+
 class LammpsBuild(BaseModel):
     """One further LAMMPS build (``[engines.lammps.gpu]``): its command and setup.
+
+    A ``-pk kokkos`` option list is checked keyword by keyword at load,
+    because LAMMPS refuses an unknown keyword at every run.
 
     Examples:
         >>> LammpsBuild.model_validate({"command": "lmp -k on g {gpus} -sf kk"}).setup
         ()
+        >>> LammpsBuild.model_validate({"command": "lmp -k on g 1 -pk kokkos negh half"})
+        Traceback (most recent call last):
+        ...
+        pydantic_core._pydantic_core.ValidationError: ...
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     command: str
     setup: tuple[str, ...] = ()
+
+    @field_validator("command")
+    @classmethod
+    def _kokkos_package_keywords_are_known(cls, value: str) -> str:
+        _check_kokkos_package("[engines.lammps.gpu] command", value)
+        return value
 
 
 _KOKKOS_GPU = re.compile(r"(?:^|\s)-k(?:okkos)?\s+on\s+g\b")
@@ -210,6 +232,13 @@ class LammpsEngineConfig(BaseModel):
     command: str | None = None
     setup: tuple[str, ...] = ()
     gpu: LammpsBuild | None = None
+
+    @field_validator("command")
+    @classmethod
+    def _kokkos_package_keywords_are_known(cls, value: str | None) -> str | None:
+        if value is not None:
+            _check_kokkos_package("[engines.lammps] command", value)
+        return value
 
     @model_validator(mode="after")
     def _builds_are_distinct(self) -> LammpsEngineConfig:

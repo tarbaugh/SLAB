@@ -40,6 +40,7 @@ from slab.backends import (
     describe_engine,
     get_calculator,
 )
+from slab.lammps import KOKKOS_PACKAGE_KEYWORDS, check_kokkos_package
 
 FIXTURE_LOG = Path(__file__).parent / "data" / "lammps-cu-relax-final.log"
 FIXTURE_DUMP = Path(__file__).parent / "data" / "lammps-cu-relax-final.dump"
@@ -1163,3 +1164,36 @@ def test_a_versionless_lammps_fingerprints_the_template_binary(
     assert two["executable_fingerprint"] == eight["executable_fingerprint"]
     stats = _versionless_fingerprint(template, ())["executable_fingerprint"]
     assert any(str(lmp) == str(piece) for piece in stats)
+
+
+# -- package kokkos keywords ------------------------------------------------------
+
+
+@pytest.mark.parametrize("keyword", sorted(KOKKOS_PACKAGE_KEYWORDS))
+def test_every_documented_package_kokkos_keyword_passes(keyword: str) -> None:
+    check_kokkos_package(f"mpirun -np 1 lmp -k on g 1 -sf kk -pk kokkos {keyword} on")
+
+
+def test_a_package_kokkos_typo_is_refused_naming_the_allowed_set() -> None:
+    """'negh' is what a real cluster config carried on 2026-09-11; LAMMPS
+    refused it at every GPU run, so the loader refuses it once and names
+    the keywords it takes."""
+    with pytest.raises(EngineNotAvailableError) as excinfo:
+        check_kokkos_package("mpirun -np 1 lmp -k on g 1 -sf kk -pk kokkos newton on negh half")
+    message = str(excinfo.value)
+    assert message.startswith("'negh' at position 2 of '-pk kokkos newton on negh half'")
+    assert "neigh" in message and "gpu/aware" in message
+
+
+def test_a_package_kokkos_keyword_without_a_value_is_refused() -> None:
+    with pytest.raises(EngineNotAvailableError, match=r"'newton' at position 1 .* without a value"):
+        check_kokkos_package("lmp -k on g 1 -pk kokkos newton")
+    with pytest.raises(EngineNotAvailableError, match=r"'neigh' at position 2 .* without a value"):
+        check_kokkos_package("lmp -k on g 1 -pk kokkos newton on neigh")
+
+
+@pytest.mark.parametrize(
+    "command", ["lmp", "mpirun -np {ntasks} lmp -k on g {gpus} -sf kk", "lmp -pk omp 4"]
+)
+def test_a_command_without_package_kokkos_passes(command: str) -> None:
+    check_kokkos_package(command)
