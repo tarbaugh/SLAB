@@ -656,6 +656,37 @@ def test_gpu_lammps_table_refuses_unknown_keys(tmp_path: Path) -> None:
         load_config(tmp_path)
 
 
+@pytest.mark.parametrize(
+    ("table", "command"),
+    [
+        (
+            "[engines.lammps.gpu]",
+            "mpirun -np {ntasks} lmp -k on g {gpus} -sf kk -pk kokkos newton on negh half",
+        ),
+        ("[engines.lammps]", "lmp -k on t 4 -sf kk -pk kokkos negh half"),
+    ],
+)
+def test_a_package_kokkos_typo_refuses_at_load_naming_the_table(
+    tmp_path: Path, table: str, command: str
+) -> None:
+    """LAMMPS refuses an unknown package kokkos keyword at every run, so the
+    loader refuses it once, naming the table, the keyword, and the set."""
+    (tmp_path / "slab.toml").write_text(f'{table}\ncommand = "{command}"\n')
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(tmp_path)
+    message = str(excinfo.value)
+    assert f"{table} command: 'negh'" in message
+    assert "is not a package kokkos keyword" in message and "neigh/qeq" in message
+
+
+def test_a_known_package_kokkos_list_loads(tmp_path: Path) -> None:
+    (tmp_path / "slab.toml").write_text(
+        "[engines.lammps.gpu]\n"
+        'command = "lmp -k on g {gpus} -sf kk -pk kokkos newton on neigh half comm device"\n'
+    )
+    assert load_config(tmp_path).engines.lammps.gpu.command.endswith("comm device")
+
+
 # -- partition caps -------------------------------------------------------------
 
 

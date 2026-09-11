@@ -2,7 +2,8 @@
 
 One command that means "ready to launch a campaign". Each row probes the
 real campaign path — the configuration, the workspace, the memory store,
-the engines, the scheduler, the mp snapshot, the gracemaker trainer, the
+the engines, the scheduler and its partition caps, the LAMMPS plain
+build, the agent's context window, the mp snapshot, the gracemaker trainer, the
 model endpoint, the sandbox, and the freshness of the rendered job — and
 the command exits nonzero only on an ``x`` row. An ``=`` row is a fact,
 not a failure: a laptop with no scheduler is healthy, and the doctor must
@@ -27,10 +28,11 @@ from mason import doctor as mason_doctor
 from mason.errors import MasonError
 from slab._ops import engines_overview
 from slab.errors import SlabError
+from slab.resources import gres_gpus
 
 if TYPE_CHECKING:
     from mason.config import AgentConfig
-    from slab.config import HpcConfig, SlabConfig
+    from slab.config import HpcConfig, Partition, SlabConfig
 
 Emit = Callable[[str], None]
 
@@ -144,6 +146,85 @@ def _hpc_row(slab_cfg: SlabConfig | None) -> tuple[str, str]:
     if hpc is None or not hpc.partitions:
         return ("=", "scheduler: sbatch found, but no [hpc] partitions declared")
     return ("+", f"scheduler: sbatch found; partitions {', '.join(sorted(hpc.partitions))}")
+
+
+_LAUNCHERS = ("mpirun", "mpiexec", "srun")
+
+
+def _lammps_plain_row(slab_cfg: SlabConfig | None) -> tuple[str, str] | None:
+    """Say whether a CPU run of LAMMPS takes the ranks it reserved.
+
+    The plain build runs whenever a launch holds no gpu. A command with no
+    launcher and no ``{ntasks}`` is one rank, whatever the reservation held.
+    A serial build is a legitimate choice, so the row is a fact, not a
+    failure. No row when ``[engines.lammps]`` sets no command.
+    """
+    lammps = getattr(getattr(slab_cfg, "engines", None), "lammps", None)
+    command: str | None = getattr(lammps, "command", None)
+    if command is None:
+        return None
+    if "{ntasks}" in command:
+        return ("+", "lammps plain build: sized per launch ({ntasks}); a CPU run takes its ranks")
+    names = (Path(word).name for word in command.split())
+    launcher = next((name for name in names if name in _LAUNCHERS), None)
+    if launcher is None:
+        return (
+            "=",
+            "lammps plain build: serial (no launcher and no {ntasks}); a CPU run takes "
+            "one rank whatever it reserved",
+        )
+    return ("+", f"lammps plain build: {launcher} launches it; a CPU run takes its ranks")
+
+
+def _context_window_row(agent: AgentConfig) -> tuple[str, str] | None:
+    """Name the window the loop compacts against, or the default it assumed."""
+    if "context_window" in agent.model_fields_set:
+        return ("+", f"[agent] context_window: {agent.context_window}")
+    if agent.provider == "openai" and agent.endpoint:
+        return (
+            "=",
+            f"[agent] context_window: unset, {agent.context_window} assumed; set it to what "
+            "the endpoint serves",
+        )
+    return None
+
+
+def _partition_rows(slab_cfg: SlabConfig | None) -> list[tuple[str, str]]:
+    """One line per partition: the caps a sized job is checked against.
+
+    The fields are the ones ``check_size`` reads, so the operator sees what
+    the agent will be allowed to ask for. A gres that names one gpu is a
+    fact worth a second look, because the node usually holds more.
+    """
+    hpc: HpcConfig | None = getattr(slab_cfg, "hpc", None)
+    if hpc is None:
+        return []
+    return [_partition_row(name, spec) for name, spec in sorted(hpc.partitions.items())]
+
+
+def _partition_row(name: str, spec: Partition) -> tuple[str, str]:
+    per_node: list[str] = []
+    ranks = spec.ntasks_per_node if spec.ntasks_per_node is not None else spec.ntasks
+    if ranks is not None:
+        per_node.append(f"{ranks * (spec.cpus_per_task or 1)} cores")
+    gpus = gres_gpus(spec.gres)
+    if gpus is not None:
+        per_node.append(f"{gpus} gpu" + ("" if gpus == 1 else "s"))
+    elif spec.gres is not None:
+        per_node.append(f"gres {spec.gres}")
+    if spec.mem is not None:
+        per_node.append(spec.mem)
+    caps: list[str] = []
+    if per_node:
+        caps.append(", ".join(per_node) + " per node")
+    if spec.nodes is not None:
+        caps.append(f"{spec.nodes} node" + ("" if spec.nodes == 1 else "s") + " per job")
+    if not caps:
+        return ("+", f"partition {name}: no caps declared; SLURM enforces its own limits")
+    line = f"partition {name}: caps {', '.join(caps)}"
+    if gpus == 1:
+        return ("=", f"{line} (one gpu per job; declare the node's count to size beyond it)")
+    return ("+", line)
 
 
 def _mp_rows(slab_cfg: SlabConfig | None) -> tuple[list[tuple[str, str]], Path | None]:
@@ -422,6 +503,14 @@ def run(
     engine_rows, checkpoint_ids = _engines_rows()
     rows.extend(engine_rows)
     rows.append(_hpc_row(slab_cfg))
+    rows.extend(_partition_rows(slab_cfg))
+    plain_row = _lammps_plain_row(slab_cfg)
+    if plain_row is not None:
+        rows.append(plain_row)
+    if agent is not None:
+        window_row = _context_window_row(agent)
+        if window_row is not None:
+            rows.append(window_row)
     mp_rows, mp_root_path = _mp_rows(slab_cfg)
     rows.extend(mp_rows)
     rows.append(_gracemaker_row(slab_cfg))
