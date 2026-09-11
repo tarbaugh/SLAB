@@ -5,6 +5,23 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- Purge leaves nothing behind. After `slab fast-forward --include-running`
+  and `slab purge --all-sessions --yes` the workspace holds the promoted
+  and archived rows with the blobs they reach, the serve record of a
+  live job, and nothing under the session, review, lock, record, and
+  job directories, and the scratch root holds no `slab-*` directory
+  whose owner is not a live process. Every slab-managed scratch
+  directory now carries a `.slab-owner` marker naming its process,
+  host, and run (`$SLAB_RUN_ID`, which `start_run` exports), and
+  `sweep_scratch` removes the ones whose run is over or whose process
+  is gone, never by age. A reap, a job cancel, a retire in purge mode,
+  and `slab fast-forward` remove the scratch of the runs they fail or
+  purge, and purge is the backstop. Purge is inventory first: one
+  function lists every category with counts and bytes, `--dry-run`
+  prints it, `--json` prints it as JSON, and the confirmation names its
+  totals. Orphan delegation transcripts, unrecognised session files,
+  stale harness records, and stale session locks are categories of
+  their own. `slab doctor` gains a `leftovers` row.
 - The sandbox job carries its job id into the container. `apptainer
   exec --cleanenv` stripped `SLURM_JOB_ID`, so the runs a sandbox job
   made carried no job id and `slab hpc cancel` with a workspace failed

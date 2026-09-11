@@ -39,8 +39,7 @@ from foundation.errors import FoundationError
 from foundation.runtime import Workspace
 from mason.cli import app as mason_app
 from mason.errors import MasonError
-from mason.serve import mason_dir, read_record
-from mason.session import session_sidecars, transcript_groups
+from mason.serve import read_record
 from slab._version import __version__
 from slab.cli import (
     _CpusPerTaskOpt,
@@ -57,6 +56,7 @@ from slab.cli import (
 )
 from slab.errors import SlabError
 from slab.hpc import SchedulerNotAvailableError, active_job_ids
+from slab_stack import _ops as stack_ops
 from slab_stack import benchmark, review
 
 _PANEL_LIFECYCLE = "Runs and lifecycle"
@@ -136,79 +136,34 @@ def fast_forward(
         root = _ops.resolve_root(workspace)
         policy = _ops.ttl_override_policy(_ops.parse_duration_days("0s"))
         with Workspace(root) as ws:
+            # A run whose process died is failed first, so the sweep expires
+            # a dead run as a failed one and not as a running one.
+            reaped = ws.reap_dead(caller="slab fast-forward")
             expired = ws.expire_due(policy, include_running=include_running)
     except (FoundationError, SlabError, OSError) as e:
         _fail(str(e))
+    for run in reaped:
+        typer.echo(f"failed  {run.id}  {run.name}  its process is gone")
     for run in expired:
         typer.echo(f"expired {run.id}  {run.name}")
     typer.echo(f"{len(expired)} run(s) fast-forwarded to expired")
 
 
-def _job_file_sweep(root: Path, active: frozenset[str]) -> list[Path]:
-    """Finished jobs' scripts and SLURM output files, active jobs excluded.
+def _job_id_of(name: str) -> str | None:
+    """The job id a job file's name carries, or None.
 
-    Two directories hold them: ``<workspace>/jobs`` (the agent's submitted
-    jobs) and ``<workspace>/mason`` (serve jobs). Only ``*.sbatch`` and
-    ``*.out`` are candidates, so the serve endpoint record is never
-    touched. A file whose embedded job id is still in the queue is kept —
-    SLURM is writing its ``.out``.
+    Examples:
+        >>> _job_id_of("cu-relax-1244113.out")
+        '1244113'
+        >>> _job_id_of("notes.txt") is None
+        True
     """
-    victims: list[Path] = []
-    for directory in (root / "jobs", mason_dir(root)):
-        if not directory.is_dir():
-            continue
-        for pattern in ("*.sbatch", "*.out"):
-            for path in sorted(directory.glob(pattern)):
-                match = _JOB_FILE_ID.search(path.name)
-                if match is not None and match.group(1) in active:
-                    continue
-                victims.append(path)
-    return victims
+    match = _JOB_FILE_ID.search(name)
+    return None if match is None else match.group(1)
 
 
-@app.command(rich_help_panel=_PANEL_HOUSEKEEPING)
-def purge(
-    workspace: _WorkspaceOpt = None,
-    dry_run: Annotated[
-        bool, typer.Option("--dry-run", help="Report what would go; delete nothing.")
-    ] = False,
-    yes: Annotated[
-        bool, typer.Option("--yes", help="Skip the confirmation prompt.")
-    ] = False,
-    all_sessions: Annotated[
-        bool,
-        typer.Option(
-            "--all-sessions",
-            help="Also delete the newest conversation's transcript and sidecars (kept "
-            "by default so 'slab mason chat --resume' still works).",
-        ),
-    ] = False,
-) -> None:
-    """Delete all expired data for real: rows, bytes, transcripts, job files.
-
-    Expired runs lose their database rows (run, transitions, artifact
-    references, tasks, checks) and any artifact bytes no surviving run
-    references. Session transcripts are deleted with their delegation
-    siblings, compaction summaries, and review records, except the newest
-    conversation's. Finished jobs' .sbatch and
-    .out files are swept from the workspace; jobs still in the queue, the
-    running model server included, keep theirs. Irreversible — run with
-    --dry-run first.
-
-    The machine's memory is not touched. This command clears project state
-    that was never promoted; a memory is durable machine state that no
-    project owns, so it is forgotten one at a time and on purpose, with
-    'slab memory forget'.
-    """
-    try:
-        root = _ops.resolve_root(workspace)
-    except (FoundationError, SlabError, OSError) as e:
-        _fail(str(e))
-
-    groups = transcript_groups(root)
-    if groups and not all_sessions:
-        groups = groups[:-1]  # the newest conversation stays resumable
-    sidecars = [path for conversation, _ in groups for path in session_sidecars(root, conversation)]
+def _active_jobs(root: Path) -> frozenset[str]:
+    """The job ids the scheduler still holds, the serve record's job included."""
     try:
         active = active_job_ids()
     except SchedulerNotAvailableError:
@@ -221,54 +176,87 @@ def purge(
         _fail(str(e))
     if record is not None and record.job_id:
         active = active | {str(record.job_id)}
-    job_files = _job_file_sweep(root, active)
+    return active
 
-    if not dry_run and not yes:
-        typer.confirm(
-            f"permanently delete every expired run, "
-            f"{sum(1 + len(s) for _, s in groups)} transcript file(s), "
-            f"{len(sidecars)} compaction and review file(s), and "
-            f"{len(job_files)} job file(s) from {root}?",
-            abort=True,
-        )
 
+@app.command(rich_help_panel=_PANEL_HOUSEKEEPING)
+def purge(
+    workspace: _WorkspaceOpt = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Print the inventory; delete nothing.")
+    ] = False,
+    yes: Annotated[
+        bool, typer.Option("--yes", help="Skip the confirmation prompt.")
+    ] = False,
+    all_sessions: Annotated[
+        bool,
+        typer.Option(
+            "--all-sessions",
+            help="Also delete the newest conversation's transcript and sidecars (kept "
+            "by default so 'slab mason chat --resume' still works), the newest "
+            "harness record, and the session files no transcript claims.",
+        ),
+    ] = False,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Print the inventory as JSON.")
+    ] = False,
+) -> None:
+    """Delete all expired data for real: rows, bytes, session files, job files, scratch.
+
+    The inventory comes first, and the confirmation names its totals.
+    Expired runs lose their database rows (run, transitions, artifact
+    references, tasks, checks) and any artifact bytes no surviving run
+    references. Session transcripts are deleted with their delegation
+    siblings, compaction summaries, and review records, except the newest
+    conversation's. Harness session records whose session has no run in
+    flight go, and so do session locks no process holds. Finished jobs'
+    .sbatch and .out files are swept from the workspace; jobs still in
+    the queue, the running model server included, keep theirs. Under
+    [paths] scratch, every slab-* directory whose calculation is over or
+    whose process is gone is removed. Irreversible: run with --dry-run
+    first.
+
+    The machine's memory and the project directory are not touched. This
+    command clears workspace state that was never promoted; a memory is
+    durable machine state that no project owns, so it is forgotten one at
+    a time and on purpose, with 'slab memory forget'.
+    """
     try:
-        with Workspace(root) as ws:
-            report = ws.purge_expired(dry_run=dry_run)
+        root = _ops.resolve_root(workspace)
     except (FoundationError, SlabError, OSError) as e:
         _fail(str(e))
-    verb = "would delete" if dry_run else "deleted"
-    for run_id in report.deleted:
-        typer.echo(f"{verb} run {run_id}")
-    typer.echo(
-        f"{verb} {len(report.deleted)} run(s); {verb} {len(report.dropped)} "
-        f"blob(s), freeing {report.freed_bytes} bytes; "
-        f"{len(report.kept)} blob(s) kept for surviving runs"
-    )
+    active = _active_jobs(root)
+    try:
+        inventory = stack_ops.purge_inventory(
+            root, all_sessions=all_sessions, active=active, job_id_of=_job_id_of, dry_run=True
+        )
+    except (FoundationError, MasonError, SlabError, OSError) as e:
+        _fail(str(e))
 
-    removed_transcripts = 0
-    for conversation, siblings in groups:
-        for path in (conversation, *siblings):
-            typer.echo(f"{verb} transcript {path.name}")
-            if not dry_run:
-                path.unlink(missing_ok=True)
-            removed_transcripts += 1
-    for path in sidecars:
-        kind = "review" if path.parent.name == "reviews" else "compactions"
-        typer.echo(f"{verb} {kind} {path.name}")
-        if not dry_run:
-            path.unlink(missing_ok=True)
-    if not all_sessions and transcript_groups(root):
-        typer.echo("kept the newest conversation (--all-sessions removes it too)")
+    if dry_run:
+        if as_json:
+            typer.echo(json.dumps(inventory.model_dump(), indent=2))
+        else:
+            for line in inventory.lines("would delete"):
+                typer.echo(line)
+        return
 
-    for path in job_files:
-        typer.echo(f"{verb} job file {path.name}")
-        if not dry_run:
-            path.unlink(missing_ok=True)
-    typer.echo(
-        f"{verb} {removed_transcripts} transcript file(s), {len(sidecars)} compaction "
-        f"and review file(s), and {len(job_files)} job file(s)"
-    )
+    if not yes:
+        typer.confirm(
+            f"permanently delete {inventory.summary()} from {root}?",
+            abort=True,
+        )
+    try:
+        deleted = stack_ops.purge_inventory(
+            root, all_sessions=all_sessions, active=active, job_id_of=_job_id_of, dry_run=False
+        )
+    except (FoundationError, MasonError, SlabError, OSError) as e:
+        _fail(str(e))
+    if as_json:
+        typer.echo(json.dumps(deleted.model_dump(), indent=2))
+        return
+    for line in deleted.lines("deleted", detail=False):
+        typer.echo(line)
 
 
 @app.command(rich_help_panel=_PANEL_DOCTOR)

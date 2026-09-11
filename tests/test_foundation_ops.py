@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from foundation import DEFAULT_POLICY, FoundationError, Workspace
+from foundation import DEFAULT_POLICY, FoundationError, Run, Workspace
 from foundation._ops import (
     launch_script,
     load_policy,
@@ -770,3 +770,67 @@ def test_cancel_job_fails_the_runs_a_job_started(
         assert [r["name"] for r in summary["runs_failed"]] == ["relax"]
     with Workspace(root) as ws:
         assert ws.runs.get(active.id).status.value == "failed"
+
+
+def test_reap_and_cancel_remove_the_scratch_of_the_runs_they_fail(
+    root: Path, tmp_path: Path, scratch_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cleanup happens at the moment a run is known dead: a reap removes the
+    reaped runs' scratch, a cancel removes the cancelled job's runs'
+    scratch, and both leave every other directory alone."""
+    import stat
+
+    from conftest import seed_scratch, vanished_pid
+    from foundation._ops import cancel_job, cancel_lines
+    from foundation.runtime import this_host
+
+    bin_dir = tmp_path / "fake-slurm"
+    bin_dir.mkdir()
+    script = bin_dir / "scancel"
+    script.write_text("#!/bin/sh\ntrue\n")
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    monkeypatch.setenv("SLAB_MEMORY_DIR", str(tmp_path / "memory"))
+
+    with Workspace(root) as ws:
+        killed = ws.runs.create(Run(name="killed"))
+        ws.runs.set_status(killed.id, "running", pid=vanished_pid(), host=this_host())
+        jobbed = ws.runs.create(Run(name="in-job", job_id="4242"))
+        ws.runs.set_status(jobbed.id, "running", pid=1, host="compute-7")
+        bystander = seed_scratch(scratch_root, "slab-qe-bystander", marker=False)
+        seed_scratch(scratch_root, "slab-qe-killed", run_id=killed.id)
+        seed_scratch(scratch_root, "slab-qe-in-job", pid=1, host="compute-7", run_id=jobbed.id)
+        assert [r.id for r in ws.reap_dead(caller="test")] == [killed.id]
+    assert sorted(p.name for p in scratch_root.iterdir()) == [
+        "slab-qe-bystander", "slab-qe-in-job"
+    ]
+    summary = cancel_job("4242", workspace=root)
+    assert [r["name"] for r in summary["runs_failed"]] == ["in-job"]
+    assert [Path(p).name for p in summary["scratch_removed"]] == ["slab-qe-in-job"]
+    assert any(line.startswith("removed scratch ") for line in cancel_lines(summary))
+    assert [p.name for p in scratch_root.iterdir()] == [bystander.name]
+
+
+def test_retire_purge_mode_removes_the_purged_runs_scratch(
+    root: Path, scratch_root: Path
+) -> None:
+    from conftest import seed_scratch
+
+    with Workspace(root) as ws:
+        with ws.start_run(name="shakeout", session="chat-1") as shakeout:
+            seed_scratch(scratch_root, "slab-qe-shakeout", run_id=shakeout.id)
+        with ws.start_run(name="result", session="chat-1") as result:
+            seed_scratch(scratch_root, "slab-qe-result", run_id=result.id)
+            result.check(lambda: True, name="gate")
+        # A dry run expires nothing, so it purges nothing, so it sweeps nothing.
+        dry = retire_session(ws, "chat-1", keep=[result.id], mode="purge", dry_run=True)
+        assert dry["purged"]["scratch_removed"] == []
+        assert sorted(p.name for p in scratch_root.iterdir()) == [
+            "slab-qe-result", "slab-qe-shakeout"
+        ]
+        report = retire_session(ws, "chat-1", keep=[result.id], mode="purge")
+        assert report["purged"]["deleted"] == [shakeout.id]
+        assert [Path(p).name for p in report["purged"]["scratch_removed"]] == ["slab-qe-shakeout"]
+    # The promoted run's scratch is a completed run's: the backstop sweep
+    # takes it later, but the retire removes only what it purged.
+    assert [p.name for p in scratch_root.iterdir()] == ["slab-qe-result"]

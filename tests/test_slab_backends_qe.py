@@ -10,6 +10,7 @@ integration test at the bottom runs against an actual ``pw.x`` when
 """
 
 import os
+import shutil
 from pathlib import Path
 from subprocess import CalledProcessError
 from types import SimpleNamespace
@@ -851,8 +852,9 @@ def test_scratch_root_config_is_honored(
     try:
         assert scratch.parent == root
         assert scratch.name.startswith("slab-qe-")
+        assert (scratch / ".slab-owner").is_file()  # the sweep reads this
     finally:
-        scratch.rmdir()
+        shutil.rmtree(scratch)
 
 
 def test_wrapper_path_override_follows_exec_semantics(

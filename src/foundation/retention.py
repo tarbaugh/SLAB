@@ -24,6 +24,15 @@ Expiry, gc, and purge are deliberately separate phases: state changes are
 cheap and reversible in review, byte deletion is not, and row deletion is
 the end of traceability for what it removes.
 
+One more operation reaches outside the workspace:
+
+* :func:`sweep_scratch` — the scratch directories a calculation makes
+  under ``[paths] scratch`` are removed when the calculation ends, so a
+  directory still there belongs to a process that was killed. The sweep
+  reads each directory's owner marker (:mod:`slab.scratch`) and removes
+  the ones whose run is over or whose process is gone. It runs when a
+  run is known dead, and ``slab purge`` runs it as the backstop.
+
 The asymmetry is enforced structurally: a policy that puts a TTL on
 ``promoted`` or ``archived`` fails validation — promoted data cannot be aged
 out, only explicitly archived.
@@ -31,18 +40,24 @@ out, only explicitly archived.
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Iterable
 from contextlib import suppress
 from datetime import datetime, timedelta
-from typing import Literal, cast
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from foundation.artifacts import ArtifactStore
-from foundation.errors import IllegalStatusChangeError, IllegalTransitionError
+from foundation.errors import IllegalStatusChangeError, IllegalTransitionError, RunNotFoundError
 from foundation.lifecycle import ExecutionStatus, LifecycleState
 from foundation.models import ArtifactRole, Run, utcnow
 from foundation.store import RunStore
+from slab.scratch import Leftover, leftovers, scratch_root
+
+if TYPE_CHECKING:
+    from foundation.runtime import Workspace
 
 _ALL_ROLES = frozenset(ArtifactRole)
 _NEVER_EXPIRE = (LifecycleState.PROMOTED, LifecycleState.ARCHIVED, LifecycleState.EXPIRED)
@@ -475,3 +490,109 @@ def purge_expired(
         freed_bytes=freed,
         dry_run=dry_run,
     )
+
+
+class ScratchReport(BaseModel):
+    """What :func:`sweep_scratch` did (or, with ``dry_run``, would do).
+
+    Fields:
+        removed: Scratch directories removed, with the reason each was a leftover.
+        kept: Scratch directories kept, with the reason each still has an owner.
+        freed_bytes: Total size of the removed directories.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    removed: list[dict[str, str]]
+    kept: list[dict[str, str]]
+    freed_bytes: int
+    dry_run: bool
+
+
+def _scratch_verdict(ws: Workspace, item: Leftover) -> tuple[bool, str]:
+    """Whether one leftover goes, and why. Recorded ownership only, never age."""
+    owner = item.owner
+    if owner is not None and owner.run_id is not None:
+        try:
+            run = ws.runs.get(owner.run_id)
+        except RunNotFoundError:
+            return True, f"run {owner.run_id} no longer exists"
+        if run.status is not ExecutionStatus.RUNNING:
+            return True, f"run {run.id} is {run.status.value}"
+        return False, f"run {run.id} is running"
+    if owner is None:
+        return True, "no owner marker"
+    if item.alive is True:
+        return False, f"process {owner.pid} is alive on this host"
+    if item.alive is None:
+        return False, f"process {owner.pid} is on {owner.host}, not this host"
+    return True, f"process {owner.pid} on this host is gone"
+
+
+def sweep_scratch(
+    ws: Workspace,
+    *,
+    dry_run: bool = False,
+    only: Iterable[str] | None = None,
+    root: Path | None = None,
+) -> ScratchReport:
+    """Remove the scratch directories no live calculation owns; report the rest.
+
+    Only the configured ``[paths] scratch`` root is swept, only its
+    ``slab-*`` directories, and only each directory's owner marker
+    decides. A leftover goes when its marker names a run that is not
+    ``running``, or names a run that no longer exists, or names no run
+    and its process is gone on this host, or has no marker at all. A
+    leftover of a run still ``running``, or of a live process, or of a
+    process on another host, is kept and reported with the reason.
+
+    *only* restricts the sweep to the leftovers stamped with those run
+    ids, for the callers that just failed or purged them: a reap, a job
+    cancel, a retire in purge mode. *root* is the scratch root to read
+    in place of the configured one, for a caller that knows it. With no
+    scratch root configured there is nothing to sweep, because the
+    platform temp directory is never listed.
+
+    Examples:
+        >>> import os, tempfile
+        >>> from foundation.runtime import Workspace
+        >>> from slab.scratch import mark_owner
+        >>> root = Path(tempfile.mkdtemp())
+        >>> dead = root / "slab-qe-dead"
+        >>> dead.mkdir()
+        >>> _ = mark_owner(dead)
+        >>> os.environ["SLAB_RUN_ID"] = "no-such-run"
+        >>> gone = root / "slab-qe-gone"
+        >>> gone.mkdir()
+        >>> _ = mark_owner(gone)
+        >>> del os.environ["SLAB_RUN_ID"]
+        >>> ws = Workspace(tempfile.mkdtemp())
+        >>> report = sweep_scratch(ws, root=root)
+        >>> [r["reason"] for r in report.removed]
+        ['run no-such-run no longer exists']
+        >>> [k["reason"] for k in report.kept] == [f"process {os.getpid()} is alive on this host"]
+        True
+        >>> ws.close()
+    """
+    if root is None:
+        root = scratch_root()
+    chosen = None if only is None else set(only)
+    removed: list[dict[str, str]] = []
+    kept: list[dict[str, str]] = []
+    freed = 0
+    for item in [] if root is None else leftovers(root):
+        run_id = item.owner.run_id if item.owner is not None else None
+        if chosen is not None and run_id not in chosen:
+            continue
+        goes, reason = _scratch_verdict(ws, item)
+        entry = {"path": str(item.path), "reason": reason}
+        if run_id is not None:
+            entry["run_id"] = run_id
+        if not goes:
+            kept.append(entry)
+            continue
+        freed += item.size_bytes
+        if not dry_run:
+            shutil.rmtree(item.path, ignore_errors=True)
+        removed.append(entry)
+    return ScratchReport(removed=removed, kept=kept, freed_bytes=freed, dry_run=dry_run)

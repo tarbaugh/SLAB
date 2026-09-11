@@ -413,6 +413,21 @@ and `time_limit`, so the agent knows the caps before it submits.
    context window row says the loop compacts against a default the
    endpoint may not serve. Each is a legitimate choice, so the doctor
    states it and does not fail.
+8. Read the `leftovers` row on the same run. It counts what `slab purge`
+   would still sweep: scratch directories under `[paths] scratch` whose
+   owner process is gone, delegation transcripts whose conversation is
+   gone, and session locks no process holds. The row is `+` when there
+   is nothing, and `=` otherwise. This one comes from a workspace with
+   one of each:
+
+   ```text
+   [=] leftovers: 1 scratch dir(s) (2200 bytes), 1 orphan transcript(s), 1 stale lock(s)
+   ```
+
+   A shared scratch root that collects directories from killed jobs is
+   the usual cause. Run `slab purge --dry-run` to see them, and see
+   [Lifecycle & retention](lifecycle-and-retention.md) for what owns a
+   scratch directory and when it goes.
 
 Users then override per project in `slab.toml`, and nothing about a
 cluster is baked into anyone's Python.

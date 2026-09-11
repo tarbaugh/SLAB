@@ -25,8 +25,8 @@ from foundation.errors import FoundationError
 from foundation.lifecycle import LifecycleState
 from foundation.models import Reservation
 from foundation.runtime import Workspace, describe_liveness, run_liveness, this_host
-from foundation.store import process_alive
 from slab.errors import SlabError
+from slab.scratch import process_alive
 
 app = typer.Typer(
     help="Foundation — workflows, runs, and state for SLAB.",

@@ -1,6 +1,9 @@
 import hashlib
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 import threading
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -25,6 +28,65 @@ def _isolated_user_config(
     ``XDG_CONFIG_HOME`` itself, which overrides this fixture's value.
     """
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path_factory.mktemp("xdg")))
+
+
+@pytest.fixture()
+def scratch_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A project whose ``[paths] scratch`` names a directory of its own.
+
+    The sweep reads only the configured root, so a test of anything that
+    removes scratch (a reap, a cancel, a retire, a purge, the doctor)
+    starts here. The current directory is the project, so the config
+    loader finds the file the usual way.
+    """
+    root = tmp_path / "scratch"
+    root.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "slab.toml").write_text(f'[paths]\nscratch = "{root}"\n')
+    monkeypatch.chdir(project)
+    monkeypatch.delenv("SLAB_CONFIG", raising=False)
+    monkeypatch.delenv("SLAB_SITE_CONFIG", raising=False)
+    return root
+
+
+def seed_scratch(
+    root: Path,
+    name: str,
+    *,
+    pid: int | None = None,
+    run_id: str | None = None,
+    host: str | None = None,
+    marker: bool = True,
+) -> Path:
+    """One ``slab-*`` directory under *root* with a marker naming its owner.
+
+    *pid* defaults to this process, *host* to this host. With ``marker=False``
+    the directory has no owner at all, the way a scratch made by an older
+    SLAB looks.
+    """
+    from slab.scratch import OWNER_MARKER, Owner, this_host
+
+    made = root / name
+    made.mkdir()
+    (made / "wavecar").write_bytes(b"w" * 32)
+    if marker:
+        owner = Owner(
+            pid=os.getpid() if pid is None else pid,
+            host=this_host() if host is None else host,
+            created_at="2026-09-11T00:00:00+00:00",
+            prefix="slab-qe-",
+            run_id=run_id,
+        )
+        (made / OWNER_MARKER).write_text(owner.model_dump_json() + "\n")
+    return made
+
+
+def vanished_pid() -> int:
+    """The pid of a process that ran and exited: recorded, and gone."""
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    return child.pid
 
 
 class LlmScript:

@@ -54,6 +54,7 @@ _SHELL_CONTROL = re.compile(r"[;&|`<>\n]|\$\(")
 # What a conversation transcript is named; delegation transcripts append
 # the agent name and an ordinal and are never resumed as conversations.
 _CONVERSATION_TRANSCRIPT = re.compile(r"^\d{8}-\d{6}-\d+\.jsonl$")
+_DELEGATION_TRANSCRIPT = re.compile(r"^(\d{8}-\d{6}-\d+)-.+-\d+\.jsonl$")
 
 
 class SessionError(MasonError):
@@ -67,6 +68,8 @@ def _approve_nothing(tool: str, preview: str) -> bool:
 
 def transcript_groups(
     workspace_root: str | os.PathLike[str],
+    *,
+    include_orphans: bool = False,
 ) -> list[tuple[Path, list[Path]]]:
     """Conversation transcripts with their delegation siblings, oldest first.
 
@@ -74,8 +77,12 @@ def transcript_groups(
     transcripts its turns produced share its stem with an agent name and
     an ordinal appended. Grouping them keeps a sweep from deleting a
     conversation while stranding its specialists' archives, or the
-    reverse. This is the one layout fact ``slab purge`` needs, so
-    it lives here with the layout's owner.
+    reverse. A delegation transcript whose conversation is gone is an
+    orphan. With *include_orphans* each orphan is a group of its own, so
+    a sweep still reaches it; the readers leave them out, because an
+    orphan is not a conversation to resume or report. This is the one
+    layout fact ``slab purge`` needs, so it lives here with the layout's
+    owner.
     """
     sessions = Path(workspace_root) / "mason" / "sessions"
     if not sessions.is_dir():
@@ -85,7 +92,8 @@ def transcript_groups(
         for p in sessions.glob("*.jsonl")
         if p.is_file() and _CONVERSATION_TRANSCRIPT.match(p.name)
     )
-    return [
+    stems = {conversation.stem for conversation in conversations}
+    groups = [
         (
             conversation,
             sorted(
@@ -96,6 +104,89 @@ def transcript_groups(
         )
         for conversation in conversations
     ]
+    if not include_orphans:
+        return groups
+    orphans = sorted(
+        p
+        for p in sessions.glob("*.jsonl")
+        if p.is_file()
+        and (match := _DELEGATION_TRANSCRIPT.match(p.name)) is not None
+        and match.group(1) not in stems
+    )
+    groups.extend((orphan, []) for orphan in orphans)
+    return sorted(groups)
+
+
+def unrecognised_session_files(workspace_root: str | os.PathLike[str]) -> list[Path]:
+    """The files under ``mason/sessions`` that no transcript group claims.
+
+    A file that is neither a conversation transcript, a delegation
+    transcript, nor a sidecar of one (``<stem>.compactions.md``) is
+    listed here and never deleted silently: ``slab purge`` prints these
+    and removes them only with ``--all-sessions``.
+
+    Examples:
+        >>> import tempfile
+        >>> root = Path(tempfile.mkdtemp())
+        >>> sessions = root / "mason" / "sessions"
+        >>> sessions.mkdir(parents=True)
+        >>> _ = (sessions / "20260901-120000-1.jsonl").write_text("{}\\n")
+        >>> _ = (sessions / "20260901-120000-1.compactions.md").write_text("#\\n")
+        >>> _ = (sessions / "notes.txt").write_text("stray\\n")
+        >>> _ = (sessions / "20260801-100000-9.compactions.md").write_text("#\\n")
+        >>> [p.name for p in unrecognised_session_files(root)]
+        ['20260801-100000-9.compactions.md', 'notes.txt']
+    """
+    sessions = Path(workspace_root) / "mason" / "sessions"
+    if not sessions.is_dir():
+        return []
+    claimed: set[Path] = set()
+    for conversation, siblings in transcript_groups(workspace_root, include_orphans=True):
+        for transcript in (conversation, *siblings):
+            claimed.add(transcript)
+            claimed.add(transcript.with_name(f"{transcript.stem}.compactions.md"))
+    return sorted(p for p in sessions.iterdir() if p.is_file() and p not in claimed)
+
+
+def stale_locks(workspace_root: str | os.PathLike[str]) -> list[Path]:
+    """The session lock files under ``mason/locks`` that no process holds.
+
+    A lock rides an open file handle, so a lock that can be taken without
+    blocking has no holder: its session ended, or its process died. The
+    probe takes and releases each lock in turn and never touches a held
+    one. On a filesystem that cannot lock, every file is reported held.
+
+    Examples:
+        >>> import tempfile
+        >>> root = Path(tempfile.mkdtemp())
+        >>> locks = root / "mason" / "locks"
+        >>> locks.mkdir(parents=True)
+        >>> _ = (locks / "abc.lock").write_text("pid 1, cwd /x\\n")
+        >>> [p.name for p in stale_locks(root)]
+        ['abc.lock']
+    """
+    locks = Path(workspace_root) / "mason" / "locks"
+    if not locks.is_dir():
+        return []
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - non-POSIX platform
+        return []
+    stale: list[Path] = []
+    for path in sorted(locks.glob("*.lock")):
+        if not path.is_file():
+            continue
+        try:
+            with open(path, "a+", encoding="utf-8") as handle:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            continue
+        stale.append(path)
+    return stale
 
 
 def workspace_containing(path: str | os.PathLike[str] | None = None) -> Path | None:

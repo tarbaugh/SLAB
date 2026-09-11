@@ -551,3 +551,111 @@ def test_purge_leaves_orphan_blobs_alone(cas: ArtifactStore) -> None:
     assert report.deleted == [] and report.dropped == []
     assert cas.has(orphan)
     store.close()
+
+
+# -- the scratch sweep -----------------------------------------------------------------
+
+
+def test_sweep_keeps_a_running_runs_scratch_and_removes_a_dead_ones(tmp_path: Path) -> None:
+    """A running run with a live process still uses its scratch; a run that
+    ended, however it ended, does not, and neither does a run that no
+    longer exists. The marker decides, never the directory's age."""
+    import os
+
+    from conftest import seed_scratch
+    from foundation import Workspace, sweep_scratch
+    from foundation.runtime import this_host
+
+    root = tmp_path / "scratch"
+    root.mkdir()
+    with Workspace(tmp_path / "ws") as ws:
+        live = ws.runs.create(Run(name="live"))
+        ws.runs.set_status(live.id, "running", pid=os.getpid(), host=this_host())
+        done = ws.runs.create(Run(name="done"))
+        ws.runs.set_status(done.id, "running", pid=os.getpid(), host=this_host())
+        ws.runs.set_status(done.id, "failed", error="killed")
+        keep = seed_scratch(root, "slab-qe-live", run_id=live.id)
+        gone = seed_scratch(root, "slab-qe-done", run_id=done.id)
+        nobody = seed_scratch(root, "slab-qe-nobody", run_id="01no-such-run-000000000000")
+        doomed_bytes = sum(
+            f.stat().st_size for d in (gone, nobody) for f in d.rglob("*") if f.is_file()
+        )
+        report = sweep_scratch(ws, root=root)
+    assert [r["reason"] for r in report.removed] == [
+        f"run {done.id} is failed",
+        "run 01no-such-run-000000000000 no longer exists",
+    ]
+    assert [k["reason"] for k in report.kept] == [f"run {live.id} is running"]
+    assert report.freed_bytes == doomed_bytes
+    assert keep.is_dir() and not gone.exists() and not nobody.exists()
+
+
+def test_sweep_judges_an_unowned_scratch_by_its_process(tmp_path: Path) -> None:
+    """A scratch made outside a run is owned by its process alone: gone
+    when the process is gone on this host, kept while it lives, kept when
+    it belongs to another host, and gone when it has no marker at all."""
+    import os
+
+    from conftest import seed_scratch, vanished_pid
+    from foundation import Workspace, sweep_scratch
+
+    root = tmp_path / "scratch"
+    root.mkdir()
+    dead = vanished_pid()
+    seed_scratch(root, "slab-qe-dead", pid=dead)
+    seed_scratch(root, "slab-qe-live")
+    seed_scratch(root, "slab-qe-away", pid=1, host="another-node")
+    seed_scratch(root, "slab-qe-noown", marker=False)
+    with Workspace(tmp_path / "ws") as ws:
+        report = sweep_scratch(ws, root=root)
+    assert [r["reason"] for r in report.removed] == [
+        f"process {dead} on this host is gone",
+        "no owner marker",
+    ]
+    assert [k["reason"] for k in report.kept] == [
+        "process 1 is on another-node, not this host",
+        f"process {os.getpid()} is alive on this host",
+    ]
+    assert sorted(p.name for p in root.iterdir()) == ["slab-qe-away", "slab-qe-live"]
+
+
+def test_sweep_honours_only_and_dry_run(tmp_path: Path) -> None:
+    from conftest import seed_scratch
+    from foundation import Workspace, sweep_scratch
+
+    root = tmp_path / "scratch"
+    root.mkdir()
+    with Workspace(tmp_path / "ws") as ws:
+        first = ws.runs.create(Run(name="first"))
+        second = ws.runs.create(Run(name="second"))
+        for run in (first, second):
+            ws.runs.set_status(run.id, "running")
+            ws.runs.set_status(run.id, "completed")
+        seed_scratch(root, "slab-qe-first", run_id=first.id)
+        seed_scratch(root, "slab-qe-second", run_id=second.id)
+        seed_scratch(root, "slab-qe-noown", marker=False)
+        dry = sweep_scratch(ws, root=root, only=[first.id], dry_run=True)
+        assert [Path(r["path"]).name for r in dry.removed] == ["slab-qe-first"]
+        assert dry.kept == [] and dry.dry_run
+        assert sorted(p.name for p in root.iterdir()) == [
+            "slab-qe-first", "slab-qe-noown", "slab-qe-second"
+        ]
+        wet = sweep_scratch(ws, root=root, only=[first.id])
+        assert [r["run_id"] for r in wet.removed] == [first.id]
+    # 'only' names runs, so the unowned directory is not this sweep's.
+    assert sorted(p.name for p in root.iterdir()) == ["slab-qe-noown", "slab-qe-second"]
+
+
+def test_sweep_without_a_scratch_root_sweeps_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from foundation import Workspace, sweep_scratch
+
+    empty = tmp_path / "project"
+    empty.mkdir()
+    monkeypatch.chdir(empty)
+    monkeypatch.delenv("SLAB_CONFIG", raising=False)
+    monkeypatch.delenv("SLAB_SITE_CONFIG", raising=False)
+    with Workspace(tmp_path / "ws") as ws:
+        report = sweep_scratch(ws)
+    assert report.removed == [] and report.kept == []

@@ -590,6 +590,19 @@ slab mason sandbox render "the goal" --partition cpu
 sbatch sandbox/mason-sandbox.sbatch
 ```
 
+A sandbox job leaves files in two places. The render writes the batch
+script, `context.md`, `render.json`, and the frozen `slab.toml` into
+`sandbox/` in the project directory, and the job's SLURM `.out` lands
+beside them. `slab purge` never edits the project, so these stay until you
+remove them. The runs the job made, the session transcript it wrote, and
+the scratch directories its calculations made under `[paths] scratch`
+belong to the workspace. Purge sweeps them like any other session's. A
+job that was cancelled or timed out leaves scratch behind, because the
+processes inside died without cleaning up. Each directory carries the id
+of the run that made it. `slab hpc cancel` removes it when it fails the
+job's runs, and `slab purge` removes whatever is left once the run is
+over. See [Lifecycle & retention](lifecycle-and-retention.md).
+
 After you have read a render of this campaign once, `launch` is the one
 motion: it runs the preflight, renders fresh, and submits. Because every
 launch re-renders, the submitted job always matches the installed code

@@ -422,17 +422,57 @@ Set `promote_cited` to `false` and `uncited` to `keep` to switch the finish hook
 
 The two phases above respect the retention policy. Two verbs override it: `slab fast-forward` and `slab purge`. Use them when a line of work is finished and you have promoted everything you intend to keep. A finished campaign has already promoted what its report cited, so these two verbs clear what no finish kept.
 
-`slab fast-forward` moves every unpromoted run to `expired`, now. It is a state change only, like `expire`. Promoted and archived runs are not touched. Runs stuck at status `running` are skipped unless you pass `--include-running`.
+`slab fast-forward` first marks failed every running run whose process is gone from this host, the way `slab runs reap` does, and removes the scratch those runs made. Then it moves every unpromoted run to `expired`, now. Promoted and archived runs are not touched. Runs still at status `running` are skipped unless you pass `--include-running`.
 
 **Warning: `slab purge` deletes data permanently. Run it with `--dry-run` first, and promote every run you want to keep before you run it.**
 
-`slab purge` removes all expired data, metadata included:
+`slab purge` takes an inventory first, and then deletes it category by category. The inventory names everything the command knows of, with a count and a size for each category. The confirmation prompt repeats the totals. `--dry-run` prints the inventory and deletes nothing. `--json` prints it as JSON. This is a dry run over a workspace with something in every category:
+
+```
+$ slab purge -w .slab --dry-run --all-sessions
+would delete expired runs: 2
+  01m28fm1wgs1sqj25yhx32kpkn  nb-bcc-md
+  01m28fm1wfar0wta2ynk360j2e  nb-bcc-probe
+would delete blobs: 1 (4096 bytes)
+  ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7
+would delete transcripts: 4 (80 bytes)
+  mason/sessions/20260903-180000-3301-critic-1.jsonl
+  mason/sessions/20260910-091502-41877.jsonl
+  mason/sessions/20260910-091502-41877-md-expert-1.jsonl
+  mason/sessions/20260911-140233-52210.jsonl
+would delete sidecars: 2 (47 bytes)
+  mason/reviews/20260910-091502-41877-review-1.md
+  mason/sessions/20260910-091502-41877.compactions.md
+would delete unrecognised: none
+would delete harness records: 1 (37 bytes)
+  sessions/mcp-20260909-113000-7712.jsonl
+would delete stale locks: 1 (68 bytes)
+  mason/locks/9c1f0b2a7e3d5a44.lock
+would delete job files: 2 (89 bytes)
+  jobs/nb-bcc-md-1244113.out
+  jobs/nb-bcc-md-1244113.sbatch
+would delete scratch: 1 (2200 bytes)
+  scratch/slab-qe-7hf2m0pw
+kept scratch scratch/slab-lammps-script-p8d2r6mt: process 25479 is alive on this host
+```
+
+The categories, in the order purge deletes them:
 
 - The database rows of every expired run: the run, its transitions, its artifact references, its tasks, and its checks. `slab show` can no longer answer for a purged run.
 - The artifact bytes those runs referenced, unless a surviving run references the same hash. Blobs that no run references at all stay, exactly as in `gc`.
-- Mason session transcripts, together with their delegation transcripts, their compaction summaries (`<stem>.compactions.md`), and their review records (`mason/reviews/`). The newest conversation and its files stay, so `slab mason chat --resume` keeps working. Pass `--all-sessions` to remove them too. The notebook and the plan live in the project directory and are never touched.
+- Mason session transcripts, together with their delegation transcripts, their compaction summaries (`<stem>.compactions.md`), and their review records (`mason/reviews/`). A delegation transcript whose conversation is already gone is swept on its own. The newest conversation and its files stay, so `slab mason chat --resume` keeps working. Pass `--all-sessions` to remove them too.
+- Files under `mason/sessions/` that no transcript claims. Purge lists them under `unrecognised` and deletes them only with `--all-sessions`, never silently.
+- The records of harness sessions over MCP (`sessions/`), except one whose session still has a run at status `running`. The newest record stays unless you pass `--all-sessions`.
+- Session lock files (`mason/locks/`) that no process holds. A held lock is left alone.
 - The `.sbatch` scripts and SLURM `.out` files of finished jobs, from `<workspace>/jobs/` and from the serve directory. Jobs still in the queue keep their files, and the serve endpoint record is never touched.
+- Scratch directories under `[paths] scratch` that no live calculation owns. Every slab-managed scratch directory carries a `.slab-owner` marker naming its process, its host, and its run, so ownership is recorded and never inferred from age. A directory goes when its run is over or no longer exists. It also goes when it names no run and its process is gone from this host, and when it has no marker at all. A directory of a running run, of a live process, or of a process on another host is kept and reported with the reason. Only the configured root is read, only its `slab-*` entries, and the platform temp directory is never swept.
+
+This is the guarantee. After `slab fast-forward --include-running` and `slab purge --all-sessions --yes`, the workspace holds exactly two things. The run store keeps its promoted and archived rows and the blobs they reach. The serve endpoint record stays while its job is alive. Nothing remains under `mason/sessions`, `mason/reviews`, `mason/locks`, `sessions`, or `jobs`. The scratch root holds no `slab-*` directory whose owner is not a live process. The test suite runs this sequence on a workspace seeded with every category and asserts that tree.
+
+Two places are never touched. The project directory keeps its `.launch.log` files and the sandbox render files (`sandbox/`), because purge never edits the project. The machine's memory is durable machine state that no project owns, so it is forgotten one entry at a time with `slab memory forget`.
 
 Only runs in the `expired` state can be deleted. The store refuses any other state, so promoted and archived runs cannot be purged. Promote a run to keep it; the two commands together remove everything you did not.
+
+Purge is the backstop for scratch, not the only sweep. A run's scratch is removed at the moment the run is known dead: `slab runs reap` and `slab fast-forward` remove the scratch of the runs they fail, `slab hpc cancel` removes the scratch of the cancelled job's runs, and a retire in `purge` mode removes the scratch of the runs it purges. `slab doctor` counts what a purge would still sweep in one row, `leftovers`, so a workspace that is collecting them is visible before the next campaign.
 
 For where these states come from in the first place, see the [Quickstart](quickstart.md). For the argument behind the design, see [Architecture](../architecture.md).

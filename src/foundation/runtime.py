@@ -53,9 +53,11 @@ from foundation.retention import (
     expire_due,
     gc,
     purge_expired,
+    sweep_scratch,
 )
 from foundation.serialize import dumps
-from foundation.store import SQLiteRunStore, process_alive
+from foundation.store import SQLiteRunStore
+from slab.scratch import RUN_ENV, process_alive
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -520,7 +522,8 @@ class Workspace:
 
         *session* stamps the run with the client session that created it (see
         :func:`resolve_session_id`), so one conversation's runs can be listed
-        and promoted together.
+        and promoted together. While the block runs, ``$SLAB_RUN_ID`` names
+        the run, so every scratch directory made inside it carries the id.
         Inside a SLURM job the run is also stamped with ``$SLURM_JOB_ID``, so
         :func:`foundation._ops.cancel_job` can fail the runs a cancelled job
         took down.
@@ -584,6 +587,11 @@ class Workspace:
             )
         active = ActiveRun(self.runs, self.artifacts, created.id)
         token = _CURRENT.set(active)
+        # Every scratch directory a calculation makes inside the run is
+        # stamped with the run's id (slab.scratch reads the variable), so
+        # a sweep after the process dies knows which run it belonged to.
+        run_env_before = os.environ.get(RUN_ENV)
+        os.environ[RUN_ENV] = created.id
         try:
             yield active
         except BaseException as exc:
@@ -606,6 +614,10 @@ class Workspace:
             self.runs.set_status(created.id, ExecutionStatus.COMPLETED)
             active._finish_completed()
         finally:
+            if run_env_before is None:
+                os.environ.pop(RUN_ENV, None)
+            else:
+                os.environ[RUN_ENV] = run_env_before
             _CURRENT.reset(token)
 
     def reserve(
@@ -716,7 +728,9 @@ class Workspace:
         run from before the stamp existed. *caller* names who marked the run
         in its error line. Returns the runs marked failed. The reservations
         those runs held, and every other dead reservation on this host, are
-        released on the way (:meth:`release_dead`).
+        released on the way (:meth:`release_dead`), and the scratch
+        directories those runs made are removed
+        (:func:`foundation.retention.sweep_scratch`).
 
         Examples:
             >>> import tempfile
@@ -750,6 +764,8 @@ class Workspace:
                     )
                 )
         self.release_dead()
+        if reaped:
+            sweep_scratch(self, only=[run.id for run in reaped])
         return reaped
 
     def fail_run(self, run_id: str, *, reason: str) -> Run:

@@ -101,10 +101,14 @@ def test_purge_deletes_rows_bytes_transcripts_and_job_files(tmp_path: Path) -> N
         "20260827-090000-222-review-1.md"
     ]
     assert list((root / "jobs").iterdir()) == []
-    assert "deleted compactions 20260826-120000-111.compactions.md" in result.output
-    assert "deleted review 20260826-120000-111-crystal-1-review-1.md" in result.output
-    assert "4 compaction and review file(s)" in result.output
-    assert "kept the newest conversation" in result.output
+    assert "deleted expired runs: 1\n" in result.output
+    assert "deleted transcripts: 2 (" in result.output
+    assert "deleted sidecars: 4 (" in result.output
+    assert "deleted job files: 2 (" in result.output
+    assert (
+        "kept transcript mason/sessions/20260827-090000-222.jsonl: the newest conversation "
+        "(--all-sessions removes it too)" in result.output
+    )
 
 
 def test_purge_dry_run_deletes_nothing(tmp_path: Path) -> None:
@@ -114,13 +118,18 @@ def test_purge_dry_run_deletes_nothing(tmp_path: Path) -> None:
     assert runner.invoke(app, ["fast-forward", "-w", str(root)]).exit_code == 0
     result = runner.invoke(app, ["purge", "-w", str(root), "--dry-run"])
     assert result.exit_code == 0
-    assert "would delete 1 run(s)" in result.output
+    # The dry run prints the inventory: one line per category, its items under it.
+    assert "would delete expired runs: 1\n" in result.output
+    assert "  failed-test\n" in result.output
+    assert "would delete blobs: 1 (7 bytes)\n" in result.output
+    assert "  mason/reviews/20260826-120000-111-review-1.md\n" in result.output
+    assert "would delete unrecognised: none\n" in result.output
+    assert "would delete scratch: none\n" in result.output
     with Workspace(root) as ws:
         assert len(ws.runs.list_runs()) == 2
     assert len(list((root / "mason" / "sessions").iterdir())) == 6
     assert len(list((root / "mason" / "reviews").iterdir())) == 3
     assert len(list((root / "jobs").iterdir())) == 2
-    assert "would delete review 20260826-120000-111-review-1.md" in result.output
 
 
 def test_purge_all_sessions_removes_the_newest_too(tmp_path: Path) -> None:
@@ -138,6 +147,7 @@ def test_purge_confirmation_defaults_to_no(tmp_path: Path) -> None:
     assert runner.invoke(app, ["fast-forward", "-w", str(root)]).exit_code == 0
     result = runner.invoke(app, ["purge", "-w", str(root)], input="n\n")
     assert result.exit_code != 0
+    assert "permanently delete 1 expired runs, 1 blobs (7 bytes in all) from" in result.output
     with Workspace(root) as ws:
         assert len(ws.runs.list_runs()) == 2  # nothing was deleted
 
@@ -154,6 +164,128 @@ def test_purge_keeps_files_of_jobs_still_in_the_queue(
     assert result.exit_code == 0
     kept = sorted(p.name for p in (root / "jobs").iterdir())
     assert kept == ["cu-relax-1244113.out", "cu-relax-1244113.sbatch"]
+
+
+def test_purge_json_prints_the_inventory(tmp_path: Path) -> None:
+    root = tmp_path / ".slab"
+    _seed_runs(root)
+    _seed_files(root)
+    assert runner.invoke(app, ["fast-forward", "-w", str(root)]).exit_code == 0
+    result = runner.invoke(app, ["purge", "-w", str(root), "--dry-run", "--json"])
+    assert result.exit_code == 0, result.output
+    inventory = json.loads(result.output)
+    assert inventory["dry_run"] is True
+    by_name = {c["name"]: c for c in inventory["categories"]}
+    assert list(by_name) == [
+        "expired runs", "blobs", "transcripts", "sidecars", "unrecognised",
+        "harness records", "stale locks", "job files", "scratch",
+    ]
+    assert by_name["blobs"]["bytes"] == 7
+    assert by_name["job files"]["items"] == [
+        "jobs/cu-relax-1244113.out",
+        "jobs/cu-relax-1244113.sbatch",
+    ]
+    assert inventory["kept"][0]["kind"] == "transcript"
+
+
+def test_fast_forward_reaps_a_dead_run_before_it_expires_it(tmp_path: Path) -> None:
+    from conftest import vanished_pid
+    from foundation.runtime import this_host
+
+    root = tmp_path / ".slab"
+    with Workspace(root) as ws:
+        killed = ws.runs.create(Run(name="killed"))
+        ws.runs.set_status(killed.id, "running", pid=vanished_pid(), host=this_host())
+    result = runner.invoke(app, ["fast-forward", "-w", str(root)])
+    assert result.exit_code == 0, result.output
+    assert f"failed  {killed.id}  killed  its process is gone" in result.output
+    assert "1 run(s) fast-forwarded to expired" in result.output
+    with Workspace(root) as ws:
+        after = ws.runs.get(killed.id)
+        assert after.status.value == "failed" and after.state.value == "expired"
+
+
+def test_purge_leaves_nothing_behind(
+    tmp_path: Path, scratch_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guarantee. After fast-forward --include-running and purge
+    --all-sessions the workspace holds the promoted rows and the blobs
+    they reach, the serve record of a live job, and nothing under the
+    session, review, lock, record, and job directories; the scratch root
+    holds only the directory of a live process."""
+    import os
+
+    from conftest import seed_scratch, vanished_pid
+    from foundation.runtime import this_host
+
+    root = tmp_path / ".slab"
+    ids = _seed_runs(root)
+    _seed_files(root)
+    sessions = root / "mason" / "sessions"
+    (sessions / "20260810-000000-7-md-expert-1.jsonl").write_text("{}\n")  # orphan sibling
+    (sessions / "notes.txt").write_text("stray\n")  # unrecognised
+    (root / "sessions").mkdir()
+    (root / "sessions" / "mcp-20260901-100000-5.jsonl").write_text("{}\n")  # harness record
+    (root / "mason" / "locks").mkdir()
+    (root / "mason" / "locks" / "1111111111111111.lock").write_text("pid 1\n")  # stale
+    (root / "mason" / "endpoint.json").write_text(
+        json.dumps({"endpoint": "http://node:8000/v1", "model": "m", "job_id": "777"})
+    )
+    (root / "mason" / "serve-500.out").write_text("an older, finished server\n")
+    with Workspace(root) as ws:
+        killed = ws.runs.create(Run(name="killed"))
+        ws.runs.set_status(killed.id, "running", pid=vanished_pid(), host=this_host())
+    seed_scratch(scratch_root, "slab-qe-killed", pid=vanished_pid(), run_id=killed.id)
+    seed_scratch(scratch_root, "slab-qe-old", marker=False)  # no owner at all
+    live = seed_scratch(scratch_root, "slab-qe-live")  # this process, still running
+    monkeypatch.setattr("slab_stack.cli.active_job_ids", lambda: frozenset({"777"}))
+
+    forward = runner.invoke(app, ["fast-forward", "-w", str(root), "--include-running"])
+    assert forward.exit_code == 0, forward.output
+    assert "2 run(s) fast-forwarded to expired" in forward.output
+    result = runner.invoke(app, ["purge", "-w", str(root), "--all-sessions", "--yes"])
+    assert result.exit_code == 0, result.output
+
+    with Workspace(root) as ws:
+        assert [r.id for r in ws.runs.list_runs()] == [ids["keep"]]
+        assert ws.artifacts.has(ids["shared"]) and not ws.artifacts.has(ids["scratch"])
+    files = sorted(
+        str(p.relative_to(root))
+        for p in root.rglob("*")
+        if p.is_file() and not p.name.startswith("runs.db")
+    )
+    assert files == [
+        f"cas/{ids['shared'][:2]}/{ids['shared'][2:4]}/{ids['shared']}",
+        "mason/endpoint.json",
+    ]
+    for empty in ("mason/sessions", "mason/reviews", "mason/locks", "sessions", "jobs"):
+        assert list((root / empty).iterdir()) == [], empty
+    assert [p.name for p in scratch_root.iterdir()] == [live.name]
+    assert f"kept scratch {live}: process {os.getpid()} is alive on this host" in result.output
+    # The killed run's scratch went at reap time, inside fast-forward; the
+    # purge is the backstop for the directory nothing owned.
+    assert "deleted scratch: 1 (" in result.output
+    assert "deleted unrecognised: 1 (" in result.output
+    assert "deleted harness records: 1 (" in result.output
+    assert "deleted stale locks: 1 (" in result.output
+    assert "kept job file" not in result.output  # the live server's record is not a job file
+
+
+def test_purge_keeps_unrecognised_files_and_the_newest_record_by_default(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / ".slab"
+    _seed_files(root)
+    (root / "mason" / "sessions" / "notes.txt").write_text("stray\n")
+    (root / "sessions").mkdir()
+    (root / "sessions" / "mcp-20260901-100000-5.jsonl").write_text("{}\n")
+    (root / "sessions" / "mcp-20260902-100000-6.jsonl").write_text("{}\n")
+    result = runner.invoke(app, ["purge", "-w", str(root), "--yes"])
+    assert result.exit_code == 0, result.output
+    assert (root / "mason" / "sessions" / "notes.txt").is_file()
+    assert "kept unrecognised mason/sessions/notes.txt: no transcript claims it" in result.output
+    assert [p.name for p in (root / "sessions").iterdir()] == ["mcp-20260902-100000-6.jsonl"]
+    assert "deleted harness records: 1 (" in result.output
 
 
 def test_purge_never_touches_the_serve_record_or_its_job(tmp_path: Path) -> None:

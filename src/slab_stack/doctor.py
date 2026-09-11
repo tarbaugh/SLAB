@@ -1,7 +1,8 @@
 """The whole-stack preflight behind ``slab doctor``.
 
 One command that means "ready to launch a campaign". Each row probes the
-real campaign path — the configuration, the workspace, the memory store,
+real campaign path — the configuration, the workspace and what a purge
+would sweep from it, the memory store,
 the engines, the scheduler and its partition caps, the LAMMPS plain
 build, the agent's context window, the mp snapshot, the gracemaker trainer, the
 model endpoint, the sandbox, and the freshness of the rendered job — and
@@ -23,12 +24,15 @@ from typing import TYPE_CHECKING, Any
 from foundation import _ops
 from foundation import memory as memory_store
 from foundation.errors import FoundationError
+from foundation.retention import sweep_scratch
 from foundation.runtime import Workspace
 from mason import doctor as mason_doctor
 from mason.errors import MasonError
+from mason.session import stale_locks, transcript_groups, unrecognised_session_files
 from slab._ops import engines_overview
 from slab.errors import SlabError
 from slab.resources import gres_gpus
+from slab.scratch import leftovers, scratch_root
 
 if TYPE_CHECKING:
     from mason.config import AgentConfig
@@ -86,6 +90,44 @@ def _workspace_row(workspace: Path | None) -> tuple[str, str]:
             f"and the switch lands on the next open with no other process holding it",
         )
     return ("+", f"workspace: {root} opens ({mode} journaling)")
+
+
+def _leftovers_row(workspace: Path | None) -> tuple[str, str] | None:
+    """What ``slab purge`` would sweep beyond the run store: scratch, orphans, locks.
+
+    An ``=`` row when anything is there, because each is a file some
+    process left behind, and a ``+`` row when the sweep would find
+    nothing. The scratch count is the dry-run sweep's when the workspace
+    exists; before one exists, every leftover whose process is not alive
+    here counts.
+    """
+    try:
+        root = _ops.resolve_root(workspace)
+    except _ERRORS:
+        return None
+    try:
+        scratch_count, scratch_bytes = 0, 0
+        scratch = scratch_root()
+        if scratch is not None and Path(root).exists():
+            with Workspace(root) as ws:
+                report = sweep_scratch(ws, dry_run=True)
+            scratch_count, scratch_bytes = len(report.removed), report.freed_bytes
+        elif scratch is not None:
+            dead = [item for item in leftovers(scratch) if item.alive is not True]
+            scratch_count, scratch_bytes = len(dead), sum(item.size_bytes for item in dead)
+        orphans = len(transcript_groups(root, include_orphans=True)) - len(
+            transcript_groups(root)
+        )
+        orphans += len(unrecognised_session_files(root))
+        locks = len(stale_locks(root))
+    except _ERRORS as e:
+        return ("x", f"leftovers: {e}")
+    mark = "=" if scratch_count or orphans or locks else "+"
+    return (
+        mark,
+        f"leftovers: {scratch_count} scratch dir(s) ({scratch_bytes} bytes), "
+        f"{orphans} orphan transcript(s), {locks} stale lock(s)",
+    )
 
 
 def _memory_row() -> tuple[str, str]:
@@ -512,6 +554,9 @@ def run(
     """Emit every row; return the count of failing (``x``) rows."""
     rows, slab_cfg, agent = _config_rows()
     rows.append(_workspace_row(workspace))
+    leftovers_row = _leftovers_row(workspace)
+    if leftovers_row is not None:
+        rows.append(leftovers_row)
     rows.append(_memory_row())
     engine_rows, checkpoint_ids = _engines_rows()
     rows.extend(engine_rows)

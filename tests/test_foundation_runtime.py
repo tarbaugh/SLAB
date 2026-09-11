@@ -639,3 +639,20 @@ def test_a_hard_killed_child_is_reaped_and_its_slice_freed(ws: Workspace) -> Non
         with contextlib.suppress(ProcessLookupError):
             child.kill()
         child.wait()
+
+
+def test_start_run_exports_the_run_id_and_restores_it(
+    ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every scratch a calculation makes inside the run is stamped with the
+    run's id, because the variable is set for the block and restored after."""
+    import os
+
+    monkeypatch.delenv("SLAB_RUN_ID", raising=False)
+    with ws.start_run(name="stamped") as run:
+        assert os.environ["SLAB_RUN_ID"] == run.id
+    assert "SLAB_RUN_ID" not in os.environ
+    monkeypatch.setenv("SLAB_RUN_ID", "outer")
+    with ws.start_run(name="nested-value") as run:
+        assert os.environ["SLAB_RUN_ID"] == run.id
+    assert os.environ["SLAB_RUN_ID"] == "outer"

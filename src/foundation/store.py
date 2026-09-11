@@ -55,6 +55,7 @@ from foundation.models import (
     Transition,
     utcnow,
 )
+from slab.scratch import process_alive
 
 SCHEMA_VERSION = 6
 
@@ -186,43 +187,6 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         "CREATE INDEX IF NOT EXISTS ix_runs_job_id ON runs(job_id)",
     ),
 }
-
-
-def process_alive(pid: int) -> bool:
-    """Whether a process with *pid* exists on this host.
-
-    Signal 0 probes without delivering: a process that belongs to another
-    user answers with a permission error, which still means it exists.
-
-    A dead child of this process is reaped first. A background launch
-    abandons its ``Popen`` object, so a child that an OOM kill or a
-    ``SIGKILL`` ended stays a zombie until something waits for it, and a
-    zombie still answers signal 0. One non-blocking ``waitpid`` on *pid*
-    collects it when it is a dead child of this process, and reports it
-    dead; a pid that is not a child answers ``ChildProcessError``, which
-    is ignored. This is the whole mechanism: no list of abandoned
-    ``Popen`` objects is kept, because ``waitpid`` on the recorded pid
-    reaches the same child without one.
-
-    Examples:
-        >>> process_alive(os.getpid())
-        True
-        >>> process_alive(0)
-        False
-    """
-    if pid <= 0:
-        return False
-    with suppress(ChildProcessError):
-        reaped, _ = os.waitpid(pid, os.WNOHANG)
-        if reaped == pid:
-            return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
 
 
 #: Filesystem types whose files may be open from several hosts at once. WAL

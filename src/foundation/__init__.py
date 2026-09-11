@@ -83,10 +83,12 @@ from foundation.retention import (
     GcReport,
     PurgeReport,
     RetentionPolicy,
+    ScratchReport,
     StateRule,
     expire_due,
     gc,
     purge_expired,
+    sweep_scratch,
 )
 from foundation.runtime import (
     ActiveRun,
@@ -139,6 +141,7 @@ __all__ = [
     "RunStore",
     "SQLiteRunStore",
     "SchemaVersionError",
+    "ScratchReport",
     "ScriptExitError",
     "SerializationError",
     "SessionNotFoundError",
@@ -163,6 +166,7 @@ __all__ = [
     "purge_expired",
     "requires_force",
     "resolve_session_id",
+    "sweep_scratch",
     "task",
     "units",
     "utcnow",

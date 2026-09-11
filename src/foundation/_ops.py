@@ -37,7 +37,7 @@ from foundation.errors import (
 )
 from foundation.lifecycle import ExecutionStatus, LifecycleState
 from foundation.models import ArtifactRole, Reservation, Run, utcnow
-from foundation.retention import DEFAULT_POLICY, RetentionPolicy, _reachable_hashes
+from foundation.retention import DEFAULT_POLICY, RetentionPolicy, _reachable_hashes, sweep_scratch
 from foundation.runtime import Workspace, describe_liveness, this_host
 
 if TYPE_CHECKING:
@@ -572,7 +572,8 @@ def retire_session(
     campaign cites the anchors it built on earlier. *mode* is what
     happens to this session's uncited runs: ``keep`` leaves them to the
     TTL sweep, ``expire`` moves them to ``expired``, and ``purge`` also
-    deletes their rows and unshared bytes.
+    deletes their rows, their unshared bytes, and the scratch directories
+    they made under ``[paths] scratch``.
 
     Outcomes per kept run: ``promoted``, ``already`` (permanent before
     the call), or ``skipped`` with a detail (``not verified``,
@@ -703,7 +704,14 @@ def retire_session(
     purged: dict[str, Any] = {}
     if mode == "purge" and expired:
         report = ws.purge_expired(dry_run=dry_run, only=[e["id"] for e in expired])
-        purged = {"deleted": report.deleted, "freed_bytes": report.freed_bytes}
+        # The purged runs' scratch directories go with their rows: nothing
+        # will ever name them again.
+        scratch = sweep_scratch(ws, dry_run=dry_run, only=report.deleted)
+        purged = {
+            "deleted": report.deleted,
+            "freed_bytes": report.freed_bytes,
+            "scratch_removed": [entry["path"] for entry in scratch.removed],
+        }
 
     return {
         "session": resolved,
@@ -1283,14 +1291,16 @@ def cancel_job(job_id: str, *, workspace: str | os.PathLike[str] | None = None) 
     still ``running`` is marked failed with a reason, because its process
     died with the job and nothing else will advance the record. Failing a
     run releases the reservation it held, and the host's dead reservations
-    are released with it. Nothing is expired or purged.
+    are released with it. The scratch directories the failed runs made
+    under ``[paths] scratch`` are removed. Nothing is expired or purged.
 
     The summary also lists the machine memories written since the job's
     first run started. A dead job may have recorded a fact it never
     verified, so the operator reviews them; nothing is deleted here.
 
     Returns ``job_id``, ``runs_failed`` (id and name), ``reservations_released``
-    (id and slice), and ``memories`` (name, description, when written).
+    (id and slice), ``scratch_removed`` (paths), and ``memories`` (name,
+    description, when written).
     """
     from foundation import memory as memory_store
     from slab.hpc import cancel
@@ -1301,6 +1311,7 @@ def cancel_job(job_id: str, *, workspace: str | os.PathLike[str] | None = None) 
         "cancel": "requested",
         "runs_failed": [],
         "reservations_released": [],
+        "scratch_removed": [],
         "memories": [],
     }
     if workspace is None:
@@ -1330,6 +1341,8 @@ def cancel_job(job_id: str, *, workspace: str | os.PathLike[str] | None = None) 
             for held in held_before.values()
             if held.id not in still and held.run_id in failed_ids
         ]
+        scratch = sweep_scratch(ws, only=failed_ids)
+        summary["scratch_removed"] = [entry["path"] for entry in scratch.removed]
         # The cutoff is the job's first run, finished or not: a fact the job
         # recorded during a run that completed is as unverified as any other.
         earliest = min(run.created_at for run in stamped)
@@ -1360,6 +1373,8 @@ def cancel_lines(summary: dict[str, Any]) -> list[str]:
         )
     for held in summary.get("reservations_released", []):
         lines.append(f"released {held['id']}  {held['slice']}")
+    for path in summary.get("scratch_removed", []):
+        lines.append(f"removed scratch {path}")
     for memory in summary.get("memories", []):
         age = age_text(datetime.fromisoformat(memory["written_at"]))
         lines.append(

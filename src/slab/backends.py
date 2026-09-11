@@ -742,15 +742,21 @@ def _scratch_dir(prefix: str) -> Path:
     files overflow a few-GB tmpfs — and where MPI ranks placed on *other*
     nodes cannot see the input files at all. The template points cluster
     maintainers at a shared scratch root for exactly this reason.
-    """
-    from slab.config import config_value
 
-    root = config_value("paths.scratch")
+    The directory carries a ``.slab-owner`` marker (:mod:`slab.scratch`).
+    """
+    from slab.scratch import mark_owner, scratch_root
+
+    root = scratch_root()
     if root is None:
-        return Path(tempfile.mkdtemp(prefix=prefix))
-    base = Path(str(root)).expanduser()
-    base.mkdir(parents=True, exist_ok=True)
-    return Path(tempfile.mkdtemp(prefix=prefix, dir=base))
+        made = Path(tempfile.mkdtemp(prefix=prefix))
+    else:
+        root.mkdir(parents=True, exist_ok=True)
+        made = Path(tempfile.mkdtemp(prefix=prefix, dir=root))
+    # The marker names this process, host, and run, so a later sweep
+    # can tell a leftover from a scratch a live calculation still uses.
+    mark_owner(made, prefix=prefix)
+    return made
 
 
 _POTENTIAL_FILE_SUFFIXES = (

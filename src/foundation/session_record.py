@@ -24,9 +24,13 @@ import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from foundation.errors import AmbiguousSessionError, FoundationError, SessionNotFoundError
+from foundation.lifecycle import ExecutionStatus
+
+if TYPE_CHECKING:
+    from foundation.store import RunStore
 
 RECORDS_DIR = "sessions"
 
@@ -166,3 +170,22 @@ def find_session_record(root: Path, session: str) -> SessionRecord:
     if not matches:
         raise SessionNotFoundError(f"no harness session record matches {session!r} under {root}")
     raise AmbiguousSessionError(session, [r.session_id for r in matches])
+
+
+def stale_records(
+    root: Path, *, runs: RunStore, keep_newest: bool = True
+) -> list[SessionRecord]:
+    """The harness records ``slab purge`` may delete, oldest first.
+
+    A record is stale when its session id stamps no run that is still
+    ``running``: the harness that wrote it has nothing in flight. With
+    *keep_newest* the newest record stays, whatever its runs, the way the
+    newest Mason conversation stays resumable.
+    """
+    records = session_records(root)
+    if keep_newest and records:
+        records = records[:-1]
+    live = {
+        run.session for run in runs.list_runs(status=ExecutionStatus.RUNNING) if run.session
+    }
+    return [record for record in records if record.session_id not in live]
