@@ -85,6 +85,14 @@ when you report.
 
 ## 4. Run a KOKKOS build on GPUs or threads
 
+The rule first. Any molecular dynamics, and any static calculation on
+more than a few hundred atoms, runs through `run_lammps` sized with
+`gpus=` when the machine declares a gpu build and the slice can hold a
+gpu. Threads through the plain build are the fallback when it cannot.
+The ASE-driven `lammps` engine is for a relaxation or single point on a
+small cell that feeds another task. The numbers are guidance
+thresholds. The rest of this section is the mechanics.
+
 KOKKOS is a LAMMPS package. The binary must be built with it, and a GPU
 build is compiled for the node's GPU architecture, so a cluster ships
 it as a separate module. The `-h` banner of the binary lists the

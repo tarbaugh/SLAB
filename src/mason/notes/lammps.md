@@ -18,9 +18,13 @@ calls from ASE (`relax`, `single_point`), one `run 0` per step. The
 `run_lammps` task hands LAMMPS a whole input script as text, so the
 dynamics run inside LAMMPS at its own speed, on the threads or GPUs the
 command line gives it, and the log, the dumps, and the thermo tables
-come back as artifacts of the run. Production MD goes through
-`run_lammps`; the lammps-scripting skill carries the input anatomy, the
-ensembles, and the checks.
+come back as artifacts of the run. The rule: any molecular dynamics,
+and any static calculation on more than a few hundred atoms, goes
+through `run_lammps` sized with `gpus=` when the machine declares a gpu
+build and the slice can hold a gpu, with threads through the plain build
+as the fallback. The engine is for a small relaxation or single point
+that feeds another task. The lammps-scripting skill carries the input
+anatomy, the ensembles, and the checks.
 
 The build follows the slice. A launch sized with `gpus=` runs the gpu
 build from `[engines.lammps.gpu]`, and an unsized launch runs the plain
