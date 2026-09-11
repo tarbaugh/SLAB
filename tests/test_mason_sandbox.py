@@ -143,7 +143,7 @@ def test_render_carries_the_job_id_into_the_container(tmp_path: Path) -> None:
     script, _, context = _render(tmp_path, _agent(), _slab_cfg())
     assert '--env SLURM_JOB_ID="${SLURM_JOB_ID:-}"' in script
     assert "Runs in here carry this job's id" in context
-    assert "'slab hpc cancel <job>'" in context
+    assert "Do not cancel from" in context
 
 
 @pytest.mark.parametrize(

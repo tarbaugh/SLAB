@@ -757,8 +757,6 @@ def test_cancel_job_fails_the_runs_a_job_started(
     monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
     monkeypatch.setenv("SLAB_MEMORY_DIR", str(tmp_path / "memory"))
     monkeypatch.setenv("SLURM_JOB_ID", "4242")
-    (tmp_path / "slab.toml").write_text('[hpc]\ndefault_partition = "cpu"\n[hpc.partitions.cpu]\n')
-    monkeypatch.chdir(tmp_path)
 
     # In the job the process dies with the cancel and the block never exits.
     # Here it does exit, and the record is already failed: final, so refused.

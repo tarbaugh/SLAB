@@ -5,6 +5,11 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- The sandbox job carries its job id into the container. `apptainer
+  exec --cleanenv` stripped `SLURM_JOB_ID`, so the runs a sandbox job
+  made carried no job id and `slab hpc cancel` with a workspace failed
+  none of them. The render exports it beside `SLURM_NTASKS`, empty
+  outside a job, and the sandbox context says the runs carry it.
 - The loader checks each keyword after `-pk kokkos` in both LAMMPS
   commands against the keywords `package kokkos` documents, and refuses
   a typo at load naming the table, because LAMMPS would refuse it at

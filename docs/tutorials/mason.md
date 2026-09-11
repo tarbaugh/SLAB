@@ -616,14 +616,15 @@ declares a `gres` that names gpus, the rendered `apptainer exec` adds
 `--nv`, so a torch-backed served engine (a rootstock MLIP worker) sees the
 device the job holds. A CPU partition renders without it. `--cleanenv`
 strips the variables the scheduler set, so the script re-exports
-`CUDA_VISIBLE_DEVICES`, `SLURM_CPUS_PER_TASK`, and `SLURM_JOB_ID` into the
-container. The job id stamps every run made inside, so `slab hpc cancel`
-fails those runs and frees their slices.
+`CUDA_VISIBLE_DEVICES`, `SLURM_CPUS_PER_TASK`, `SLURM_NTASKS`, and
+`SLURM_JOB_ID` into the container.
 When the job did not set `CUDA_VISIBLE_DEVICES`, the script counts the
 devices that `SLURM_JOB_GPUS` names and exports the ids `0,1,...`
 instead of SLURM's own. SLURM's ids are the node's global ids, and a
 job under cgroup device constraints sees its devices renumbered from
-zero. The budget inside reads exactly these. The script also sets
+zero. The budget inside reads exactly these. The job id stamps every
+run made inside, so `slab hpc cancel` fails those runs and frees their
+slices. The script also sets
 `OMPI_MCA_hwloc_base_binding_policy=none`, so two concurrent launches
 bind inside their own affinity masks instead of both to core 0. The
 context file states how many GPUs the job holds and that their ids are
