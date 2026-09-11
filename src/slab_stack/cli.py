@@ -1058,23 +1058,56 @@ def benchmark_tables(
 # added to foundation.cli later can never be forgotten here —
 # tests/test_slab_front_cli.py pins the resulting tree exactly.
 
+
+def _command_name(info: typer.models.CommandInfo) -> str:
+    """The name typer will give this command (explicit, or from the function)."""
+    return info.name or info.callback.__name__.replace("_", "-")  # type: ignore[union-attr]
+
+
+# ``hpc cancel`` is the one machine verb that reaches into the workspace: a
+# cancelled job leaves runs at ``running`` and reservations held, and only
+# foundation can settle them. ``slab.cli`` cannot import foundation, so the
+# group mounts here with its ``cancel`` replaced by the workspace-aware one.
+_hpc_group = typer.Typer(
+    help=hpc_app.info.help, no_args_is_help=True, rich_markup_mode=hpc_app.rich_markup_mode
+)
+for _info in hpc_app.registered_commands:
+    if _command_name(_info) != "cancel":
+        _hpc_group.registered_commands.append(copy.copy(_info))
+
+
+@_hpc_group.command("cancel")
+def hpc_cancel(
+    job_id: Annotated[str, typer.Argument(help="SLURM job id.")],
+    workspace: _WorkspaceOpt = None,
+) -> None:
+    """Cancel a job and settle the runs, reservations, and memories it leaves behind.
+
+    The scheduler is asked first. Then every run the job was still
+    executing is marked failed, the reservations those runs held are
+    released, and each machine memory written since the job's first run
+    started is listed for review. Nothing is expired, purged, or deleted.
+    """
+    try:
+        summary = _ops.cancel_job(job_id, workspace=_ops.resolve_root(workspace))
+    except (SlabError, FoundationError, OSError) as e:
+        _fail(str(e))
+    for line in _ops.cancel_lines(summary):
+        typer.echo(line)
+
+
 for _group, _name in (
     (engines_app, "engines"),
     (pseudos_app, "pseudos"),
     (protocols_app, "protocols"),
     (mp_app, "mp"),
-    (hpc_app, "hpc"),
+    (_hpc_group, "hpc"),
     (config_app, "config"),
 ):
     app.add_typer(_group, name=_name, rich_help_panel=_PANEL_MACHINE)
 
 app.add_typer(mason_app, name="mason", rich_help_panel=_PANEL_AGENT)
 app.add_typer(foundation_cli.runs_app, name="runs", rich_help_panel=_PANEL_LIFECYCLE)
-
-
-def _command_name(info: typer.models.CommandInfo) -> str:
-    """The name typer will give this command (explicit, or from the function)."""
-    return info.name or info.callback.__name__.replace("_", "-")  # type: ignore[union-attr]
 
 
 for _info in foundation_cli.app.registered_commands:

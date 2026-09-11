@@ -597,8 +597,13 @@ def build_server(
         @server.tool()
         @_surfaced
         def cancel_job(job_id: str) -> dict[str, Any]:
-            """Cancel a SLURM job (a no-op if it already finished)."""
-            return _ops.cancel_job(job_id)
+            """Cancel a SLURM job (a no-op if it already finished). The runs
+            the job was still executing are marked failed, their reservations
+            are released, and the machine memories written since the job
+            started are listed for review; 'text' carries the same summary
+            as lines."""
+            summary = _ops.cancel_job(job_id, workspace=root)
+            return summary | {"text": "\n".join(_ops.cancel_lines(summary))}
 
     @server.tool()
     @_surfaced

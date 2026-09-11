@@ -329,6 +329,33 @@ def discover(directory: Path | None = None) -> dict[str, Memory]:
     return found
 
 
+def written_since(when: datetime, directory: Path | None = None) -> list[Memory]:
+    """The memories whose file changed at or after *when*, newest first.
+
+    The judgement is the file's modification time, which every write and
+    every replacement sets, so the answer covers what a process wrote
+    whether it created the memory or rewrote one. A naive *when* is read
+    as UTC. A malformed file is a loud error, as for :func:`discover`.
+
+    Examples:
+        >>> import tempfile
+        >>> from datetime import timedelta
+        >>> root = Path(tempfile.mkdtemp())
+        >>> before = datetime.now(UTC)
+        >>> _ = write("qe-on-gpu", "pw.x needs -nk 1 here", "One pool.", directory=root)
+        >>> [m.name for m in written_since(before, root)]
+        ['qe-on-gpu']
+        >>> written_since(datetime.now(UTC) + timedelta(seconds=1), root)
+        []
+    """
+    cutoff = when if when.tzinfo is not None else when.replace(tzinfo=UTC)
+    found = [
+        (datetime.fromtimestamp(memory.path.stat().st_mtime, tz=UTC), memory)
+        for memory in discover(directory).values()
+    ]
+    return [memory for written, memory in sorted(found, reverse=True) if written >= cutoff]
+
+
 def write(
     name: str,
     description: str,

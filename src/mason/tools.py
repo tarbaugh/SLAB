@@ -2232,15 +2232,18 @@ def _add_hpc_tools(box: Toolbox, session: MasonSession) -> None:
     )
 
     def cancel_job(arguments: dict[str, Any]) -> str:
-        from slab.hpc import cancel
-
-        cancel(str(arguments["job_id"]))
-        return f"cancel requested for job {arguments['job_id']}"
+        summary = _ops.cancel_job(str(arguments["job_id"]), workspace=session.workspace_root)
+        return "\n".join(_ops.cancel_lines(summary))
 
     box.add(
         Tool(
             name="cancel_job",
-            description="Cancel a SLURM job (a no-op if it already finished).",
+            description=(
+                "Cancel a SLURM job (a no-op if it already finished). The runs the "
+                "job was still executing are marked failed, their reservations are "
+                "released, and the machine memories written since the job started "
+                "are listed for review."
+            ),
             parameters=_schema({"job_id": {"type": "string"}}, ["job_id"]),
             handler=cancel_job,
             requires_approval=True,

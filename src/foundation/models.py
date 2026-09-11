@@ -95,6 +95,10 @@ class Run(BaseModel):
             ``threads``, and the ``reservation`` id it claimed), copied from
             the reservation when the run claimed it; None for a run that
             was never reserved. A record for provenance, not a live count.
+        job_id: The scheduler job the run started under, read from
+            ``$SLURM_JOB_ID`` by :meth:`foundation.runtime.Workspace.start_run`;
+            None for a run started outside a batch job. A cancel of the job
+            finds the runs it took down through this field.
 
     Examples:
         >>> run = Run(name="si-relax", intent="baseline lattice constant")
@@ -124,6 +128,7 @@ class Run(BaseModel):
     failure: dict[str, Any] | None = None
     pid: int | None = None
     host: str | None = None
+    job_id: str | None = None
     resources: dict[str, Any] | None = None
 
     @field_validator("created_at", "updated_at", "state_entered_at", "started_at", "finished_at")

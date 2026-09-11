@@ -240,6 +240,8 @@ def _render_details(details: dict[str, object]) -> None:
     typer.echo(f"  state:   {state_text}    status: {run['status']}")
     if run["status"] == "running" and run.get("pid") is not None:
         typer.echo(f"  process: {run['pid']} on {run['host']}")
+    if run.get("job_id"):
+        typer.echo(f"  job:     {run['job_id']}")
     resources = run.get("resources")
     if isinstance(resources, dict):
         typer.echo(f"  resources: {_ops.describe_resources(resources)}")
