@@ -64,6 +64,7 @@ from mason.config import AgentConfig
 from mason.errors import MasonError
 from mason.serve import read_record, record_path
 from slab.config import HpcConfig, SlabConfig
+from slab.resources import JobSize
 
 #: Where the bridge surfaces inside the container. The port exists only in
 #: the sandbox's private namespace, so it can never collide with the host.
@@ -1613,6 +1614,21 @@ def _tool_lines(snapshots: dict[str, SetupSnapshot] | None) -> list[str]:
     return lines
 
 
+def _gres_gpus(gres: str | None) -> int | None:
+    """The gpu count a gres string asks for, or None when it names none.
+
+    Examples:
+        >>> _gres_gpus("gpu:a100:4"), _gres_gpus("gpu:2"), _gres_gpus("gpu")
+        (4, 2, None)
+        >>> _gres_gpus(None) is None
+        True
+    """
+    if not gres or "gpu" not in gres.lower():
+        return None
+    last = gres.split(":")[-1]
+    return int(last) if last.isdigit() else None
+
+
 def _sandbox_context(
     binds: list[str],
     *,
@@ -1620,6 +1636,8 @@ def _sandbox_context(
     memories: Path | None,
     engine_tasks: int | None,
     snapshots: dict[str, SetupSnapshot] | None = None,
+    gpus: int | None = None,
+    gres: str | None = None,
 ) -> str:
     """The sandbox facts as a prompt block, written at render time.
 
@@ -1654,14 +1672,22 @@ def _sandbox_context(
         "  missing — use python or /proc instead of probing for them.",
         "- $HOME is not mounted."
         + (f" Machine memories are at {memories} (rw)." if memories else ""),
-        "- GPU: the host driver stack is mounted (--nv); the job holds a GPU."
-        if gpu
-        else "- GPU: none on this partition.",
+        *(_gpu_lines(gpus, gres) if gpu else ["- GPU: none on this partition."]),
         "- Mounted paths and their modes (nothing else exists in here):",
         *rows,
     ]
     if engine_tasks is not None:
-        lines.append(f"- MPI engines launch with {engine_tasks} rank(s).")
+        lines.append(f"- MPI engines launch with {engine_tasks} rank(s) when a launch is unsized.")
+    lines.append(
+        "- Size every launch: launch_workflow takes ntasks, threads, and gpus,"
+    )
+    lines.append(
+        "  reserves that slice of this job's allocation before the run starts,"
+    )
+    lines.append(
+        "  and refuses a slice that does not fit what is free. `list_engines`"
+    )
+    lines.append("  reports the budget and what is free right now.")
     if tools:
         lines.extend(
             [
@@ -1671,6 +1697,27 @@ def _sandbox_context(
             ]
         )
     return "\n".join(lines)
+
+
+def _gpu_lines(gpus: int | None, gres: str | None) -> list[str]:
+    """The GPU lines of the context: how many the job holds and how they are named.
+
+    The ids are the scheduler's, exported into the container as
+    ``CUDA_VISIBLE_DEVICES`` at job start, so the render states the count
+    it can know and where the ids come from.
+
+    Examples:
+        >>> _gpu_lines(4, "gpu:a100:4")[0]
+        '- GPU: the host driver stack is mounted (--nv); the job holds 4 GPU(s) (gres gpu:a100:4).'
+        >>> _gpu_lines(None, "gpu")[0]
+        '- GPU: the host driver stack is mounted (--nv); the job holds a GPU (gres gpu).'
+    """
+    held = f"{gpus} GPU(s)" if gpus is not None else "a GPU"
+    return [
+        f"- GPU: the host driver stack is mounted (--nv); the job holds {held} (gres {gres}).",
+        "  Their ids are the ones in CUDA_VISIBLE_DEVICES, exported from the job;",
+        "  `list_engines` lists the budget, and a launch holds some with gpus=.",
+    ]
 
 
 def _source_commit() -> str | None:
@@ -1700,6 +1747,7 @@ def render_record(
     agent: str | None = None,
     condition: str | None = None,
     without: tuple[str, ...] = (),
+    size: JobSize | None = None,
 ) -> dict[str, Any]:
     """The arguments and provenance of one render, for ``render.json``.
 
@@ -1719,6 +1767,7 @@ def render_record(
         "partition": partition,
         "time_limit": time_limit,
         "engine_tasks": engine_tasks,
+        "size": None if size is None else size.model_dump(),
         "out": str(out_dir),
         "rendered_at": datetime.now(UTC).isoformat(),
         "version": version("slab-stack"),
@@ -1734,6 +1783,21 @@ def read_render_record(out_dir: Path) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError):
         return None
     return record if isinstance(record, dict) and isinstance(record.get("goal"), str) else None
+
+
+def recorded_size(record: dict[str, Any]) -> JobSize | None:
+    """The job size a render record carries, or None when it was unsized.
+
+    Examples:
+        >>> recorded_size({"goal": "g", "size": {"ntasks_per_node": 8, "gpus_per_node": 2}})
+        JobSize(nodes=1, ntasks_per_node=8, cpus_per_task=1, gpus_per_node=2, mem=None)
+        >>> recorded_size({"goal": "g"}) is None
+        True
+    """
+    from slab.resources import JobSize
+
+    size = record.get("size")
+    return JobSize.model_validate(size) if isinstance(size, dict) else None
 
 
 def render_sandbox_script(
@@ -1752,6 +1816,7 @@ def render_sandbox_script(
     entry_agent: str | None = None,
     entry_condition: str | None = None,
     ablated: tuple[str, ...] = (),
+    size: JobSize | None = None,
 ) -> tuple[str, list[str], str]:
     """The batch script for one autonomous, network-dark session.
 
@@ -1773,6 +1838,12 @@ def render_sandbox_script(
     api_key_env``, read on the host at job start. The container is launched
     ``--cleanenv`` and its rendered config drops ``api_key_env``, so the key
     never crosses the boundary.
+
+    *size* (a :class:`slab.resources.JobSize`) sizes the sandbox job itself
+    within the partition's declared node; the directives replace the
+    partition's own, and a size the node cannot hold is refused before
+    anything is written. Inside the job, the agent sizes each launch
+    against what the allocation holds.
     """
     from slab.hpc import render_sbatch
 
@@ -1868,13 +1939,24 @@ def render_sandbox_script(
                 if engine_tasks is not None
                 else '--env SLURM_NTASKS="${SLURM_NTASKS:-1}"'
             ),
+            # --cleanenv also strips the GPU ids and the thread count the
+            # scheduler set, and the budget inside reads exactly these:
+            # CUDA_VISIBLE_DEVICES first (SLURM_JOB_GPUS when the job did
+            # not export it), SLURM_CPUS_PER_TASK for the default thread
+            # count of an unsized launch. Without them every launch would
+            # see no GPU and one thread.
+            '--env CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-${SLURM_JOB_GPUS:-}}"',
+            '--env SLURM_CPUS_PER_TASK="${SLURM_CPUS_PER_TASK:-1}"',
             # OpenMPI inside the namespace: there is no ssh and no
             # scheduler, so component selection must not go looking for
             # either — 'isolated' launches local ranks with no agent, and
             # CMA single-copy is unavailable in user namespaces. Other MPI
-            # implementations ignore both variables.
+            # implementations ignore both variables. Binding is off so two
+            # concurrent launches bind inside their own affinity masks
+            # instead of both to core 0.
             "--env OMPI_MCA_plm=isolated",
             "--env OMPI_MCA_btl_vader_single_copy_mechanism=none",
+            "--env OMPI_MCA_hwloc_base_binding_policy=none",
             # The network namespace is dark, but ML stacks that do not know
             # that will still *attempt* a model download — burning a worker
             # on a doomed fetch against a read-only bind. These flags make
@@ -1906,13 +1988,17 @@ def render_sandbox_script(
         # Host-level module loads serve the engines OUTSIDE a container;
         # inside one they resolve against the wrong filesystem anyway.
         include_global_setup=False,
+        size=size,
     )
+    held_gpus = size.gpus_per_node if size is not None else _gres_gpus(partition_spec.gres)
     context = _sandbox_context(
         binds,
         gpu="--nv" in isolation_flags,
         memories=memories if agent.memory else None,
         engine_tasks=engine_tasks,
         snapshots=snapshots,
+        gpus=held_gpus,
+        gres=partition_spec.gres,
     )
     context_path = toml_path.with_name("context.md")
     if not context_path.is_relative_to(project):

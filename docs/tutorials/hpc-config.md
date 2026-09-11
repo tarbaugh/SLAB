@@ -163,6 +163,12 @@ gres = "gpu:a100:4"
 qos = "gpu"
 setup = ["module load cuda/12.4"]     # runs after the [hpc] setup lines
 sbatch_extra = ["--exclusive"]        # raw directives the schema does not model
+max_nodes = 2                         # nodes one sized job may take (default 1)
+
+[hpc.partitions.gpu.node]             # one node's size, the cap a sized job is checked against
+cpus = 64
+gpus = 4
+mem = "480G"
 
 [agent]
 model = "meta-models/Muse-Glimmer-30B"
@@ -263,6 +269,72 @@ finished jobs leave the queue. It collapses SLURM's ~22 states onto seven
 `undetermined`) and preserves the raw state string as evidence. When
 neither command answers, the state is reported as undetermined with the
 reason, so an unknown is never presented as a known.
+
+## Size a job
+
+A partition declares one node's size in a `node` table, with `cpus`,
+`gpus`, and `mem`, and `max_nodes` says how many nodes one job may take.
+`slab hpc partitions` prints both:
+
+```text
+$ slab hpc partitions
+cluster: delta
+  cpu          (default) 24:00:00  mem 240G
+  gpu                    12:00:00  gpu:a100:4, qos gpu
+                         node: 64 cpus, 4 gpus, mem 480G; up to 2 node(s) per job
+```
+
+`render` and `submit` take five size flags: `--nodes`,
+`--ntasks-per-node`, `--cpus-per-task`, `--gpus-per-node`, and `--mem`. A
+size names its rank count, so `--ntasks-per-node` is required, and the
+other four default to one node, one cpu per rank, no gpu, and no memory
+directive. The size replaces the partition's own directives, and the
+`gres` keeps the type the partition names:
+
+```text
+$ slab hpc render "slab run relax.py" --name si-relax --partition gpu --time 02:00:00 --ntasks-per-node 8 --gpus-per-node 2
+#!/bin/bash -l
+#SBATCH --job-name=si-relax
+#SBATCH --partition=gpu
+#SBATCH --output=si-relax-%j.out
+#SBATCH --account=abc-123
+#SBATCH --qos=gpu
+#SBATCH --time=02:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=8
+#SBATCH --cpus-per-task=1
+#SBATCH --gres=gpu:a100:2
+#SBATCH --exclusive
+
+set -euo pipefail
+
+module load quantum-espresso/7.4
+module load cuda/12.4
+slab run relax.py
+```
+
+SLAB checks the size against the node table before it writes anything.
+A size the node cannot hold is refused, and the message names the cap and
+the config field that declares it:
+
+```text
+$ slab hpc render "slab run relax.py" --name si-relax --partition gpu --ntasks-per-node 8 --gpus-per-node 5
+error: gpus_per_node=5 exceeds the 4 gpus of one gpu node ([hpc.partitions.gpu.node] gpus)
+```
+
+A partition without a `node` table cannot be sized. The request is
+refused and names the table to add, because SLAB guesses no resource
+default:
+
+```text
+$ slab hpc render "slab run relax.py" --name si-relax --ntasks-per-node 8
+error: partition 'cpu' declares no node, so a job on it cannot be sized; add [hpc.partitions.cpu.node] with cpus (and gpus, mem) to the slab config, or submit without a size
+```
+
+Without a size the script is byte for byte what it was. The `submit_job`
+tool takes the same five fields over MCP and in Mason, so an agent sizes
+a job within the same declared caps, and `list_engines` reports each
+partition's `node` and `max_nodes` so it knows them before it submits.
 
 ## A cluster maintainer's checklist
 

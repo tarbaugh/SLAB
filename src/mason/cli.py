@@ -27,10 +27,12 @@ if TYPE_CHECKING:
     from mason.session import MasonSession
     from slab.config import HpcConfig
     from slab.hpc import SubmittedJob
+    from slab.resources import JobSize
 
 from foundation import _ops
 from foundation.errors import FoundationError
 from mason.errors import MasonError
+from slab.cli import _CpusPerTaskOpt, _GpusPerNodeOpt, _MemOpt, _NodesOpt, _NtasksPerNodeOpt
 from slab.errors import SlabError
 
 app = typer.Typer(
@@ -214,6 +216,7 @@ def render_sandbox_files(
     agent: str | None = None,
     condition: str | None = None,
     without: tuple[str, ...] = (),
+    size: JobSize | None = None,
 ) -> tuple[Path, str]:
     """Render the sandbox job files for *goal* without submitting (public form).
 
@@ -221,7 +224,8 @@ def render_sandbox_files(
     *out* (default ``./sandbox``) for reading and tweaking before an
     explicit ``sbatch``. *agent* names the card the job runs as; ``None``
     is the condition's card, else the PI. *condition* and *without* name
-    the harness arm and the mechanisms switched off from it.
+    the harness arm and the mechanisms switched off from it. *size* sizes
+    the sandbox job itself within the partition's declared node.
     """
     return _render_sandbox_files(
         goal,
@@ -233,6 +237,7 @@ def render_sandbox_files(
         agent=agent,
         condition=condition,
         without=without,
+        size=size,
     )
 
 
@@ -663,6 +668,8 @@ def _command_line(event: dict[str, Any]) -> str:
         where.append(f"job {event['job_id']} on {event.get('partition', '?')}")
     if event.get("background"):
         where.append("background")
+    if event.get("sized"):
+        where.append("sized")
     if where:
         head += f" ({', '.join(where)})"
     if event.get("error"):
@@ -683,6 +690,11 @@ def _command_details(event: dict[str, Any]) -> list[str]:
          'kokkos: -k on, 1 GPU(s) per node, -sf kk']
         >>> _command_details({"kind": "shell", "cwd": "/proj"})
         ['cwd /proj']
+        >>> _command_details({"kind": "launch", "sized": True,
+        ...                   "resources": {"cpus": [0, 1], "gpus": ["0"], "ntasks": 2}})
+        ['resources 2 cpu(s) 0-1, 1 gpu(s) 0; 2 rank(s) x 1 thread(s)']
+        >>> _command_details({"kind": "job", "size": {"ntasks_per_node": 8, "gpus_per_node": 2}})
+        ['size 1 node(s) x 8 rank(s) x 1 cpu(s), 2 gpu(s) per node']
     """
     details: list[str] = []
     if event.get("engine"):
@@ -706,6 +718,12 @@ def _command_details(event: dict[str, Any]) -> list[str]:
             details.append("kokkos: off, the plain styles run on the host")
     if event.get("script"):
         details.append(f"script {event['script']}")
+    if isinstance(event.get("resources"), dict):
+        details.append(f"resources {_ops.describe_resources(event['resources'])}")
+    if isinstance(event.get("size"), dict):
+        from mason.tools import describe_size
+
+        details.append(f"size {describe_size(event['size'])}")
     if event.get("cwd"):
         details.append(f"cwd {event['cwd']}")
     return details
@@ -1091,11 +1109,17 @@ def mason_sandbox_render(
     ] = None,
     condition: _ConditionOpt = None,
     without: _WithoutOpt = None,
+    nodes: _NodesOpt = None,
+    ntasks_per_node: _NtasksPerNodeOpt = None,
+    cpus_per_task: _CpusPerTaskOpt = None,
+    gpus_per_node: _GpusPerNodeOpt = None,
+    mem: _MemOpt = None,
 ) -> None:
     """Write the batch script, slab.toml, context.md, and render.json.
 
     Read them, then submit with sbatch — or use 'slab mason sandbox
-    launch', which renders fresh and submits in one motion.
+    launch', which renders fresh and submits in one motion. The five size
+    flags size the sandbox job itself within the partition's node.
     """
     script_path, _script = _render_sandbox_files(
         goal,
@@ -1107,6 +1131,7 @@ def mason_sandbox_render(
         agent=agent,
         condition=condition,
         without=tuple(without or ()),
+        size=_job_size(nodes, ntasks_per_node, cpus_per_task, gpus_per_node, mem),
     )
     typer.echo(
         "read these files, then submit with: "
@@ -1126,6 +1151,7 @@ def _render_sandbox_files(
     agent: str | None = None,
     condition: str | None = None,
     without: tuple[str, ...] = (),
+    size: JobSize | None = None,
 ) -> tuple[Path, str]:
     """Render and write the four sandbox files; echo warnings and paths."""
     import json
@@ -1172,6 +1198,7 @@ def _render_sandbox_files(
             entry_agent=agent,
             entry_condition=condition,
             ablated=without,
+            size=size,
         )
     except (MasonError, FoundationError, SlabError) as e:
         _fail(str(e))
@@ -1190,6 +1217,7 @@ def _render_sandbox_files(
         out_dir=out_dir,
         condition=condition,
         without=without,
+        size=size,
     )
     record_path = out_dir / "render.json"
     record_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
@@ -1232,6 +1260,11 @@ def mason_sandbox_launch(
     ] = None,
     condition: _ConditionOpt = None,
     without: _WithoutOpt = None,
+    nodes: _NodesOpt = None,
+    ntasks_per_node: _NtasksPerNodeOpt = None,
+    cpus_per_task: _CpusPerTaskOpt = None,
+    gpus_per_node: _GpusPerNodeOpt = None,
+    mem: _MemOpt = None,
 ) -> None:
     """Preflight, render fresh, and submit — one motion, never a stale render.
 
@@ -1240,10 +1273,11 @@ def mason_sandbox_launch(
     recorded in render.json are reused (a flag still overrides a recorded
     value); with a goal, only the flags given here apply.
     """
-    from mason.sandbox import read_render_record
+    from mason.sandbox import read_render_record, recorded_size
 
     project = Path.cwd()
     out_dir = (out if out is not None else project / "sandbox").resolve()
+    size = _job_size(nodes, ntasks_per_node, cpus_per_task, gpus_per_node, mem)
     if goal is None:
         record = read_render_record(out_dir)
         if record is None:
@@ -1264,6 +1298,11 @@ def mason_sandbox_launch(
             condition = str(record["condition"])
         if not without and record.get("without"):
             without = [str(name) for name in record["without"]]
+        if size is None:
+            try:
+                size = recorded_size(record)
+            except SlabError as e:
+                _fail(f"render.json carries an unusable size: {e}")
     try:
         job = launch_sandbox(
             goal,
@@ -1276,6 +1315,7 @@ def mason_sandbox_launch(
             agent=agent,
             condition=condition,
             without=tuple(without or ()),
+            size=size,
         )
     except (MasonError, FoundationError, SlabError) as e:
         _fail(str(e))
@@ -1296,6 +1336,7 @@ def launch_sandbox(
     agent: str | None = None,
     condition: str | None = None,
     without: tuple[str, ...] = (),
+    size: JobSize | None = None,
 ) -> SubmittedJob:
     """Preflight, render fresh into *out_dir*, and submit one sandbox job.
 
@@ -1323,9 +1364,32 @@ def launch_sandbox(
         agent=agent,
         condition=condition,
         without=without,
+        size=size,
     )
     resolved, _spec = hpc.resolve_partition(partition)
     return submit(script, job_name="mason-sandbox", partition=resolved, directory=out_dir)
+
+
+def _job_size(
+    nodes: int | None,
+    ntasks_per_node: int | None,
+    cpus_per_task: int | None,
+    gpus_per_node: int | None,
+    mem: str | None,
+) -> JobSize | None:
+    """The five size flags as a JobSize, or None; a partial size fails on the host."""
+    from slab.resources import job_size
+
+    try:
+        return job_size(
+            nodes=nodes,
+            ntasks_per_node=ntasks_per_node,
+            cpus_per_task=cpus_per_task,
+            gpus_per_node=gpus_per_node,
+            mem=mem,
+        )
+    except SlabError as e:
+        _fail(str(e))
 
 
 @sandbox_app.command("forward")

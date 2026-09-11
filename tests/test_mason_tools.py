@@ -2,6 +2,7 @@
 
 import contextlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -20,11 +21,11 @@ def _session(tmp_path: Path, **agent: object) -> MasonSession:
     )
 
 
-def _call(name: str, **arguments: object) -> ToolCall:
+def _call(tool: str, /, **arguments: object) -> ToolCall:
     import json
 
     return ToolCall(
-        id="t1", name=name, arguments=dict(arguments), arguments_raw=json.dumps(arguments)
+        id="t1", name=tool, arguments=dict(arguments), arguments_raw=json.dumps(arguments)
     )
 
 
@@ -686,16 +687,226 @@ def test_oversubscribed_launches_are_refused_where_they_run_here(
     assert "exit 0" in result
 
 
-def test_the_environment_states_the_cpu_budget(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_the_environment_states_the_budget_and_what_is_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_gpus: None
 ) -> None:
+    from foundation import Workspace
     from mason.prompts import environment_block
 
     monkeypatch.setenv("SLURM_NTASKS", "16")
-    block = environment_block(_session(tmp_path))
-    assert "cpus:" in block
+    session = _session(tmp_path)
+    block = environment_block(session)
+    assert "cpus:" in block and "gpus: 0" in block
     assert "16 rank(s)" in block
+    assert "ntasks, threads, and gpus" in block
     assert "refused" in block  # the promise the tools actually keep
+    cpus = int(block.split("cpus: ")[1].split()[0])
+    assert f"free right now: {cpus} cpu(s), 0 gpu(s)" in block
+    with Workspace(session.workspace_root) as ws:
+        ws.reserve(ntasks=1, holder_pid=os.getpid())
+    assert f"free right now: {cpus - 1} cpu(s), 0 gpu(s)" in environment_block(session)
+
+
+# -- sized launches -----------------------------------------------------------
+
+
+@pytest.fixture()
+def no_gpus(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("SLAB_CPUS", "SLAB_GPUS", "SLAB_NTASKS", "SLAB_THREADS", "SLURM_NTASKS"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+
+
+SIZED_WORKFLOW = """\
+import os
+from foundation import check
+print("env", os.environ["SLAB_NTASKS"], os.environ["OMP_NUM_THREADS"],
+      repr(os.environ["CUDA_VISIBLE_DEVICES"]))
+@check
+def ok():
+    return True
+"""
+
+
+def _budget_cpus() -> int:
+    from slab.resources import budget
+
+    return len(budget().cpus)
+
+
+def test_a_sized_launch_that_does_not_fit_is_refused_with_the_free_amounts(
+    box: Toolbox, tmp_path: Path, no_gpus: None
+) -> None:
+    from foundation import Workspace
+
+    (tmp_path / "wf.py").write_text(SIZED_WORKFLOW)
+    answer = box.dispatch(_call("launch_workflow", script="wf.py", gpus=1))
+    assert answer.startswith("refused:") and "1 gpu(s) asked, but only 0 of 0" in answer
+    too_many = _budget_cpus() + 1
+    answer = box.dispatch(_call("launch_workflow", script="wf.py", ntasks=too_many))
+    assert answer.startswith("refused:") and f"{too_many} cpus asked" in answer
+    assert "are free on" in answer
+    with Workspace(box.session.workspace_root) as ws:
+        assert ws.runs.list_reservations() == []  # nothing leaked
+    assert _command_events(box.session) == []  # a refusal ran nothing
+
+
+def test_a_foreground_sized_launch_runs_as_a_child_and_the_run_carries_resources(
+    box: Toolbox, tmp_path: Path, no_gpus: None
+) -> None:
+    from foundation import Workspace
+
+    (tmp_path / "wf.py").write_text(SIZED_WORKFLOW)
+    answer = box.dispatch(
+        _call("launch_workflow", script="wf.py", intent="sized", ntasks=1, threads=1)
+    )
+    assert "state=verified" in answer and "checks=1/1" in answer
+    assert "resources held: 1 cpu(s)" in answer and "1 rank(s) x 1 thread(s)" in answer
+    assert "env 1 1 ''" in answer  # the child ran inside the envelope
+    run_id = answer.split()[1].rstrip(":")
+    (launch,) = [e for e in _command_events(box.session) if e["kind"] == "launch"]
+    assert launch["sized"] is True and launch["background"] is False
+    assert "--reservation " in launch["command"]
+    assert launch["resources"]["ntasks"] == 1 and len(launch["resources"]["cpus"]) == 1
+    with Workspace(box.session.workspace_root) as ws:
+        run = ws.runs.get(run_id)
+        assert run.pid != os.getpid()  # a child, never this process
+        assert run.resources["reservation"] == launch["reservation"]
+        assert run.resources["cpus"] == launch["resources"]["cpus"]
+        assert ws.runs.list_reservations() == []  # released when the run ended
+
+
+def test_two_background_launches_get_disjoint_slices(
+    box: Toolbox, tmp_path: Path, no_gpus: None
+) -> None:
+    from foundation import Workspace
+
+    if _budget_cpus() < 2:
+        pytest.skip("two one-cpu slices need two cpus")
+    (tmp_path / "slow.py").write_text("import time\ntime.sleep(1.5)\n")
+    first = box.dispatch(
+        _call("launch_workflow", script="slow.py", name="one", background=True, ntasks=1)
+    )
+    second = box.dispatch(
+        _call("launch_workflow", script="slow.py", name="two", background=True, ntasks=1)
+    )
+    assert "launched in the background" in first and "launched in the background" in second
+    one, two = [e for e in _command_events(box.session) if e["kind"] == "launch"]
+    assert one["resources"]["cpus"] != two["resources"]["cpus"]
+    assert not set(one["resources"]["cpus"]) & set(two["resources"]["cpus"])
+    box.dispatch(_call("wait_for_run", timeout_s=60))
+    with Workspace(box.session.workspace_root) as ws:
+        held = {run.name: run.resources["cpus"] for run in ws.runs.list_runs()}
+        assert held["one"] == one["resources"]["cpus"]
+        assert held["two"] == two["resources"]["cpus"]
+        assert ws.runs.list_reservations() == []
+
+
+def test_an_unsized_foreground_launch_reserves_the_whole_free_budget_in_process(
+    box: Toolbox, tmp_path: Path, no_gpus: None
+) -> None:
+    from foundation import Workspace
+
+    (tmp_path / "wf.py").write_text("print('ok')\n")
+    answer = box.dispatch(_call("launch_workflow", script="wf.py"))
+    assert f"resources held: {_budget_cpus()} cpu(s)" in answer
+    run_id = answer.split()[1].rstrip(":")
+    with Workspace(box.session.workspace_root) as ws:
+        run = ws.runs.get(run_id)
+        assert run.pid == os.getpid()  # in-process, as before
+        assert len(run.resources["cpus"]) == _budget_cpus()
+        assert ws.runs.list_reservations() == []
+
+
+def test_a_hand_written_mpirun_is_judged_against_the_launches_own_slice(
+    box: Toolbox, tmp_path: Path, no_gpus: None
+) -> None:
+    from foundation import Workspace
+
+    script = tmp_path / "wide.py"
+    script.write_text('import subprocess\nsubprocess.run("mpirun -np 2 hostname")\n')
+    answer = box.dispatch(_call("launch_workflow", script="wide.py", ntasks=1))
+    assert answer.startswith("refused") and "2 MPI rank(s)" in answer
+    assert "1 cpu(s) are in this launch's slice" in answer
+    with Workspace(box.session.workspace_root) as ws:
+        assert ws.runs.list_reservations() == []  # the refused launch gave it back
+
+
+def test_the_shell_refuses_the_run_driver(box: Toolbox) -> None:
+    for command in (
+        "slab run wf.py",
+        "foundation run wf.py -w .slab",
+        "python -m foundation.cli run wf.py",
+    ):
+        answer = box.dispatch(_call("shell", command=command))
+        assert answer.startswith("refused") and "launch_workflow" in answer
+    assert _command_events(box.session) == []
+    assert box.dispatch(_call("shell", command="echo slab list")).startswith("exit 0")
+
+
+def _clustered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Toolbox, dict[str, object]]:
+    import slab.hpc as hpc_module
+    from slab.hpc import SubmittedJob
+
+    captured: dict[str, object] = {}
+
+    def fake_submit(script: str, *, job_name: str, partition: str, directory=None):
+        captured["script"] = script
+        return SubmittedJob(job_id="7", job_name=job_name, partition=partition, script_path="x")
+
+    monkeypatch.setattr(hpc_module, "submit", fake_submit)
+    hpc = HpcConfig.model_validate(
+        {
+            "default_partition": "gpu",
+            "partitions": {
+                "gpu": {"gres": "gpu:a100:4", "node": {"cpus": 64, "gpus": 4, "mem": "480G"}},
+                "cpu": {},
+            },
+        }
+    )
+    session = MasonSession(
+        tmp_path, workspace_root=tmp_path / ".slab", hpc=hpc, auto_approve=True
+    )
+    return build_toolbox(session), captured
+
+
+def test_submit_job_takes_a_size_and_records_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box, captured = _clustered(tmp_path, monkeypatch)
+    answer = box.dispatch(
+        _call(
+            "submit_job", command="slab run md.py", name="md", ntasks_per_node=4, gpus_per_node=2
+        )
+    )
+    assert "submitted job 7" in answer
+    assert "sized 1 node(s) x 4 rank(s) x 1 cpu(s), 2 gpu(s) per node" in answer
+    script = str(captured["script"])
+    assert "#SBATCH --ntasks-per-node=4\n" in script and "#SBATCH --gres=gpu:a100:2\n" in script
+    (event,) = _command_events(box.session)
+    assert event["kind"] == "job" and event["size"]["gpus_per_node"] == 2
+    assert event["size"]["ntasks_per_node"] == 4 and event["size"]["nodes"] == 1
+
+
+def test_submit_job_refuses_a_size_the_node_cannot_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box, captured = _clustered(tmp_path, monkeypatch)
+    answer = box.dispatch(
+        _call("submit_job", command="c", name="n", ntasks_per_node=1, gpus_per_node=5)
+    )
+    assert answer.startswith("refused:") and "gpus_per_node=5 exceeds the 4 gpus" in answer
+    assert "[hpc.partitions.gpu.node] gpus" in answer
+    answer = box.dispatch(_call("submit_job", command="c", name="n", gpus_per_node=1))
+    assert answer.startswith("refused:") and "pass ntasks_per_node" in answer
+    answer = box.dispatch(
+        _call("submit_job", command="c", name="n", partition="cpu", ntasks_per_node=1)
+    )
+    assert answer.startswith("refused:") and "declares no node" in answer
+    assert "[hpc.partitions.cpu.node]" in answer
+    assert "script" not in captured and _command_events(box.session) == []
 
 
 # -- session stamps ----------------------------------------------------------
@@ -777,7 +988,11 @@ def test_background_launch_detaches_and_wait_for_run_collects(
     assert "wait_for_run" in answer
     launch = _command_events(box.session)[-1]
     assert launch["kind"] == "launch" and launch["background"] is True
-    assert "foundation.cli run" in launch["command"] and "--name bg-test" in launch["command"]
+    # A background launch is a reserved child: the record carries the
+    # driver with the reservation it hands over, and the slice it holds.
+    assert launch["command"].startswith("slab run ") and "--name bg-test" in launch["command"]
+    assert "--reservation " in launch["command"] and launch["sized"] is False
+    assert launch["resources"]["cpus"] and launch["reservation"]
     waited = box.dispatch(_call("wait_for_run", timeout_s=60))
     assert "bg-test" in waited
     assert "running" not in waited.split("bg-test")[1].splitlines()[0]

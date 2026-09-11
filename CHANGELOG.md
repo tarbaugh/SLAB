@@ -50,8 +50,41 @@ All notable changes to SLAB, newest first. Dates are commit dates on
   slice does not fit. `submit_job` gains `nodes`, `ntasks_per_node`,
   `cpus_per_task`, `gpus_per_node`, and `mem`. `list_engines` carries
   `budget` and `free`. The session record's `launch` and `job` events
-  carry the slice and the size. Mason's tools and the docs follow in the
-  next change.
+  carry the slice and the size.
+- Mason sizes its launches and its jobs. `launch_workflow` takes
+  `ntasks`, `threads`, and `gpus`; the session reserves the slice with
+  its own pid, a sized launch runs as a child `foundation run
+  --reservation` (waited unless `background=true`), an unsized
+  foreground launch runs in-process as before but still reserves the
+  whole free budget, and a background launch is always the child. A
+  slice that does not fit is refused as tool text with the free amounts,
+  a hand-written `mpirun` in a script is judged against the launch's own
+  slice, and the `shell` tool refuses `slab run` and `foundation run`,
+  pointing at `launch_workflow`. `submit_job` takes the five size
+  arguments and returns a `check_size` refusal as tool text.
+  `list_engines` carries `budget` and `free`. The `launch` command event
+  records the slice and the `job` event the size, and `slab mason read
+  --full` prints both. The environment block states the budget, what is
+  free right now, and the default rank count of an unsized launch, and
+  the `cluster` compute profile says `submit_job` is sized per job up to
+  the node spec.
+- The sandbox re-exports what `--cleanenv` strips. The rendered script
+  carries `CUDA_VISIBLE_DEVICES` (from `SLURM_JOB_GPUS` when the job did
+  not set it) and `SLURM_CPUS_PER_TASK` into the container, and sets
+  `OMPI_MCA_hwloc_base_binding_policy=none` so concurrent launches bind
+  inside their masks. The context block states the GPU count and where
+  the ids come from, and says a launch is sized. `slab mason sandbox
+  render` and `launch` and `slab benchmark launch` take the five
+  job-size flags, `render.json` records the size, and a bare `launch`
+  and `slab doctor` reuse it. `--engine-tasks` keeps its meaning as the
+  rank count of an unsized launch.
+- The md-expert card and the lammps-scripting and lammps-potentials
+  skills size a GPU run where it runs: `gpus_per_node` on `submit_job`
+  from a login node, `gpus=` with one rank per GPU on `launch_workflow`
+  inside a sandbox or an allocation, and `info["kokkos"]["gpus"]` must
+  equal what the launch held. A route with placeholders is `sized per
+  launch`. The docs state the guarantee: a launch can oversubscribe only
+  its own slice, never a neighbour's.
 
 - Transcripts record every command that ran. The `shell` tool records
   its command line, `launch_workflow` the driver's command, `submit_job`

@@ -219,6 +219,15 @@ The details that keep runs honest and directories clean:
   with `-h`, and a GPU switch on a node without a GPU makes that probe
   record no version, so a GPU command belongs in a job on a GPU node. The
   `lammps-potentials` skill carries the rules for the agent.
+- **A command can be sized per launch.** A command may hold the
+  placeholders `{ntasks}`, `{threads}`, and `{gpus}`. SLAB fills them from
+  the launch's size before the run starts, and it fills only the
+  placeholders the command asks for, so a command without one runs as
+  written. A command that asks `{gpus}` under a launch without a GPU is
+  refused naming the route, because `g 0` would fail later and less
+  clearly. The filled command enters the cache identity, as a hand-written
+  one would. [Mason](mason.md#compute-budget-sizing-the-physics-to-the-machine)
+  says how a launch gets its size.
 - **Nothing adds a switch the command lacks.** The command runs as
   written. `-k on` is what enables the KOKKOS package, so a KOKKOS build
   under a plain `lmp` runs its plain styles on the host, and it does so
@@ -239,9 +248,13 @@ The details that keep runs honest and directories clean:
 ```text
 lammps routes (engine= for relax, single_point, and run_lammps):
   lammps         lmp  (KOKKOS off: the plain styles run on the host)
-  lammps-gpu     mpirun -np 1 lmp -k on g 1 -sf kk -pk kokkos newton on neigh half  (KOKKOS on, 1 GPU(s) per node, -sf kk)
+  lammps-gpu     mpirun -np {ntasks} lmp -k on g {gpus} -sf kk -pk kokkos newton on neigh half  (sized per launch: ntasks, gpus; KOKKOS on, -sf kk)
                  setup: module load lammps/2025.07-kokkos
 ```
+
+  A route with placeholders is marked `sized per launch` and names
+  them. The switches parsed from such a route show no GPU count, because
+  the count is the launch's.
 
 - **Units come back converted.** Whatever `units=` the potential requires
   (`metal`, `real`, ...), ASE converts results to eV and eV/Å, so `relax`'s
@@ -362,9 +375,10 @@ writing the command:
 bin = "/shared/sw/qe-7.4/bin"
 ```
 
-SLAB then constructs the command as `mpirun -np N <bin>/pw.x`. `N` comes
-from `$SLURM_NTASKS`, so a batch job uses its whole allocation and a
-login-node smoke test stays serial. An `mpirun` bundled in the same bin
+SLAB then constructs the command as literally `mpirun -np {ntasks}
+<bin>/pw.x` and fills `{ntasks}` per launch with a sized launch's rank
+count, else `$SLURM_NTASKS`, else 1. So a batch job uses its whole allocation
+and a login-node smoke test stays serial. An `mpirun` bundled in the same bin
 directory wins over the one on `PATH`, because a custom install usually
 links against its own MPI. `bin` and `command` are exclusive, and the
 constructed line enters cache identity exactly as a hand-written command
@@ -791,7 +805,7 @@ unchanged on any cluster whose registry declares `vasp`.
     "lammps-gpu": {
       "calculator": "slab.backends.lammps_calculator",
       "options": {
-        "command": "mpirun -np 1 lmp -k on g 1 -sf kk -pk kokkos newton on neigh half",
+        "command": "mpirun -np {ntasks} lmp -k on g {gpus} -sf kk -pk kokkos newton on neigh half",
         "setup": ["module load lammps/2025.07-kokkos"]
       },
       "version": "22 Jul 2025 - Update 4",

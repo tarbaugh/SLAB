@@ -118,8 +118,56 @@ def test_the_cage_description_notices_the_gpu(tmp_path: Path) -> None:
         toml_path=tmp_path / "sandbox" / "slab.toml",
         engine_tasks=4,
     )
-    assert "the job holds a GPU" in context
-    assert "MPI engines launch with 4 rank(s)." in context
+    assert "the job holds 1 GPU(s) (gres gpu:1)" in context
+    assert "CUDA_VISIBLE_DEVICES" in context  # where the ids come from
+    assert "MPI engines launch with 4 rank(s) when a launch is unsized." in context
+    assert "launch_workflow takes ntasks, threads, and gpus" in context
+
+
+def test_render_re_exports_the_gpu_ids_and_turns_binding_off(tmp_path: Path) -> None:
+    """--cleanenv strips what the scheduler set; the budget inside reads
+    exactly these, and OpenMPI must bind inside each launch's mask."""
+    script, _, _ = _render(tmp_path, _agent(), _slab_cfg())
+    assert '--env CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-${SLURM_JOB_GPUS:-}}"' in script
+    assert '--env SLURM_CPUS_PER_TASK="${SLURM_CPUS_PER_TASK:-1}"' in script
+    assert "--env OMPI_MCA_hwloc_base_binding_policy=none" in script
+
+
+def test_a_sized_render_sizes_the_sandbox_job_and_the_context(tmp_path: Path) -> None:
+    from slab.resources import JobSize
+
+    gpu_hpc = HpcConfig.model_validate(
+        {
+            "default_partition": "gpu",
+            "partitions": {
+                "gpu": {"gres": "gpu:a100:4", "node": {"cpus": 64, "gpus": 4}},
+            },
+        }
+    )
+    script, _, context = render_sandbox_script(
+        _agent(),
+        gpu_hpc,
+        _slab_cfg(),
+        tmp_path / "ws",
+        tmp_path / "project",
+        "goal",
+        toml_path=tmp_path / "sandbox" / "slab.toml",
+        size=JobSize(ntasks_per_node=8, gpus_per_node=2),
+    )
+    assert "#SBATCH --ntasks-per-node=8\n" in script
+    assert "#SBATCH --gres=gpu:a100:2\n" in script  # the type kept, the count sized
+    assert "the job holds 2 GPU(s) (gres gpu:a100:4)" in context
+    with pytest.raises(Exception, match="gpus_per_node=5 exceeds the 4 gpus"):
+        render_sandbox_script(
+            _agent(),
+            gpu_hpc,
+            _slab_cfg(),
+            tmp_path / "ws",
+            tmp_path / "project",
+            "goal",
+            toml_path=tmp_path / "sandbox" / "slab.toml",
+            size=JobSize(ntasks_per_node=8, gpus_per_node=5),
+        )
 
 
 def test_a_context_outside_the_project_is_warned(tmp_path: Path) -> None:
@@ -402,6 +450,54 @@ def test_cli_render_writes_both_files_and_next_steps(
     context = (tmp_path / "sandbox" / "context.md").read_text()
     assert context.startswith("# Sandbox")
     assert str(tmp_path / "sandbox" / "context.md") in script  # SLAB_SANDBOX_CONTEXT
+
+
+def test_cli_render_takes_the_five_size_flags_and_launch_reuses_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "slab.toml").write_text(
+        '[agent]\nmodel = "m"\n[agent.sandbox]\nimage = "/i.sif"\n'
+        '[hpc]\ndefault_partition = "gpu"\n[hpc.partitions.gpu]\ngres = "gpu:a100:4"\n'
+        "[hpc.partitions.gpu.node]\ncpus = 64\ngpus = 4\n"
+    )
+    workspace = ["-w", str(tmp_path / "ws")]
+    result = runner.invoke(
+        app,
+        ["sandbox", "render", "size it", *workspace, "--ntasks-per-node", "8",
+         "--gpus-per-node", "2"],
+    )
+    assert result.exit_code == 0, result.output
+    script = (tmp_path / "sandbox" / "mason-sandbox.sbatch").read_text()
+    assert "#SBATCH --ntasks-per-node=8\n" in script and "#SBATCH --gres=gpu:a100:2\n" in script
+    record = json.loads((tmp_path / "sandbox" / "render.json").read_text())
+    assert record["size"] == {
+        "nodes": 1, "ntasks_per_node": 8, "cpus_per_task": 1, "gpus_per_node": 2, "mem": None,
+    }
+    refused = runner.invoke(
+        app,
+        ["sandbox", "render", "too big", *workspace, "--ntasks-per-node", "8",
+         "--gpus-per-node", "5"],
+    )
+    assert refused.exit_code != 0 and "gpus_per_node=5 exceeds the 4 gpus" in refused.output
+    partial = runner.invoke(app, ["sandbox", "render", "half", *workspace, "--gpus-per-node", "1"])
+    assert partial.exit_code != 0 and "pass ntasks_per_node" in partial.output
+    # A bare launch reuses the recorded size: the re-render is sized the same.
+    import mason.cli as mason_cli
+
+    seen: dict[str, object] = {}
+
+    def fake_launch(goal: str, **kwargs: object):
+        from slab.hpc import SubmittedJob
+
+        seen.update(kwargs)
+        return SubmittedJob(job_id="1", job_name="mason-sandbox", partition="gpu", script_path="x")
+
+    monkeypatch.setattr(mason_cli, "launch_sandbox", fake_launch)
+    launched = runner.invoke(app, ["sandbox", "launch", *workspace])
+    assert launched.exit_code == 0, launched.output
+    size = seen["size"]
+    assert size is not None and size.ntasks_per_node == 8 and size.gpus_per_node == 2
 
 
 def test_the_prompt_carries_the_sandbox_context(

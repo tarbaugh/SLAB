@@ -326,6 +326,56 @@ def test_materials_tools_unconfigured_surface_the_fix(
 # -- parity with the resident agent -------------------------------------------
 
 
+def test_the_size_arguments_match_the_resident_agents(root: Path, tmp_path: Path) -> None:
+    """Both tool surfaces name the sizes the same way, so a skill that says
+    'pass ntasks, threads, gpus' or 'ntasks_per_node ... mem' is true over MCP
+    and in Mason alike."""
+    from mason.session import MasonSession
+    from mason.tools import build_toolbox
+    from slab.config import HpcConfig
+
+    (tmp_path / "slab.toml").write_text('[hpc]\ndefault_partition = "cpu"\n[hpc.partitions.cpu]\n')
+    server = build_server(root, project=tmp_path)
+    over_mcp = {
+        tool.name: set((getattr(tool, "input_schema", None) or tool.inputSchema)["properties"])
+        for tool in asyncio.run(server.list_tools())
+    }
+    hpc = HpcConfig.model_validate({"default_partition": "cpu", "partitions": {"cpu": {}}})
+    session = MasonSession(tmp_path, workspace_root=root, hpc=hpc, auto_approve=True)
+    in_mason = {
+        name: set(tool.parameters["properties"])
+        for name, tool in build_toolbox(session).tools.items()
+    }
+    launch = {"ntasks", "threads", "gpus"}
+    assert launch <= over_mcp["launch_workflow"] and launch <= in_mason["launch_workflow"]
+    sizes = {"nodes", "ntasks_per_node", "cpus_per_task", "gpus_per_node", "mem"}
+    assert sizes <= over_mcp["submit_job"] and sizes <= in_mason["submit_job"]
+
+
+def test_the_server_holds_the_reservation_until_the_child_claims_it(
+    root: Path, tmp_path: Path, no_gpus: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The holder of a fresh reservation is the server's own pid, so a server
+    that dies before its child starts leaves a reservation the next reap
+    releases, never one that outlives everything."""
+    import foundation._ops as ops
+
+    seen: dict[str, object] = {}
+    real = ops.launch_child
+
+    def spy(root_arg: Path, script: object, **kwargs: Any) -> dict[str, Any]:
+        with Workspace(root) as ws:
+            seen["holder"] = ws.runs.get_reservation(kwargs["reservation"].id).holder_pid
+        return real(root_arg, script, **kwargs)
+
+    monkeypatch.setattr(ops, "launch_child", spy)
+    script = tmp_path / "wf.py"
+    script.write_text("print('ok')\n")
+    server = build_server(root, project=tmp_path, session="mcp-holder")
+    result = _call(server, "launch_workflow", {"script_path": str(script), "ntasks": 1})
+    assert seen["holder"] == os.getpid() and result["run_id"] and result["exit_code"] == 0
+
+
 def test_hpc_tools_appear_only_with_partitions(root: Path, tmp_path: Path) -> None:
     server = build_server(root, project=tmp_path)
     assert not HPC_TOOLS & {t.name for t in asyncio.run(server.list_tools())}
