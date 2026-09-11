@@ -286,6 +286,10 @@ class MasonSession:
         self.compute_profile = self.agent.compute_profile or (
             "cluster" if self.hpc.partitions else "laptop"
         )
+        # What this process may use, counted once at start for the transcript
+        # header. The report divides the cpu-hours and gpu-hours the
+        # session's runs held by this budget over the session's wall time.
+        self.budget: dict[str, int] = self._count_budget()
         self.endpoint = ""
         self.endpoint_origin = ""
         self.resolve_endpoint()
@@ -307,6 +311,12 @@ class MasonSession:
         self.transcript_path = self.sessions_dir / f"{stamp}-{os.getpid()}.jsonl"
         self._lock_handle: Any | None = None
         self._software_versions: dict[str, str] | None = None
+
+    @staticmethod
+    def _count_budget() -> dict[str, int]:
+        from slab.resources import budget
+
+        return budget().counts
 
     def software_versions(self) -> dict[str, str]:
         """The software present now, probed once per session and then reused.

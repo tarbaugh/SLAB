@@ -1028,12 +1028,22 @@ def benchmark_tables(
             "promoted of what its session produced. Rewrites nothing.",
         ),
     ] = False,
+    utilisation: Annotated[
+        bool,
+        typer.Option(
+            "--utilisation",
+            help="Print the utilisation table instead: the cpu-hours and gpu-hours each "
+            "campaign's runs held, against the session's budget over its wall time. "
+            "Rewrites nothing.",
+        ),
+    ] = False,
 ) -> None:
     """Rewrite the benchmark tables inside their marker regions in the docs and the README."""
     path = records or benchmark.records_path()
-    if retention:
+    if retention or utilisation:
+        table = benchmark.retention_table if retention else benchmark.utilisation_table
         try:
-            typer.echo(benchmark.retention_table(benchmark.load_records(path)))
+            typer.echo(table(benchmark.load_records(path)))
         except _BENCH_ERRORS as e:
             _fail(str(e))
         return

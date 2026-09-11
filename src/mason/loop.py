@@ -582,6 +582,9 @@ class Mason:
                     "endpoint": session.endpoint,
                     "endpoint_origin": session.endpoint_origin,
                     "compute_profile": session.compute_profile,
+                    # The cpus and gpus the session may use, so a report can
+                    # say what share of them its runs held.
+                    "budget": dict(session.budget),
                     "max_turns": session.agent.max_turns,
                     # The reasoning dial and the code that ran, so a review
                     # can attribute a bloated or a truncated turn.

@@ -231,6 +231,17 @@ Rules for the record:
   finish retired sessions carries `null`. `slab benchmark tables
   --retention` prints one row per record from these fields and
   rewrites nothing.
+- A record carries `utilisation`: what the session's runs held of the
+  machine. `cpu_hours_held` and `gpu_hours_held` sum each run's slice
+  times its running span, `wall_hours` is the transcript span, `budget`
+  is the `{cpus, gpus}` the session started with, and `utilisation` is
+  held over budget times wall, per resource, as a fraction. `runs_sized`
+  counts the runs that contributed, `runs_unsized` the runs without a
+  slice, and `runs_open` the sized runs that had not finished. A session
+  whose header records no budget carries `null` for `budget` and for the
+  fractions, and a campaign scored before the scorer kept these numbers
+  has no `utilisation` field. `slab benchmark tables --utilisation`
+  prints one row per record from these fields and rewrites nothing.
 
 Then rewrite the tables on this page (the questions, the conditions, the
 mechanism ledger, the results, and the flags) and the summary in the

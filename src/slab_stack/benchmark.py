@@ -67,7 +67,7 @@ from mason.mechanisms import (
 )
 from mason.mechanisms import conditions_table as _conditions_table
 from mason.mechanisms import mechanisms_table as _mechanisms_table
-from mason.report import summarize
+from mason.report import session_runs, summarize, utilisation
 from mason.session import SessionError, session_header, transcript_for, transcript_groups
 from slab._version import __version__
 from slab_stack import review
@@ -513,6 +513,8 @@ def score_session(
         "slab_version": __version__,
     }
     with Workspace(root) as ws:
+        summary.update(utilisation(summary, session_runs(ws, stem)))
+        record["utilisation"] = utilisation_of(summary)
         _judge_campaign(ws, asked, finish, record)  # may refuse: no reference
         if transcript is not None:
             review.review(
@@ -557,6 +559,32 @@ def retention_of(retire: dict[str, Any] | None) -> dict[str, Any] | None:
     if "error" in retire:
         return {"error": str(retire["error"])}
     return {key: retire.get(key) for key in RETENTION_KEYS}
+
+
+UTILISATION_KEYS = (
+    "budget",
+    "cpu_hours_held",
+    "gpu_hours_held",
+    "wall_hours",
+    "runs_sized",
+    "runs_unsized",
+    "runs_open",
+    "utilisation",
+)
+
+
+def utilisation_of(summary: dict[str, Any]) -> dict[str, Any]:
+    """The resource hours a session's runs held, copied from the report summary.
+
+    Examples:
+        >>> held = utilisation_of({"budget": {"cpus": 8, "gpus": 0}, "cpu_hours_held": 0.5,
+        ...                        "gpu_hours_held": 0.0, "wall_hours": 0.25, "runs_sized": 1,
+        ...                        "runs_unsized": 0, "runs_open": 0,
+        ...                        "utilisation": {"cpu": 0.25, "gpu": None}, "steps": 3})
+        >>> sorted(held) == sorted(UTILISATION_KEYS), held["utilisation"]["cpu"]
+        (True, 0.25)
+    """
+    return {key: summary.get(key) for key in UTILISATION_KEYS}
 
 
 def _harness_summary(harness: SessionRecord) -> dict[str, Any]:
@@ -919,6 +947,57 @@ def retention_table(records: Iterable[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _hours(value: Any) -> str:
+    hours = float(value or 0.0)
+    text = f"{hours:.3g}"
+    return f"{hours:.6f}" if "e" in text else text
+
+
+def utilisation_table(records: Iterable[dict[str, Any]]) -> str:
+    """One row per record: the cpu-hours and gpu-hours its runs held, and
+    what share of the session's budget over its wall time that was.
+
+    A record scored before the scorer kept these numbers says so instead
+    of showing zeros, and a session whose header recorded no budget shows
+    its hours held with no share.
+    """
+    rows = list(records)
+    if not rows:
+        return "No campaign has been scored yet."
+    lines = [
+        "| Session | Model | Machine | Condition | Q | Wall | Budget | Held cpu-h | Held gpu-h "
+        "| Cpu | Gpu | Unsized |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for record in rows:
+        held = record.get("utilisation")
+        session = str(record.get("session") or "")[:20]
+        head = (
+            f"| {session} | {record.get('model')} | {record.get('machine')} | "
+            f"{harness_label(record.get('condition'), record.get('ablated') or ())} | "
+            f"Q{record.get('question')} | "
+        )
+        if not held:
+            lines.append(head + " | ".join(["not recorded"] * 7) + " |")
+            continue
+        wall = held.get("wall_hours")
+        budget = held.get("budget") or {}
+        shares = held.get("utilisation") or {}
+        cells = [
+            f"{wall:.2f} h" if wall is not None else "unknown",
+            f"{budget.get('cpus')} cpus, {budget.get('gpus')} gpus" if budget else "not recorded",
+            _hours(held.get("cpu_hours_held")),
+            _hours(held.get("gpu_hours_held")),
+            *(
+                f"{100 * shares[resource]:.0f} %" if shares.get(resource) is not None else ""
+                for resource in ("cpu", "gpu")
+            ),
+            str(int(held.get("runs_unsized") or 0)),
+        ]
+        lines.append(head + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
 def conditions_table() -> str:
     """The three harness conditions, rendered from :mod:`mason.mechanisms`."""
     return _conditions_table()
@@ -1059,4 +1138,6 @@ __all__ = [
     "rewrite_region",
     "run_campaign",
     "score_session",
+    "utilisation_of",
+    "utilisation_table",
 ]

@@ -914,6 +914,55 @@ def _format_span(seconds: float | None) -> str:
     return f"{int(seconds // 3600)}h{int(seconds % 3600 // 60):02d}m"
 
 
+def _format_hours(hours: float) -> str:
+    """Three significant figures, never in exponent form.
+
+    Examples:
+        >>> [_format_hours(h) for h in (12.34, 1.5, 0.002, 0.0000123, 0.0)]
+        ['12.3', '1.5', '0.002', '0.000012', '0']
+    """
+    text = f"{hours:.3g}"
+    return f"{hours:.6f}" if "e" in text else text
+
+
+def _held_line(summary: dict[str, Any]) -> str:
+    """The resource hours the session's runs held, against the budget.
+
+    Examples:
+        >>> _held_line({"cpu_hours_held": 12.3, "gpu_hours_held": 1.5, "span_s": 5220.0,
+        ...             "budget": {"cpus": 64, "gpus": 4},
+        ...             "utilisation": {"cpu": 0.13, "gpu": 0.26},
+        ...             "runs_unsized": 0, "runs_open": 0})
+        'held 12.3 cpu-h and 1.5 gpu-h over 1h27m on 64 cpus and 4 gpus (13 % cpu, 26 % gpu)'
+        >>> _held_line({"cpu_hours_held": 0.002, "gpu_hours_held": 0.0, "span_s": 30.0,
+        ...             "budget": None, "utilisation": None, "runs_unsized": 2, "runs_open": 0})
+        'held 0.002 cpu-h and 0 gpu-h over 30s; budget not recorded; 2 run(s) without a slice'
+    """
+    line = (
+        f"held {_format_hours(summary['cpu_hours_held'])} cpu-h and "
+        f"{_format_hours(summary['gpu_hours_held'])} gpu-h over "
+        f"{_format_span(summary['span_s'])}"
+    )
+    budget = summary.get("budget")
+    shares = summary.get("utilisation")
+    if budget is None or shares is None:
+        line += "; budget not recorded"
+    else:
+        line += f" on {budget['cpus']} cpus and {budget['gpus']} gpus"
+        percents = [
+            f"{100 * share:.0f} % {resource}"
+            for resource, share in shares.items()
+            if share is not None
+        ]
+        if percents:
+            line += f" ({', '.join(percents)})"
+    if summary.get("runs_unsized"):
+        line += f"; {summary['runs_unsized']} run(s) without a slice"
+    if summary.get("runs_open"):
+        line += f"; {summary['runs_open']} run(s) still open"
+    return line
+
+
 def _offenders(counts: dict[str, int]) -> str:
     return ", ".join(f"{name} x{n}" for name, n in list(counts.items())[:4])
 
@@ -970,12 +1019,14 @@ def mason_report(
             (group for conversation, group in groups if conversation.resolve() == resolved),
             [],
         )
-    summary = summarize(transcript, siblings)
+    runs: list[dict[str, Any]] | None
     try:
         with Workspace(root) as ws:
-            summary["runs"] = session_runs(ws, str(summary["session"]))
+            runs = session_runs(ws, transcript.stem)
     except (FoundationError, SlabError, OSError):
-        summary["runs"] = None  # no workspace record is not a report failure
+        runs = None  # no workspace record is not a report failure
+    summary = summarize(transcript, siblings, runs)
+    summary["runs"] = runs
 
     if as_json:
         typer.echo(json.dumps(summary, indent=2))
@@ -1012,6 +1063,8 @@ def mason_report(
             )
     else:
         typer.echo("runs this session created: none")
+    if runs is not None:
+        typer.echo(_held_line(summary))
     tools = summary["tools"]
     if tools:
         typer.echo(f"tool calls ({sum(tools.values())}):")
