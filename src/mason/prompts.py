@@ -280,8 +280,10 @@ one.""",
 
 This machine is a workstation: bigger than a laptop, smaller than a cluster. \
 Medium cells and the `balanced` protocol are reasonable; hour-scale jobs are \
-acceptable if you say what you are starting and why. Anything that would run \
-overnight belongs on a cluster — say so rather than starting it.""",
+acceptable if you say what you are starting and why. Molecular dynamics and \
+large cells go through `run_lammps` with a gpu slice (`gpus=` on \
+`launch_workflow`) where the machine declares a gpu build. Anything that would \
+run overnight belongs on a cluster — say so rather than starting it.""",
     "cluster": """\
 # Compute budget: cluster
 
@@ -299,8 +301,10 @@ than a few minutes goes through `submit_job` (typically wrapping \
 `job_status`. Size each job: `submit_job` takes ntasks_per_node, \
 cpus_per_task, gpus_per_node, nodes, and mem, up to the fields the \
 partition declares as `list_engines` reports them, and a size past a \
-declared field is refused naming it. Keep interactive work on this node \
-small.""",
+declared field is refused naming it. Molecular dynamics and large cells go \
+through `run_lammps` with a gpu slice (`gpus_per_node` on `submit_job`, \
+`gpus=` on `launch_workflow`) where the machine declares a gpu build. Keep \
+interactive work on this node small.""",
 }
 
 

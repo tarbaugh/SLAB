@@ -5,6 +5,15 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- The LAMMPS skills state one rule for speed. Any molecular dynamics,
+  and any static calculation on more than a few hundred atoms, runs
+  through `run_lammps` sized with `gpus=` when the machine declares a
+  gpu build and the slice can hold a gpu, with threads through the plain
+  build as the fallback. The ASE-driven `lammps` engine is for a small
+  relaxation or single point that feeds another task. The
+  lammps-scripting and lammps-potentials skills, the md-expert card, the
+  lammps note, the cluster and workstation compute profiles, and the
+  `relax` and `single_point` docstrings say so.
 - The gpu build is `[engines.lammps.gpu]`, and the slice chooses it. The
   table carries a KOKKOS `command`, which must name `{gpus}` or turn
   KOKKOS on with `-k on`, and its `setup`. `[engines.lammps]` stays the

@@ -27,26 +27,18 @@ Record the provenance of every potential: which file or checkpoint id,
 what it was fit for, where it came from. A beautiful trajectory under a
 potential used outside its domain is fiction with good statistics.
 
-Speed is a setting you choose, not luck. A KOKKOS build of LAMMPS runs
-the same input on GPUs or on threads through command-line switches; the
-lammps-potentials skill gives the switches, the one-MPI-task-per-GPU
-rule, and the check that the accelerated run reproduces the plain one on
-the smoke cell. A GPU run is sized: on a login node it is a job on the
-GPU partition through `submit_job` with `gpus_per_node` set, and inside
-a sandbox or an allocation it is a `launch_workflow` call with `gpus=`
-and one rank per GPU (`ntasks` equal to `gpus`). Never start a GPU run
-on the login node itself. A timing on the smoke cell decides whether the
-switches pay before a production run spends its allocation. A machine
-keeps a plain build and a gpu build, and the build follows the slice:
-a launch sized with `gpus=` runs the gpu build, and an unsized launch
-runs the plain build, so a smoke test stays plain and production MD is
-accelerated. Never name a build; `engine="lammps"` is all you pass. A
-build whose command holds `{ntasks}`, `{threads}`, or `{gpus}` fills
-them from the launch's size, and `list_engines` marks it `sized per
-launch`; SLAB adds no switch a build lacks. Read the `lammps` entry of
-`list_engines` before a GPU run, and `info["kokkos"]` after it, because
-a build without `-k on` ran on the host whatever it contained, and
-`gpus` there must equal what the launch held.
+Speed is a rule, not luck. Any molecular dynamics, and any static
+calculation on more than a few hundred atoms, runs through `run_lammps`
+sized with `gpus=` and one rank per GPU when the machine declares a gpu
+build and the slice can hold a gpu. Threads through the plain build are
+the fallback when it cannot. The ASE-driven `lammps` engine is for a
+small relaxation or single point that feeds another task. The build
+follows the slice, so a smoke test on the small cell runs plain and
+unsized first, and the accelerated run must reproduce it. Never name a
+build; `engine="lammps"` is all you pass. Never start a GPU run on the
+login node itself. The lammps-scripting skill has the launch call and
+the fallback, and the lammps-potentials skill has the switches, the
+smoke comparison, and what `info["kokkos"]` must show after a GPU run.
 
 A machine-learned potential can say when it is guessing. GRACE reports a
 per-atom extrapolation grade, gamma: near 1 is the edge of the training

@@ -311,6 +311,14 @@ the text enters the cache identity. `atoms=` writes the structure as
 `structure.data`, `files=` stages potential files and restarts by
 basename, and the task refuses a file the script never mentions.
 
+The rule the bundled LAMMPS skills state is one sentence. Any molecular
+dynamics, and any static calculation on more than a few hundred atoms,
+runs through `run_lammps` sized with `gpus=` when the machine declares a
+gpu build and the slice can hold a gpu. Threads through the plain build
+are the fallback when it cannot. The engine is for a relaxation or a
+single point on a small cell that feeds another task. The numbers are
+guidance thresholds, not limits.
+
 Executed for real, on a laptop, against a LAMMPS build from 22 Jul 2025:
 
 <!-- no-verify -->

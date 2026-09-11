@@ -92,6 +92,10 @@ def relax(
 ) -> tuple[Atoms, dict[str, Any]]:
     """Relax atomic positions with BFGS under the chosen engine.
 
+    For molecular dynamics or a large cell under LAMMPS use
+    :func:`run_lammps`, which runs the script whole and takes the gpu
+    build when the launch holds gpus.
+
     Positions only — no cell relaxation in the MVP. The input ``atoms`` is
     never mutated; pass it *without* an attached calculator (tracing hashes the
     input, and a live calculator does not serialize).
@@ -381,6 +385,10 @@ def single_point(
     label: str | None = None,
 ) -> tuple[Atoms, dict[str, Any]]:
     """Evaluate energy and forces once under the chosen engine — no optimization.
+
+    For molecular dynamics or a large cell under LAMMPS use
+    :func:`run_lammps`, which runs the script whole and takes the gpu
+    build when the launch holds gpus.
 
     The second half of the canonical two-fidelity workflow: relax a structure
     under a cheap engine (a universal MLIP, EMT), then ``single_point`` the

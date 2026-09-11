@@ -4,9 +4,12 @@ description: Write a LAMMPS input script and run it whole through the
   run_lammps task, so the dynamics run inside LAMMPS at its own speed -
   the input anatomy in order, the ensembles and their damping constants,
   outputs and restarts, the checks that gate a run, a thermo report script
-  for equilibration, and the errors LAMMPS prints. Use for production MD
-  (NVE, NVT, NPT, Langevin), a minimization in LAMMPS, a long run on GPUs
-  or threads, or when an ASE-driven engine run is too slow.
+  for equilibration, and the errors LAMMPS prints. Use for every
+  molecular dynamics run (NVE, NVT, NPT, Langevin), a minimization in
+  LAMMPS, and any static calculation on more than a few hundred atoms,
+  sized with gpus= when the machine declares a gpu build and the slice
+  can hold a gpu; the ASE-driven lammps engine is only for a small
+  relaxation or single point that feeds another task.
 license: MIT
 metadata:
   mason-agents: "md-expert"
@@ -20,16 +23,27 @@ is about writing that script well and judging what came back.
 
 ## 1. Script or engine
 
+The rule: any molecular dynamics, and any static calculation on more
+than a few hundred atoms, runs through `run_lammps` sized with `gpus=`
+when the machine declares a gpu build and the slice can hold a gpu.
+Threads through the plain build are the fallback when it cannot. The
+ASE-driven `lammps` engine is for a relaxation or single point that
+feeds another task, on a small cell. The numbers are guidance
+thresholds, not limits: a few hundred atoms, a thousand steps.
+
 | Need | Route |
 | --- | --- |
-| Production MD, thousands of steps or more | `run_lammps` with a script |
+| MD of any length | `run_lammps` sized with `gpus=`; threads through the plain build when no gpu can be held |
+| A static calculation above a few hundred atoms | `run_lammps` sized with `gpus=`, with the same fallback |
 | A minimization LAMMPS does better (`fix box/relax`, `min_style fire`) | `run_lammps` |
-| GPUs or threads through a KOKKOS build | `run_lammps`; the switches ride in the command (lammps-potentials skill, section 4) |
-| A relaxation or single point ASE drives, feeding another task | the `lammps` engine with `relax` or `single_point` |
+| A relaxation or single point on a small cell, feeding another task | the `lammps` engine with `relax` or `single_point`, unsized |
 
 The engine sends the whole input to LAMMPS once per force call, so a
 long MD through it pays a `read_data` and a potential load on every
-step. A script pays them once.
+step, and the gpu build cannot speed dynamics through it. A script pays
+them once. A smoke test on the small cell still runs plain first, and
+the accelerated run must reproduce it within the tolerance the
+lammps-potentials skill states in section 4.
 
 ## 2. The task
 
@@ -277,18 +291,32 @@ the build follows the slice: size the launch with `gpus=` and the gpu
 build runs, leave it unsized and the plain build runs. Read the
 `lammps` entry of `list_engines` before a GPU run, and `info["kokkos"]`
 after it.
+
+The production launch, inside a sandbox or an allocation, sizes the run
+with `gpus=` and one MPI task per GPU:
+
+```
+launch_workflow(script="md.py", gpus=2, ntasks=2)
+```
+
+The call reserves the GPUs and the cpus before the run starts and is
+refused with the free amounts when they are taken. Before a second
+concurrent launch, call `free_resources`, because the free amounts in
+the environment block were read when the prompt was built and the first
+launch now holds its slice. On a login node the same run is a job on
+the GPU partition through `submit_job` with `gpus_per_node` and
+`ntasks_per_node` equal to it. Never login-node work. After the run,
+`info["kokkos"]["gpus"]` must equal what the launch held.
+
+When the machine declares no gpu build, or the budget holds no gpu, the
+fallback is threads through the plain build: size the launch with
+`ntasks=` and `threads=` so tasks times threads stays within the cores
+it holds, and say in the notebook that the run was not accelerated. Do
+not hold an MD run for a gpu the budget cannot give.
+
 `-sf kk` gives every style in the script its Kokkos version where one
 exists, and a fix or compute without one runs on the host and copies
 data back each step, so keep the script inside Kokkos-enabled styles
 and keep the thermo and dump intervals long. The lammps-potentials
 skill, section 4, has the switches, the one-task-per-GPU rule, and the
-smoke comparison against the plain build. A GPU run is sized where it
-runs: on a login node, a job on the GPU partition through `submit_job`
-with `gpus_per_node`; inside a sandbox or an allocation, a
-`launch_workflow` call with `gpus=` and `ntasks` equal to it, which
-reserves the GPUs and the cpus before the run starts and is refused with
-the free amounts when they are taken. Before a second concurrent launch,
-call `free_resources`, because the free amounts in the environment block
-were read when the prompt was built and the first launch now holds its
-slice. Never login-node work. After the run, `info["kokkos"]["gpus"]`
-must equal what the launch held.
+smoke comparison against the plain build.
