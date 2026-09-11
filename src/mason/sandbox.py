@@ -895,6 +895,8 @@ _DEFAULT_PAYLOAD = {
 _SNAPSHOT_BUILDERS = ("atomsk", "gracemaker")
 
 _LAUNCHERS = frozenset({"env", "srun", "mpirun", "mpiexec", "nice", "time"})
+#: A size placeholder a build fills per launch (``{ntasks}``, ``{gpus}``); never a binary.
+_PLACEHOLDER = re.compile(r"\{[a-z_]+\}")
 
 
 class SetupSnapshot:
@@ -956,18 +958,28 @@ class SetupSnapshot:
 def payload_name(engine: str, command: str | None) -> str:
     """The binary a setup must make resolvable, read off the command line.
 
-    Skips launchers, options, assignments, and bare numbers, so
-    ``mpirun -np 4 pw.x`` and ``env OMP_NUM_THREADS=4 pw.x`` both name
-    ``pw.x``. With no command configured, the engine's canonical binary.
+    Skips launchers, options, assignments, bare numbers, and the size
+    placeholders a build fills per launch, so ``mpirun -np 4 pw.x``,
+    ``env OMP_NUM_THREADS=4 pw.x``, and ``mpirun -np {ntasks} pw.x`` all
+    name ``pw.x``. With no command configured, the engine's canonical
+    binary.
 
     Examples:
         >>> payload_name("qe", "mpirun -np 4 pw.x")
         'pw.x'
+        >>> payload_name("lammps", "mpirun -np {ntasks} lmp -k on g {gpus}")
+        'lmp'
         >>> payload_name("lammps", None)
         'lmp'
     """
     for token in shlex.split(command) if command else ():
-        if token in _LAUNCHERS or token.startswith("-") or "=" in token or token.isdigit():
+        if (
+            token in _LAUNCHERS
+            or token.startswith("-")
+            or "=" in token
+            or token.isdigit()
+            or _PLACEHOLDER.fullmatch(token)
+        ):
             continue
         return token
     return _DEFAULT_PAYLOAD[engine]
@@ -1230,6 +1242,18 @@ def snapshot_engines(slab_cfg: SlabConfig) -> dict[str, SetupSnapshot]:
         else:
             payload = payload_name(engine, command)
         snapshots[engine] = snapshot_setup(engine, table.setup, payload, extras=extras)
+    # The gpu LAMMPS build is a second binary with setup lines of its own
+    # (a KOKKOS module beside the plain one). It is snapshotted under
+    # ``lammps.gpu`` so its install is bound and its setup frozen too;
+    # otherwise the first sized launch in the container would run
+    # ``module load`` and die.
+    gpu = getattr(slab_cfg.engines.lammps, "gpu", None)
+    if gpu is not None and gpu.setup:
+        tokens = shlex.split(gpu.command)
+        extras = tuple(t for t in tokens if t in ("mpirun", "mpiexec"))
+        snapshots["lammps.gpu"] = snapshot_setup(
+            "lammps", gpu.setup, payload_name("lammps", gpu.command), extras=extras
+        )
     # Builders are executables too, and gracemaker's is a whole python
     # installation reached through setup lines the container cannot run.
     # A configured builder is snapshotted the same way, so its install is
@@ -1459,38 +1483,46 @@ def sandbox_toml(
             "sandbox (no route to the controller): edit the rendered slab.toml "
             "to an mpirun-style command sized to the job's allocation"
         )
+    # (label in the rendered file, engine or builder name, its table, the
+    # snapshot key): the gpu LAMMPS build is a nested table with a binary
+    # and setup lines of its own, frozen exactly like a top-level engine.
+    targets: list[tuple[str, str, dict[str, Any], str]] = []
     for kind, tables in (("engines", engines), ("builders", builders)):
         for name, table in tables.items():
-            snapshot = (snapshots or {}).get(name)
-            if snapshot is not None and snapshot.error is None and not table.get("setup"):
-                # No setup to freeze, but the command must still resolve in
-                # a container whose PATH never saw the host's: replace the
-                # payload token only, keeping launchers and arguments.
-                if table.get("command") and not str(table["command"]).startswith("/"):
-                    token = payload_name(name, str(table["command"]))
-                    table["command"] = shlex.join(
-                        snapshot.payload if t == token else t
-                        for t in shlex.split(str(table["command"]))
-                    )
-                continue
-            if not table.get("setup"):
-                continue
-            if snapshot is not None and snapshot.error is None:
-                table["setup"] = snapshot.setup_lines()
-                warnings.append(
-                    f"[{kind}.{name}] setup snapshotted from the host: "
-                    f"{snapshot.payload}, {snapshot.export_count()} export(s), "
-                    f"{len(_snapshot_binds(snapshot))} bind(s)"
+            targets.append((f"{kind}.{name}", name, table, name))
+            if kind == "engines" and name == "lammps" and isinstance(table.get("gpu"), dict):
+                targets.append(("engines.lammps.gpu", "lammps", table["gpu"], "lammps.gpu"))
+    for label, name, table, key in targets:
+        snapshot = (snapshots or {}).get(key)
+        if snapshot is not None and snapshot.error is None and not table.get("setup"):
+            # No setup to freeze, but the command must still resolve in
+            # a container whose PATH never saw the host's: replace the
+            # payload token only, keeping launchers and arguments.
+            if table.get("command") and not str(table["command"]).startswith("/"):
+                token = payload_name(name, str(table["command"]))
+                table["command"] = shlex.join(
+                    snapshot.payload if t == token else t
+                    for t in shlex.split(str(table["command"]))
                 )
-                continue
-            because = f" (snapshot failed: {snapshot.error})" if snapshot is not None else ""
+            continue
+        if not table.get("setup"):
+            continue
+        if snapshot is not None and snapshot.error is None:
+            table["setup"] = snapshot.setup_lines()
             warnings.append(
-                f"[{kind}.{name}] has setup lines the render could not snapshot"
-                f"{because}: module loads resolve against the host, not the "
-                f"container — bind the software read-only via [agent.sandbox] "
-                f"binds and set PATH/LD_LIBRARY_PATH in setup instead of "
-                f"'module load'"
+                f"[{label}] setup snapshotted from the host: "
+                f"{snapshot.payload}, {snapshot.export_count()} export(s), "
+                f"{len(_snapshot_binds(snapshot))} bind(s)"
             )
+            continue
+        because = f" (snapshot failed: {snapshot.error})" if snapshot is not None else ""
+        warnings.append(
+            f"[{label}] has setup lines the render could not snapshot"
+            f"{because}: module loads resolve against the host, not the "
+            f"container — bind the software read-only via [agent.sandbox] "
+            f"binds and set PATH/LD_LIBRARY_PATH in setup instead of "
+            f"'module load'"
+        )
 
     agent_table = {
         k: v
