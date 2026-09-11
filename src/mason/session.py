@@ -118,12 +118,13 @@ def transcript_groups(
 
 
 def unrecognised_session_files(workspace_root: str | os.PathLike[str]) -> list[Path]:
-    """The files under ``mason/sessions`` that no transcript group claims.
+    """The files under ``mason/sessions`` and ``mason/reviews`` no transcript group claims.
 
     A file that is neither a conversation transcript, a delegation
-    transcript, nor a sidecar of one (``<stem>.compactions.md``) is
-    listed here and never deleted silently: ``slab purge`` prints these
-    and removes them only with ``--all-sessions``.
+    transcript, nor a sidecar of one (``<stem>.compactions.md``, or a
+    review record of one) is listed here and never deleted silently:
+    ``slab purge`` prints these and removes them only with
+    ``--all-sessions``.
 
     Examples:
         >>> import tempfile
@@ -137,15 +138,16 @@ def unrecognised_session_files(workspace_root: str | os.PathLike[str]) -> list[P
         >>> [p.name for p in unrecognised_session_files(root)]
         ['20260801-100000-9.compactions.md', 'notes.txt']
     """
-    sessions = Path(workspace_root) / "mason" / "sessions"
-    if not sessions.is_dir():
-        return []
+    mason = Path(workspace_root) / "mason"
     claimed: set[Path] = set()
     for conversation, siblings in transcript_groups(workspace_root, include_orphans=True):
-        for transcript in (conversation, *siblings):
-            claimed.add(transcript)
-            claimed.add(transcript.with_name(f"{transcript.stem}.compactions.md"))
-    return sorted(p for p in sessions.iterdir() if p.is_file() and p not in claimed)
+        claimed.update((conversation, *siblings))
+        claimed.update(session_sidecars(workspace_root, conversation))
+    found: list[Path] = []
+    for directory in (mason / "sessions", mason / "reviews"):
+        if directory.is_dir():
+            found.extend(p for p in directory.iterdir() if p.is_file() and p not in claimed)
+    return sorted(found)
 
 
 def stale_locks(workspace_root: str | os.PathLike[str]) -> list[Path]:

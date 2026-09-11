@@ -54,7 +54,7 @@ from foundation.errors import IllegalStatusChangeError, IllegalTransitionError, 
 from foundation.lifecycle import ExecutionStatus, LifecycleState
 from foundation.models import ArtifactRole, Run, utcnow
 from foundation.store import RunStore
-from slab.scratch import Leftover, leftovers, scratch_root
+from slab.scratch import Leftover, directory_size, leftovers, scratch_root
 
 if TYPE_CHECKING:
     from foundation.runtime import Workspace
@@ -492,6 +492,10 @@ def purge_expired(
     )
 
 
+MARKER_GRACE_S = 60.0
+"""How long a marker-less scratch directory is kept, for the gap before its marker lands."""
+
+
 class ScratchReport(BaseModel):
     """What :func:`sweep_scratch` did (or, with ``dry_run``, would do).
 
@@ -521,6 +525,10 @@ def _scratch_verdict(ws: Workspace, item: Leftover) -> tuple[bool, str]:
             return True, f"run {run.id} is {run.status.value}"
         return False, f"run {run.id} is running"
     if owner is None:
+        # The marker is written right after the directory is made. Age
+        # never decides ownership; here it only guards that one gap.
+        if item.age_s < MARKER_GRACE_S:
+            return False, "no owner marker yet; made moments ago"
         return True, "no owner marker"
     if item.alive is True:
         return False, f"process {owner.pid} is alive on this host"
@@ -544,7 +552,9 @@ def sweep_scratch(
     ``running``, or names a run that no longer exists, or names no run
     and its process is gone on this host, or has no marker at all. A
     leftover of a run still ``running``, or of a live process, or of a
-    process on another host, is kept and reported with the reason.
+    process on another host, is kept and reported with the reason, and
+    so is one the sweep could not remove. A marker-less directory made
+    less than a minute ago is kept too: its marker is on its way.
 
     *only* restricts the sweep to the leftovers stamped with those run
     ids, for the callers that just failed or purged them: a reap, a job
@@ -580,7 +590,9 @@ def sweep_scratch(
     removed: list[dict[str, str]] = []
     kept: list[dict[str, str]] = []
     freed = 0
-    for item in [] if root is None else leftovers(root):
+    # Sized only after the choice: a reap on a shared root must not walk
+    # every live calculation's scratch to size the one it came for.
+    for item in [] if root is None else leftovers(root, sizes=False):
         run_id = item.owner.run_id if item.owner is not None else None
         if chosen is not None and run_id not in chosen:
             continue
@@ -591,8 +603,13 @@ def sweep_scratch(
         if not goes:
             kept.append(entry)
             continue
-        freed += item.size_bytes
+        size = directory_size(item.path)
         if not dry_run:
-            shutil.rmtree(item.path, ignore_errors=True)
+            try:
+                shutil.rmtree(item.path)
+            except OSError as e:
+                kept.append(entry | {"reason": f"could not remove it: {e}"})
+                continue
+        freed += size
         removed.append(entry)
     return ScratchReport(removed=removed, kept=kept, freed_bytes=freed, dry_run=dry_run)

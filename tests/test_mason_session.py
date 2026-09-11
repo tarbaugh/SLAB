@@ -44,7 +44,13 @@ def test_unrecognised_session_files_are_listed_not_swept(tmp_path: Path) -> None
     (sessions / "transcript.jsonl.bak").write_text("{}\n")
     (sessions / "notes.txt").write_text("stray\n")
     (sessions / "a-dir").mkdir()
+    reviews = tmp_path / "mason" / "reviews"
+    reviews.mkdir()
+    (reviews / "20260826-120000-111-review-1.md").write_text("---\n")  # claimed
+    (reviews / "20260801-000000-5-md-expert-1-review-1.md").write_text("---\n")  # the orphan's
+    (reviews / "20260601-000000-2-review-1.md").write_text("---\n")  # its transcript is gone
     assert [p.name for p in unrecognised_session_files(tmp_path)] == [
+        "20260601-000000-2-review-1.md",
         "20260701-000000-3.compactions.md",
         "notes.txt",
         "transcript.jsonl.bak",

@@ -147,7 +147,7 @@ def test_purge_confirmation_defaults_to_no(tmp_path: Path) -> None:
     assert runner.invoke(app, ["fast-forward", "-w", str(root)]).exit_code == 0
     result = runner.invoke(app, ["purge", "-w", str(root)], input="n\n")
     assert result.exit_code != 0
-    assert "permanently delete 1 expired runs, 1 blobs (7 bytes in all) from" in result.output
+    assert "permanently delete expired runs: 1, blobs: 1 (7 bytes in all) from" in result.output
     with Workspace(root) as ws:
         assert len(ws.runs.list_runs()) == 2  # nothing was deleted
 
@@ -177,8 +177,8 @@ def test_purge_json_prints_the_inventory(tmp_path: Path) -> None:
     assert inventory["dry_run"] is True
     by_name = {c["name"]: c for c in inventory["categories"]}
     assert list(by_name) == [
-        "expired runs", "blobs", "transcripts", "sidecars", "unrecognised",
-        "harness records", "stale locks", "job files", "scratch",
+        "stale locks", "transcripts", "sidecars", "unrecognised", "harness records",
+        "job files", "expired runs", "blobs", "scratch",
     ]
     assert by_name["blobs"]["bytes"] == 7
     assert by_name["job files"]["items"] == [
@@ -224,6 +224,7 @@ def test_purge_leaves_nothing_behind(
     sessions = root / "mason" / "sessions"
     (sessions / "20260810-000000-7-md-expert-1.jsonl").write_text("{}\n")  # orphan sibling
     (sessions / "notes.txt").write_text("stray\n")  # unrecognised
+    (root / "mason" / "reviews" / "20260701-000000-3-review-1.md").write_text("---\n")  # orphan
     (root / "sessions").mkdir()
     (root / "sessions" / "mcp-20260901-100000-5.jsonl").write_text("{}\n")  # harness record
     (root / "mason" / "locks").mkdir()
@@ -265,7 +266,7 @@ def test_purge_leaves_nothing_behind(
     # The killed run's scratch went at reap time, inside fast-forward; the
     # purge is the backstop for the directory nothing owned.
     assert "deleted scratch: 1 (" in result.output
-    assert "deleted unrecognised: 1 (" in result.output
+    assert "deleted unrecognised: 2 (" in result.output
     assert "deleted harness records: 1 (" in result.output
     assert "deleted stale locks: 1 (" in result.output
     assert "kept job file" not in result.output  # the live server's record is not a job file
@@ -286,6 +287,37 @@ def test_purge_keeps_unrecognised_files_and_the_newest_record_by_default(
     assert "kept unrecognised mason/sessions/notes.txt: no transcript claims it" in result.output
     assert [p.name for p in (root / "sessions").iterdir()] == ["mcp-20260902-100000-6.jsonl"]
     assert "deleted harness records: 1 (" in result.output
+
+
+def test_purge_leaves_a_lock_taken_since_the_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lock path is the project's, so a session that started while
+    purge was busy holds the very file the inventory called stale. The
+    lock is probed again just before it is unlinked."""
+    import fcntl
+
+    from slab_stack import _ops as stack_ops
+
+    root = tmp_path / ".slab"
+    locks = root / "mason" / "locks"
+    locks.mkdir(parents=True)
+    lock = locks / "1111111111111111.lock"
+    lock.write_text("pid 1\n")
+    handle = open(lock, "a+", encoding="utf-8")  # noqa: SIM115 - held across the purge
+    probed = stack_ops.stale_locks
+
+    def take_then_report(workspace_root: Path) -> list[Path]:
+        found = probed(workspace_root)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)  # a session starts now
+        return found
+
+    monkeypatch.setattr(stack_ops, "stale_locks", take_then_report)
+    result = runner.invoke(app, ["purge", "-w", str(root), "--yes"])
+    handle.close()
+    assert result.exit_code == 0, result.output
+    assert lock.is_file()
+    assert "deleted stale locks: none" in result.output
 
 
 def test_purge_never_touches_the_serve_record_or_its_job(tmp_path: Path) -> None:

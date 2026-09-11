@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import socket
+import time
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -133,7 +134,8 @@ class Leftover(BaseModel):
 
     Fields:
         path: The directory.
-        size_bytes: Its size, every file summed.
+        size_bytes: Its size, every file summed (zero when not asked for).
+        age_s: Seconds since the directory was made.
         owner: The marker's content, or ``None`` when there is no readable marker.
         unowned: No run claims it: there is no marker, or the marker names no run.
         alive: Whether the owner's process exists on this host. ``None``
@@ -145,12 +147,14 @@ class Leftover(BaseModel):
 
     path: Path
     size_bytes: int
+    age_s: float
     owner: Owner | None
     unowned: bool
     alive: bool | None
 
 
-def _size_of(directory: Path) -> int:
+def directory_size(directory: Path) -> int:
+    """Every file under *directory* summed, in bytes; unreadable entries count nothing."""
     total = 0
     for dirpath, _, filenames in os.walk(directory):
         for name in filenames:
@@ -159,11 +163,13 @@ def _size_of(directory: Path) -> int:
     return total
 
 
-def leftovers(root: str | os.PathLike[str]) -> list[Leftover]:
+def leftovers(root: str | os.PathLike[str], *, sizes: bool = True) -> list[Leftover]:
     """Every ``slab-*`` directory under *root* with its marker read. Deletes nothing.
 
     Only ``slab-*`` entries are listed, so a scratch root shared with
-    other tools is never read beyond them.
+    other tools is never read beyond them. Without *sizes* every
+    ``size_bytes`` is zero and no directory is walked, for a caller that
+    will judge a few of them and size those with :func:`directory_size`.
 
     Examples:
         >>> import tempfile
@@ -188,10 +194,15 @@ def leftovers(root: str | os.PathLike[str]) -> list[Leftover]:
         alive: bool | None = None
         if owner is not None and owner.host == host:
             alive = process_alive(owner.pid)
+        try:
+            age_s = max(0.0, time.time() - path.stat().st_mtime)
+        except OSError:
+            age_s = 0.0
         found.append(
             Leftover(
                 path=path,
-                size_bytes=_size_of(path),
+                size_bytes=directory_size(path) if sizes else 0,
+                age_s=age_s,
                 owner=owner,
                 unowned=owner is None or owner.run_id is None,
                 alive=alive,

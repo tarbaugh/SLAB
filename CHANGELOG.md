@@ -19,9 +19,11 @@ All notable changes to SLAB, newest first. Dates are commit dates on
   purge, and purge is the backstop. Purge is inventory first: one
   function lists every category with counts and bytes, `--dry-run`
   prints it, `--json` prints it as JSON, and the confirmation names its
-  totals. Orphan delegation transcripts, unrecognised session files,
-  stale harness records, and stale session locks are categories of
-  their own. `slab doctor` gains a `leftovers` row.
+  totals, so its text changed. Orphan delegation transcripts,
+  unrecognised session files, stale harness records, and stale session
+  locks are categories of their own. A submitted job and a launched
+  child never inherit the submitter's `SLAB_RUN_ID`. `slab doctor` gains
+  a `leftovers` row.
 - The sandbox job carries its job id into the container. `apptainer
   exec --cleanenv` stripped `SLURM_JOB_ID`, so the runs a sandbox job
   made carried no job id and `slab hpc cancel` with a workspace failed

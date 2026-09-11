@@ -39,6 +39,7 @@ from foundation.lifecycle import ExecutionStatus, LifecycleState
 from foundation.models import ArtifactRole, Reservation, Run, utcnow
 from foundation.retention import DEFAULT_POLICY, RetentionPolicy, _reachable_hashes, sweep_scratch
 from foundation.runtime import Workspace, describe_liveness, this_host
+from slab.scratch import RUN_ENV
 
 if TYPE_CHECKING:
     from slab.resources import JobSize
@@ -939,6 +940,9 @@ def launch_child(
         **env_for(reservation.envelope()),
         "PYTHONUNBUFFERED": "1",
     }
+    # The child opens its own run and exports its own id; the parent's
+    # must not stamp what the child makes.
+    child_env.pop(RUN_ENV, None)
     try:
         with open(log, "ab") as handle:
             process = subprocess.Popen(
@@ -1246,7 +1250,10 @@ def submit_job(
     from slab.hpc import render_sbatch, submit
 
     chosen, _spec = hpc.resolve_partition(partition)
-    prologue: list[str] = []
+    # The job opens its own runs; the submitter's run id must not stamp
+    # the scratch the job makes, or a sweep would take it once the
+    # submitting run completes.
+    prologue: list[str] = ["unset SLAB_RUN_ID"]
     if session:
         prologue.append(f"export SLAB_SESSION={shlex.quote(session)}")
     if project is not None:

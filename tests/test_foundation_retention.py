@@ -593,7 +593,8 @@ def test_sweep_keeps_a_running_runs_scratch_and_removes_a_dead_ones(tmp_path: Pa
 def test_sweep_judges_an_unowned_scratch_by_its_process(tmp_path: Path) -> None:
     """A scratch made outside a run is owned by its process alone: gone
     when the process is gone on this host, kept while it lives, kept when
-    it belongs to another host, and gone when it has no marker at all."""
+    it belongs to another host, and gone when it has no marker at all,
+    unless it was made moments ago and its marker is still on its way."""
     import os
 
     from conftest import seed_scratch, vanished_pid
@@ -606,6 +607,7 @@ def test_sweep_judges_an_unowned_scratch_by_its_process(tmp_path: Path) -> None:
     seed_scratch(root, "slab-qe-live")
     seed_scratch(root, "slab-qe-away", pid=1, host="another-node")
     seed_scratch(root, "slab-qe-noown", marker=False)
+    seed_scratch(root, "slab-qe-young", marker=False, age_s=0)  # its marker is on its way
     with Workspace(tmp_path / "ws") as ws:
         report = sweep_scratch(ws, root=root)
     assert [r["reason"] for r in report.removed] == [
@@ -615,8 +617,11 @@ def test_sweep_judges_an_unowned_scratch_by_its_process(tmp_path: Path) -> None:
     assert [k["reason"] for k in report.kept] == [
         "process 1 is on another-node, not this host",
         f"process {os.getpid()} is alive on this host",
+        "no owner marker yet; made moments ago",
     ]
-    assert sorted(p.name for p in root.iterdir()) == ["slab-qe-away", "slab-qe-live"]
+    assert sorted(p.name for p in root.iterdir()) == [
+        "slab-qe-away", "slab-qe-live", "slab-qe-young"
+    ]
 
 
 def test_sweep_honours_only_and_dry_run(tmp_path: Path) -> None:

@@ -834,3 +834,45 @@ def test_retire_purge_mode_removes_the_purged_runs_scratch(
     # The promoted run's scratch is a completed run's: the backstop sweep
     # takes it later, but the retire removes only what it purged.
     assert [p.name for p in scratch_root.iterdir()] == ["slab-qe-result"]
+
+
+def test_a_job_and_a_child_never_inherit_the_run_id(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A workflow script that submits a job or launches a child runs under a
+    run of its own, and that run completes as soon as the script returns.
+    Its id must not stamp the scratch the job or the child makes, or a
+    sweep would remove a live calculation's directory."""
+    import stat
+    import subprocess
+
+    from foundation._ops import launch_child, submit_job
+    from slab.config import HpcConfig
+
+    monkeypatch.setenv("SLAB_RUN_ID", "the-submitter")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    sbatch = fake_bin / "sbatch"
+    sbatch.write_text("#!/bin/sh\necho 777\n")
+    sbatch.chmod(sbatch.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{fake_bin}:/usr/bin:/bin")
+    hpc = HpcConfig.model_validate({"default_partition": "cpu", "partitions": {"cpu": {}}})
+    job = submit_job(root, hpc=hpc, command="python wf.py", name="wf", session="chat-1")
+    script = Path(job["script_path"]).read_text()
+    assert "unset SLAB_RUN_ID\n" in script
+    assert script.index("unset SLAB_RUN_ID") < script.index("export SLAB_SESSION=chat-1")
+
+    seen: dict[str, object] = {}
+
+    def fake_popen(command: list[str], **kwargs: object) -> object:
+        seen["env"] = kwargs["env"]
+        raise OSError("stopped here: the environment was the question")
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    workflow = tmp_path / "wf.py"
+    workflow.write_text("print('ok')\n")
+    with Workspace(root) as ws:
+        held = ws.reserve(ntasks=1, threads=1)
+    with pytest.raises(FoundationError):
+        launch_child(root, workflow, reservation=held, wait=False)
+    assert "SLAB_RUN_ID" not in seen["env"]  # type: ignore[operator]

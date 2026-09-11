@@ -417,12 +417,12 @@ def test_the_doctor_counts_what_a_purge_would_sweep(
     seed_scratch(scratch_root, "slab-qe-live")
     (ws / "mason" / "sessions").mkdir(parents=True)
     (ws / "mason" / "sessions" / "20260810-000000-7-md-expert-1.jsonl").write_text("{}\n")
-    (ws / "mason" / "sessions" / "notes.txt").write_text("stray\n")
+    (ws / "mason" / "sessions" / "notes.txt").write_text("stray\n")  # purge lists it; not an orphan
     (ws / "mason" / "locks").mkdir()
     (ws / "mason" / "locks" / "1111111111111111.lock").write_text("pid 1\n")
     dirty = runner.invoke(app, ["doctor", "--offline"])
     assert dirty.exit_code == 0, dirty.output
     assert (
-        f"[=] leftovers: 1 scratch dir(s) ({dead_bytes} bytes), 2 orphan transcript(s), "
+        f"[=] leftovers: 1 scratch dir(s) ({dead_bytes} bytes), 1 orphan transcript(s), "
         "1 stale lock(s)" in dirty.output
     )

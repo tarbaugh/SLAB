@@ -5,6 +5,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -58,12 +59,14 @@ def seed_scratch(
     run_id: str | None = None,
     host: str | None = None,
     marker: bool = True,
+    age_s: float = 3600.0,
 ) -> Path:
     """One ``slab-*`` directory under *root* with a marker naming its owner.
 
     *pid* defaults to this process, *host* to this host. With ``marker=False``
     the directory has no owner at all, the way a scratch made by an older
-    SLAB looks.
+    SLAB looks. The directory is made *age_s* old, an hour by default, so a
+    marker-less one is past the grace the sweep gives a marker on its way.
     """
     from slab.scratch import OWNER_MARKER, Owner, this_host
 
@@ -79,6 +82,8 @@ def seed_scratch(
             run_id=run_id,
         )
         (made / OWNER_MARKER).write_text(owner.model_dump_json() + "\n")
+    stamp = time.time() - age_s
+    os.utime(made, (stamp, stamp))
     return made
 
 

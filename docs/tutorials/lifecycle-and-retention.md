@@ -426,15 +426,12 @@ The two phases above respect the retention policy. Two verbs override it: `slab 
 
 **Warning: `slab purge` deletes data permanently. Run it with `--dry-run` first, and promote every run you want to keep before you run it.**
 
-`slab purge` takes an inventory first, and then deletes it category by category. The inventory names everything the command knows of, with a count and a size for each category. The confirmation prompt repeats the totals. `--dry-run` prints the inventory and deletes nothing. `--json` prints it as JSON. This is a dry run over a workspace with something in every category:
+`slab purge` takes an inventory first, and then deletes it category by category. The inventory names everything the command knows of, with a count and a size for each category. The confirmation prompt repeats the totals. `--dry-run` prints the inventory and deletes nothing. `--json` prints it as JSON. This is a dry run over a workspace with something in every category but one:
 
 ```
 $ slab purge -w .slab --dry-run --all-sessions
-would delete expired runs: 2
-  01m28fm1wgs1sqj25yhx32kpkn  nb-bcc-md
-  01m28fm1wfar0wta2ynk360j2e  nb-bcc-probe
-would delete blobs: 1 (4096 bytes)
-  ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7
+would delete stale locks: 1 (68 bytes)
+  mason/locks/9c1f0b2a7e3d5a44.lock
 would delete transcripts: 4 (80 bytes)
   mason/sessions/20260903-180000-3301-critic-1.jsonl
   mason/sessions/20260910-091502-41877.jsonl
@@ -443,29 +440,33 @@ would delete transcripts: 4 (80 bytes)
 would delete sidecars: 2 (47 bytes)
   mason/reviews/20260910-091502-41877-review-1.md
   mason/sessions/20260910-091502-41877.compactions.md
-would delete unrecognised: none
+would delete unrecognised: 1 (24 bytes)
+  mason/reviews/20260828-101500-2004-review-1.md
 would delete harness records: 1 (37 bytes)
   sessions/mcp-20260909-113000-7712.jsonl
-would delete stale locks: 1 (68 bytes)
-  mason/locks/9c1f0b2a7e3d5a44.lock
 would delete job files: 2 (89 bytes)
   jobs/nb-bcc-md-1244113.out
   jobs/nb-bcc-md-1244113.sbatch
+would delete expired runs: 2
+  01m28ga4r3qnqe15290302b09y  nb-bcc-md
+  01m28ga4r14tqp0cdm2grnzvsd  nb-bcc-probe
+would delete blobs: 1 (4096 bytes)
+  ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7
 would delete scratch: 1 (2200 bytes)
   scratch/slab-qe-7hf2m0pw
-kept scratch scratch/slab-lammps-script-p8d2r6mt: process 25479 is alive on this host
+kept scratch scratch/slab-lammps-script-p8d2r6mt: process 27070 is alive on this host
 ```
 
 The categories, in the order purge deletes them:
 
+- Session lock files (`mason/locks/`) that no process holds. A held lock is left alone. Purge probes each stale lock again just before it unlinks it, because a Mason session that started during the inventory holds the same file.
+- Mason session transcripts, together with their delegation transcripts, their compaction summaries (`<stem>.compactions.md`), and their review records (`mason/reviews/`). A delegation transcript whose conversation is already gone is swept on its own. The newest conversation and its files stay, so `slab mason chat --resume` keeps working. Pass `--all-sessions` to remove them too.
+- Files under `mason/sessions/` and `mason/reviews/` that no transcript claims. Purge lists them under `unrecognised` and deletes them only with `--all-sessions`, never silently.
+- The records of harness sessions over MCP (`sessions/`), except one whose session still has a run at status `running`. The newest record stays unless you pass `--all-sessions`.
+- The `.sbatch` scripts and SLURM `.out` files of finished jobs, from `<workspace>/jobs/` and from the serve directory. Jobs still in the queue keep their files, and the serve endpoint record is never touched.
 - The database rows of every expired run: the run, its transitions, its artifact references, its tasks, and its checks. `slab show` can no longer answer for a purged run.
 - The artifact bytes those runs referenced, unless a surviving run references the same hash. Blobs that no run references at all stay, exactly as in `gc`.
-- Mason session transcripts, together with their delegation transcripts, their compaction summaries (`<stem>.compactions.md`), and their review records (`mason/reviews/`). A delegation transcript whose conversation is already gone is swept on its own. The newest conversation and its files stay, so `slab mason chat --resume` keeps working. Pass `--all-sessions` to remove them too.
-- Files under `mason/sessions/` that no transcript claims. Purge lists them under `unrecognised` and deletes them only with `--all-sessions`, never silently.
-- The records of harness sessions over MCP (`sessions/`), except one whose session still has a run at status `running`. The newest record stays unless you pass `--all-sessions`.
-- Session lock files (`mason/locks/`) that no process holds. A held lock is left alone.
-- The `.sbatch` scripts and SLURM `.out` files of finished jobs, from `<workspace>/jobs/` and from the serve directory. Jobs still in the queue keep their files, and the serve endpoint record is never touched.
-- Scratch directories under `[paths] scratch` that no live calculation owns. Every slab-managed scratch directory carries a `.slab-owner` marker naming its process, its host, and its run, so ownership is recorded and never inferred from age. A directory goes when its run is over or no longer exists. It also goes when it names no run and its process is gone from this host, and when it has no marker at all. A directory of a running run, of a live process, or of a process on another host is kept and reported with the reason. Only the configured root is read, only its `slab-*` entries, and the platform temp directory is never swept.
+- Scratch directories under `[paths] scratch` that no live calculation owns. Every slab-managed scratch directory carries a `.slab-owner` marker naming its process, its host, and its run, so ownership is recorded and never inferred from age. A directory goes when its run is over or no longer exists. It also goes when it names no run and its process is gone from this host, and when it has no marker at all. A directory of a running run, of a live process, or of a process on another host is kept and reported with the reason. So is a marker-less directory made less than a minute ago, because its marker is on its way. Only the configured root is read, only its `slab-*` entries, and the platform temp directory is never swept.
 
 This is the guarantee. After `slab fast-forward --include-running` and `slab purge --all-sessions --yes`, the workspace holds exactly two things. The run store keeps its promoted and archived rows and the blobs they reach. The serve endpoint record stays while its job is alive. Nothing remains under `mason/sessions`, `mason/reviews`, `mason/locks`, `sessions`, or `jobs`. The scratch root holds no `slab-*` directory whose owner is not a live process. The test suite runs this sequence on a workspace seeded with every category and asserts that tree.
 

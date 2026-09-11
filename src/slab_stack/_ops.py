@@ -32,17 +32,23 @@ from mason.session import (
 )
 
 CATEGORIES = (
-    "expired runs",
-    "blobs",
+    "stale locks",
     "transcripts",
     "sidecars",
     "unrecognised",
     "harness records",
-    "stale locks",
     "job files",
+    "expired runs",
+    "blobs",
     "scratch",
 )
-"""The categories in the order purge deletes them."""
+"""The categories in the order purge deletes them.
+
+Stale locks go first, and are probed again just before they are unlinked,
+because a session that started during the inventory holds the same file:
+the lock path is the project's, so unlinking a held lock would let a third
+session take a fresh one beside it.
+"""
 
 
 class Category(BaseModel):
@@ -72,9 +78,9 @@ class Kept(BaseModel):
 class Inventory(BaseModel):
     """What one purge deletes (or, with ``dry_run``, would delete), and what it keeps.
 
-    ``categories`` follow :data:`CATEGORIES` in order. Paths are relative
-    to the workspace root when they lie under it, and absolute otherwise
-    (scratch lives under ``[paths] scratch``).
+    ``categories`` follow :data:`CATEGORIES` in order. Workspace paths are
+    relative to the root; scratch paths are as the sweep reports them,
+    under ``[paths] scratch``.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -84,13 +90,6 @@ class Inventory(BaseModel):
     dry_run: bool
     categories: list[Category]
     kept: list[Kept]
-
-    def category(self, name: str) -> Category:
-        return next(c for c in self.categories if c.name == name)
-
-    @property
-    def total_count(self) -> int:
-        return sum(c.count for c in self.categories)
 
     @property
     def total_bytes(self) -> int:
@@ -131,9 +130,9 @@ class Inventory(BaseModel):
             >>> Inventory(root="/ws", all_sessions=False, dry_run=False,
             ...     categories=[Category(name="blobs", items=["ab12"], bytes=7),
             ...                 Category(name="job files", items=[])], kept=[]).summary()
-            '1 blobs (7 bytes in all)'
+            'blobs: 1 (7 bytes in all)'
         """
-        parts = [f"{c.count} {c.name}" for c in self.categories if c.items]
+        parts = [f"{c.name}: {c.count}" for c in self.categories if c.items]
         if not parts:
             return "nothing"
         return f"{', '.join(parts)} ({self.total_bytes} bytes in all)"
@@ -246,42 +245,49 @@ def purge_inventory(
             Kept(kind="job file", item=_relative(root, path), reason="its job is in the queue")
         )
 
-    with Workspace(root) as ws:
-        records = [
-            r.path for r in stale_records(root, runs=ws.runs, keep_newest=not all_sessions)
-        ]
-        names = {run.id: run.name for run in ws.runs.list_runs(state="expired")}
-        report = ws.purge_expired(dry_run=dry_run)
-        scratch = sweep_scratch(ws, dry_run=dry_run)
-    for entry in scratch.kept:
-        kept.append(Kept(kind="scratch", item=entry["path"], reason=entry["reason"]))
-
     def files(name: str, paths: list[Path]) -> Category:
         # Sized before anything is unlinked, so the deleted inventory
         # reports what went, not what is left.
         return Category(name=name, items=[_relative(root, p) for p in paths], bytes=_size(paths))
 
-    categories = [
-        Category(
-            name="expired runs",
-            items=[f"{run_id}  {names.get(run_id, '')}".rstrip() for run_id in report.deleted],
-        ),
-        Category(name="blobs", items=list(report.dropped), bytes=report.freed_bytes),
-        files("transcripts", transcripts),
-        files("sidecars", sidecars),
-        files("unrecognised", unrecognised),
-        files("harness records", records),
-        files("stale locks", locks),
-        files("job files", gone_jobs),
-        Category(
-            name="scratch",
-            items=[entry["path"] for entry in scratch.removed],
-            bytes=scratch.freed_bytes,
-        ),
-    ]
-    if not dry_run:
-        for path in [*transcripts, *sidecars, *unrecognised, *records, *locks, *gone_jobs]:
-            path.unlink(missing_ok=True)
+    with Workspace(root) as ws:
+        records = [
+            r.path for r in stale_records(root, runs=ws.runs, keep_newest=not all_sessions)
+        ]
+        names = {run.id: run.name for run in ws.runs.list_runs(state="expired")}
+        if not dry_run:
+            # A session that started since the probe holds its lock now.
+            still_stale = set(stale_locks(root))
+            locks = [path for path in locks if path in still_stale]
+        categories = [
+            files("stale locks", locks),
+            files("transcripts", transcripts),
+            files("sidecars", sidecars),
+            files("unrecognised", unrecognised),
+            files("harness records", records),
+            files("job files", gone_jobs),
+        ]
+        if not dry_run:
+            for path in [*locks, *transcripts, *sidecars, *unrecognised, *records, *gone_jobs]:
+                path.unlink(missing_ok=True)
+        report = ws.purge_expired(dry_run=dry_run)
+        scratch = sweep_scratch(ws, dry_run=dry_run)
+    for entry in scratch.kept:
+        kept.append(Kept(kind="scratch", item=entry["path"], reason=entry["reason"]))
+    categories.extend(
+        [
+            Category(
+                name="expired runs",
+                items=[f"{run_id}  {names.get(run_id, '')}".rstrip() for run_id in report.deleted],
+            ),
+            Category(name="blobs", items=list(report.dropped), bytes=report.freed_bytes),
+            Category(
+                name="scratch",
+                items=[entry["path"] for entry in scratch.removed],
+                bytes=scratch.freed_bytes,
+            ),
+        ]
+    )
     return Inventory(
         root=str(root),
         all_sessions=all_sessions,

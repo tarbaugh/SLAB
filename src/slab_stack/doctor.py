@@ -24,11 +24,11 @@ from typing import TYPE_CHECKING, Any
 from foundation import _ops
 from foundation import memory as memory_store
 from foundation.errors import FoundationError
-from foundation.retention import sweep_scratch
+from foundation.retention import MARKER_GRACE_S, sweep_scratch
 from foundation.runtime import Workspace
 from mason import doctor as mason_doctor
 from mason.errors import MasonError
-from mason.session import stale_locks, transcript_groups, unrecognised_session_files
+from mason.session import stale_locks, transcript_groups
 from slab._ops import engines_overview
 from slab.errors import SlabError
 from slab.resources import gres_gpus
@@ -98,8 +98,10 @@ def _leftovers_row(workspace: Path | None) -> tuple[str, str] | None:
     An ``=`` row when anything is there, because each is a file some
     process left behind, and a ``+`` row when the sweep would find
     nothing. The scratch count is the dry-run sweep's when the workspace
-    exists; before one exists, every leftover whose process is not alive
-    here counts.
+    exists. Before one exists no run exists either, so a directory that
+    names a run counts, and so does one with no marker or a dead process
+    here; a live process and another host's process are kept, as the
+    sweep keeps them.
     """
     try:
         root = _ops.resolve_root(workspace)
@@ -113,12 +115,17 @@ def _leftovers_row(workspace: Path | None) -> tuple[str, str] | None:
                 report = sweep_scratch(ws, dry_run=True)
             scratch_count, scratch_bytes = len(report.removed), report.freed_bytes
         elif scratch is not None:
-            dead = [item for item in leftovers(scratch) if item.alive is not True]
+            dead = [
+                item
+                for item in leftovers(scratch)
+                if (item.owner is None and item.age_s >= MARKER_GRACE_S)
+                or (item.owner is not None and item.owner.run_id is not None)
+                or item.alive is False
+            ]
             scratch_count, scratch_bytes = len(dead), sum(item.size_bytes for item in dead)
         orphans = len(transcript_groups(root, include_orphans=True)) - len(
             transcript_groups(root)
         )
-        orphans += len(unrecognised_session_files(root))
         locks = len(stale_locks(root))
     except _ERRORS as e:
         return ("x", f"leftovers: {e}")
