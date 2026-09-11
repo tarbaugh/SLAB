@@ -94,7 +94,10 @@ def task(
             key and the recipe. Use it for computation identity that lives
             outside pip — e.g. the cluster engine registry's declared version
             for the engine an argument names: bumping the registry version
-            then honestly invalidates the cache.
+            then honestly invalidates the cache. One key is the exception:
+            ``provenance`` enters the recipe and not the key. Put there
+            what describes this execution without changing its answer,
+            such as an engine command filled for the launch's width.
 
     Examples:
         >>> @task
@@ -176,6 +179,10 @@ def _traced_call(
     }
     if extra:
         recipe["extra"] = extra
+    # The recipe keeps every extra key. The key drops ``provenance``: the
+    # line an engine command filled for this launch's width, which changes
+    # the run record and not the answer.
+    identity_extra = {key: value for key, value in extra.items() if key != "provenance"}
     closure_fp = _closure_fingerprints(f)
     cacheable = closure_fp is not None
     cache_key = fingerprint(
@@ -186,7 +193,7 @@ def _traced_call(
             "bytecode": bytecode_hash,
             "closure": closure_fp if cacheable else f"uncacheable-{os.urandom(16).hex()}",
             "engines": engine_versions,
-            "extra": extra,
+            "extra": identity_extra,
             "inputs": input_hashes,
         }
     )

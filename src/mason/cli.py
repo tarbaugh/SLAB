@@ -722,6 +722,9 @@ def _command_details(event: dict[str, Any]) -> list[str]:
         ...                 )  # doctest: +NORMALIZE_WHITESPACE
         ['engine lammps 22 Jul 2025', 'setup: module load lammps',
          'kokkos: -k on, 1 GPU(s) per node, -sf kk']
+        >>> _command_details({"kind": "engine", "engine": "qe",
+        ...                   "template": "mpirun -np {ntasks} pw.x"})
+        ['engine qe', 'template: mpirun -np {ntasks} pw.x']
         >>> _command_details({"kind": "shell", "cwd": "/proj"})
         ['cwd /proj']
         >>> _command_details({"kind": "launch", "sized": True,
@@ -734,6 +737,8 @@ def _command_details(event: dict[str, Any]) -> list[str]:
     if event.get("engine"):
         version = f" {event['version']}" if event.get("version") else ""
         details.append(f"engine {event['engine']}{version}")
+    if event.get("template"):
+        details.append(f"template: {event['template']}")
     if event.get("setup"):
         details.append("setup: " + "; ".join(str(line) for line in event["setup"]))
     kokkos = event.get("kokkos")

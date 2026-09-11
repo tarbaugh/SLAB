@@ -474,7 +474,10 @@ def run_commands(ws: Workspace, run_id: str) -> list[dict[str, Any]]:
     carries the KOKKOS switches the command asks for, because SLAB adds
     none. The exact argument vector adds the runner's own flags (``-in``
     and ``-log`` for a script, ASE's ``-echo``, ``-screen``, and ``-log``
-    for the engine).
+    for the engine). ``command`` is the line that ran: for a command with
+    ``{ntasks}``, ``{threads}``, or ``{gpus}`` that is the filled line
+    from the recipe's ``provenance``, and ``template`` is the line as
+    written, which is the cache identity.
     """
     from slab.lammps import kokkos_switches
 
@@ -483,7 +486,11 @@ def run_commands(ws: Workspace, run_id: str) -> list[dict[str, Any]]:
         extra = task.recipe.get("extra") if isinstance(task.recipe, dict) else None
         if not isinstance(extra, dict) or not extra.get("command"):
             continue
-        command = str(extra["command"])
+        template = str(extra["command"])
+        provenance = extra.get("provenance")
+        command = template
+        if isinstance(provenance, dict) and provenance.get("command"):
+            command = str(provenance["command"])
         setup = [str(line) for line in extra.get("setup") or []]
         engine = extra.get("engine") or extra.get("builder")
         key = (engine, command, tuple(setup))
@@ -500,6 +507,8 @@ def run_commands(ws: Workspace, run_id: str) -> list[dict[str, Any]]:
                 "setup": setup,
                 "version": extra.get("version"),
             }
+            if template != command:
+                entry["template"] = template
             if extra.get("build"):
                 entry["build"] = extra["build"]
             if engine == "lammps":

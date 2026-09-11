@@ -533,7 +533,9 @@ def test_run_lammps_follows_the_slice_to_the_gpu_build(
     assert "FAKE_MARK=gpu" in ws.artifacts.get(gpu["artifacts"]["gpu.log"]).read_text()
     (task,) = ws.runs.list_tasks(run.id)
     assert task.recipe["extra"]["build"] == "gpu"
-    assert task.recipe["extra"]["command"] == f"{fake_lmp} -k on g 2 -sf kk"
+    # The template is the identity; the filled line is provenance.
+    assert task.recipe["extra"]["command"] == f"{fake_lmp} -k on g {{gpus}} -sf kk"
+    assert task.recipe["extra"]["provenance"]["command"] == f"{fake_lmp} -k on g 2 -sf kk"
     monkeypatch.setenv("SLAB_GPUS", "")
     with ws.start_run(name="cpu") as run:
         _, cpu = run_lammps(SCRIPT, atoms=_argon(), label="cpu")
