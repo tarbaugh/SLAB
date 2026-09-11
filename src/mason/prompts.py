@@ -470,7 +470,9 @@ def resources_line(session: MasonSession) -> str:
         f"{free_text}an unsized launch runs with {envelope().ntasks} rank(s) and "
         f"takes every free cpu. Size a launch with ntasks, threads, and gpus; a "
         f"launch that does not fit what is free is refused with the free amounts, "
-        f"and so is a shell command or script that spells out more ranks."
+        f"and so is a shell command or script that spells out more ranks. The free "
+        f"amounts above were read when this prompt was built; call `free_resources` "
+        f"before a concurrent launch."
     )
 
 

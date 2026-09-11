@@ -25,7 +25,7 @@ The workspace is resolved exactly as for the CLI: `-w/--workspace` flag > `$SLAB
 
 ## The toolbox
 
-Twenty-four tools, each a thin wrapper over the operations layer, and three more on a cluster:
+Twenty-five tools, each a thin wrapper over the operations layer, and three more on a cluster:
 
 | Tool | What it does |
 | --- | --- |
@@ -39,6 +39,7 @@ Twenty-four tools, each a thin wrapper over the operations layer, and three more
 | `expire_runs` | Expire unpromoted runs past their TTL. `older_than="0d"` means everything, now. |
 | `gc` | Drop artifact bytes no retention rule demands. `dry_run=True` only reports. |
 | `list_engines` | Built-in engines, the cluster registry's declarations, rootstock checkpoint ids, QE protocols, installed pseudo families, the configured builders, each partition's declared fields, and this host's `budget` with what is `free` right now. |
+| `free_resources` | What is free on this host right now: the budget and free cpu and gpu ids, the live reservation ids, and one line per live reservation with its slice, its run or holder, and its age. Call it before a concurrent launch. |
 | `list_tasks` | The traced tasks a workflow script may call: name, signature, and a one-line summary each. |
 | `describe_task` | One task's full signature and docstring. |
 | `search_materials` | Filtered search over the offline Materials Project snapshot (`[builders.mp]`): elements, ranges, ordering, a row cap. |
@@ -178,7 +179,7 @@ print("scored:", record["passed"], record["engine_class"], record["engines"], re
 ```
 
 ```text
-24 tools: describe_task, expire_runs, gc, get_material, launch_workflow, list_engines, list_memories, list_runs, list_sessions, list_skills, list_tasks, notebook, plan, promote_run, promote_session, query_materials, recall, remember, report_results, retire_session, search_materials, show_run, skill, wait_for_run
+25 tools: describe_task, expire_runs, free_resources, gc, get_material, launch_workflow, list_engines, list_memories, list_runs, list_sessions, list_skills, list_tasks, notebook, plan, promote_run, promote_session, query_materials, recall, remember, report_results, retire_session, search_materials, show_run, skill, wait_for_run
 skill: equation-of-state files: ['SKILL.md', 'assets/eos_scan.py', 'scripts/fit_eos.py']
 verified 1/1 checks passed; a0 = 3.5907 Å
 reported for session mcp-demo -> mcp-demo.jsonl

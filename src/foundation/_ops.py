@@ -21,6 +21,7 @@ import sys
 import traceback
 from collections.abc import Iterable, Sequence
 from contextlib import ExitStack, redirect_stderr, redirect_stdout, suppress
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -34,7 +35,7 @@ from foundation.errors import (
     StorageError,
 )
 from foundation.lifecycle import ExecutionStatus, LifecycleState
-from foundation.models import ArtifactRole, Reservation, Run
+from foundation.models import ArtifactRole, Reservation, Run, utcnow
 from foundation.retention import DEFAULT_POLICY, RetentionPolicy, _reachable_hashes
 from foundation.runtime import Workspace, describe_liveness
 
@@ -160,6 +161,72 @@ def describe_resources(resources: dict[str, Any] | None) -> str:
         f"{len(cpus)} cpu(s) {_id_ranges(cpus)}, {gpu_text}; "
         f"{resources.get('ntasks', 1)} rank(s) x {resources.get('threads', 1)} thread(s)"
     )
+
+
+def age_text(moment: datetime) -> str:
+    """How long ago *moment* was, in one unit: ``12s``, ``3m``, ``2h``, ``1d``.
+
+    Examples:
+        >>> from datetime import timedelta
+        >>> age_text(utcnow() - timedelta(minutes=3))
+        '3m'
+        >>> age_text(utcnow() + timedelta(hours=1))
+        '0s'
+    """
+    seconds = max(0.0, (utcnow() - moment).total_seconds())
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    if seconds < 86_400:
+        return f"{int(seconds // 3600)}h"
+    return f"{int(seconds // 86_400)}d"
+
+
+def describe_reservation(held: Reservation) -> str:
+    """One line for a live reservation: the slice, the run or the holder, the age.
+
+    Examples:
+        >>> held = Reservation(host="n1", cpus=(0, 1), gpus=(), ntasks=2, holder_pid=41)
+        >>> describe_reservation(held).startswith(
+        ...     "2 cpu(s) 0-1, no gpu; 2 rank(s) x 1 thread(s)  unclaimed, holder 41 on n1  "
+        ... )
+        True
+        >>> claimed = held.model_copy(update={"run_id": "run-1"})
+        >>> "claimed by run run-1" in describe_reservation(claimed)
+        True
+    """
+    slice_text = describe_resources(held.slice)
+    age = age_text(held.created_at)
+    if held.run_id is not None:
+        return f"{slice_text}  claimed by run {held.run_id}  {age}"
+    return f"{slice_text}  unclaimed, holder {held.holder_pid} on {held.host}  {age}"
+
+
+def free_resources(ws: Workspace) -> dict[str, Any]:
+    """What is free on this host right now, and who holds the rest.
+
+    :meth:`Workspace.free_resources` plus ``held``: one line per live
+    reservation from :func:`describe_reservation`, in the order the
+    reservations were made. Dead reservations are released first, so the
+    answer is what a launch made now would be judged against.
+    """
+    ws.reap_dead(caller="free_resources")
+    answer = ws.free_resources()
+    live = {row.id: row for row in ws.runs.live_reservations(answer["host"])}
+    answer["held"] = [describe_reservation(live[rid]) for rid in answer["reservations"]]
+    return answer
+
+
+def free_line(answer: dict[str, Any]) -> str:
+    """The one-line trailer: ``free now: N cpu(s), M gpu(s)``.
+
+    Examples:
+        >>> free_line({"free": {"cpus": [2, 3], "gpus": []}})
+        'free now: 2 cpu(s), 0 gpu(s)'
+    """
+    free = answer["free"]
+    return f"free now: {len(free['cpus'])} cpu(s), {len(free['gpus'])} gpu(s)"
 
 
 def _id_ranges(ids: list[int]) -> str:

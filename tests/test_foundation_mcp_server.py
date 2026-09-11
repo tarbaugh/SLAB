@@ -10,7 +10,7 @@ import pytest
 
 pytest.importorskip("mcp", reason="mcp extra not installed")
 
-from foundation import Workspace
+from foundation import Workspace, _ops
 from foundation.mcp_server import build_server
 from foundation.session_record import find_session_record
 
@@ -26,6 +26,7 @@ EXPECTED_TOOLS = {
     "launch_workflow",
     "wait_for_run",
     "list_engines",
+    "free_resources",
     "list_tasks",
     "describe_task",
     "search_materials",
@@ -543,6 +544,26 @@ def test_list_engines_reports_budget_and_free(root: Path, no_gpus: None) -> None
         ws.reserve(ntasks=1, holder_pid=os.getpid())
     after = _call(server, "list_engines")
     assert after["free"]["cpus"] == answer["budget"]["cpus"] - 1
+
+
+def test_free_resources_matches_the_workspace_and_names_the_holders(
+    root: Path, no_gpus: None
+) -> None:
+    import os
+
+    server = build_server(root)
+    answer = _call(server, "free_resources")
+    with Workspace(root) as ws:
+        assert {k: answer[k] for k in ("host", "budget", "free")} == {
+            k: ws.free_resources()[k] for k in ("host", "budget", "free")
+        }
+        assert answer["reservations"] == [] and answer["held"] == []
+        held = ws.reserve(ntasks=1, holder_pid=os.getpid())
+    after = _call(server, "free_resources")
+    assert after["reservations"] == [held.id]
+    assert len(after["free"]["cpus"]) == len(answer["free"]["cpus"]) - 1
+    assert after["held"] == [_ops.describe_reservation(held)]
+    assert f"unclaimed, holder {os.getpid()} on {held.host}" in after["held"][0]
 
 
 def test_sized_launch_runs_as_a_child_and_the_run_carries_resources(

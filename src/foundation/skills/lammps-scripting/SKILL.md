@@ -287,5 +287,8 @@ runs: on a login node, a job on the GPU partition through `submit_job`
 with `gpus_per_node`; inside a sandbox or an allocation, a
 `launch_workflow` call with `gpus=` and `ntasks` equal to it, which
 reserves the GPUs and the cpus before the run starts and is refused with
-the free amounts when they are taken. Never login-node work. After the
-run, `info["kokkos"]["gpus"]` must equal what the launch held.
+the free amounts when they are taken. Before a second concurrent launch,
+call `free_resources`, because the free amounts in the environment block
+were read when the prompt was built and the first launch now holds its
+slice. Never login-node work. After the run, `info["kokkos"]["gpus"]`
+must equal what the launch held.
