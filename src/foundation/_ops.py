@@ -16,8 +16,10 @@ import os
 import re
 import runpy
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import traceback
 from collections.abc import Iterable, Sequence
 from contextlib import ExitStack, redirect_stderr, redirect_stdout, suppress
@@ -39,7 +41,8 @@ from foundation.lifecycle import ExecutionStatus, LifecycleState
 from foundation.models import ArtifactRole, Reservation, Run, utcnow
 from foundation.retention import DEFAULT_POLICY, RetentionPolicy, _reachable_hashes, sweep_scratch
 from foundation.runtime import Workspace, describe_liveness, this_host
-from slab.scratch import RUN_ENV
+from foundation.serialize import loads
+from slab.scratch import RUN_ENV, scratch_root
 
 if TYPE_CHECKING:
     from slab.resources import JobSize
@@ -773,6 +776,7 @@ def launch_script(
     argv: tuple[str, ...] = (),
     capture_output: bool = False,
     reservation: Reservation | str | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """Execute a workflow script inside a fresh run context; return the outcome.
 
@@ -797,64 +801,39 @@ def launch_script(
     and diagnostic notes, :func:`foundation.errors.failure_record`) is included; a
     raw ``traceback`` is the fallback for failures the run itself never saw
     (runner machinery).
+
+    With *dry_run* the script rehearses: see :func:`dry_run_script`, which
+    this calls and whose report it returns. *root* and *reservation* are
+    not used then, because a rehearsal touches no store.
     """
     script_path = Path(script).resolve()
     if not script_path.exists():
         raise FileNotFoundError(f"no such workflow script: {script_path}")
+    if dry_run:
+        return dry_run_script(
+            script_path,
+            name=name,
+            intent=intent,
+            session=session,
+            argv=argv,
+            capture_output=capture_output,
+        )
 
-    buffer = io.StringIO()
-    error: str | None = None
-    run_id: str | None = None
     try:
         workspace = Workspace(root)
     except Exception as e:
         raise StorageError(f"cannot open workspace at {root}: {e}") from e
-    # The interpreter state is touched only once the workspace is open, so
-    # a failed open (in a long-lived MCP process) leaves argv and path as
-    # they were.
-    old_argv = sys.argv
-    sys.argv = [str(script_path), *argv]
-    sys.path.insert(0, str(script_path.parent))
     with workspace as ws:
-        try:
-            # capture wraps the whole run context: @check hooks evaluate at
-            # context exit, and their prints must not reach the real stdout
-            # (under MCP, stdout is the protocol channel).
-            with ExitStack() as stack:
-                if capture_output:
-                    stack.enter_context(redirect_stdout(buffer))
-                    stack.enter_context(redirect_stderr(buffer))
-                with ws.start_run(
-                    name=name or script_path.stem,
-                    intent=intent,
-                    session=session,
-                    reservation=reservation,
-                ) as active:
-                    run_id = active.id
-                    # The script is the run's recompute root and its own
-                    # best explanation. Kept by name, so show_run lists it
-                    # and read_artifact reads it: one real lead searched
-                    # three filesystems for a script the run record held.
-                    active.keep(script_path.name, script_path, role=ArtifactRole.INPUT)
-                    _execute_script(script_path)
-        except NestedRunError:
-            raise FoundationError(
-                f"{script_path.name} manages its own runs (it calls start_run); "
-                f"execute it with plain 'python {script_path.name}' instead of "
-                f"'slab run'"
-            ) from None
-        except ResourcesError:
-            raise
-        except Exception:
-            error = traceback.format_exc(limit=8)
-        finally:
-            sys.argv = old_argv
-            sys.path.remove(str(script_path.parent))
-
-        if run_id is None:
-            # The run never started (unwritable database, storage failure...):
-            # surface the real cause instead of pretending a run exists.
-            raise StorageError(f"could not start a run for {script_path.name}:\n{error}")
+        run_id, error, buffer = _run_script_in(
+            ws,
+            script_path,
+            name=name,
+            intent=intent,
+            session=session,
+            argv=argv,
+            capture_output=capture_output,
+            reservation=reservation,
+        )
         run = ws.runs.get(run_id)
         checks = ws.runs.list_check_results(run_id)
         result: dict[str, Any] = run_summary(run) | {
@@ -874,6 +853,238 @@ def launch_script(
     return result
 
 
+def _run_script_in(
+    ws: Workspace,
+    script_path: Path,
+    *,
+    name: str | None,
+    intent: str | None,
+    session: str | None,
+    argv: tuple[str, ...],
+    capture_output: bool,
+    reservation: Reservation | str | None = None,
+    dry_run: bool = False,
+) -> tuple[str, str | None, io.StringIO]:
+    """Run *script_path* inside a fresh run of *ws*; return its id, the raw
+    traceback of a failure the run never saw, and the captured output."""
+    buffer = io.StringIO()
+    error: str | None = None
+    run_id: str | None = None
+    # The interpreter state is touched only once the workspace is open, so
+    # a failed open (in a long-lived MCP process) leaves argv and path as
+    # they were.
+    old_argv = sys.argv
+    sys.argv = [str(script_path), *argv]
+    sys.path.insert(0, str(script_path.parent))
+    try:
+        # capture wraps the whole run context: @check hooks evaluate at
+        # context exit, and their prints must not reach the real stdout
+        # (under MCP, stdout is the protocol channel).
+        with ExitStack() as stack:
+            if capture_output:
+                stack.enter_context(redirect_stdout(buffer))
+                stack.enter_context(redirect_stderr(buffer))
+            with ws.start_run(
+                name=name or script_path.stem,
+                intent=intent,
+                session=session,
+                reservation=reservation,
+                dry_run=dry_run,
+            ) as active:
+                run_id = active.id
+                # The script is the run's recompute root and its own
+                # best explanation. Kept by name, so show_run lists it
+                # and read_artifact reads it: one real lead searched
+                # three filesystems for a script the run record held.
+                active.keep(script_path.name, script_path, role=ArtifactRole.INPUT)
+                _execute_script(script_path)
+    except NestedRunError:
+        raise FoundationError(
+            f"{script_path.name} manages its own runs (it calls start_run); "
+            f"execute it with plain 'python {script_path.name}' instead of "
+            f"'slab run'"
+        ) from None
+    except ResourcesError:
+        raise
+    except Exception:
+        error = traceback.format_exc(limit=8)
+    finally:
+        sys.argv = old_argv
+        sys.path.remove(str(script_path.parent))
+
+    if run_id is None:
+        # The run never started (unwritable database, storage failure...):
+        # surface the real cause instead of pretending a run exists.
+        raise StorageError(f"could not start a run for {script_path.name}:\n{error}")
+    return run_id, error, buffer
+
+
+DRY_RUN_MARKER = "dry run:"
+"""The line ``slab run --dry-run`` prints before its JSON report."""
+_DRY_RUN_MARKER_LINE = re.compile(rf"^{re.escape(DRY_RUN_MARKER)}$", re.MULTILINE)
+
+DRY_RUN_CHECKS_NOTE = (
+    "physics checks are expected to fail in a dry run: LAMMPS integrated no steps"
+)
+WORKSPACE_ENV = "SLAB_WORKSPACE"
+
+
+def dry_run_script(
+    script: str | os.PathLike[str],
+    *,
+    name: str | None = None,
+    intent: str | None = None,
+    session: str | None = None,
+    argv: tuple[str, ...] = (),
+    capture_output: bool = False,
+) -> dict[str, Any]:
+    """Rehearse a workflow script without a real run: ``slab run --dry-run``.
+
+    The script runs to its end, or to its first exception, inside a run
+    opened with ``dry_run=True`` in a throwaway workspace: a fresh
+    directory under ``[paths] scratch`` (else the platform temp dir) that
+    is removed when the rehearsal ends, whatever happened. So nothing
+    lands in the real store or its cache, no reservation is claimed, and
+    every ``run_lammps`` call runs LAMMPS under ``-skiprun``: the pair
+    style, the data file, every fix and compute are set up, every command
+    runs in order, and no step is integrated. A ``timer`` line in the
+    script is dropped for the rehearsal, because it would override the
+    flag. While the script runs, ``$SLAB_WORKSPACE`` names the throwaway
+    workspace, so a child the script starts lands there too.
+
+    The report says what the rehearsal found:
+
+    * ``dry_run``: True.
+    * ``reached_end``: the script ran to its last line.
+    * ``traceback``: the failure record's traceback, or None.
+    * ``lammps``: one entry per ``run_lammps`` call, in order, with the
+      ``label`` and an ``outcome`` of ``setup ok`` or the ``ERROR`` line
+      LAMMPS printed.
+    * ``checks``: every ``@check`` with ``name``, ``passed``, ``message``,
+      and ``checks_note``, which says why a physics check fails here.
+    * ``outputs``: the names of the files ``run_lammps`` kept, which are
+      the names a real run would keep.
+    * ``output``: what the script printed, with *capture_output*.
+    """
+    script_path = Path(script).resolve()
+    if not script_path.exists():
+        raise FileNotFoundError(f"no such workflow script: {script_path}")
+    scratch = scratch_root()
+    if scratch is not None:
+        scratch.mkdir(parents=True, exist_ok=True)
+    throwaway = Path(tempfile.mkdtemp(prefix="slab-dry-run-", dir=scratch))
+    workspace_before = os.environ.get(WORKSPACE_ENV)
+    os.environ[WORKSPACE_ENV] = str(throwaway)
+    try:
+        with Workspace(throwaway) as ws:
+            run_id, error, buffer = _run_script_in(
+                ws,
+                script_path,
+                name=name,
+                intent=intent,
+                session=session,
+                argv=argv,
+                capture_output=capture_output,
+                dry_run=True,
+            )
+            report = _dry_run_report(ws, run_id, error)
+    finally:
+        if workspace_before is None:
+            os.environ.pop(WORKSPACE_ENV, None)
+        else:
+            os.environ[WORKSPACE_ENV] = workspace_before
+        shutil.rmtree(throwaway, ignore_errors=True)
+    if capture_output:
+        report["output"] = buffer.getvalue()
+    return report
+
+
+def _dry_run_report(ws: Workspace, run_id: str, error: str | None) -> dict[str, Any]:
+    """The dry-run report, read from the throwaway run's records."""
+    run = ws.runs.get(run_id)
+    failure = run.failure
+    lammps: list[dict[str, str]] = []
+    outputs: list[str] = []
+    for task in ws.runs.list_tasks(run_id):
+        if task.name != "run_lammps":
+            continue
+        label = "lammps"
+        label_hash = task.inputs.get("label")
+        if label_hash is not None:
+            with suppress(Exception):
+                loaded = loads(ws.artifacts.get(label_hash).read_bytes())
+                if loaded is not None:
+                    label = str(loaded)
+        if task.status is ExecutionStatus.COMPLETED:
+            outcome = "setup ok"
+        else:
+            outcome = _first_error_line(task.failure, task.error)
+        lammps.append({"label": label, "outcome": outcome})
+        outputs.extend(
+            ref.name
+            for ref in ws.runs.list_artifacts(run_id, role=ArtifactRole.INTERMEDIATE)
+            if ref.name.startswith(label) and ref.name not in outputs
+        )
+    return {
+        "dry_run": True,
+        "reached_end": run.status is ExecutionStatus.COMPLETED,
+        "traceback": failure["traceback"] if failure is not None else error,
+        "lammps": lammps,
+        "checks": [
+            {"name": result.name, "passed": result.passed, "message": result.message}
+            for result in ws.runs.list_check_results(run_id)
+        ],
+        "checks_note": DRY_RUN_CHECKS_NOTE,
+        "outputs": outputs,
+    }
+
+
+def _first_error_line(failure: dict[str, Any] | None, error: str | None) -> str:
+    r"""The ``ERROR`` line a failed ``run_lammps`` recorded, else its one-line error.
+
+    Examples:
+        >>> record = {"message": "LAMMPS failed (exit 1):\n  context: unfix nosuch\n"
+        ...           "  ERROR: Could not find fix ID nosuch to delete (src/modify.cpp:1071)"}
+        >>> _first_error_line(record, None)
+        'ERROR: Could not find fix ID nosuch to delete (src/modify.cpp:1071)'
+        >>> _first_error_line(None, "LammpsScriptError: timed out")
+        'LammpsScriptError: timed out'
+    """
+    texts: list[str] = []
+    if failure is not None:
+        texts.append(str(failure.get("message", "")))
+        texts.extend(str(note) for note in failure.get("notes", ()))
+    for text in texts:
+        for line in text.splitlines():
+            if line.strip().startswith("ERROR"):
+                return line.strip()
+    if failure is not None and failure.get("message"):
+        return str(failure["message"]).splitlines()[0]
+    return error or "failed"
+
+
+def parse_dry_run_report(text: str) -> dict[str, Any] | None:
+    r"""The JSON report after the last line that is only ``dry run:``, or None.
+
+    Examples:
+        >>> parse_dry_run_report('noise\ndry run:\n{"dry_run": true, "reached_end": true}\n')
+        {'dry_run': True, 'reached_end': True}
+        >>> parse_dry_run_report('a dry run: no marker line') is None
+        True
+        >>> parse_dry_run_report("no report") is None
+        True
+    """
+    markers = list(_DRY_RUN_MARKER_LINE.finditer(text))
+    if not markers:
+        return None
+    body = text[markers[-1].end() :]
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def launch_child(
     root: Path,
     script: str | os.PathLike[str],
@@ -887,6 +1098,7 @@ def launch_child(
     env: dict[str, str] | None = None,
     wait: bool = True,
     log_path: str | os.PathLike[str] | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """Run a workflow script as a child ``foundation run --reservation`` process.
 
@@ -905,6 +1117,12 @@ def launch_child(
     once the child claims the reservation. *env* is the base environment
     for the child (this process's when omitted); the envelope variables
     are added on top.
+
+    With *dry_run* the child rehearses under the slice (``slab run
+    --dry-run``): it takes the envelope, claims nothing, releases the
+    reservation when it ends, and prints the report of
+    :func:`dry_run_script` after a ``dry run:`` line. With ``wait=True``
+    that report is returned, plus ``exit_code``, ``log``, and ``output``.
     """
     from slab.resources import env_for
 
@@ -935,6 +1153,8 @@ def launch_child(
         command += ["--intent", intent]
     if session:
         command += ["--session", session]
+    if dry_run:
+        command.append("--dry-run")
     child_env = {
         **(env if env is not None else os.environ),
         **env_for(reservation.envelope()),
@@ -971,6 +1191,20 @@ def launch_child(
         return launched
     exit_code = process.wait()
     output = log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
+    if dry_run:
+        with Workspace(root) as ws, suppress(FoundationError):
+            ws.runs.release_reservation(reservation.id)
+        report = parse_dry_run_report(output)
+        if report is None:
+            tail = "\n".join(output.strip().splitlines()[-20:])
+            raise StorageError(
+                f"the child dry run (pid {process.pid}) exited {exit_code} without a "
+                f"report; its log {log} ends with:\n{tail}"
+            )
+        report.update(launched)
+        report["exit_code"] = exit_code
+        report["output"] = output
+        return report
     with Workspace(root) as ws:
         run = ws.runs.run_for_reservation(reservation.id)
         if run is None:

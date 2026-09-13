@@ -876,3 +876,124 @@ def test_a_job_and_a_child_never_inherit_the_run_id(
     with pytest.raises(FoundationError):
         launch_child(root, workflow, reservation=held, wait=False)
     assert "SLAB_RUN_ID" not in seen["env"]  # type: ignore[operator]
+
+
+# -- dry run ---------------------------------------------------------------------------
+
+
+DRY_RUN_SCRIPT = """\
+import os
+from foundation import check, task
+
+print("workspace", os.environ["SLAB_WORKSPACE"])
+
+@task
+def double(x):
+    return 2 * x
+
+y = double(21)
+
+@check
+def sane():
+    return y == 42
+"""
+
+DRY_RUN_KEYERROR_SCRIPT = """\
+from foundation import task
+
+@task
+def double(x):
+    return 2 * x
+
+y = double(21)
+result = {}
+print(result["thermo"]["Temp"])
+"""
+
+
+def _store_counts(root: Path) -> tuple[int, int]:
+    with Workspace(root) as ws:
+        return len(ws.runs.list_runs(limit=1000)), sum(1 for _ in ws.artifacts.hashes())
+
+
+def test_dry_run_touches_no_store_and_removes_the_throwaway(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rehearsal runs the script to its end in a throwaway workspace: the
+    real store's run and blob counts do not move, the throwaway directory is
+    gone afterwards, and $SLAB_WORKSPACE is what it was."""
+    launch_script(root, _write(tmp_path, "real.py", HAPPY_SCRIPT))
+    before = _store_counts(root)
+    monkeypatch.setenv("SLAB_WORKSPACE", str(root))
+    script = _write(tmp_path, "rehearsal.py", DRY_RUN_SCRIPT)
+    report = launch_script(root, script, dry_run=True, capture_output=True)
+    assert report["dry_run"] is True
+    assert report["reached_end"] is True
+    assert report["traceback"] is None
+    assert report["lammps"] == []
+    assert report["checks"] == [{"name": "sane", "passed": True, "message": "returned True"}]
+    assert "LAMMPS integrated no steps" in report["checks_note"]
+    assert report["outputs"] == []
+    assert "run_id" not in report
+    (line,) = [ln for ln in report["output"].splitlines() if ln.startswith("workspace ")]
+    throwaway = Path(line.split(" ", 1)[1])
+    assert throwaway.name.startswith("slab-dry-run-")
+    assert throwaway != root and not throwaway.exists()
+    assert _store_counts(root) == before
+    import os
+
+    assert os.environ["SLAB_WORKSPACE"] == str(root)
+
+
+def test_dry_run_reports_a_failure_after_the_task(root: Path, tmp_path: Path) -> None:
+    script = _write(tmp_path, "keyerror.py", DRY_RUN_KEYERROR_SCRIPT)
+    report = launch_script(root, script, dry_run=True)
+    assert report["reached_end"] is False
+    assert "KeyError: 'thermo'" in report["traceback"]
+    assert report["checks"] == []
+    assert not (root / "runs.db").exists()  # the real store was never opened
+
+
+def test_dry_run_uses_the_configured_scratch_root(
+    scratch_root: Path, tmp_path: Path
+) -> None:
+    script = _write(tmp_path, "where.py", DRY_RUN_SCRIPT)
+    report = launch_script(tmp_path / "ws", script, dry_run=True, capture_output=True)
+    (line,) = [ln for ln in report["output"].splitlines() if ln.startswith("workspace ")]
+    throwaway = Path(line.split(" ", 1)[1])
+    assert throwaway.parent == scratch_root
+    assert list(scratch_root.iterdir()) == []
+
+
+def test_dry_run_of_a_missing_script(root: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        launch_script(root, root / "ghost.py", dry_run=True)
+
+
+def test_parse_dry_run_report_takes_the_last_marker() -> None:
+    from foundation._ops import DRY_RUN_MARKER, parse_dry_run_report
+
+    text = f"{DRY_RUN_MARKER}\n{{}}\nnoise\n{DRY_RUN_MARKER}\n{{\"reached_end\": false}}\n"
+    assert parse_dry_run_report(text) == {"reached_end": False}
+    assert parse_dry_run_report(f"{DRY_RUN_MARKER}\nnot json") is None
+
+
+def test_launch_child_dry_run_returns_the_report_and_releases_the_reservation(
+    root: Path, tmp_path: Path
+) -> None:
+    """The child rehearses under the slice, prints the report, and the
+    reservation is gone when the parent's wait returns; no run exists."""
+    from foundation._ops import launch_child
+
+    script = _write(tmp_path, "child.py", DRY_RUN_SCRIPT)
+    with Workspace(root) as ws:
+        held = ws.reserve(ntasks=1, threads=1)
+    result = launch_child(root, script, reservation=held, dry_run=True, wait=True)
+    assert result["exit_code"] == 0, result["output"]
+    assert result["dry_run"] is True and result["reached_end"] is True
+    assert result["checks"][0]["passed"] is True
+    assert result["reservation"] == held.id
+    assert "--dry-run" in result["command"]
+    with Workspace(root) as ws:
+        assert ws.runs.list_runs() == []
+        assert ws.runs.list_reservations() == []

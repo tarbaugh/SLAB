@@ -882,3 +882,74 @@ def test_show_names_the_job_a_run_started_under(root: Path) -> None:
     assert "job:" not in shown.output
     as_json = runner.invoke(app, ["show", batched.id, "-w", str(root), "--json"])
     assert '"job_id": "4242"' in as_json.output
+
+
+# -- run --dry-run ---------------------------------------------------------------------
+
+
+DRY_SCRIPT = """\
+from foundation import check, task
+
+@task
+def double(x):
+    return 2 * x
+
+y = double(21)
+
+@check
+def sane():
+    return y == 42
+"""
+
+
+def _report(output: str) -> dict:
+    from foundation._ops import parse_dry_run_report
+
+    parsed = parse_dry_run_report(output)
+    assert parsed is not None, output
+    return parsed
+
+
+def test_run_dry_run_prints_the_report_and_touches_no_store(root: Path, tmp_path: Path) -> None:
+    script = tmp_path / "wf.py"
+    script.write_text(DRY_SCRIPT)
+    result = runner.invoke(app, ["run", str(script), "-w", str(root), "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "dry run:\n" in result.output
+    report = _report(result.output)
+    assert report["reached_end"] is True and report["lammps"] == []
+    assert report["checks"] == [{"name": "sane", "passed": True, "message": "returned True"}]
+    assert not root.exists()
+
+
+def test_run_dry_run_exits_one_when_the_script_dies(root: Path, tmp_path: Path) -> None:
+    script = tmp_path / "wf.py"
+    script.write_text("x = {}\nprint(x['thermo'])\n")
+    result = runner.invoke(app, ["run", str(script), "-w", str(root), "--dry-run"])
+    assert result.exit_code == 1
+    report = _report(result.output)
+    assert report["reached_end"] is False
+    assert "KeyError: 'thermo'" in report["traceback"]
+
+
+def test_run_dry_run_releases_the_reservation(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    monkeypatch.setattr(os, "environ", os.environ.copy())
+    monkeypatch.setattr("slab.resources.apply", lambda envelope: None)
+    for name in ("SLAB_CPUS", "SLAB_GPUS", "SLAB_NTASKS", "SLAB_THREADS"):
+        monkeypatch.delenv(name, raising=False)
+    script = tmp_path / "wf.py"
+    script.write_text("import os\nprint('cpus', os.environ['SLAB_CPUS'])\n")
+    with Workspace(root) as ws:
+        held = ws.reserve(ntasks=1, threads=2, budget=_budget())
+    result = runner.invoke(
+        app, ["run", str(script), "-w", str(root), "--reservation", held.id, "--dry-run"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "cpus 0,1" in result.output
+    with Workspace(root) as ws:
+        assert ws.runs.list_runs() == []
+        assert ws.runs.list_reservations() == []

@@ -399,6 +399,113 @@ carries the input anatomy, the ensembles, and the checks for the resident
 agent, and `slab.outputs` digests the kept log on `read_artifact`. A script that dies keeps its evidence; see
 [Debugging failures](debugging-failures.md#when-the-engine-writes-files).
 
+### Dry run
+
+LAMMPS runs the commands of a script in order. An error in the third
+stage of a script, such as an `unfix` of an id that does not exist,
+surfaces only after the first two stages have run. The Python after
+`run_lammps`, a `KeyError` on a result key or a wrong table index, runs
+only after the dynamics. A dry run finds both before any step is paid
+for.
+
+Run the script with `slab run --dry-run`. The script runs to its end, or
+to its first exception, inside a throwaway workspace that is removed
+afterwards, so nothing lands in the real store or its cache, and no
+reservation is claimed. Every `run_lammps` call runs LAMMPS under
+`-skiprun`. LAMMPS reads the data file, sets up every pair style, fix,
+and compute, runs every command in order, and integrates no step of any
+`run` or `minimize`. A `timer` line in the script is dropped for the dry
+run, because it would override the flag, and `info["dropped_lines"]`
+names it. The result of the call has `steps == 0`, `tables == []`, and
+an empty `thermo`, so a physics check is expected to fail. The report
+says so. A `fix ave/time` file holds only its header lines, a `dump`
+file is empty, and `write_data` and `write_restart` files are complete.
+
+The command prints a JSON report after a `dry run:` line and exits 0
+when the script reached its end and every `run_lammps` set up cleanly,
+else 1. The script below has a `timer` line and a check on the
+temperature. Executed for real, on a laptop, against a LAMMPS build from
+22 Jul 2025:
+
+<!-- no-verify -->
+```python
+from ase.build import bulk
+
+from foundation import check
+from foundation.tasks import run_lammps
+
+atoms = bulk("Ar", "fcc", a=5.26, cubic=True) * (3, 3, 3)
+script = """\
+units metal
+atom_style atomic
+boundary p p p
+read_data structure.data
+pair_style lj/cut 8.5
+pair_coeff 1 1 0.0104 3.40
+timer timeout 0:10:00 every 100
+velocity all create 300.0 4928459 mom yes rot yes dist gaussian
+timestep 0.002
+fix integrate all nvt temp 300.0 300.0 0.2
+fix avg all ave/time 10 10 100 c_thermo_temp file ar-temp.txt
+thermo 100
+thermo_style custom step temp pe ke etotal press vol
+run 2000
+write_data ar-final.data
+"""
+result, info = run_lammps(script, atoms=atoms, label="ar")
+print(f"steps={result['steps']} tables={len(result['tables'])} dropped={info['dropped_lines']}")
+
+
+@check
+def the_thermostat_held() -> None:
+    assert abs(result["thermo"]["Temp"] - 300.0) < 30.0
+```
+
+<!-- no-verify -->
+```text
+$ slab run --dry-run md_nvt.py
+steps=0 tables=0 dropped=['timer timeout 0:10:00 every 100']
+dry run:
+{
+  "dry_run": true,
+  "reached_end": true,
+  "traceback": null,
+  "lammps": [
+    {
+      "label": "ar",
+      "outcome": "setup ok"
+    }
+  ],
+  "checks": [
+    {
+      "name": "the_thermostat_held",
+      "passed": false,
+      "message": "check raised KeyError: 'Temp'"
+    }
+  ],
+  "checks_note": "physics checks are expected to fail in a dry run: LAMMPS integrated no steps",
+  "outputs": [
+    "ar.in",
+    "ar.log",
+    "ar-thermo.json",
+    "ar-structure.data",
+    "ar.screen",
+    "ar-final.data",
+    "ar-temp.txt"
+  ]
+}
+```
+
+`reached_end` says the script ran to its last line, `lammps` lists each
+`run_lammps` call with `setup ok` or the `ERROR` line LAMMPS printed,
+`checks` shows every check with its outcome, and `outputs` names the
+files the real run would keep. A script that dies after `run_lammps`
+reports `reached_end: false` and the traceback. A build that does not
+list `-skiprun` in its `-h` output is refused with a message that names
+the flag, and `describe_lammps(...)["skiprun"]` reports the support. In
+Python, `launch_script` and `launch_child` take the same `dry_run`
+switch.
+
 ## Per-engine environments
 
 Each engine runs isolated by construction. QE and LAMMPS are external
