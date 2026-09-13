@@ -479,12 +479,13 @@ def build_server(
         except (FoundationError, sqlite3.Error, OSError) as e:
             found = discover_budget()
             return engines_overview() | {
-                "budget": {"cpus": len(found.cpus), "gpus": len(found.gpus)},
+                "budget": _ops.budget_counts(found.cpus, found.gpus, found.gpu_source),
                 "free": None,
                 "resources_note": f"run store unavailable: {e}",
             }
+        held = resources["budget"]
         return engines_overview() | {
-            "budget": {key: len(ids) for key, ids in resources["budget"].items()},
+            "budget": _ops.budget_counts(held["cpus"], held["gpus"], held["gpu_source"]),
             "free": {key: len(ids) for key, ids in resources["free"].items()},
         }
 

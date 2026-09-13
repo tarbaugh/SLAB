@@ -749,6 +749,32 @@ def test_free_resources_shrinks_under_a_launch_and_grows_back(
         assert ws.runs.list_reservations() == []
 
 
+def test_free_resources_lists_each_budget_gpu_with_its_memory_in_use(
+    box: Toolbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An occupied device is visible before a launch holds it: one line per
+    budget gpu with the memory nvidia-smi reports, and where the ids came
+    from on the budget line. Without nvidia-smi the tool says so once."""
+    for name in ("SLAB_CPUS", "SLAB_GPUS", "SLAB_NTASKS", "SLAB_THREADS"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    monkeypatch.setenv("SLAB_GPU_SOURCE", "slurm_job_gpus")
+    monkeypatch.setattr(
+        "slab.resources.device_status",
+        lambda: [{"id": "1", "mode": "Default", "memory_used": "40123 MiB"}],
+    )
+    answer = box.dispatch(_call("free_resources"))
+    lines = answer.splitlines()
+    assert lines[0].endswith("1 gpu(s) (ids 1, source slurm_job_gpus)")
+    assert lines[1] == "  gpu 1: 40123 MiB used, mode Default"
+    assert lines[2] == f"free now: {_budget_cpus()} cpu(s), 1 gpu(s)"
+    monkeypatch.setattr("slab.resources.device_status", lambda: None)
+    assert "  gpus: nvidia-smi not found" in box.dispatch(_call("free_resources"))
+    listed = json.loads(box.dispatch(_call("list_engines")))
+    assert listed["budget"]["gpu_ids"] == ["1"]
+    assert listed["budget"]["gpu_source"] == "slurm_job_gpus"
+
+
 def test_free_resources_names_an_unclaimed_holder(box: Toolbox, no_gpus: None) -> None:
     from foundation import Workspace
 

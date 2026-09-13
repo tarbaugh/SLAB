@@ -318,7 +318,7 @@ def run_lammps_script(
     _write_screen(directory, screen)
     log = _read_log(directory)
     if process.returncode != 0 or _has_error(log) or _has_error(screen):
-        evidence = "\n  ".join(error_lines(log if log.strip() else screen))
+        evidence = "\n  ".join(failure_evidence(log, screen))
         raise LammpsScriptError(
             f"LAMMPS failed (exit {process.returncode}):\n  {evidence}", log=log, screen=screen
         )
@@ -544,18 +544,53 @@ def kokkos_report(log: str) -> dict[str, Any]:
     }
 
 
+def failure_evidence(log: str, screen: str, limit: int = _EVIDENCE_LIMIT) -> list[str]:
+    """The lines worth reading after a failure, from the log or the screen.
+
+    The log's error lines when the log holds one; else the screen's error
+    lines when the screen holds one; else the log's tail when the log has
+    text, and the screen's tail otherwise. A GPU build that dies in
+    ``Kokkos::initialize`` writes the LAMMPS banner to the log and the
+    CUDA error to the screen alone, so the screen is read before either
+    tail is.
+
+    Examples:
+        >>> log = "LAMMPS (22 Jul 2025 - Update 4)\\nKOKKOS mode with Kokkos version 4.6.1"
+        >>> screen = log + (
+        ...     "\\nterminate called after throwing an instance of 'std::runtime_error'"
+        ...     "\\n  what():  cudaSetDevice(1) error( cudaErrorDevicesUnavailable): busy")
+        >>> for line in failure_evidence(log, screen):
+        ...     print(line)
+        context: terminate called after throwing an instance of 'std::runtime_error'
+        what():  cudaSetDevice(1) error( cudaErrorDevicesUnavailable): busy
+        >>> failure_evidence("pair_style x\\nERROR: Unrecognized pair style", screen)
+        ['context: pair_style x', 'ERROR: Unrecognized pair style']
+        >>> failure_evidence("", "")
+        ['LAMMPS wrote nothing: the process died before the script started']
+    """
+    if _has_error_line(log):
+        return error_lines(log, limit)
+    if _has_error_line(screen):
+        return error_lines(screen, limit)
+    return error_lines(log if log.strip() else screen, limit)
+
+
 def error_lines(log: str, limit: int = _EVIDENCE_LIMIT) -> list[str]:
     """The lines of a LAMMPS log worth reading after a failure.
 
     The ``ERROR`` lines are the evidence, with the line before the first
     one: the echoed command that died, or the last thermo row before the
-    blow-up. A log without one contributes its last non-empty lines, and
-    an empty log says so, because a process that wrote nothing died before
-    LAMMPS started (a missing library, a wrong binary, a scheduler kill).
+    blow-up. A Kokkos abort (a line starting ``Kokkos::``) and a CUDA
+    error (``cudaError``, ``CUDA error``) are error lines too. A log
+    without one contributes its last non-empty lines, and an empty log
+    says so, because a process that wrote nothing died before LAMMPS
+    started (a missing library, a wrong binary, a scheduler kill).
 
     Examples:
         >>> error_lines("pair_style eam/aloy\\nERROR: Unrecognized pair style 'eam/aloy'")
         ['context: pair_style eam/aloy', "ERROR: Unrecognized pair style 'eam/aloy'"]
+        >>> error_lines("banner\\nKokkos::Cuda::initialize ERROR: no CUDA-capable device")
+        ['context: banner', 'Kokkos::Cuda::initialize ERROR: no CUDA-capable device']
         >>> error_lines("")
         ['LAMMPS wrote nothing: the process died before the script started']
     """
@@ -571,8 +606,43 @@ def error_lines(log: str, limit: int = _EVIDENCE_LIMIT) -> list[str]:
     return stripped[-5:][:limit]
 
 
+_CUDA_DEVICE_ERROR = re.compile(
+    r"cudaError(?:DevicesUnavailable|NoDevice|InvalidDevice|DeviceUnavailable|"
+    r"InsufficientDriver|DeviceUninitialized)|no CUDA-capable device"
+)
+
+
+def cuda_device_error(text: str) -> str | None:
+    """The first line of *text* that names a CUDA device error, or None.
+
+    A device error is the driver refusing the device itself, as against
+    a kernel fault later in the run: ``cudaErrorDevicesUnavailable``,
+    ``cudaErrorNoDevice``, ``cudaErrorInvalidDevice``, and their kin.
+
+    Examples:
+        >>> cuda_device_error("x\\n  what():  cudaSetDevice(1) error( cudaErrorNoDevice): none")
+        'what():  cudaSetDevice(1) error( cudaErrorNoDevice): none'
+        >>> cuda_device_error("ERROR: Unrecognized pair style") is None
+        True
+    """
+    for line in text.splitlines():
+        if _CUDA_DEVICE_ERROR.search(line):
+            return line.strip()
+    return None
+
+
 def _is_error_line(line: str) -> bool:
-    return line.startswith("ERROR") or line.startswith("Last command:")
+    return (
+        line.startswith("ERROR")
+        or line.startswith("Last command:")
+        or line.startswith("Kokkos::")
+        or "cudaError" in line
+        or "CUDA error" in line
+    )
+
+
+def _has_error_line(text: str) -> bool:
+    return any(_is_error_line(line.strip()) for line in text.splitlines())
 
 
 def _has_error(text: str) -> bool:

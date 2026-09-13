@@ -38,18 +38,26 @@ PLACEHOLDERS = ("ntasks", "threads", "gpus")
 _PLACEHOLDER = re.compile(r"(?<!\$)\{(ntasks|threads|gpus)\}")
 _NVIDIA_SMI_TIMEOUT_S = 10
 
+#: Where a budget's gpu ids came from, in the order :func:`budget` tries them.
+GPU_SOURCES = ("cuda_visible_devices", "slurm_job_gpus", "slurm_count", "probed", "none")
+
 
 @dataclass(frozen=True)
 class Budget:
-    """The cpu ids and gpu ids this process may use.
+    """The cpu ids and gpu ids this process may use, and where the gpu ids came from.
+
+    ``gpu_source`` is one of :data:`GPU_SOURCES`, so a listing can say
+    whether the ids were the scheduler's allocation or a probe of the
+    whole node.
 
     Examples:
-        >>> Budget(cpus=(0, 1, 2, 3), gpus=("0",)).counts
+        >>> Budget(cpus=(0, 1, 2, 3), gpus=("0",), gpu_source="slurm_job_gpus").counts
         {'cpus': 4, 'gpus': 1}
     """
 
     cpus: tuple[int, ...]
     gpus: tuple[str, ...] = ()
+    gpu_source: str = "none"
 
     @property
     def counts(self) -> dict[str, int]:
@@ -86,15 +94,35 @@ def budget() -> Budget:
 
     Cpus come from the affinity mask where the platform reports one (a
     SLURM cgroup shrinks it to the allocation) and from the machine's count
-    elsewhere. Gpus come from ``CUDA_VISIBLE_DEVICES`` when it is set (an
-    empty value means none), else ``SLURM_JOB_GPUS`` or ``SLURM_STEP_GPUS``,
-    else one cached ``nvidia-smi -L`` probe, else none.
+    elsewhere. Gpus are the allocation, never the node: the first of these
+    that answers decides, and ``gpu_source`` names it.
+
+    1. ``CUDA_VISIBLE_DEVICES`` as written; an empty value means none
+       (``cuda_visible_devices``). Inside a sandbox job the prologue that
+       set it also exports ``SLAB_GPU_SOURCE`` to say where it got the ids,
+       and that name is reported instead.
+    2. ``SLURM_JOB_GPUS`` or ``SLURM_STEP_GPUS`` (``slurm_job_gpus``). These
+       hold the node's global ids. When the process can see more devices
+       than the job holds (``nvidia-smi -L`` lists more ids than the
+       variable names) there is no cgroup device constraint, and the
+       global ids are the usable ones, so they pass through as written.
+       Otherwise the job sees its devices renumbered from zero, and the
+       ids become ``0, 1, ...``.
+    3. ``SLURM_GPUS_ON_NODE`` or ``SLURM_GPUS`` as a count, ids ``0..n-1``
+       (``slurm_count``).
+    4. One cached ``nvidia-smi -L`` probe, only outside a job: no
+       ``SLURM_JOB_ID`` set (``probed``). Inside a job that names no gpu
+       variable the budget holds no gpu (``none``), because a probe would
+       list every device on the node, held by other jobs included.
 
     Examples:
         >>> import os
+        >>> for name in ("SLURM_JOB_GPUS", "SLURM_STEP_GPUS", "SLURM_GPUS_ON_NODE", "SLURM_GPUS",
+        ...              "SLURM_JOB_ID", "SLAB_GPU_SOURCE"):
+        ...     _ = os.environ.pop(name, None)
         >>> os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
-        >>> budget().gpus
-        ('0', '1')
+        >>> budget().gpus, budget().gpu_source
+        (('0', '1'), 'cuda_visible_devices')
         >>> os.environ["CUDA_VISIBLE_DEVICES"] = ""
         >>> budget().gpus
         ()
@@ -102,7 +130,8 @@ def budget() -> Budget:
         >>> len(budget().cpus) >= 1
         True
     """
-    return Budget(cpus=_affinity_cpus(), gpus=_visible_gpus())
+    gpus, source = _gpu_budget()
+    return Budget(cpus=_affinity_cpus(), gpus=gpus, gpu_source=source)
 
 
 def envelope() -> Envelope:
@@ -420,23 +449,99 @@ def _affinity_cpus() -> tuple[int, ...]:
 
 
 def _visible_gpus() -> tuple[str, ...]:
-    """The gpu ids this process may name in ``CUDA_VISIBLE_DEVICES``.
+    """The gpu ids this process may name in ``CUDA_VISIBLE_DEVICES``."""
+    return _gpu_budget()[0]
 
-    ``CUDA_VISIBLE_DEVICES`` is taken as written. ``SLURM_JOB_GPUS`` and
-    ``SLURM_STEP_GPUS`` hold the node's global ids (``2,3`` on a node with
-    four), but a job under cgroup device constraints sees its devices
-    renumbered from zero, so exporting those ids to a child would name
-    devices it cannot open. Only their count is used, and the ids become
-    ``0, 1, ...``.
+
+def _gpu_budget() -> tuple[tuple[str, ...], str]:
+    """The gpu ids and their source, in the order :func:`budget` documents.
+
+    Examples:
+        >>> import os
+        >>> import slab.resources as resources
+        >>> for name in ("CUDA_VISIBLE_DEVICES", "SLURM_JOB_GPUS", "SLURM_STEP_GPUS",
+        ...              "SLURM_GPUS_ON_NODE", "SLURM_GPUS", "SLURM_JOB_ID", "SLAB_GPU_SOURCE"):
+        ...     _ = os.environ.pop(name, None)
+        >>> probe = resources._probed_gpus
+        >>> resources._probed_gpus = lambda: ("0", "1")  # a node with two devices
+        >>> os.environ["SLURM_JOB_ID"] = "123"
+
+        A job holding one of the two: no cgroup constraint, the id passes through.
+
+        >>> os.environ["SLURM_JOB_GPUS"] = "1"
+        >>> _gpu_budget()
+        (('1',), 'slurm_job_gpus')
+
+        A job holding both: the count matches, so the ids are renumbered from zero.
+
+        >>> os.environ["SLURM_JOB_GPUS"] = "2,3"
+        >>> _gpu_budget()
+        (('0', '1'), 'slurm_job_gpus')
+
+        The step variable answers when the job variable is unset.
+
+        >>> del os.environ["SLURM_JOB_GPUS"]
+        >>> os.environ["SLURM_STEP_GPUS"] = "3"
+        >>> _gpu_budget()
+        (('3',), 'slurm_job_gpus')
+        >>> del os.environ["SLURM_STEP_GPUS"]
+
+        A count alone; ``SLURM_GPUS`` may carry the type in front of it.
+
+        >>> os.environ["SLURM_GPUS_ON_NODE"] = "2"
+        >>> _gpu_budget()
+        (('0', '1'), 'slurm_count')
+        >>> del os.environ["SLURM_GPUS_ON_NODE"]
+        >>> os.environ["SLURM_GPUS"] = "a100:1"
+        >>> _gpu_budget()
+        (('0',), 'slurm_count')
+        >>> del os.environ["SLURM_GPUS"]
+
+        Inside a job with no gpu variable: none, whatever the node holds.
+
+        >>> _gpu_budget()
+        ((), 'none')
+
+        Outside a job the probe answers.
+
+        >>> del os.environ["SLURM_JOB_ID"]
+        >>> _gpu_budget()
+        (('0', '1'), 'probed')
+
+        ``CUDA_VISIBLE_DEVICES`` wins over everything, and a sandbox prologue
+        that set it names where it got the ids.
+
+        >>> os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+        >>> os.environ["SLAB_GPU_SOURCE"] = "slurm_job_gpus"
+        >>> _gpu_budget()
+        (('1',), 'slurm_job_gpus')
+        >>> os.environ["SLAB_GPU_SOURCE"] = "not-a-source"
+        >>> _gpu_budget()
+        (('1',), 'cuda_visible_devices')
+        >>> for name in ("CUDA_VISIBLE_DEVICES", "SLAB_GPU_SOURCE"):
+        ...     del os.environ[name]
+        >>> resources._probed_gpus = probe
     """
     visible = os.environ.get("CUDA_VISIBLE_DEVICES")
     if visible is not None:
-        return _id_list(visible)
+        told = os.environ.get("SLAB_GPU_SOURCE")
+        source = told if told in GPU_SOURCES else "cuda_visible_devices"
+        return _id_list(visible), source
     for name in ("SLURM_JOB_GPUS", "SLURM_STEP_GPUS"):
         value = os.environ.get(name)
         if value:
-            return tuple(str(index) for index in range(len(_id_list(value))))
-    return _probed_gpus()
+            ids = _id_list(value)
+            if len(_probed_gpus()) > len(ids):
+                return ids, "slurm_job_gpus"
+            return tuple(str(index) for index in range(len(ids))), "slurm_job_gpus"
+    for name in ("SLURM_GPUS_ON_NODE", "SLURM_GPUS"):
+        count = _positive_int(os.environ.get(name, "").rsplit(":", 1)[-1])
+        if count is not None:
+            return tuple(str(index) for index in range(count)), "slurm_count"
+    if os.environ.get("SLURM_JOB_ID"):
+        return (), "none"
+    probed = _probed_gpus()
+    return probed, "probed" if probed else "none"
 
 
 @functools.lru_cache(maxsize=1)
@@ -459,6 +564,50 @@ def _probed_gpus() -> tuple[str, ...]:
         return ()
     found = re.findall(r"^GPU (\d+):", result.stdout, flags=re.MULTILINE)
     return tuple(found)
+
+
+def device_status() -> list[dict[str, str]] | None:
+    """Each device ``nvidia-smi`` lists now: its id, compute mode, and memory used.
+
+    None when ``nvidia-smi`` is not on the path. An empty list when it is
+    there but answers nothing (no driver, a timeout). The ids are the
+    node's global ids, so a caller compares them with the budget to say
+    which devices are outside this job's allocation.
+
+    Examples:
+        >>> _parse_device_status("0, Default, 1234 MiB\\n1, Exclusive_Process, 0 MiB\\n")[1]
+        {'id': '1', 'mode': 'Exclusive_Process', 'memory_used': '0 MiB'}
+    """
+    if shutil.which("nvidia-smi") is None:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,compute_mode,memory.used",
+                "--format=csv,noheader",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_NVIDIA_SMI_TIMEOUT_S,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+    return _parse_device_status(result.stdout)
+
+
+def _parse_device_status(text: str) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for line in text.splitlines():
+        pieces = [piece.strip() for piece in line.split(",")]
+        if len(pieces) < 3 or not pieces[0].isdigit():
+            continue
+        rows.append({"id": pieces[0], "mode": pieces[1], "memory_used": pieces[2]})
+    return rows
 
 
 def _id_list(text: str) -> tuple[str, ...]:
@@ -504,6 +653,7 @@ def _positive_int(text: str | None) -> int | None:
 
 
 __all__ = [
+    "GPU_SOURCES",
     "PLACEHOLDERS",
     "Budget",
     "Envelope",
@@ -511,6 +661,7 @@ __all__ = [
     "apply",
     "budget",
     "check_size",
+    "device_status",
     "env_for",
     "envelope",
     "fill",

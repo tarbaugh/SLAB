@@ -61,6 +61,7 @@ from slab.lammps import (
     INPUT_NAME,
     LOG_NAME,
     SCREEN_NAME,
+    cuda_device_error,
     describe_lammps,
     kokkos_report,
     kokkos_switches,
@@ -1177,6 +1178,7 @@ def run_lammps(
         except LammpsScriptError as e:
             if active is not None:
                 _keep_lammps_failure(active, scratch, name, before, e)
+            _note_device_error(e)
             raise
         produced = sorted(
             path
@@ -1556,6 +1558,31 @@ def _keep_lammps_failure(
             kept.append(_keep_unique(active, f"{name}-failed-{path.name}", path))
     if kept:
         e.add_note("LAMMPS files kept as artifacts: " + ", ".join(repr(k) for k in kept))
+
+
+def _note_device_error(e: LammpsScriptError) -> None:
+    """A CUDA device error names the slice the launch held and the budget it came from.
+
+    The driver refusing the device (``cudaErrorDevicesUnavailable`` and its
+    kin, see :func:`slab.lammps.cuda_device_error`) is not a fault in the
+    script: the device is held by another process, or it is outside this
+    job's allocation. The note says which ids the launch held, how many
+    the budget listed, and where the budget's ids came from, so the reader
+    checks the machine and not the input.
+    """
+    from slab.resources import budget, envelope
+
+    line = cuda_device_error(e.screen) or cuda_device_error(e.log)
+    if line is None:
+        return
+    held = ",".join(envelope().gpus) or "none"
+    found = budget()
+    e.add_note(
+        f"the launch held gpu id(s) {held} from a budget of {len(found.gpus)} "
+        f"(source: {found.gpu_source}); a device that refuses within seconds is held "
+        f"by another process or is outside this job's allocation; check nvidia-smi "
+        f"inside the job"
+    )
 
 
 # Extensions atomsk writes that ASE reads only under an explicit format name.

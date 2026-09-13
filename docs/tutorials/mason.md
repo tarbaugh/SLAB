@@ -322,6 +322,20 @@ command the agent types by hand. The rank check catches one that names
 a launcher, and the refusal of `slab run` catches one that names the
 driver.
 
+The gpu budget is the allocation, never the node. Inside a job the ids
+come from `CUDA_VISIBLE_DEVICES`, else from `SLURM_JOB_GPUS`, else from
+a SLURM count, and a job that names no gpu holds none. A probe of
+`nvidia-smi` answers only outside a job, because inside one it lists
+the devices other jobs hold too, and a launch that took one of those
+would die in the driver within seconds. `list_engines` and
+`free_resources` name the ids and their source (`gpu_source`), and
+`free_resources` adds one line per budget gpu with the memory it has in
+use, so an occupied device is visible before a launch. When a GPU build
+dies on a CUDA device error, the failure record quotes the error from
+the screen output and adds a note naming the ids the launch held, the
+budget they came from, and its source. See
+[Configuring SLAB for your HPC](hpc-config.md#the-gpu-budget-is-the-allocation).
+
 ## Software notes: curated context for the engines
 
 Without context, a model spends its first steps searching the filesystem for
@@ -633,17 +647,24 @@ device the job holds. A CPU partition renders without it. `--cleanenv`
 strips the variables the scheduler set, so the script re-exports
 `CUDA_VISIBLE_DEVICES`, `SLURM_CPUS_PER_TASK`, `SLURM_NTASKS`, and
 `SLURM_JOB_ID` into the container.
-When the job did not set `CUDA_VISIBLE_DEVICES`, the script counts the
-devices that `SLURM_JOB_GPUS` names and exports the ids `0,1,...`
-instead of SLURM's own. SLURM's ids are the node's global ids, and a
-job under cgroup device constraints sees its devices renumbered from
-zero. The budget inside reads exactly these. The job id stamps every
+When the job did not set `CUDA_VISIBLE_DEVICES`, the script resolves
+the ids from `SLURM_JOB_GPUS` in the order the budget does. SLURM's
+ids are the node's global ids. When `nvidia-smi` lists more devices
+than the job holds there is no cgroup device constraint, and the ids
+pass through as written. When it lists exactly the job's devices, the
+job sees them renumbered from zero, and the script exports `0,1,...`.
+Without `SLURM_JOB_GPUS` a `SLURM_GPUS_ON_NODE` count gives `0..n-1`,
+and a job that names no gpu gets none. The script also exports
+`SLAB_GPU_SOURCE`, so the budget inside reports where the prologue got
+the ids, and it prints the resolved ids and their source to the job's
+output. The budget inside reads exactly these. The job id stamps every
 run made inside, so `slab hpc cancel` fails those runs and frees their
 slices. The script also sets
 `OMPI_MCA_hwloc_base_binding_policy=none`, so two concurrent launches
 bind inside their own affinity masks instead of both to core 0. The
-context file states how many GPUs the job holds and that their ids are
-the ones in `CUDA_VISIBLE_DEVICES`.
+context file states how many GPUs the job holds, that their ids are
+the ones in `CUDA_VISIBLE_DEVICES`, and the order they were resolved
+in.
 
 Two launches share one allocation like this. On a node with four GPUs,
 the agent calls `launch_workflow` with `ntasks=2, gpus=2,

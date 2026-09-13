@@ -64,6 +64,17 @@ if "-k" in args and args[args.index("-k") + 1] == "on":
     lines.append("  using %d OpenMP thread(s) per MPI task" % threads)
 if os.environ.get("FAKE_MARK"):
     lines.append("FAKE_MARK=" + os.environ["FAKE_MARK"])
+if os.environ.get("FAKE_CUDA_BUSY") and "-k" in args:
+    # A GPU build whose device is held: the banner reaches the log, the
+    # Kokkos abort reaches the screen alone, and the exit is an abort.
+    with open(log_name, "w") as handle:
+        handle.write("\\n".join(lines) + "\\n")
+    sys.stdout.write("\\n".join(lines) + "\\n")
+    sys.stdout.write("terminate called after throwing an instance of 'std::runtime_error'\\n")
+    sys.stdout.write("  what():  cudaSetDevice(cuda_device_id) error( cudaErrorDevicesUnavailable):"
+                     " CUDA-capable device(s) is/are busy or unavailable"
+                     " /opt/lammps/lib/kokkos/core/src/Cuda/Kokkos_Cuda_Instance.cpp:135\\n")
+    sys.exit(134)
 natoms, every, temp, step = 0, 1, 300.0, 0
 columns = ["Step", "Temp", "E_pair", "E_mol", "TotEng", "Press"]
 failed = False
@@ -589,6 +600,46 @@ def test_run_lammps_failure_keeps_evidence_and_names_the_error(
     failed = ws.runs.get(run.id)
     assert failed.status is ExecutionStatus.FAILED
     assert "Unrecognized pair style" in (failed.error or "")
+
+
+def test_a_device_error_is_quoted_from_the_screen_and_names_the_slice(
+    tmp_path: Path, fake_lmp: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The campaign's failure: a GPU build dies in Kokkos::initialize within
+    seconds. The log holds the banner alone, so the evidence comes from the
+    screen, and the failure record's notes name the gpu ids the launch held,
+    the budget they came from, and its source."""
+    from foundation._ops import launch_script, run_details
+
+    monkeypatch.setenv("FAKE_CUDA_BUSY", "1")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    monkeypatch.setenv("SLAB_GPU_SOURCE", "slurm_job_gpus")
+    monkeypatch.setenv("SLAB_GPUS", "1")
+    monkeypatch.setenv("SLAB_CPUS", "0")
+    workflow = tmp_path / "gpu.py"
+    workflow.write_text(
+        "from foundation.tasks import run_lammps\n"
+        f"run_lammps({EAM_SCRIPT.replace('pair_style eam', 'pair_style lj/cut 8.5')!r}"
+        f".replace('pair_coeff 1 1 Cu_u3.eam', 'pair_coeff 1 1 0.0104 3.40'),"
+        f" label='cu', command={fake_lmp + ' -k on g 1 -sf kk'!r})\n"
+    )
+    result = launch_script(tmp_path / "ws", workflow, name="gpu", capture_output=True)
+    assert (result["state"], result["status"]) == ("quarantined", "failed")
+    message = result["failure"]["message"]
+    assert "cudaErrorDevicesUnavailable" in message, message
+    assert "context: terminate called" in message
+    notes = result["failure"]["notes"]
+    assert (
+        "the launch held gpu id(s) 1 from a budget of 1 (source: slurm_job_gpus); a device "
+        "that refuses within seconds is held by another process or is outside this job's "
+        "allocation; check nvidia-smi inside the job"
+    ) in notes
+    with Workspace(tmp_path / "ws") as ws:
+        details = run_details(ws, result["run_id"])
+        names = {a.name for a in ws.runs.list_artifacts(result["run_id"])}
+    assert {"cu-failed.log", "cu-failed.screen"} <= names
+    (task_entry,) = details["tasks"]
+    assert "the launch held gpu id(s) 1" in "\n".join(task_entry["failure"]["notes"])
 
 
 def test_run_lammps_cache_identity_follows_the_script_the_files_and_the_command(

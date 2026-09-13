@@ -2,11 +2,11 @@
 
 One command that means "ready to launch a campaign". Each row probes the
 real campaign path — the configuration, the workspace and what a purge
-would sweep from it, the memory store,
-the engines, the scheduler and its partition caps, the LAMMPS plain
-build, the agent's context window, the mp snapshot, the gracemaker trainer, the
-model endpoint, the sandbox, and the freshness of the rendered job — and
-the command exits nonzero only on an ``x`` row. An ``=`` row is a fact,
+would sweep from it, the memory store, the engines, the scheduler and
+its partition caps, the gpu budget and the devices, the LAMMPS plain
+build, the agent's context window, the mp snapshot, the gracemaker
+trainer, the model endpoint, the sandbox, and the freshness of the
+rendered job — and the command exits nonzero only on an ``x`` row. An ``=`` row is a fact,
 not a failure: a laptop with no scheduler is healthy, and the doctor must
 say so rather than fail it.
 
@@ -31,7 +31,7 @@ from mason.errors import MasonError
 from mason.session import stale_locks, transcript_groups
 from slab._ops import engines_overview
 from slab.errors import SlabError
-from slab.resources import gres_gpus
+from slab.resources import budget, device_status, gres_gpus
 from slab.scratch import leftovers, scratch_root
 
 if TYPE_CHECKING:
@@ -249,6 +249,40 @@ def _context_window_row(agent: AgentConfig) -> tuple[str, str] | None:
             "the endpoint serves",
         )
     return None
+
+
+def _gpu_rows() -> list[tuple[str, str]]:
+    """The gpu budget, where its ids came from, and every device ``nvidia-smi`` lists.
+
+    The budget is the allocation (see :func:`slab.resources.budget`), and
+    a device the node holds outside it is marked so, because a launch
+    that named it would die in the driver within seconds. A budget with
+    no gpu is a fact, so its row is ``=`` and not a failure.
+    """
+    found = budget()
+    ids = ",".join(found.gpus) or "none"
+    rows = [
+        (
+            "+" if found.gpus else "=",
+            f"gpu budget: {len(found.gpus)} gpu(s), ids {ids} (source: {found.gpu_source})",
+        )
+    ]
+    devices = device_status()
+    if devices is None:
+        rows.append(("=", "gpus: nvidia-smi not found"))
+        return rows
+    if not devices:
+        rows.append(("=", "gpus: nvidia-smi lists no device"))
+    for device in devices:
+        inside = device["id"] in found.gpus
+        rows.append(
+            (
+                "+" if inside else "=",
+                f"gpu {device['id']}: mode {device['mode']}, {device['memory_used']} used"
+                + ("" if inside else " (outside the allocation)"),
+            )
+        )
+    return rows
 
 
 def _partition_rows(slab_cfg: SlabConfig | None) -> list[tuple[str, str]]:
@@ -569,6 +603,7 @@ def run(
     rows.extend(engine_rows)
     rows.append(_hpc_row(slab_cfg))
     rows.extend(_partition_rows(slab_cfg))
+    rows.extend(_gpu_rows())
     plain_row = _lammps_plain_row(slab_cfg)
     if plain_row is not None:
         rows.append(plain_row)

@@ -2014,11 +2014,12 @@ def _add_engine_tools(box: Toolbox, session: MasonSession) -> None:
             # The engines are still the answer; the budget needs no store,
             # and what is free cannot be known without one.
             found = discover_budget()
-            overview["budget"] = {"cpus": len(found.cpus), "gpus": len(found.gpus)}
+            overview["budget"] = _ops.budget_counts(found.cpus, found.gpus, found.gpu_source)
             overview["free"] = None
             overview["resources_note"] = f"run store unavailable: {e}"
             return json.dumps(overview, indent=1, ensure_ascii=False)
-        overview["budget"] = {key: len(ids) for key, ids in resources["budget"].items()}
+        held = resources["budget"]
+        overview["budget"] = _ops.budget_counts(held["cpus"], held["gpus"], held["gpu_source"])
         overview["free"] = {key: len(ids) for key, ids in resources["free"].items()}
         return json.dumps(overview, indent=1, ensure_ascii=False)
 
@@ -2028,7 +2029,10 @@ def _add_engine_tools(box: Toolbox, session: MasonSession) -> None:
         budget = answer["budget"]
         lines = [
             f"budget on {answer['host']}: {len(budget['cpus'])} cpu(s), "
-            f"{len(budget['gpus'])} gpu(s)",
+            f"{len(budget['gpus'])} gpu(s)"
+            + (f" (ids {','.join(budget['gpus'])}, source {budget['gpu_source']})"
+               if budget["gpus"] else ""),
+            *_ops.gpu_lines(budget["gpus"]),
             _ops.free_line(answer),
         ]
         if answer["held"]:
@@ -2042,11 +2046,12 @@ def _add_engine_tools(box: Toolbox, session: MasonSession) -> None:
         Tool(
             name="free_resources",
             description=(
-                "What is free on this host right now: the budget, the free cpu and "
-                "gpu counts, and one line per live reservation (its slice, the run "
-                "or the holder, its age). Call it before a concurrent launch; the "
-                "environment block's free amounts were read when the prompt was "
-                "built."
+                "What is free on this host right now: the budget (with the gpu ids "
+                "and where they came from), the memory each budget gpu has in use "
+                "per nvidia-smi, the free cpu and gpu counts, and one line per live "
+                "reservation (its slice, the run or the holder, its age). Call it "
+                "before a concurrent launch; the environment block's free amounts "
+                "were read when the prompt was built."
             ),
             parameters=_schema({}, []),
             requires_approval=False,

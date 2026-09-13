@@ -131,6 +131,7 @@ def test_render_re_exports_the_gpu_ids_and_turns_binding_off(tmp_path: Path) -> 
 
     script, _, _ = _render(tmp_path, _agent(), _slab_cfg())
     assert '--env CUDA_VISIBLE_DEVICES="$SANDBOX_GPUS"' in script
+    assert '--env SLAB_GPU_SOURCE="$SANDBOX_GPU_SOURCE"' in script
     assert "\n".join(GPU_ID_LINES) in script
     assert script.index("SANDBOX_GPUS=") < script.index("apptainer exec")
     assert '--env SLURM_CPUS_PER_TASK="${SLURM_CPUS_PER_TASK:-1}"' in script
@@ -146,32 +147,58 @@ def test_render_carries_the_job_id_into_the_container(tmp_path: Path) -> None:
     assert "Do not cancel from" in context
 
 
+def _fake_nvidia_smi(directory: Path, devices: int) -> Path:
+    """A ``nvidia-smi`` that lists *devices* GPUs the way ``-L`` does."""
+    directory.mkdir(exist_ok=True)
+    script = directory / "nvidia-smi"
+    listing = "".join(f"GPU {n}: Fake (UUID: GPU-{n})\\n" for n in range(devices))
+    script.write_text(f"#!/bin/sh\nprintf '{listing}'\n")
+    script.chmod(0o755)
+    return script
+
+
 @pytest.mark.parametrize(
-    ("environment", "expected"),
+    ("environment", "devices", "expected"),
     [
-        ({"CUDA_VISIBLE_DEVICES": "3"}, "3"),
-        ({"CUDA_VISIBLE_DEVICES": "", "SLURM_JOB_GPUS": "0,1"}, ""),
-        ({"SLURM_JOB_GPUS": "2,3"}, "0,1"),
-        ({"SLURM_JOB_GPUS": "0-1"}, "0,1"),
-        ({"SLURM_JOB_GPUS": "1-3,5"}, "0,1,2,3"),
-        ({}, ""),
+        ({"CUDA_VISIBLE_DEVICES": "3"}, 4, "3|cuda_visible_devices"),
+        ({"CUDA_VISIBLE_DEVICES": "", "SLURM_JOB_GPUS": "0,1"}, 4, "|cuda_visible_devices"),
+        # No cgroup constraint: the node shows more devices than the job holds,
+        # so the global ids pass through, ranges expanded.
+        ({"SLURM_JOB_GPUS": "1"}, 2, "1|slurm_job_gpus"),
+        ({"SLURM_JOB_GPUS": "2,3"}, 4, "2,3|slurm_job_gpus"),
+        ({"SLURM_JOB_GPUS": "1-3,5"}, 8, "1,2,3,5|slurm_job_gpus"),
+        # Constrained: the node shows exactly the job's devices, renumbered from zero.
+        ({"SLURM_JOB_GPUS": "2,3"}, 2, "0,1|slurm_job_gpus"),
+        ({"SLURM_JOB_GPUS": "0-1"}, 2, "0,1|slurm_job_gpus"),
+        ({"SLURM_JOB_GPUS": "1-3,5"}, 4, "0,1,2,3|slurm_job_gpus"),
+        # No nvidia-smi at all: the constrained form, as before.
+        ({"SLURM_JOB_GPUS": "2,3"}, None, "0,1|slurm_job_gpus"),
+        ({"SLURM_GPUS_ON_NODE": "2"}, 4, "0,1|slurm_count"),
+        ({}, 4, "|none"),
     ],
 )
-def test_the_gpu_id_lines_renumber_slurms_global_ids(
-    environment: dict[str, str], expected: str
+def test_the_gpu_id_lines_resolve_the_allocation(
+    tmp_path: Path, environment: dict[str, str], devices: int | None, expected: str
 ) -> None:
-    """SLURM_JOB_GPUS names the node's global ids, a comma list or a range;
-    under cgroup device constraints the job sees them renumbered from zero,
-    so the container gets one id per device, counted from zero. A
-    CUDA_VISIBLE_DEVICES the job set passes through, an empty one included."""
+    """The prologue resolves the ids in the order slab.resources.budget does.
+    A CUDA_VISIBLE_DEVICES the job set passes through, an empty one included.
+    SLURM_JOB_GPUS names the node's global ids: they pass through when
+    nvidia-smi lists more devices than the job holds (no cgroup device
+    constraint), and are renumbered from zero when it lists exactly the job's
+    devices or is missing. A SLURM count gives 0..n-1, and a job that names
+    no gpu gets none, never a probe of the node."""
     from mason.sandbox import GPU_ID_LINES
 
-    probe = "\n".join(GPU_ID_LINES) + '\nprintf "%s" "$SANDBOX_GPUS"\n'
+    path = "/usr/bin:/bin"
+    if devices is not None:
+        path = f"{_fake_nvidia_smi(tmp_path / 'bin', devices).parent}:{path}"
+    probe = "\n".join(GPU_ID_LINES) + '\nprintf "%s|%s" "$SANDBOX_GPUS" "$SANDBOX_GPU_SOURCE"\n'
     result = subprocess.run(
-        ["sh", "-c", probe], env={"PATH": "/usr/bin:/bin", **environment}, capture_output=True,
+        ["sh", "-c", probe], env={"PATH": path, **environment}, capture_output=True,
         text=True, check=True,
     )
-    assert result.stdout == expected
+    assert result.stdout.splitlines()[-1] == expected
+    assert result.stdout.startswith("gpu ids for the container: ")
 
 
 def test_gres_gpus_reads_only_the_gpu_entry_of_a_list() -> None:
@@ -327,7 +354,7 @@ def test_render_without_a_key_sends_none(tmp_path: Path) -> None:
     script, _, _ = _render(tmp_path, agent, _slab_cfg())
     assert "UPSTREAM=http://internal:8000/v1" in script
     assert "--key-env" not in script
-    assert "[ -n " not in script
+    assert "is not set in this" not in script  # no key guard rendered
 
 
 def test_render_for_a_served_model_is_unchanged(tmp_path: Path) -> None:

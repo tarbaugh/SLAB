@@ -393,6 +393,37 @@ def test_the_doctor_prints_each_partitions_caps(project: Path) -> None:
     assert "[+] partition open: no caps declared; SLURM enforces its own limits" in result.output
 
 
+def test_the_doctor_prints_the_gpu_budget_and_marks_a_device_outside_it(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The budget is the allocation: a job holding device 1 of a two-device
+    node sees device 0 marked outside it, with its memory in use, so the
+    operator reads the occupied device before a launch dies on it."""
+    from slab.resources import Budget
+
+    monkeypatch.setattr(
+        doctor, "budget", lambda: Budget(cpus=(0, 1), gpus=("1",), gpu_source="slurm_job_gpus")
+    )
+    monkeypatch.setattr(
+        doctor,
+        "device_status",
+        lambda: [
+            {"id": "0", "mode": "Default", "memory_used": "40123 MiB"},
+            {"id": "1", "mode": "Default", "memory_used": "0 MiB"},
+        ],
+    )
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert result.exit_code == 0, result.output
+    assert "[+] gpu budget: 1 gpu(s), ids 1 (source: slurm_job_gpus)" in result.output
+    assert "[=] gpu 0: mode Default, 40123 MiB used (outside the allocation)" in result.output
+    assert "[+] gpu 1: mode Default, 0 MiB used" in result.output
+
+    monkeypatch.setattr(doctor, "device_status", lambda: None)
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert "[=] gpus: nvidia-smi not found" in result.output
+    assert "outside the allocation" not in result.output
+
+
 def test_the_doctor_counts_what_a_purge_would_sweep(
     project: Path, scratch_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

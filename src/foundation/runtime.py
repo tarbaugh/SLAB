@@ -701,8 +701,10 @@ class Workspace:
         """What this host's budget holds and what is free right now.
 
         The read side of :meth:`reserve`: ``budget`` and ``free`` each list
-        cpu ids and gpu ids, and ``reservations`` the ids of the live
-        reservations that hold the difference. Derived, never counted.
+        cpu ids and gpu ids, ``budget`` says where its gpu ids came from
+        (``gpu_source``, see :func:`slab.resources.budget`), and
+        ``reservations`` lists the ids of the live reservations that hold
+        the difference. Derived, never counted.
         A caller that has already read the live reservations passes them
         as *live*, so one answer rests on one read.
         """
@@ -716,7 +718,11 @@ class Workspace:
         used_gpus = {gpu for row in live for gpu in row.gpus}
         return {
             "host": where,
-            "budget": {"cpus": list(found.cpus), "gpus": list(found.gpus)},
+            "budget": {
+                "cpus": list(found.cpus),
+                "gpus": list(found.gpus),
+                "gpu_source": found.gpu_source,
+            },
             "free": {
                 "cpus": [cpu for cpu in found.cpus if cpu not in used_cpus],
                 "gpus": [gpu for gpu in found.gpus if gpu not in used_gpus],
