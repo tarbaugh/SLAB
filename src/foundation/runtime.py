@@ -153,7 +153,7 @@ class ActiveRun:
     registration (:meth:`check`); the ``@task`` tracer records through it.
     ``dry_run`` is True inside a throwaway run opened by
     ``Workspace.start_run(dry_run=True)``: a task that can run its engine
-    without integrating anything (``run_lammps`` under ``-skiprun``) reads it.
+    without integrating anything (``run_lammps`` with its loops emptied) reads it.
     """
 
     def __init__(
@@ -553,7 +553,7 @@ class Workspace:
 
         *dry_run* marks the run as a rehearsal: the handle's ``dry_run``
         is True, and a task that can rehearse its engine (``run_lammps``
-        under ``-skiprun``) integrates nothing. The run record itself is
+        with its loops emptied) integrates nothing. The run record itself is
         an ordinary run; open it in a throwaway workspace.
 
         Raises:

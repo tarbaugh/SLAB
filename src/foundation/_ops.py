@@ -945,11 +945,13 @@ def dry_run_script(
     directory under ``[paths] scratch`` (else the platform temp dir) that
     is removed when the rehearsal ends, whatever happened. So nothing
     lands in the real store or its cache, no reservation is claimed, and
-    every ``run_lammps`` call runs LAMMPS under ``-skiprun``: the pair
-    style, the data file, every fix and compute are set up, every command
-    runs in order, and no step is integrated. A ``timer`` line in the
-    script is dropped for the rehearsal, because it would override the
-    flag. While the script runs, ``$SLAB_WORKSPACE`` names the throwaway
+    every ``run_lammps`` call runs with its loops emptied: every ``run``
+    line becomes ``run 0`` and every ``minimize`` gets zero iterations,
+    so the data file, every pair style, fix, and compute are set up,
+    every command runs in order, each loop prints one thermo row and one
+    loop line, and no step is integrated. The result keeps its real
+    shape, so the Python after the call is exercised. While the script
+    runs, ``$SLAB_WORKSPACE`` names the throwaway
     workspace, so a child the script starts lands there too.
 
     The report says what the rehearsal found:

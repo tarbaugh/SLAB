@@ -1010,8 +1010,6 @@ def _lammps_identity(arguments: dict[str, Any]) -> dict[str, Any]:
     setup = arguments.get("setup") if arguments.get("setup") is not None else build["setup"]
     described = describe_lammps(command=command, setup=setup)
     described["build"] = build["build"]
-    # Whether the build accepts -skiprun changes no result: not identity.
-    described.pop("skiprun", None)
     return described
 
 
@@ -1103,9 +1101,9 @@ def run_lammps(
     the ``switches`` the command asked for), ``types``, ``files`` (the
     kept names of what the script wrote), ``artifacts`` (name to hash),
     ``warnings`` (the log's WARNING lines, deduplicated), ``n_warnings``,
-    ``skiprun`` (True inside a dry run, where LAMMPS ran under
-    ``-skiprun`` and integrated no step), and ``dropped_lines`` (the
-    ``timer`` lines a dry run removed from the script LAMMPS read). A
+    ``dry_run`` (True inside a dry run, where every loop was emptied and
+    LAMMPS integrated no step), and ``rewritten_lines`` (the ``run`` and
+    ``minimize`` lines the dry run rewrote in the script LAMMPS read). A
     script that finishes with bad physics is not a failure here: judge
     ``result`` with a ``@check``.
 
@@ -1160,7 +1158,7 @@ def run_lammps(
                 command=command,
                 setup=setup_lines,
                 timeout_s=timeout_s,
-                skiprun=active is not None and active.dry_run,
+                dry_run=active is not None and active.dry_run,
             )
         except LammpsScriptError as e:
             if active is not None:
@@ -1221,8 +1219,8 @@ def run_lammps(
         "artifacts": artifact_hashes,
         "warnings": warnings,
         "n_warnings": len(warnings),
-        "skiprun": outcome.skiprun,
-        "dropped_lines": list(outcome.dropped),
+        "dry_run": outcome.dry_run,
+        "rewritten_lines": list(outcome.rewritten),
     }
     return result, info
 

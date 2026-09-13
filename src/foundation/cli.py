@@ -118,9 +118,9 @@ def run(
         bool,
         typer.Option(
             "--dry-run",
-            help="Rehearse the script in a throwaway workspace: LAMMPS runs under "
-            "-skiprun and integrates no step, nothing lands in the store, and a JSON "
-            "report follows a 'dry run:' line.",
+            help="Rehearse the script in a throwaway workspace: every LAMMPS loop "
+            "becomes run 0, nothing lands in the store, and a JSON report follows a "
+            "'dry run:' line.",
         ),
     ] = False,
 ) -> None:

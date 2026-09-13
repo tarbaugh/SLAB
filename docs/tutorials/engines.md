@@ -400,20 +400,22 @@ for.
 Run the script with `slab run --dry-run`. The script runs to its end, or
 to its first exception, inside a throwaway workspace that is removed
 afterwards, so nothing lands in the real store or its cache, and no
-reservation is claimed. Every `run_lammps` call runs LAMMPS under
-`-skiprun`. LAMMPS reads the data file, sets up every pair style, fix,
-and compute, runs every command in order, and integrates no step of any
-`run` or `minimize`. A `timer` line in the script is dropped for the dry
-run, because it would override the flag, and `info["dropped_lines"]`
-names it. The result of the call has `steps == 0`, `tables == []`, and
-an empty `thermo`, so a physics check is expected to fail. The report
-says so. A `fix ave/time` file holds only its header lines, a `dump`
-file is empty, and `write_data` and `write_restart` files are complete.
+reservation is claimed. Every `run_lammps` call runs with its loops
+emptied. In the `in.lammps` LAMMPS reads, every `run` line becomes
+`run 0` and every `minimize` line gets zero iterations, and
+`info["rewritten_lines"]` names the original lines. LAMMPS reads the
+data file, sets up every pair style, fix, and compute, runs every
+command in order, prints one thermo row and one loop line per loop, and
+integrates no step. The result keeps its real shape. Each table has one
+row, `steps == 0`, and `thermo` is the step-0 row, so the Python after
+the call is exercised. A physics check judges a state nothing has
+evolved, so expect it to fail, and the report says so. A `fix ave/time`
+file holds only its header lines, a `dump` file holds its step-0 frame,
+and `write_data` and `write_restart` files are complete.
 
 The command prints a JSON report after a `dry run:` line and exits 0
 when the script reached its end and every `run_lammps` set up cleanly,
-else 1. The script below has a `timer` line and a check on the
-temperature. Executed for real, on a laptop, against a LAMMPS build from
+else 1. Executed for real, on a laptop, against a LAMMPS build from
 22 Jul 2025:
 
 <!-- no-verify -->
@@ -431,7 +433,6 @@ boundary p p p
 read_data structure.data
 pair_style lj/cut 8.5
 pair_coeff 1 1 0.0104 3.40
-timer timeout 0:10:00 every 100
 velocity all create 300.0 4928459 mom yes rot yes dist gaussian
 timestep 0.002
 fix integrate all nvt temp 300.0 300.0 0.2
@@ -442,18 +443,21 @@ run 2000
 write_data ar-final.data
 """
 result, info = run_lammps(script, atoms=atoms, label="ar")
-print(f"steps={result['steps']} tables={len(result['tables'])} dropped={info['dropped_lines']}")
+table = result["tables"][-1]
+print(f"{result['steps']} steps, {table['rows']} row(s), rewritten: {info['rewritten_lines']}")
+print(f"tail mean T = {table['tail']['mean']['Temp']:.1f} K")
 
 
 @check
 def the_thermostat_held() -> None:
-    assert abs(result["thermo"]["Temp"] - 300.0) < 30.0
+    assert abs(table["tail"]["mean"]["Temp"] - 300.0) < 30.0
 ```
 
 <!-- no-verify -->
 ```text
 $ slab run --dry-run md_nvt.py
-steps=0 tables=0 dropped=['timer timeout 0:10:00 every 100']
+0 steps, 1 row(s), rewritten: ['run 2000']
+tail mean T = 300.0 K
 dry run:
 {
   "dry_run": true,
@@ -468,8 +472,8 @@ dry run:
   "checks": [
     {
       "name": "the_thermostat_held",
-      "passed": false,
-      "message": "check raised KeyError: 'Temp'"
+      "passed": true,
+      "message": "completed without assertion errors"
     }
   ],
   "checks_note": "physics checks are expected to fail in a dry run: LAMMPS integrated no steps",
@@ -485,15 +489,14 @@ dry run:
 }
 ```
 
-`reached_end` says the script ran to its last line, `lammps` lists each
-`run_lammps` call with `setup ok` or the `ERROR` line LAMMPS printed,
-`checks` shows every check with its outcome, and `outputs` names the
-files the real run would keep. A script that dies after `run_lammps`
-reports `reached_end: false` and the traceback. A build that does not
-list `-skiprun` in its `-h` output is refused with a message that names
-the flag, and `describe_lammps(...)["skiprun"]` reports the support. In
-Python, `launch_script` and `launch_child` take the same `dry_run`
-switch.
+Here the check passed, because the step-0 temperature is the one
+`velocity create` set. `reached_end` says the script ran to its last
+line, `lammps` lists each `run_lammps` call with `setup ok` or the
+`ERROR` line LAMMPS printed, `checks` shows every check with its
+outcome, and `outputs` names the files the real run would keep. A
+script that dies after `run_lammps` reports `reached_end: false` and
+the traceback. In Python, `launch_script` and `launch_child` take the
+same `dry_run` switch.
 
 ## Per-engine environments
 

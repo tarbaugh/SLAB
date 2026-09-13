@@ -48,7 +48,6 @@ import time
 args = sys.argv[1:]
 if "-h" in args:
     print("Large-scale Atomic/Molecular Massively Parallel Simulator - 22 Jul 2025 - Update 4")
-    print("-skiprun                    : skip loops in run and minimize (-sr)")
     sys.exit(0)
 script = open(args[args.index("-in") + 1]).read()
 log_name = args[args.index("-log") + 1] if "-log" in args else "log.lammps"
@@ -651,58 +650,55 @@ def test_the_md_template_runs_verified_under_a_real_lammps(
 # -- dry run ---------------------------------------------------------------------------
 
 
-TIMED_SCRIPT = EAM_SCRIPT.replace("thermo 10\n", "thermo 10\ntimer timeout 0:10:00 every 100\n")
+STAGED_EAM = EAM_SCRIPT + "unfix nosuch\nminimize 1e-6 1e-8 1000 10000\n"
 
 
-def test_describe_lammps_reports_whether_the_build_accepts_skiprun(
-    tmp_path: Path, fake_lmp: str
-) -> None:
-    assert describe_lammps(fake_lmp)["skiprun"] is True
-    older = _script(tmp_path / "older-lmp", _NO_LOG)  # its -h lists no -skiprun
-    assert describe_lammps(older)["skiprun"] is False
-    from foundation.tasks import _lammps_identity
+def test_rewrite_loops_empties_every_run_and_minimize() -> None:
+    from slab.lammps import rewrite_loops
 
-    assert "skiprun" not in _lammps_identity({"command": fake_lmp})  # not cache identity
-    cwd = tmp_path / "scratch"
-    cwd.mkdir()
-    (cwd / "in.lammps").write_text(EAM_SCRIPT)
-    with pytest.raises(LammpsScriptError, match="does not accept -skiprun"):
-        run_lammps_script(cwd=cwd, command=older, skiprun=True)
+    text, lines = rewrite_loops(STAGED_EAM)
+    assert "run 0\n" in text and "minimize 1e-6 1e-8 0 0\n" in text
+    assert lines == ("run 100", "minimize 1e-6 1e-8 1000 10000")
+    assert text.count("\n") == STAGED_EAM.count("\n")
 
 
-def test_run_lammps_script_skiprun_appends_the_flag_and_drops_timer_lines(
+def test_run_lammps_script_dry_run_rewrites_the_loops_in_place(
     tmp_path: Path, fake_lmp: str
 ) -> None:
     cwd = tmp_path / "scratch"
     cwd.mkdir()
-    (cwd / "in.lammps").write_text(TIMED_SCRIPT.replace("Cu_u3.eam", "x"))
-    outcome = run_lammps_script(cwd=cwd, command=fake_lmp, skiprun=True)
-    assert outcome.argv[-3:] == ("-log", "log.lammps", "-skiprun")
-    assert outcome.skiprun is True
-    assert outcome.dropped == ("timer timeout 0:10:00 every 100",)
-    assert "timer" not in (cwd / "in.lammps").read_text()
+    (cwd / "in.lammps").write_text(EAM_SCRIPT.replace("Cu_u3.eam", "x"))
+    outcome = run_lammps_script(cwd=cwd, command=fake_lmp, dry_run=True)
+    assert outcome.dry_run is True
+    assert outcome.rewritten == ("run 100",)
+    assert "run 0\n" in (cwd / "in.lammps").read_text()
+    assert outcome.argv[-4:] == ("-in", "in.lammps", "-log", "log.lammps")
+    (table,) = lammps_thermo(outcome.log)
+    assert len(table["rows"]) == 1 and table["loop"]["steps"] == 0
     plain = run_lammps_script(cwd=cwd, command=fake_lmp)
-    assert plain.skiprun is False and plain.dropped == () and "-skiprun" not in plain.argv
+    assert plain.dry_run is False and plain.rewritten == ()
 
 
-def test_run_lammps_inside_a_dry_run_passes_skiprun_and_records_the_dropped_lines(
+def test_run_lammps_inside_a_dry_run_empties_the_loops_and_records_them(
     ws: Workspace, tmp_path: Path, fake_lmp: str
 ) -> None:
     potential = tmp_path / "Cu_u3.eam"
     potential.write_text("comment\n29 63.55 3.615 fcc\n")
     with ws.start_run(name="rehearsal", dry_run=True) as run:
         assert run.dry_run is True
-        _, info = run_lammps(TIMED_SCRIPT, files=[str(potential)], command=fake_lmp, label="cu")
-    assert info["skiprun"] is True
-    assert info["argv"][-1] == "-skiprun"
-    assert info["dropped_lines"] == ["timer timeout 0:10:00 every 100"]
-    kept = ws.artifacts.get(info["artifacts"]["cu.in"]).read_text()
-    assert "timer" not in kept
+        result, info = run_lammps(
+            EAM_SCRIPT, files=[str(potential)], command=fake_lmp, label="cu"
+        )
+    assert info["dry_run"] is True
+    assert info["rewritten_lines"] == ["run 100"]
+    assert result["steps"] == 0 and len(result["tables"]) == 1
+    assert result["tables"][0]["rows"] == 1
+    assert "run 0\n" in ws.artifacts.get(info["artifacts"]["cu.in"]).read_text()
     with ws.start_run(name="real") as real:
         assert real.dry_run is False
-        _, info = run_lammps(TIMED_SCRIPT, files=[str(potential)], command=fake_lmp)
-    assert info["skiprun"] is False and info["dropped_lines"] == []
-    assert "-skiprun" not in info["argv"]
+        result, info = run_lammps(EAM_SCRIPT, files=[str(potential)], command=fake_lmp)
+    assert info["dry_run"] is False and info["rewritten_lines"] == []
+    assert result["steps"] == 100
 
 
 def test_dry_run_reports_each_run_lammps_call_and_the_python_after_it(
@@ -720,10 +716,12 @@ def test_dry_run_reports_each_run_lammps_call_and_the_python_after_it(
         f"script = {EAM_SCRIPT!r}\n"
         f"result, info = run_lammps(script, files=[{str(potential)!r}], "
         f"command={fake_lmp!r}, label='cu')\n"
+        "print(result['tables'][-1]['loop']['steps'])\n"
         "print(result['msd'])\n"
     )
-    report = launch_script(tmp_path / "ws", dying, dry_run=True)
+    report = launch_script(tmp_path / "ws", dying, dry_run=True, capture_output=True)
     assert report["reached_end"] is False
+    assert report["output"] == "0\n"  # the table indexing before the KeyError ran
     assert "KeyError: 'msd'" in report["traceback"]
     assert report["lammps"] == [{"label": "cu", "outcome": "setup ok"}]
     assert report["outputs"] == ["cu.in", "cu.log", "cu-thermo.json", "cu.screen"]
@@ -746,23 +744,28 @@ def test_dry_run_reports_each_run_lammps_call_and_the_python_after_it(
 
 
 @pytest.mark.skipif(not os.environ.get("SLAB_TEST_LMP"), reason="set $SLAB_TEST_LMP to a real lmp")
-def test_a_real_lammps_dry_run_integrates_nothing_and_drops_the_timer(tmp_path: Path) -> None:
+def test_a_real_lammps_dry_run_sets_up_every_loop_and_integrates_nothing(
+    tmp_path: Path,
+) -> None:
     lmp = os.environ["SLAB_TEST_LMP"]
-    assert describe_lammps(lmp)["skiprun"] is True
     cwd = tmp_path / "scratch"
     cwd.mkdir()
-    script = SCRIPT.replace("thermo 100\n", "thermo 100\ntimer timeout 0:10:00 every 100\n")
+    script = SCRIPT + "unfix nvt\nminimize 1e-6 1e-8 1000 10000\n"
     (cwd / "in.lammps").write_text(script)
     from ase.io import write as ase_write
 
     ase_write(cwd / "structure.data", _argon(), format="lammps-data", masses=True)
-    outcome = run_lammps_script(cwd=cwd, command=lmp, skiprun=True)
-    assert outcome.dropped == ("timer timeout 0:10:00 every 100",)
-    assert "Loop time" not in outcome.log and "Total wall time: 0:00:00" in outcome.log
-    assert lammps_thermo(outcome.log) == []
-    assert (cwd / "ar.dump").stat().st_size == 0
+    outcome = run_lammps_script(cwd=cwd, command=lmp, dry_run=True)
+    assert outcome.rewritten == ("run 1000", "minimize 1e-6 1e-8 1000 10000")
+    assert "Total wall time: 0:00:00" in outcome.log
+    tables = lammps_thermo(outcome.log)
+    assert [len(t["rows"]) for t in tables] == [1, 1]
+    assert [t["loop"]["steps"] for t in tables] == [0, 0]
+    assert tables[0]["rows"][0][0] == 0  # the step-0 row
+    assert (cwd / "ar.dump").read_text().count("ITEM: TIMESTEP") == 1  # the step-0 frame
     assert (cwd / "ar-temp.txt").read_text().count("\n") == 2  # the two header lines
     assert "atoms" in (cwd / "ar-final.data").read_text()
+    assert (cwd / "ar.restart").stat().st_size > 0
 
 
 STAGED_SCRIPT = """\
@@ -778,7 +781,6 @@ boundary p p p
 read_data structure.data
 pair_style lj/cut 8.5
 pair_coeff 1 1 0.0104 3.40
-timer timeout 0:10:00 every 100
 velocity all create 300.0 4928459 mom yes rot yes dist gaussian
 timestep 0.002
 fix nvt all nvt temp 300.0 300.0 0.2
@@ -818,16 +820,19 @@ def test_a_real_dry_run_finds_a_stage_three_error_before_any_run_is_paid_for(
     clean = tmp_path / "clean.py"
     clean.write_text(
         STAGED_SCRIPT.replace("unfix nosuch\n", "")
-        + "print('steps', result['steps'], 'tables', result['tables'], "
-        "'dropped', info['dropped_lines'])\n"
+        + "table = result['tables'][-1]\n"
+        "print('steps', result['steps'], 'tables', len(result['tables']), 'rows', "
+        "table['rows'], 'loop', table['loop']['steps'], 'rewritten', info['rewritten_lines'])\n"
         "from foundation import check\n"
-        "@check\ndef held():\n    assert result['thermo']['Temp'] > 0\n"
+        "@check\ndef held():\n    assert abs(table['tail']['mean']['Temp'] - 300.0) < 30.0\n"
     )
     report = launch_script(tmp_path / ".slab", clean, dry_run=True, capture_output=True)
     assert report["reached_end"] is True, report
     assert report["lammps"] == [{"label": "ar", "outcome": "setup ok"}]
-    assert "steps 0 tables [] dropped ['timer timeout 0:10:00 every 100']" in report["output"]
+    assert (
+        "steps 0 tables 2 rows 1 loop 0 rewritten ['run 1000', 'run 1000']" in report["output"]
+    )
     assert report["checks"] == [
-        {"name": "held", "passed": False, "message": "check raised KeyError: 'Temp'"}
+        {"name": "held", "passed": True, "message": "completed without assertion errors"}
     ]
     assert {"ar-temp.txt", "ar-final.data", "ar.in", "ar.log"} <= set(report["outputs"])
