@@ -1,7 +1,8 @@
 site_name: SLAB
 site_description: >-
-  Simplest Layer for Atomistic Backends — an agent-native state layer
-  for atomistic materials modeling.
+  Simplest Layer for Atomistic Backends, an agent-native state layer for
+  atomistic materials modeling that verifies what an agent computed so
+  you can trust the results sooner.
 site_url: https://tarbaugh.github.io/SLAB/
 repo_url: https://github.com/tarbaugh/SLAB
 repo_name: tarbaugh/SLAB

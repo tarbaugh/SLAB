@@ -4,12 +4,16 @@
 for atomistic materials modeling. It keeps the record of what an agent
 computed, verifies the results, and retains only what you promote.
 
-Every run starts as temporary, and it becomes permanent only when you
-promote it. Nothing is stored permanently by default and deleted later.
-Workflows are plain imperative Python, and SLAB traces the task graph as the
-script runs. Machine-checkable verification hooks decide when a run counts
-as verified, and an explicit promotion command is the only action that makes
-data permanent. Everything else expires automatically.
+An agent produces calculations faster than a person can check them, and
+the check is what holds a campaign back. SLAB makes the check cheap.
+Machine-checkable verification hooks decide when a run counts as
+verified, so the runtime does the first pass and you read results that
+already passed. Every run starts as temporary, and it becomes permanent
+only when you promote it. Nothing is stored permanently by default and
+deleted later. Workflows are plain imperative Python, and SLAB traces the
+task graph as the script runs. An explicit promotion command is the only
+action that makes data permanent, and everything else expires
+automatically.
 
 <!-- no-verify -->
 ```python
@@ -37,12 +41,20 @@ repository. After a week of agentic work, nobody can say which numbers are
 verified, which files are safe to delete, or how the one result that
 matters was made.
 
+In that campaign the slow step is the person who checks the agent's
+work. Each result needs someone to confirm that the forces converged and
+that the number came from the script the agent says it ran. Done by hand,
+that check sets the pace of the whole campaign.
+
 SLAB sits under that work. Every calculation lands as a run with a recorded
 recipe, a cache identity, and a lifecycle state. Verification is a property
-a run earns from its checks, not a claim in a notebook. Unpromoted data
-expires on its own, so the workspace stays small without manual cleanup.
-The archive holds only what someone decided to keep, and every kept run
-carries the complete recipe that reproduces it.
+a run earns from its checks, not a claim in a notebook. A run that fails a
+check, or asserts nothing, stays quarantined where you can see it. So the
+person reviews the runs that passed and asks why the others did not, and
+the campaign moves at the agent's pace. Unpromoted data expires on its
+own, so the workspace stays small without manual cleanup. The archive
+holds only what someone decided to keep, and every kept run carries the
+complete recipe that reproduces it.
 
 ## Use it from any harness
 

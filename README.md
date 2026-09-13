@@ -2,10 +2,14 @@
 
 [![tests](https://github.com/tarbaugh/SLAB/actions/workflows/tests.yml/badge.svg)](https://github.com/tarbaugh/SLAB/actions/workflows/tests.yml)
 
-An agent-native state layer for atomistic materials modeling. Every run
-starts as temporary and becomes permanent only when you promote it.
-Workflows are plain Python, and SLAB traces the task graph as the script
-runs, verifies the results with checks, and expires what nobody promoted.
+An agent-native state layer for atomistic materials modeling. An agent
+can start hundreds of calculations in a day, and checking them is where
+the work slows down. SLAB narrows that bottleneck. Every run records the
+recipe that made it, earns `verified` from assertions the runtime
+evaluates, and stays temporary until you promote it. Workflows are plain
+Python, and SLAB traces the task graph as the script runs. You review the
+results that already passed their checks, so you reach an answer you can
+trust sooner, and SLAB expires what nobody promoted.
 
 **Documentation: [tarbaugh.github.io/SLAB](https://tarbaugh.github.io/SLAB/)**
 has the overview, the tutorials, and the architecture document. Every code
