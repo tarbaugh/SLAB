@@ -45,7 +45,7 @@ fix integrate all nvt temp {TEMPERATURE_K} {TEMPERATURE_K} {100 * TIMESTEP_PS}
 
 thermo {THERMO_EVERY}
 thermo_style custom step temp pe ke etotal press vol
-thermo_modify flush yes
+thermo_modify line yaml flush yes
 dump traj all custom {DUMP_EVERY} {LABEL}.dump id type x y z vx vy vz
 dump_modify traj sort id
 fix avg all ave/time 10 10 {THERMO_EVERY} c_thermo_temp c_thermo_press file {LABEL}-avg.dat
@@ -59,7 +59,8 @@ table = result["tables"][-1]
 final = result["thermo"]
 tail = table["tail"]
 print(
-    f"LAMMPS {info['version']}: {result['steps']} steps, {result['atoms']} atoms, "
+    f"LAMMPS {info['version']} (thermo {info['thermo_format']}): "
+    f"{result['steps']} steps, {result['atoms']} atoms, "
     f"{result['seconds']:.2f} s, {result['rate']['steps_per_s']:.0f} steps/s, "
     f"{result['rate']['atom_steps_per_s']:.3g} atom-steps/s"
 )

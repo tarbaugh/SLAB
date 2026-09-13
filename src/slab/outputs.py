@@ -28,7 +28,18 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["digest", "extxyz_digest", "lammps_log_digest", "pwscf_digest"]
+import yaml
+
+__all__ = [
+    "THERMO_FORMATS",
+    "digest",
+    "extxyz_digest",
+    "lammps_log_digest",
+    "lammps_thermo",
+    "lammps_thermo_format",
+    "lammps_yaml_thermo",
+    "pwscf_digest",
+]
 
 #: Ry/bohr to eV/Å, for the force line.
 _RY_PER_BOHR_TO_EV_PER_A = 25.71104309541616
@@ -302,6 +313,13 @@ _LMP_LOOP = re.compile(r"^Loop time of (\S+) on (\d+) procs for (\d+) steps with
 _LMP_STOP = re.compile(r"^\s*Stopping criterion\s*=\s*(.+)")
 _LMP_WALL = re.compile(r"^Total wall time:\s*(\S+)")
 _LMP_INPUT_ECHO = re.compile(r"^(atom_style|thermo_style|pair_style|thermo)\s", re.MULTILINE)
+#: ``thermo_modify line yaml`` prints each table as one YAML document between
+#: these two lines. Both are exact: the ``----...`` rule of the timing
+#: breakdown is longer than three dashes.
+_LMP_YAML_OPEN = "---"
+_LMP_YAML_CLOSE = "..."
+_LMP_YAML_ROW = "  - ["
+THERMO_FORMATS = ("yaml", "text", "mixed")
 #: The commands an ASE-driven run echoes first, before any banner would come.
 _LMP_OPENING = re.compile(
     r"^(log|clear|echo|units|atom_style|dimension|boundary|newton|package|"
@@ -333,26 +351,38 @@ def _looks_like_lammps_log(head: str) -> bool:
 
 
 def lammps_log_digest(name: str, text: str) -> str:
-    """The digest of one LAMMPS log: setup, each thermo table's ends, warnings."""
+    """The digest of one LAMMPS log: setup, each thermo table's ends, warnings.
+
+    A table printed as YAML (``thermo_modify line yaml``) digests to the
+    same lines as a text table, and a ``thermo:`` line says which form
+    the log took.
+
+    Examples:
+        >>> log = (
+        ...     "LAMMPS (22 Jul 2025)\\nunits metal\\nCreated 4 atoms\\n---\\n"
+        ...     "keywords: ['Step', 'Temp', ]\\ndata:\\n  - [0, 300, ]\\n  - [10, 1e+20, ]\\n"
+        ...     "...\\nLoop time of 0.5 on 1 procs for 10 steps with 4 atoms\\n"
+        ...     "Total wall time: 0:00:01\\n"
+        ... )
+        >>> print(lammps_log_digest("a.log", log))
+        LAMMPS log digest: a.log (11 lines, LAMMPS 22 Jul 2025, finished: Total wall time 0:00:01)
+        setup: units metal; 4 atoms
+        thermo: yaml
+        thermo table 1 (2 rows): Step Temp
+          first: 0 300
+          last:  10 1e+20
+          loop: 10 steps, 4 atoms, 1 procs, 0.5 s
+        warnings: none
+    """
     lines = text.splitlines()
     version = units = pair = None
     atoms: str | None = None
-    tables: list[tuple[str, list[str], int]] = []  # header, [first row, last row], rows
     loops: list[str] = []
     stops: list[str] = []
     warnings: list[str] = []
     errors: list[str] = []
     wall = None
-    header: str | None = None
-    rows: list[str] = []
     for line in lines:
-        if header is not None:
-            stripped = line.strip()
-            if stripped and _is_numeric_row(stripped):
-                rows.append(" ".join(stripped.split()))
-                continue
-            tables.append((header, [rows[0], rows[-1]] if rows else [], len(rows)))
-            header, rows = None, []
         if m := _LMP_VERSION.match(line):
             version = m.group(1)
         elif m := _LMP_UNITS.match(line):
@@ -361,8 +391,6 @@ def lammps_log_digest(name: str, text: str) -> str:
             atoms = m.group(1)
         elif m := _LMP_PAIR.match(line):
             pair = m.group(1).strip()
-        elif _LMP_THERMO_HEAD.match(line):
-            header = " ".join(line.split())
         elif m := _LMP_LOOP.match(line):
             loops.append(
                 f"{m.group(3)} steps, {m.group(4)} atoms, {m.group(2)} procs, {m.group(1)} s"
@@ -376,8 +404,7 @@ def lammps_log_digest(name: str, text: str) -> str:
                 warnings.append(line.strip())
         elif line.startswith("ERROR") and len(errors) < _MAX_NOTES:
             errors.append(line.strip())
-    if header is not None:
-        tables.append((header, [rows[0], rows[-1]] if rows else [], len(rows)))
+    scanned = _scan_thermo(text)
     if wall:
         status = f"finished: Total wall time {wall}"
     elif loops:
@@ -397,14 +424,16 @@ def lammps_log_digest(name: str, text: str) -> str:
         setup.append(f"pair_style {pair}")
     if setup:
         out.append("setup: " + "; ".join(setup))
-    if not tables:
+    if not scanned:
         out.append("thermo: no table printed")
-    for i, (head, ends, count) in enumerate(tables, start=1):
-        out.append(f"thermo table {i} ({count} rows): {head}")
-        if ends:
-            out.append(f"  first: {ends[0]}")
-            if count > 1:
-                out.append(f"  last:  {ends[1]}")
+    else:
+        out.append(f"thermo: {_thermo_format(scanned)}")
+    for i, (_, table, texts) in enumerate(scanned, start=1):
+        out.append(f"thermo table {i} ({len(texts)} rows): {' '.join(table['columns'])}")
+        if texts:
+            out.append(f"  first: {texts[0]}")
+            if len(texts) > 1:
+                out.append(f"  last:  {texts[-1]}")
         if i <= len(loops):
             out.append(f"  loop: {loops[i - 1]}")
     for stop in stops:
@@ -415,14 +444,25 @@ def lammps_log_digest(name: str, text: str) -> str:
     return "\n".join(out)
 
 
+def _row_text(row: list[int | float]) -> str:
+    """One YAML thermo row as LAMMPS's default text format prints it (``%.8g``)."""
+    return " ".join(str(v) if isinstance(v, int) else f"{v:.8g}" for v in row)
+
+
 def lammps_thermo(text: str) -> list[dict[str, Any]]:
     """Every thermo table of a LAMMPS log: columns, rows, and its loop line.
 
-    A table starts at a ``Step ...`` header and holds every numeric row
-    that follows; ``WARNING`` lines inside a table are skipped, any other
-    line ends it. The ``Loop time`` line that follows a table is attached
-    to it as ``loop`` (seconds, procs, steps, atoms). Integers stay
-    integers (the step), everything else is a float.
+    A table is either a YAML document, which ``thermo_modify line yaml``
+    prints between a ``---`` line and a ``...`` line, or a text table
+    that starts at a ``Step ...`` header and holds every numeric row that
+    follows; ``WARNING`` lines inside a table are skipped, any other line
+    ends a text table. The two forms come back in order of appearance,
+    so a log that switches to YAML between two runs parses fully, and a
+    YAML document is never read as a text table. The ``Loop time`` line
+    that follows a table is attached to it as ``loop`` (seconds, procs,
+    steps, atoms). In a YAML table the step is an int and every other
+    value a float; in a text table integers stay integers (the step) and
+    everything else is a float.
 
     Examples:
         >>> log = (
@@ -436,31 +476,142 @@ def lammps_thermo(text: str) -> list[dict[str, Any]]:
         {'seconds': 0.5, 'procs': 1, 'steps': 100, 'atoms': 32}
         >>> lammps_thermo("no table here\\n")
         []
+        >>> mixed = log + (
+        ...     "---\\nkeywords: ['Step', 'Temp', ]\\ndata:\\n  - [100, 300, ]\\n"
+        ...     "  - [200, 1e+20, ]\\n...\\n"
+        ...     "Loop time of 0.4 on 1 procs for 100 steps with 32 atoms\\n"
+        ... )
+        >>> [t["rows"] for t in lammps_thermo(mixed)]
+        [[[0, 300, -3.5], [100, 298.2, -3.49]], [[100, 300.0], [200, 1e+20]]]
+        >>> lammps_thermo(mixed)[1]["loop"]["seconds"]
+        0.4
     """
-    tables: list[dict[str, Any]] = []
-    current: dict[str, Any] | None = None
+    return [table for _, table, _ in _scan_thermo(text)]
+
+
+def lammps_thermo_format(text: str) -> str | None:
+    """Which form the thermo tables of a log took: ``yaml``, ``text``,
+    ``mixed`` (both forms in one log), or None when no table was printed.
+
+    Examples:
+        >>> lammps_thermo_format("Step Temp\\n0 300\\n")
+        'text'
+        >>> lammps_thermo_format("---\\nkeywords: ['Step', ]\\ndata:\\n  - [0, ]\\n...\\n")
+        'yaml'
+        >>> lammps_thermo_format("Step Temp\\n0 300\\n---\\nkeywords: ['Step', ]\\ndata:\\n...\\n")
+        'mixed'
+        >>> lammps_thermo_format("Loop time of 0.5 on 1 procs for 0 steps with 1 atoms\\n") is None
+        True
+    """
+    scanned = _scan_thermo(text)
+    return _thermo_format(scanned) if scanned else None
+
+
+def _thermo_format(scanned: list[_ThermoScan]) -> str:
+    forms = {form for form, _, _ in scanned}
+    return "mixed" if len(forms) > 1 else forms.pop()
+
+
+def lammps_yaml_thermo(text: str) -> list[dict[str, Any]]:
+    """The thermo tables a log printed as YAML documents, in order.
+
+    Only the lines that belong to a document are read: the ``keywords:``
+    line, the ``data:`` line, and the ``  - [...]`` rows between a
+    ``---`` line and a ``...`` line. A ``fix print`` line or a WARNING
+    inside a document is skipped. A document that never closes, because
+    LAMMPS died inside the run, still yields the rows it printed. Values
+    PyYAML leaves as text (``1e+20``, ``inf``, ``-nan``) become floats.
+
+    Examples:
+        >>> doc = (
+        ...     "---\\nkeywords: ['Step', 'Temp', 'Press', ]\\ndata:\\n"
+        ...     "  - [0, 300, 1e+20, ]\\nWARNING: x (src/a.cpp:1)\\n"
+        ...     "  - [50, 298.5, -1.5, ]\\n...\\n"
+        ...     "Loop time of 0.5 on 1 procs for 50 steps with 4 atoms\\n"
+        ... )
+        >>> table = lammps_yaml_thermo(doc)[0]
+        >>> table["columns"], table["rows"]
+        (['Step', 'Temp', 'Press'], [[0, 300.0, 1e+20], [50, 298.5, -1.5]])
+        >>> table["loop"]["steps"]
+        50
+        >>> lammps_yaml_thermo("---\\nno keywords here\\n...\\n")
+        []
+    """
+    return [table for form, table, _ in _scan_thermo(text) if form == "yaml"]
+
+
+#: One scanned table: its form (``yaml`` or ``text``), the table, and each
+#: row as text for the digest (the log's own line for a text table).
+_ThermoScan = tuple[str, dict[str, Any], list[str]]
+
+
+def _scan_thermo(text: str) -> list[_ThermoScan]:
+    """Every thermo table with its form (``yaml`` or ``text``), in log order."""
+    tables: list[_ThermoScan] = []
+    current: dict[str, Any] | None = None  # a text table being read
+    texts: list[str] = []
+    document: list[str] | None = None  # the lines of a YAML document being read
+
+    def close_document() -> None:
+        nonlocal document
+        if document is not None:
+            table = _yaml_table(document)
+            if table is not None:
+                tables.append(("yaml", table, [_row_text(row) for row in table["rows"]]))
+            document = None
+
     for line in text.splitlines():
         stripped = line.strip()
+        if document is not None:
+            if line == _LMP_YAML_CLOSE:
+                close_document()
+            elif line.startswith(("keywords:", "data:", _LMP_YAML_ROW)):
+                document.append(line)
+            continue
         if current is not None:
             if stripped and _is_numeric_row(stripped):
                 current["rows"].append([_number(token) for token in stripped.split()])
+                texts.append(" ".join(stripped.split()))
                 continue
             if stripped.startswith("WARNING"):
                 continue
-            tables.append(current)
-            current = None
-        if _LMP_THERMO_HEAD.match(line):
+            tables.append(("text", current, texts))
+            current, texts = None, []
+        if line == _LMP_YAML_OPEN:
+            document = []
+        elif _LMP_THERMO_HEAD.match(line):
             current = {"columns": stripped.split(), "rows": [], "loop": None}
-        elif (m := _LMP_LOOP.match(line)) and tables and tables[-1]["loop"] is None:
-            tables[-1]["loop"] = {
+        elif (m := _LMP_LOOP.match(line)) and tables and tables[-1][1]["loop"] is None:
+            tables[-1][1]["loop"] = {
                 "seconds": float(m.group(1)),
                 "procs": int(m.group(2)),
                 "steps": int(m.group(3)),
                 "atoms": int(m.group(4)),
             }
+    close_document()
     if current is not None:
-        tables.append(current)
+        tables.append(("text", current, texts))
     return tables
+
+
+def _yaml_table(lines: list[str]) -> dict[str, Any] | None:
+    """One thermo table from the lines of a YAML document, or None when the
+    lines hold no ``keywords`` list (a ``---`` line that opened no table)."""
+    try:
+        loaded = yaml.safe_load("\n".join(lines))
+    except yaml.YAMLError:
+        return None
+    if not isinstance(loaded, dict) or not isinstance(loaded.get("keywords"), list):
+        return None
+    columns = [str(key) for key in loaded["keywords"]]
+    rows: list[list[int | float]] = []
+    for row in loaded.get("data") or []:
+        if not isinstance(row, list) or len(row) != len(columns):
+            continue
+        rows.append(
+            [int(v) if name == "Step" else float(v) for name, v in zip(columns, row, strict=True)]
+        )
+    return {"columns": columns, "rows": rows, "loop": None}
 
 
 def _number(token: str) -> int | float:

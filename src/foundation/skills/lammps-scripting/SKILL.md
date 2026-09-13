@@ -246,7 +246,7 @@ fix integrate all nvt temp 300.0 300.0 0.1
 # 6. Output: thermo, dumps, averages, restarts
 thermo 100
 thermo_style custom step temp pe ke etotal press vol
-thermo_modify flush yes
+thermo_modify line yaml flush yes
 dump traj all custom 1000 w-nvt.dump id type x y z vx vy vz
 dump_modify traj sort id
 
@@ -296,6 +296,13 @@ write_data w-nvt-final.data
   statistics (hundreds of rows) and large enough not to dominate the
   cost. `thermo_modify flush yes` writes each row at once, so a killed
   run keeps its log.
+- Put `thermo_modify line yaml` after each `thermo_style` line. LAMMPS
+  then prints the table as one YAML document, and `run_lammps` reads it
+  by schema instead of by a regex over the text table, so a long column
+  list or a WARNING inside the table cannot break the parse. Every
+  `thermo_style` line resets the setting, so a script with two
+  `thermo_style` lines needs the yaml line twice. `info["thermo_format"]`
+  reports `yaml` when the run took this path.
 - `dump ID all custom N file.dump id type x y z vx vy vz` writes frames
   ASE reads back with `format="lammps-dump-text"`, and the analysis
   skills (msd-diffusion, radial-distribution) read those frames.

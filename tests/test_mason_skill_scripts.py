@@ -1576,6 +1576,7 @@ def test_the_quench_template_runs_verified_under_a_real_lammps(
     )
     assert result["state"] == "verified", result
     assert result["checks_passed"] == result["checks_total"] == 3
+    assert "thermo yaml" in result["output"]
     trajectories = sorted(tmp_path.glob("quench-*.traj"))
     assert len(trajectories) == 2
     summary = json.loads((tmp_path / "quench.json").read_text())
@@ -1613,6 +1614,7 @@ def test_the_ramp_template_runs_verified_and_yields_a_classical_cp(
     )
     assert result["state"] == "verified", result
     assert result["checks_passed"] == result["checks_total"] == 3
+    assert "(thermo yaml)" in result["output"]
 
     code, out = _run(
         FIT_RAMP, str(tmp_path / "ramp.json"), "--json", monkeypatch=monkeypatch, capsys=capsys

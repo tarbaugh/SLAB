@@ -20,7 +20,7 @@ import pytest
 from ase.build import bulk
 
 from foundation import ExecutionStatus, Workspace
-from foundation.tasks import run_lammps
+from foundation.tasks import run_lammps, series
 from slab.errors import EngineNotAvailableError, LammpsScriptError
 from slab.lammps import (
     LOG_NAME,
@@ -66,6 +66,7 @@ if os.environ.get("FAKE_MARK"):
     lines.append("FAKE_MARK=" + os.environ["FAKE_MARK"])
 natoms, every, temp, step = 0, 1, 300.0, 0
 columns = ["Step", "Temp", "E_pair", "E_mol", "TotEng", "Press"]
+yaml_thermo = False
 failed = False
 for raw in script.splitlines():
     line = raw.strip()
@@ -87,6 +88,12 @@ for raw in script.splitlines():
         every = int(tok[1])
     elif cmd == "thermo_style" and tok[1] == "custom":
         columns = [NAMES.get(t, t) for t in tok[2:]]
+        if yaml_thermo:
+            lines.append("WARNING: New thermo_style command, previous thermo_modify "
+                         "settings will be lost (src/output.cpp:912)")
+        yaml_thermo = False
+    elif cmd == "thermo_modify" and "line" in tok:
+        yaml_thermo = tok[tok.index("line") + 1] == "yaml"
     elif cmd == "velocity" and "create" in tok:
         temp = float(tok[tok.index("create") + 1])
     elif cmd == "pair_style" and tok[1] == "nonsense":
@@ -115,7 +122,12 @@ for raw in script.splitlines():
         time.sleep(30)
     elif cmd == "run":
         n = int(tok[1])
-        lines.append(" ".join(columns))
+        if yaml_thermo:
+            lines.append("---")
+            lines.append("keywords: [" + "".join("'%s', " % c for c in columns) + "]")
+            lines.append("data:")
+        else:
+            lines.append(" ".join(columns))
         for s in range(step, step + n + 1, every):
             wobble = 1.0 + 0.01 * ((s // every) % 3 - 1)
             row = {{"Step": s, "Temp": temp * wobble, "E_pair": -3.5 * natoms,
@@ -123,9 +135,14 @@ for raw in script.splitlines():
                    "E_mol": 0.0, "TotEng": -3.46 * natoms, "Press": 1500.0 * wobble,
                    "Volume": 3929.35}}
             cells = ["%d" % row[c] if c == "Step" else "%.6g" % row.get(c, 0.0) for c in columns]
-            lines.append(" ".join(cells))
+            if yaml_thermo:
+                lines.append("  - [" + "".join(c + ", " for c in cells) + "]")
+            else:
+                lines.append(" ".join(cells))
             if s == step + every and "warn-inside" in script:
                 lines.append("WARNING: Inconsistent image flags (src/domain.cpp:1)")
+        if yaml_thermo:
+            lines.append("...")
         lines.append("Loop time of 0.0123 on 1 procs for %d steps with %d atoms" % (n, natoms))
         step += n
 if not failed:
@@ -159,6 +176,7 @@ timestep 0.002
 fix nvt all nvt temp 300.0 300.0 0.2
 thermo 100
 thermo_style custom step temp pe ke etotal press vol
+thermo_modify line yaml
 dump traj all custom 500 ar.dump id type x y z
 fix avg all ave/time 10 10 100 c_thermo_temp file ar-temp.txt
 run 1000
@@ -648,6 +666,7 @@ def test_the_md_template_runs_verified_under_a_real_lammps(
     assert result["state"] == "verified", result
     assert result["checks_passed"] == result["checks_total"] == 2
     assert "tail of" in result["output"]
+    assert "(thermo yaml)" in result["output"]
 
 
 # -- the result needs no memory ------------------------------------------------------
@@ -862,7 +881,7 @@ def test_a_real_lammps_dry_run_sets_up_every_loop_and_integrates_nothing(
 STAGED_SCRIPT = """\
 from ase.build import bulk
 
-from foundation.tasks import run_lammps
+from foundation.tasks import run_lammps, series
 
 atoms = bulk("Ar", "fcc", a=5.26, cubic=True) * (3, 3, 3)
 script = '''\\
@@ -927,3 +946,66 @@ def test_a_real_dry_run_finds_a_stage_three_error_before_any_run_is_paid_for(
         {"name": "held", "passed": True, "message": "completed without assertion errors"}
     ]
     assert {"ar-temp.txt", "ar-final.data", "ar.in", "ar.log"} <= set(report["outputs"])
+
+
+# -- YAML thermo -----------------------------------------------------------------
+
+
+def test_run_lammps_reads_yaml_thermo_and_keeps_the_text_path_shape(
+    ws: Workspace, fake_lmp: str
+) -> None:
+    """The script asks for `thermo_modify line yaml`: the log holds a YAML
+    document, thermo_format says so, and the result and the artifact keep
+    exactly the shape the text path produced."""
+    text_script = SCRIPT.replace("thermo_modify line yaml\n", "")
+    assert text_script != SCRIPT
+    with ws.start_run(name="yaml"):
+        result, info = run_lammps(SCRIPT, atoms=_argon(), label="ar", command=fake_lmp)
+    log = ws.artifacts.get(info["artifacts"]["ar.log"]).read_text()
+    thermo = json.loads(ws.artifacts.get(info["artifacts"]["ar-thermo.json"]).read_text())
+    assert "keywords: ['Step', 'Temp', 'PotEng', " in log and "\n...\n" in log
+    assert info["thermo_format"] == "yaml" and info["n_warnings"] == 0
+    with ws.start_run(name="text"):
+        text_result, text_info = run_lammps(
+            text_script, atoms=_argon(), label="ar", command=fake_lmp
+        )
+    text_thermo = json.loads(ws.artifacts.get(text_info["artifacts"]["ar-thermo.json"]).read_text())
+    assert text_info["thermo_format"] == "text"
+    assert result["thermo"] == text_result["thermo"]
+    assert result["tables"] == text_result["tables"]
+    assert result["averages"] == text_result["averages"]
+    assert thermo == text_thermo
+    assert thermo[0]["columns"] == ["Step", "Temp", "PotEng", "KinEng", "TotEng", "Press", "Volume"]
+    assert len(thermo[0]["rows"]) == 11 and thermo[0]["loop"]["steps"] == 1000
+    with ws.start_run(name="read"):
+        assert series(result, 0)[-1]["Step"] == 1000 == series(text_result, 0)[-1]["Step"]
+    assert text_info["warnings"] == [
+        'thermo parsed from text; add "thermo_modify line yaml" after each thermo_style line'
+    ]
+    assert text_info["n_warnings"] == 1
+
+
+def test_run_lammps_warns_of_text_thermo_only_under_a_lammps_that_could_print_yaml(
+    ws: Workspace, fake_lmp: str, tmp_path: Path
+) -> None:
+    old = tmp_path / "old-lmp"
+    old.write_text(_FAKE.replace("22 Jul 2025 - Update 4", "29 Sep 2021 - Update 3"))
+    old.chmod(0o755)
+    text_script = SCRIPT.replace("thermo_modify line yaml\n", "")
+    with ws.start_run(name="old"):
+        _, info = run_lammps(text_script, atoms=_argon(), label="ar", command=str(old))
+    assert info["version"] == "29 Sep 2021 - Update 3"
+    assert info["thermo_format"] == "text" and info["warnings"] == []
+    # Two thermo_style lines, the second without its yaml line: a mixed log.
+    mixed_script = SCRIPT.replace(
+        "run 1000\n", "run 500\nthermo_style custom step temp pe\nrun 500\n"
+    )
+    with ws.start_run(name="mixed"):
+        result, info = run_lammps(mixed_script, atoms=_argon(), label="ar", command=fake_lmp)
+    assert info["thermo_format"] == "mixed"
+    assert [t["columns"] for t in result["tables"]] == [
+        ["Step", "Temp", "PotEng", "KinEng", "TotEng", "Press", "Volume"],
+        ["Step", "Temp", "PotEng"],
+    ]
+    assert result["thermo"]["Step"] == 1000
+    assert "WARNING: New thermo_style command" in info["warnings"][0]

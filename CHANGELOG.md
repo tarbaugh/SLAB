@@ -5,6 +5,17 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- `run_lammps` prefers the YAML thermo output of LAMMPS.
+  `slab.outputs.lammps_thermo` reads every table a script printed as a
+  YAML document (`thermo_modify line yaml`) by schema, and reads the
+  text table when the script did not ask for YAML, in log order, so a
+  log that switches between the forms parses fully. The log digest
+  says `thermo: yaml`, `text`, or `mixed`, and `info["thermo_format"]`
+  reports the same. A run parsed from text under a LAMMPS that could
+  have printed YAML carries one warning line. The bundled templates and
+  the lammps-scripting skill put the yaml line after each
+  `thermo_style` line, and `slab doctor` says whether the plain build
+  accepts it.
 - Mason and the MCP server dry-run a script on request and say when a
   launch skipped it. `launch_workflow` takes `dry_run`; the session
   records a `dry_run` event with the script text's digest, and a real

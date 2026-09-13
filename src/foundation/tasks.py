@@ -67,9 +67,10 @@ from slab.lammps import (
     lammps_build,
     run_lammps_script,
     script_scratch_dir,
+    yaml_thermo_supported,
 )
 from slab.mp import describe_mp, mp_root, structure_path
-from slab.outputs import lammps_ave_time, lammps_thermo
+from slab.outputs import lammps_ave_time, lammps_thermo, lammps_thermo_format
 
 
 # cache_extra folds the resolved engine's identity (source + the registry's
@@ -1084,6 +1085,11 @@ def run_lammps(
     ``{label}-<name>`` (or under its own name when that already starts
     with the label), the thermo tables parsed to ``{label}-thermo.json``,
     and every ``fix ave/time`` file parsed to ``{label}-averages.json``.
+    A table is read by schema from the YAML document that
+    ``thermo_modify line yaml`` prints, and from the text header when
+    the script did not ask for YAML; put the line after each
+    ``thermo_style`` line, because ``thermo_style`` resets it. The
+    parsed shape is the same either way.
     Nothing is copied into the working directory; read the artifacts
     back by name, or a time series with :func:`series`. Every output the
     script names (``dump``, ``write_data``, ``write_restart``,
@@ -1113,7 +1119,12 @@ def run_lammps(
     ``enabled``, ``gpus``, ``threads``, the ``/kk`` styles that ran, and
     the ``switches`` the command asked for), ``types``, ``files`` (the
     kept names of what the script wrote), ``artifacts`` (name to hash),
-    ``warnings`` (the log's WARNING lines, deduplicated), ``n_warnings``,
+    ``thermo_format`` (``yaml`` when every table came as a YAML document,
+    ``text`` when every table was read from a text header, ``mixed``
+    when the log held both, None when no table was printed),
+    ``warnings`` (the log's WARNING lines, deduplicated, plus one line
+    of SLAB's own when the thermo was parsed from text under a LAMMPS
+    that could have printed YAML), ``n_warnings``,
     ``dry_run`` (True inside a dry run, where every loop was emptied and
     LAMMPS integrated no step), and ``rewritten_lines`` (the ``run`` and
     ``minimize`` lines the dry run rewrote in the script LAMMPS read). A
@@ -1186,6 +1197,7 @@ def run_lammps(
             and path.name not in (LOG_NAME, SCREEN_NAME)
         )
         tables = lammps_thermo(outcome.log)
+        thermo_format = lammps_thermo_format(outcome.log)
         thermo_path = scratch / "thermo.json"
         thermo_path.write_text(_json_dumps(tables), encoding="utf-8")
         averages = _ave_time_files(produced)
@@ -1217,6 +1229,8 @@ def run_lammps(
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
     warnings = _lammps_warnings(outcome.log)
+    if thermo_format == "text" and yaml_thermo_supported(described.get("version")):
+        warnings.append(_TEXT_THERMO_WARNING)
     wall = _LMP_WALL.search(outcome.log)
     loops = [table["loop"] for table in tables if table.get("loop")]
     result: dict[str, Any] = {
@@ -1247,6 +1261,7 @@ def run_lammps(
         "types": types,
         "files": kept_files,
         "artifacts": artifact_hashes,
+        "thermo_format": thermo_format,
         "warnings": warnings,
         "n_warnings": len(warnings),
         "dry_run": outcome.dry_run,
@@ -1312,6 +1327,11 @@ def _lammps_types(
                 f"specorder {order} lacks {', '.join(missing)}, which the structure holds"
             )
     return {index + 1: symbol for index, symbol in enumerate(order)}
+
+
+_TEXT_THERMO_WARNING = (
+    'thermo parsed from text; add "thermo_modify line yaml" after each thermo_style line'
+)
 
 
 def _lammps_warnings(log: str, limit: int = 20) -> list[str]:

@@ -31,6 +31,7 @@ from mason.errors import MasonError
 from mason.session import stale_locks, transcript_groups
 from slab._ops import engines_overview
 from slab.errors import SlabError
+from slab.lammps import describe_lammps, yaml_thermo_supported
 from slab.resources import gres_gpus
 from slab.scratch import leftovers, scratch_root
 
@@ -231,6 +232,36 @@ def _lammps_plain_row(slab_cfg: SlabConfig | None) -> tuple[str, str] | None:
             "one rank whatever it reserved",
         )
     return ("+", f"lammps plain build: {launcher} launches it; a CPU run takes its ranks")
+
+
+def _lammps_yaml_row(slab_cfg: SlabConfig | None) -> tuple[str, str]:
+    """Say whether the plain LAMMPS build prints thermo as YAML on request.
+
+    The bundled skills put ``thermo_modify line yaml`` after each
+    ``thermo_style`` line. A build older than the 4 May 2022 release
+    refuses that line with ``Illegal thermo_modify command``, so the row
+    warns; a build whose version probe answers nothing is a fact, not a
+    failure.
+    """
+    lammps = getattr(getattr(slab_cfg, "engines", None), "lammps", None)
+    try:
+        described = describe_lammps(
+            getattr(lammps, "command", None), getattr(lammps, "setup", None)
+        )
+    except _ERRORS as e:
+        return ("=", f"lammps thermo yaml: version probe failed ({e})")
+    version = described.get("version")
+    supported = yaml_thermo_supported(version)
+    if supported is None:
+        return ("=", "lammps thermo yaml: no release date in the version probe; not checked")
+    if supported:
+        return ("+", f"lammps thermo yaml: LAMMPS {version} accepts thermo_modify line yaml")
+    return (
+        "=",
+        f"lammps thermo yaml: LAMMPS {version} predates 4 May 2022; the skills' "
+        "thermo_modify line yaml line errors with Illegal thermo_modify command "
+        "on this build",
+    )
 
 
 def _context_window_row(agent: AgentConfig) -> tuple[str, str] | None:
@@ -572,6 +603,7 @@ def run(
     plain_row = _lammps_plain_row(slab_cfg)
     if plain_row is not None:
         rows.append(plain_row)
+        rows.append(_lammps_yaml_row(slab_cfg))
     if agent is not None:
         window_row = _context_window_row(agent)
         if window_row is not None:

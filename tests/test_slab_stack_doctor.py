@@ -306,6 +306,39 @@ def test_doctor_runs_the_rootstock_setup_lines(project: Path) -> None:
     assert result.exit_code != 0
 
 
+def test_the_doctor_says_whether_the_lammps_build_prints_yaml_thermo(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The skills' `thermo_modify line yaml` line needs the 4 May 2022 release
+    or later; an older build gets a warning row, not a failure."""
+    from slab_stack import doctor
+
+    base = '[agent]\nmodel = "m"\n[hpc]\ndefault_partition = "cpu"\n[hpc.partitions.cpu]\n'
+    (project / "slab.toml").write_text(base + '[engines.lammps]\ncommand = "lmp"\n')
+    probed: dict[str, object] = {"version": "22 Jul 2025 - Update 4"}
+    monkeypatch.setattr(doctor, "describe_lammps", lambda command, setup: probed)
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert result.exit_code == 0, result.output
+    assert (
+        "[+] lammps thermo yaml: LAMMPS 22 Jul 2025 - Update 4 accepts thermo_modify line yaml"
+        in result.output
+    )
+    probed["version"] = "29 Sep 2021 - Update 3"
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert result.exit_code == 0, result.output
+    assert (
+        "[=] lammps thermo yaml: LAMMPS 29 Sep 2021 - Update 3 predates 4 May 2022; the "
+        "skills' thermo_modify line yaml line errors with Illegal thermo_modify command "
+        "on this build" in result.output
+    )
+    probed["version"] = None
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert "[=] lammps thermo yaml: no release date in the version probe" in result.output
+    (project / "slab.toml").write_text(base)
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert "lammps thermo yaml" not in result.output
+
+
 def test_the_doctor_names_the_lammps_plain_build_launcher(project: Path) -> None:
     """A plain command with no launcher and no {ntasks} runs one rank whatever
     the launch reserved. That is a legitimate choice, so the row is a fact."""

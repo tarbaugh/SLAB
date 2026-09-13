@@ -117,6 +117,43 @@ def describe_lammps(
 LAMMPS_FACTORY = "slab.backends.lammps_calculator"
 
 
+#: The first LAMMPS release whose ``thermo_modify`` accepts ``line yaml``.
+YAML_THERMO_SINCE = (2022, 5, 4)
+_MONTHS = {
+    name: index
+    for index, name in enumerate(
+        ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"),
+        start=1,
+    )
+}
+_VERSION_DATE = re.compile(r"(\d{1,2}) ([A-Z][a-z]{2}) (\d{4})")
+
+
+def yaml_thermo_supported(version: str | None) -> bool | None:
+    """Whether a LAMMPS of this version prints thermo as YAML on request.
+
+    ``thermo_modify line yaml`` arrived in the 4 May 2022 release. The
+    version is the date text the binary prints (``22 Jul 2025 - Update 4``).
+    None when no release date can be read from it.
+
+    Examples:
+        >>> yaml_thermo_supported("22 Jul 2025 - Update 4")
+        True
+        >>> yaml_thermo_supported("29 Sep 2021 - Update 3")
+        False
+        >>> yaml_thermo_supported("4 May 2022")
+        True
+        >>> yaml_thermo_supported(None) is None
+        True
+    """
+    if not version or not (m := _VERSION_DATE.search(version)):
+        return None
+    month = _MONTHS.get(m.group(2))
+    if month is None:
+        return None
+    return (int(m.group(3)), month, int(m.group(1))) >= YAML_THERMO_SINCE
+
+
 def lammps_build(engine: str | None = None) -> dict[str, Any]:
     """The LAMMPS build a launch runs: its name, command, and setup lines.
 

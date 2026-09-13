@@ -26,6 +26,13 @@ as the fallback. The engine is for a small relaxation or single point
 that feeds another task. The lammps-scripting skill carries the input
 anatomy, the ensembles, and the checks.
 
+The thermo table is read by schema when the script asks for it. Put
+`thermo_modify line yaml` after each `thermo_style` line, because a
+`thermo_style` line resets it, and LAMMPS prints every table as one YAML
+document that `run_lammps` parses without a regex. A script without the
+line still parses from the text table, and `info["thermo_format"]` says
+which path the run took (`yaml`, `text`, or `mixed`).
+
 The build follows the slice. A launch sized with `gpus=` runs the gpu
 build from `[engines.lammps.gpu]`, and an unsized launch runs the plain
 build from `[engines.lammps]`. Never name a build; `engine="lammps"` is

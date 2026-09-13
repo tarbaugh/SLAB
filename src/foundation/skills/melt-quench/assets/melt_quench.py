@@ -80,7 +80,7 @@ neigh_modify every 1 delay 0 check yes
 timestep {TIMESTEP_PS}
 thermo {THERMO_EVERY}
 thermo_style custom step temp pe ke etotal press vol
-thermo_modify flush yes
+thermo_modify line yaml flush yes
 
 velocity all create {T_MELT} {SEED + replica} mom yes rot yes dist gaussian
 {_npt(T_MELT, T_MELT)}
@@ -102,7 +102,7 @@ neigh_modify every 1 delay 0 check yes
 timestep {TIMESTEP_PS}
 thermo {THERMO_EVERY}
 thermo_style custom step temp pe ke etotal press vol
-thermo_modify flush yes
+thermo_modify line yaml flush yes
 {_npt(T_MELT, T_FINAL)}
 run {ramp_steps}
 unfix integrate
@@ -138,7 +138,8 @@ for replica in range(1, REPLICAS + 1):
     print(
         f"replica {replica}: melted {melt['loop']['atoms']} atoms at {T_MELT:g} K "
         f"and {PRESSURE_BAR:g} bar; V = {melt_volumes[-1]:.2f} A^3 "
-        f"(LAMMPS {info['version']}, {result['steps']} steps in all)"
+        f"(LAMMPS {info['version']}, thermo {info['thermo_format']}, "
+        f"{result['steps']} steps in all)"
     )
     for index, rate in enumerate(QUENCH_RATES_K_PER_PS):
         ramp, hold = tables[1 + 2 * index], tables[2 + 2 * index]

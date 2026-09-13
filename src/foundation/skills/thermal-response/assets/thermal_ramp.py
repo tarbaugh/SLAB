@@ -87,7 +87,7 @@ neigh_modify every 1 delay 0 check yes
 timestep {TIMESTEP_PS}
 thermo {SAMPLE_EVERY}
 thermo_style custom step temp pe ke etotal press vol lx ly lz
-thermo_modify flush yes
+thermo_modify line yaml flush yes
 velocity all create {TEMPERATURES[0]} {SEED} mom yes rot yes dist gaussian
 {rungs}
 write_data {LABEL}-final.data
@@ -128,7 +128,8 @@ active = current_run()
 assert active is not None, "run this template through launch_workflow"
 n_tables = len(result["tables"])
 print(
-    f"LAMMPS {info['version']}: {result['steps']} steps over {len(ladder)} rung(s), "
+    f"LAMMPS {info['version']} (thermo {info['thermo_format']}): "
+    f"{result['steps']} steps over {len(ladder)} rung(s), "
     f"{n_tables} thermo tables"
 )
 rows: list[dict[str, Any]] = []

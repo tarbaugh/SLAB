@@ -87,8 +87,9 @@ def test_lammps_log_digest_reads_the_ase_driven_capture() -> None:
     assert lines[0].startswith("LAMMPS log digest: lammps-cu-relax-final.log (77 lines, LAMMPS ?, ")
     assert "1 loop(s) completed" in lines[0]
     assert lines[1] == "setup: units metal; 8 atoms; pair_style eam"
-    assert lines[2].startswith("thermo table 1 (1 rows): Step Temp Press CPU Pxx")
-    assert lines[3].startswith("  first: 0 0 17.45234162594413")
+    assert lines[2] == "thermo: text"
+    assert lines[3].startswith("thermo table 1 (1 rows): Step Temp Press CPU Pxx")
+    assert lines[4].startswith("  first: 0 0 17.45234162594413")
     assert "  loop: 0 steps, 8 atoms, 1 procs, 2.92e-07 s" in shown
     assert "warnings: WARNING: Triclinic box skew is large." in shown
     assert digest("lammps-cu-relax-final.log", text) == shown
@@ -204,3 +205,89 @@ def test_lammps_ave_time_reads_the_scalar_and_vector_captures() -> None:
     assert shown is not None
     assert "(fix vec, vector mode, 2 block(s); the blocks are in the file itself)" in shown
     assert "columns: Row c_rdf[1] c_rdf[2] c_rdf[3]" in shown
+
+
+# -- YAML thermo (thermo_modify line yaml) -------------------------------------
+
+
+def test_lammps_thermo_reads_a_two_run_yaml_log() -> None:
+    """Both documents of a real two-run log (LAMMPS 22 Jul 2025 - Update 4),
+    each with its loop line, in the text parser's shape."""
+    from slab.outputs import lammps_thermo, lammps_thermo_format, lammps_yaml_thermo
+
+    text = (DATA / "lammps-cu-two-runs-yaml.log").read_text()
+    tables = lammps_thermo(text)
+    assert lammps_yaml_thermo(text) == tables
+    assert lammps_thermo_format(text) == "yaml"
+    assert [t["columns"] for t in tables] == [
+        ["Step", "Temp", "PotEng", "KinEng", "TotEng", "Press", "Volume"],
+        ["Step", "Temp", "PotEng", "Press", "c_thermo_temp", "v_x"],
+    ]
+    assert [len(t["rows"]) for t in tables] == [4, 3]
+    assert tables[0]["rows"][0][:2] == [0, 300.0]
+    assert all(isinstance(row[0], int) for t in tables for row in t["rows"])
+    assert all(isinstance(v, float) for t in tables for row in t["rows"] for v in row[1:])
+    assert tables[0]["loop"]["steps"] == 60 and tables[1]["loop"]["steps"] == 40
+    assert tables[1]["rows"][-1][-1] == 1.5  # v_x
+    assert tables[0]["rows"][-1][0] == 60 and tables[1]["rows"][0][0] == 60
+
+
+def test_lammps_thermo_reads_a_mixed_log_in_order() -> None:
+    """A text table, then `thermo_modify line yaml`, then a YAML table: both
+    parse, in log order, and the YAML document is never read as text rows."""
+    from slab.outputs import lammps_thermo, lammps_thermo_format, lammps_yaml_thermo
+
+    text = (DATA / "lammps-cu-mixed-thermo.log").read_text()
+    tables = lammps_thermo(text)
+    assert lammps_thermo_format(text) == "mixed"
+    assert len(tables) == 2 and len(lammps_yaml_thermo(text)) == 1
+    assert tables[0]["columns"] == tables[1]["columns"]
+    assert [row[0] for row in tables[0]["rows"]] == [0, 20, 40]
+    assert [row[0] for row in tables[1]["rows"]] == [40, 60, 80]
+    assert tables[0]["rows"][-1][0] == tables[1]["rows"][0][0] == 40
+    assert tables[0]["loop"]["steps"] == tables[1]["loop"]["steps"] == 40
+
+
+def test_lammps_thermo_reads_a_minimize_yaml_log() -> None:
+    from slab.outputs import lammps_thermo
+
+    text = (DATA / "lammps-cu-minimize-yaml.log").read_text()
+    (table,) = lammps_thermo(text)
+    assert table["columns"] == ["Step", "Temp", "PotEng", "Press"]
+    assert len(table["rows"]) == 2 and table["loop"]["steps"] == 1
+
+
+def test_lammps_yaml_thermo_survives_an_unclosed_document_and_odd_values() -> None:
+    """LAMMPS died inside a run: the `...` never came, the rows still count.
+    Values PyYAML leaves as text (1e+20, inf, -nan) become floats."""
+    from slab.outputs import lammps_thermo, lammps_thermo_format
+
+    text = (
+        "---\nkeywords: ['Step', 'Temp', 'Press', ]\ndata:\n"
+        "  - [0, 300, 1e+20, ]\nfix print says hello\n  - [10, inf, -nan, ]\n"
+        "ERROR: Lost atoms: original 4 current 3 (src/thermo.cpp:1)\n"
+    )
+    (table,) = lammps_thermo(text)
+    assert lammps_thermo_format(text) == "yaml"
+    assert table["rows"][0] == [0, 300.0, 1e20]
+    assert table["rows"][1][1] == float("inf") and table["rows"][1][2] != table["rows"][1][2]
+    assert table["loop"] is None
+    # The timing breakdown's rule of dashes opens no document.
+    assert lammps_thermo("-" * 63 + "\nPair | 0.1 | 0.1 | 0.1 | 0.0 | 90.0\n") == []
+
+
+def test_lammps_log_digest_of_a_yaml_log_shows_no_raw_yaml() -> None:
+    text = (DATA / "lammps-cu-two-runs-yaml.log").read_text()
+    shown = lammps_log_digest("two.log", text)
+    assert "keywords:" not in shown and "- [" not in shown and "data:" not in shown
+    lines = shown.splitlines()
+    assert lines[1] == "setup: units metal; 108 atoms; pair_style lj/cut 6.0"
+    assert lines[2] == "thermo: yaml"
+    assert lines[3] == "thermo table 1 (4 rows): Step Temp PotEng KinEng TotEng Press Volume"
+    assert lines[4] == "  first: 0 300 -349.78363 4.1492507 -345.63438 36633.041 1275.5241"
+    assert lines[5].startswith("  last:  60 188.00905 ")
+    assert lines[6].startswith("  loop: 60 steps, 108 atoms, 1 procs, ")
+    assert lines[7] == "thermo table 2 (3 rows): Step Temp PotEng Press c_thermo_temp v_x"
+    assert "warnings: WARNING: New thermo_style command" in shown
+    mixed = lammps_log_digest("mixed.log", (DATA / "lammps-cu-mixed-thermo.log").read_text())
+    assert "thermo: mixed" in mixed and "- [" not in mixed

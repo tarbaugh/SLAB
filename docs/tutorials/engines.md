@@ -345,6 +345,7 @@ timestep 0.002
 fix integrate all nvt temp 300.0 300.0 0.2
 thermo 100
 thermo_style custom step temp pe ke etotal press vol
+thermo_modify line yaml
 dump traj all custom 500 ar.dump id type x y z
 fix avg all ave/time 10 10 100 c_thermo_temp c_thermo_press file ar-avg.dat
 run 2000
@@ -366,11 +367,11 @@ def the_thermostat_held() -> None:
 
 <!-- no-verify -->
 ```text
-LAMMPS 22 Jul 2025 - Update 4: 2000 steps in 0.05 s, 41503 steps/s
+LAMMPS 22 Jul 2025 - Update 4: 2000 steps in 0.05 s, 41205 steps/s
 tail mean T = 303.2 K over 11 rows
 averages: ['ar-avg.dat'], 20 rows
 artifacts: ['ar-averages.json', 'ar-avg.dat', 'ar-final.data', 'ar-structure.data', 'ar-thermo.json', 'ar.dump', 'ar.in', 'ar.log', 'ar.screen']
-run 01m2dn7229d8gv27mqxjvstqtt  ar-nvt  state=verified status=completed checks=1/1 tasks=1
+run 01m2dsc2can361bm2b3pnn56x3  ar-nvt  state=verified status=completed checks=1/1 tasks=1
 ```
 
 The run kept the script, the log, the screen capture, the structure, the
@@ -381,6 +382,13 @@ deviation of every column over the tail of its rows, which is what the
 check judged. `seconds`, `atoms`, and `rate` come from the loop lines, so
 a step rate is never computed by hand; `wall_time` is LAMMPS's own text.
 `averages` holds every `fix ave/time` file in the same shape as a table.
+The script asks for `thermo_modify line yaml` after its `thermo_style`
+line, so LAMMPS printed the table as one YAML document and the task read
+it by schema. `info["thermo_format"]` reports `yaml`. A script without
+that line is read from the text table, reports `text`, and carries one
+warning line in `info["warnings"]` when the LAMMPS build could have
+printed YAML. Put the line after each `thermo_style` line, because
+`thermo_style` resets it.
 The full rows are the `ar-thermo.json` and `ar-averages.json` artifacts,
 and `foundation.tasks.series(result, 0)` or `series(result, "ar-avg.dat")`
 reads them back as one dict per row. Every output the script names is a
@@ -452,6 +460,7 @@ fix integrate all nvt temp 300.0 300.0 0.2
 fix avg all ave/time 10 10 100 c_thermo_temp file ar-temp.txt
 thermo 100
 thermo_style custom step temp pe ke etotal press vol
+thermo_modify line yaml
 run 2000
 write_data ar-final.data
 """
