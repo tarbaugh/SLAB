@@ -1984,6 +1984,15 @@ def render_sandbox_script(
         '[ -f "$IMAGE" ] || { echo "no container image at $IMAGE; build it '
         "(e.g. 'apptainer build $IMAGE docker://rockylinux:9') on a filesystem "
         'the compute nodes mount" >&2; exit 1; }',
+        # A reap at job start, on the host, because the container cannot
+        # reach the scheduler. A job that died without its EXIT trap, or
+        # before the trap existed, leaves its runs at 'running', and the
+        # next job to start settles them here. The reap is safe at this
+        # point only because this job has no runs yet: --containall gives
+        # the container its own PID namespace and its hostname matches the
+        # host, so a host-side reap later in the job would judge this job's
+        # own runs by pids that mean nothing here, and mark them gone.
+        f"{slab} runs reap -w {shlex.quote(str(workspace_root))} || true",
         *_upstream_lines(agent, workspace_root),
         'BRIDGE="$(mktemp -d)/llm.sock"',
         f'{slab} mason sandbox bridge "$BRIDGE" "$UPSTREAM"'

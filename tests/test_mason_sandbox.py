@@ -161,6 +161,28 @@ def test_render_closes_the_jobs_runs_from_its_exit_trap(tmp_path: Path) -> None:
     assert "runs reap --job" not in script[inner_start:]
 
 
+def test_render_reaps_on_the_host_at_job_start(tmp_path: Path) -> None:
+    """The container cannot reach the scheduler, so the batch script reaps
+    on the host before the container and the bridge start, while this job
+    has no runs. The start reap and the EXIT trap are the only reaps, and
+    the container script holds none."""
+    script, _, _ = _render(tmp_path, _agent(), _slab_cfg())
+    lines = script.splitlines()
+    starts = [i for i, line in enumerate(lines) if "runs reap -w " in line]
+    (start,) = starts
+    reap = lines[start]
+    assert str(tmp_path / "ws") in reap
+    assert reap.endswith(" || true")
+    assert not reap.startswith("trap ")
+    bridge = next(i for i, line in enumerate(lines) if "mason sandbox bridge" in line)
+    exec_at = next(i for i, line in enumerate(lines) if "apptainer exec" in line)
+    image_check = next(i for i, line in enumerate(lines) if 'no container image at' in line)
+    assert image_check < start < bridge < exec_at
+    assert script.count("runs reap") == 2
+    inner = script[script.index("apptainer exec"):]
+    assert "runs reap" not in inner
+
+
 def _fake_nvidia_smi(directory: Path, devices: int) -> Path:
     """A ``nvidia-smi`` that lists *devices* GPUs the way ``-L`` does."""
     directory.mkdir(exist_ok=True)

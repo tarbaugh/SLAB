@@ -777,3 +777,35 @@ def test_a_session_record_is_stale_once_its_runs_were_failed_by_job_end(
     assert ws.runs.get(run.id).error == "job 8 is timeout; marked failed by the test"
     stale = stale_records(records, runs=ws.runs, keep_newest=False)
     assert [r.session_id for r in stale] == ["sess-old"]
+
+
+def test_a_reap_at_job_start_settles_a_run_an_ended_job_left_on_another_host(
+    ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The batch script's start reap: a new job on the host finds a run of a
+    job that died without its exit trap, on another node. The scheduler says
+    the job is terminal, so the run is failed and its slice released."""
+    from foundation import runtime
+    from foundation.models import Run
+
+    monkeypatch.setenv("SLURM_JOB_ID", "9")
+    left = ws.runs.create(Run(name="left-by-8", job_id="8"))
+    held = ws.runs.reserve(
+        host="compute-7", holder_pid=1, budget_cpus=range(4), budget_gpus=("0",),
+        gpus=1, job_id="8",
+    )
+    ws.runs.claim_reservation(held.id, left.id, host="compute-7", pid=1)
+    asked: list[str] = []
+
+    def answer(job_id: str) -> Any:
+        asked.append(job_id)
+        return _job_answer("cancelled")(job_id)
+
+    monkeypatch.setattr(runtime, "job_state", answer)
+    reaped = ws.reap_dead(caller="slab runs reap")
+    assert [r.id for r in reaped] == [left.id]
+    assert asked == ["8"]
+    after = ws.runs.get(left.id)
+    assert after.status is ExecutionStatus.FAILED
+    assert after.error == "job 8 is cancelled; marked failed by slab runs reap"
+    assert ws.runs.list_reservations() == []

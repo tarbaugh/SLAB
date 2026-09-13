@@ -984,3 +984,40 @@ def test_runs_reap_job_fails_exactly_the_jobs_running_runs(root: Path) -> None:
         assert ws.runs.get(bare.id).status.value == "running"
     again = runner.invoke(runs_app, ["reap", "--job", "4242", "-w", str(root)])
     assert "0 run(s) of job 4242 marked failed" in again.output
+
+
+def test_runs_reap_settles_the_runs_of_an_ended_job(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The start reap in the sandbox batch script, as it runs on the host:
+    a run of a terminal job is failed and its reservation released, and a
+    run of a job the scheduler still runs stays running."""
+    from foundation import runtime
+    from foundation.cli import runs_app
+    from foundation.models import Run
+    from slab.hpc import JobState, JobStatus
+
+    states = {"4242": JobState.TIMEOUT, "4243": JobState.RUNNING}
+
+    def answer(job_id: str) -> JobStatus:
+        return JobStatus(job_id=job_id, state=states[job_id], raw=states[job_id].value)
+
+    monkeypatch.setattr(runtime, "job_state", answer)
+    monkeypatch.setenv("SLURM_JOB_ID", "4244")
+    with Workspace(root) as ws:
+        ended = ws.runs.create(Run(name="ended", job_id="4242"))
+        held = ws.runs.reserve(
+            host="compute-7", holder_pid=1, budget_cpus=range(2), budget_gpus=(),
+            ntasks=1, job_id="4242",
+        )
+        ws.runs.claim_reservation(held.id, ended.id, host="compute-7", pid=1)
+        still = ws.runs.create(Run(name="still", job_id="4243"))
+        ws.runs.set_status(still.id, "running", pid=1, host="compute-7")
+    result = runner.invoke(runs_app, ["reap", "-w", str(root)])
+    assert result.exit_code == 0, result.output
+    assert f"failed  {ended.id}  ended  job 4242 is timeout" in result.output
+    with Workspace(root) as ws:
+        assert ws.runs.get(ended.id).status.value == "failed"
+        assert ws.runs.get(ended.id).error == "job 4242 is timeout; marked failed by slab runs reap"
+        assert ws.runs.get(still.id).status.value == "running"
+        assert ws.runs.list_reservations() == []

@@ -350,8 +350,12 @@ allocation never counts against this budget.
 The sandbox batch script closes its own runs. Its exit trap runs
 `slab runs reap --job "$SLURM_JOB_ID"` on the host after the container
 is gone, so a normal exit, an `scancel`, and a time limit all mark the
-job's running runs failed and release their slices. Run the same command
-by hand for a job that ended some other way.
+job's running runs failed and release their slices. The batch script also
+runs `slab runs reap` on the host at job start, before the container
+starts, because the container cannot reach the scheduler. So the next job
+to start settles a job that ended without its exit trap. For a workspace
+that no new job will use, run `slab runs reap` or
+`slab runs reap --job <job>` by hand where the scheduler answers.
 
 When the run belongs to a job you are cancelling, do not
 retire it by hand. `slab hpc cancel <job>` marks every running run of that

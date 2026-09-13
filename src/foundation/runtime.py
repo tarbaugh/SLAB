@@ -858,7 +858,12 @@ class Workspace:
         with another host is left alone, because nothing about that host
         can be seen from here, and so is a run from before the stamp
         existed. Where the scheduler cannot be reached, or answers
-        ``undetermined``, no run is failed for its job. *caller* names who
+        ``undetermined``, no run is failed for its job. Do not call this
+        on the host of a running sandbox job: ``--containall`` gives the
+        container its own PID namespace and its hostname matches the host,
+        so the job's own runs would be judged by pids that mean nothing on
+        the host, and marked gone. The sandbox batch script reaps on the
+        host only at job start, before the job has runs. *caller* names who
         marked the run in its error line. Returns the runs marked failed.
         The reservations those runs held, and every other dead reservation
         of this job on this host, are released on the way
