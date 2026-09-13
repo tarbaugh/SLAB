@@ -7,6 +7,9 @@ no transcript claims, the harness session records, the stale session
 locks, the finished jobs' files, and the scratch directories no live
 calculation owns. One function lists them all with counts and bytes, so
 the dry run, the confirmation, and the deletion describe the same set.
+Before it deletes anything, purge settles the running runs whose
+scheduler job has ended: it marks them failed, so their records, slices,
+and scratch are settled in the same pass.
 
 This lives in ``slab_stack`` because the categories come from all three
 layers: the run store and the sweep from ``foundation``, the transcript
@@ -90,6 +93,8 @@ class Inventory(BaseModel):
     dry_run: bool
     categories: list[Category]
     kept: list[Kept]
+    settled: list[str] = []
+    """The running runs of ended jobs marked failed (or, dry, to be marked)."""
 
     @property
     def total_bytes(self) -> int:
@@ -97,6 +102,9 @@ class Inventory(BaseModel):
 
     def lines(self, verb: str, *, detail: bool = True) -> list[str]:
         """One line per category, its items under it with *detail*, then one per kept item.
+
+        The runs of ended jobs come first, and only when there are any,
+        because purge marks them failed and deletes nothing of theirs.
 
         Examples:
             >>> inventory = Inventory(root="/ws", all_sessions=False, dry_run=True,
@@ -110,8 +118,16 @@ class Inventory(BaseModel):
               ab12
             would delete job files: none
             kept transcript mason/sessions/x.jsonl: the newest conversation
+            >>> settled = inventory.model_copy(update={"settled": ["01ab  md  job 8 is timeout"]})
+            >>> settled.lines("would delete", detail=False)[0]
+            'would mark failed runs of ended jobs: 1'
         """
         lines: list[str] = []
+        if self.settled:
+            marked = "would mark failed" if self.dry_run else "marked failed"
+            lines.append(f"{marked} runs of ended jobs: {len(self.settled)}")
+            if detail:
+                lines.extend(f"  {item}" for item in self.settled)
         for category in self.categories:
             if not category.items:
                 lines.append(f"{verb} {category.name}: none")
@@ -192,6 +208,7 @@ def purge_inventory(
     active: frozenset[str],
     job_id_of: JobIdOf,
     dry_run: bool = True,
+    ended: frozenset[str] = frozenset(),
 ) -> Inventory:
     """List everything ``slab purge`` deletes from *root*, with counts and bytes.
 
@@ -199,7 +216,12 @@ def purge_inventory(
     deleted in order, and the inventory returned is what actually went:
     the run store reports the rows and blobs it removed, and the sweep
     reports the scratch it removed. *active* is the set of job ids the
-    scheduler still holds, the serve record's job included.
+    scheduler still holds, the serve record's job included. The running
+    runs of jobs the scheduler reports ended, and of the jobs in *ended*,
+    are marked failed first
+    (:meth:`~foundation.runtime.Workspace.settle_ended_jobs`), so a
+    harness record whose only running run was among them is stale in the
+    same pass, and their scratch goes with them.
     """
     root = Path(root)
     groups = transcript_groups(root, include_orphans=True)
@@ -251,6 +273,10 @@ def purge_inventory(
         return Category(name=name, items=[_relative(root, p) for p in paths], bytes=_size(paths))
 
     with Workspace(root) as ws:
+        settled = [
+            f"{run.id}  {run.name}  job {run.job_id}".rstrip()
+            for run in ws.settle_ended_jobs(caller="slab purge", ended=ended, dry_run=dry_run)
+        ]
         records = [
             r.path for r in stale_records(root, runs=ws.runs, keep_newest=not all_sessions)
         ]
@@ -294,4 +320,5 @@ def purge_inventory(
         dry_run=dry_run,
         categories=categories,
         kept=kept,
+        settled=settled,
     )

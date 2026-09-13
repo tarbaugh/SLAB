@@ -608,34 +608,9 @@ runs_app = typer.Typer(
 
 
 @runs_app.command("reap")
-def runs_reap(
-    workspace: _WorkspaceOpt = None,
-    job: Annotated[
-        str | None,
-        typer.Option(
-            "--job",
-            help="Fail every running run stamped with this scheduler job, without a "
-            "liveness check: the job is ending. The sandbox batch script runs this "
-            "from its EXIT trap.",
-        ),
-    ] = None,
-) -> None:
+def runs_reap(workspace: _WorkspaceOpt = None) -> None:
     """Mark failed every running run whose recorded process on this host is gone
     or whose job ended, and release every reservation no live process holds."""
-    if job is not None:
-        with _open(workspace) as ws:
-            settled = _ops.fail_job_runs(
-                ws, job, reason=f"job {job} ended; marked failed by slab runs reap --job"
-            )
-        for run in settled["runs_failed"]:
-            typer.echo(f"failed  {run['id']}  {run['name']}  job {job} ended")
-        for held in settled["reservations_released"]:
-            typer.echo(f"released {held['id']}  {held['slice']}")
-        typer.echo(
-            f"{len(settled['runs_failed'])} run(s) of job {job} marked failed, "
-            f"{len(settled['reservations_released'])} reservation(s) released"
-        )
-        return
     with _open(workspace) as ws:
         released = ws.release_dead()
         for held in released:

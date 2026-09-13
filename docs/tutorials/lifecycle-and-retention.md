@@ -457,6 +457,8 @@ would delete scratch: 1 (2200 bytes)
 kept scratch scratch/slab-lammps-script-p8d2r6mt: process 27070 is alive on this host
 ```
 
+Before it deletes anything, purge marks failed the running runs whose scheduler job has ended. It asks the scheduler once about each job and consults no pid, so it gives the same answer on any host. The failed runs release their slices, and their scratch is removed. The inventory lists them first, as `would mark failed runs of ended jobs`, and only when there are any. Where the scheduler cannot place an old job, because accounting is off or the record has aged out, pass `--job <job>` to take it as ended. Purge refuses a `--job` that the scheduler still holds, so cancel a live job with `slab hpc cancel`.
+
 The categories, in the order purge deletes them:
 
 - Session lock files (`mason/locks/`) that no process holds. A held lock is left alone. Purge probes each stale lock again just before it unlinks it, because a Mason session that started during the inventory holds the same file.

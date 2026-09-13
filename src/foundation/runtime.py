@@ -862,8 +862,8 @@ class Workspace:
         on the host of a running sandbox job: ``--containall`` gives the
         container its own PID namespace and its hostname matches the host,
         so the job's own runs would be judged by pids that mean nothing on
-        the host, and marked gone. The sandbox batch script reaps on the
-        host only at job start, before the job has runs. *caller* names who
+        the host, and marked gone. :meth:`settle_ended_jobs` asks only the
+        scheduler and is safe from any host. *caller* names who
         marked the run in its error line. Returns the runs marked failed.
         The reservations those runs held, and every other dead reservation
         of this job on this host, are released on the way
@@ -906,6 +906,64 @@ class Workspace:
         if reaped:
             sweep_scratch(self, only=[run.id for run in reaped])
         return reaped
+
+    def settle_ended_jobs(
+        self, *, caller: str, ended: Iterable[str] = (), dry_run: bool = False
+    ) -> list[Run]:
+        """Mark failed every running run whose scheduler job has ended.
+
+        The scheduler is asked once about each distinct job the running
+        runs carry (:func:`job_states_for`). A run whose job is terminal is
+        failed with the error line ``job N is <state>; marked failed by
+        <caller>``. A job in *ended* is taken as ended without asking, for
+        a job the scheduler cannot place (no accounting, or a record that
+        has aged out), and its runs are failed with ``job N ended; marked
+        failed by <caller>``. No pid is consulted, so the answer is the
+        same from any host. A run with no job, a run of a job the
+        scheduler still holds or cannot place, and every run where the
+        scheduler cannot be reached stay as they are. Each failed run's
+        reservation is released with it, and the scratch directories the
+        failed runs made are removed. With *dry_run* nothing changes, and
+        the runs that would be failed are returned as they stand.
+
+        Examples:
+            >>> import tempfile
+            >>> from foundation.models import Run
+            >>> ws = Workspace(tempfile.mkdtemp())
+            >>> left = ws.runs.create(Run(name="left", job_id="8"))
+            >>> _ = ws.runs.set_status(left.id, "running", pid=1, host="n1")
+            >>> [r.name for r in ws.settle_ended_jobs(caller="t", ended=["8"], dry_run=True)]
+            ['left']
+            >>> ws.runs.get(left.id).status.value
+            'running'
+            >>> [r.error for r in ws.settle_ended_jobs(caller="t", ended=["8"])]
+            ['job 8 ended; marked failed by t']
+            >>> ws.close()
+        """
+        forced = set(ended)
+        running = [
+            run
+            for run in self.runs.list_runs(status=ExecutionStatus.RUNNING)
+            if run.job_id is not None
+        ]
+        states = job_states_for([run for run in running if run.job_id not in forced])
+        settled: list[Run] = []
+        for run in running:
+            if run.job_id in forced:
+                error = f"job {run.job_id} ended; marked failed by {caller}"
+            else:
+                state = states.get(str(run.job_id))
+                if state is None or not state.is_terminal:
+                    continue
+                error = f"job {run.job_id} is {state.value}; marked failed by {caller}"
+            if dry_run:
+                settled.append(run)
+                continue
+            with suppress(IllegalStatusChangeError):  # it may finish under us; fine
+                settled.append(self.runs.set_status(run.id, ExecutionStatus.FAILED, error=error))
+        if settled and not dry_run:
+            sweep_scratch(self, only=[run.id for run in settled])
+        return settled
 
     def fail_run(self, run_id: str, *, reason: str) -> Run:
         """Mark one running run failed on the operator's word; return the snapshot.

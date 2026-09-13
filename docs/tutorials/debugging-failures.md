@@ -347,15 +347,15 @@ scheduler, or the scheduler cannot say, no run is failed for its job.
 A reservation belongs to a job as well, so a slice from another
 allocation never counts against this budget.
 
-The sandbox batch script closes its own runs. Its exit trap runs
-`slab runs reap --job "$SLURM_JOB_ID"` on the host after the container
-is gone, so a normal exit, an `scancel`, and a time limit all mark the
-job's running runs failed and release their slices. The batch script also
-runs `slab runs reap` on the host at job start, before the container
-starts, because the container cannot reach the scheduler. So the next job
-to start settles a job that ended without its exit trap. For a workspace
-that no new job will use, run `slab runs reap` or
-`slab runs reap --job <job>` by hand where the scheduler answers.
+A sandbox job cannot reach the scheduler from inside its container, so
+it never judges a run job-ended. Its runs stay at `running` after the job
+ends until a reap runs where the scheduler answers. `slab purge` does
+this first, on any host, and asks only the scheduler, never a pid. It
+marks failed the running runs of every ended job, releases their slices,
+and removes their scratch. `--dry-run` lists them under
+`would mark failed runs of ended jobs`. Where the scheduler cannot place
+an old job, name it with `slab purge --job <job>`. Purge refuses a job
+that is still in the queue.
 
 When the run belongs to a job you are cancelling, do not
 retire it by hand. `slab hpc cancel <job>` marks every running run of that

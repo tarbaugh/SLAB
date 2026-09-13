@@ -779,12 +779,12 @@ def test_a_session_record_is_stale_once_its_runs_were_failed_by_job_end(
     assert [r.session_id for r in stale] == ["sess-old"]
 
 
-def test_a_reap_at_job_start_settles_a_run_an_ended_job_left_on_another_host(
+def test_reap_dead_settles_a_run_an_ended_job_left_on_another_host(
     ws: Workspace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The batch script's start reap: a new job on the host finds a run of a
-    job that died without its exit trap, on another node. The scheduler says
-    the job is terminal, so the run is failed and its slice released."""
+    """A run of a job that died on another node, seen from a new job: the
+    scheduler says the job is terminal, so the run is failed and its slice
+    released, though its host and pid cannot be checked from here."""
     from foundation import runtime
     from foundation.models import Run
 
@@ -809,3 +809,67 @@ def test_a_reap_at_job_start_settles_a_run_an_ended_job_left_on_another_host(
     assert after.status is ExecutionStatus.FAILED
     assert after.error == "job 8 is cancelled; marked failed by slab runs reap"
     assert ws.runs.list_reservations() == []
+
+
+def test_settle_ended_jobs_asks_only_the_scheduler(
+    ws: Workspace, scratch_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The settle behind 'slab purge': a run of a terminal job is failed, its
+    slice released, its scratch removed. A run of a running job, a run with
+    no job (even one whose pid is gone here), and every run where the
+    scheduler cannot be reached stay running. A job named as ended is taken
+    at its word, without a question to the scheduler."""
+    from conftest import seed_scratch
+    from foundation import runtime
+    from foundation.models import Run
+    from foundation.runtime import this_host
+    from slab.hpc import JobState, JobStatus, SchedulerNotAvailableError
+
+    ended = ws.runs.create(Run(name="ended", job_id="8"))
+    held = ws.runs.reserve(
+        host="compute-7", holder_pid=1, budget_cpus=range(2), budget_gpus=(),
+        ntasks=1, job_id="8",
+    )
+    ws.runs.claim_reservation(held.id, ended.id, host="compute-7", pid=1)
+    scratch = seed_scratch(scratch_root, "slab-lammps-8", run_id=ended.id)
+    live = ws.runs.create(Run(name="live", job_id="9"))
+    ws.runs.set_status(live.id, "running", pid=1, host="compute-7")
+    lost = ws.runs.create(Run(name="lost", job_id="10"))
+    ws.runs.set_status(lost.id, "running", pid=1, host="compute-7")
+    bare = ws.runs.create(Run(name="bare"))
+    ws.runs.set_status(bare.id, "running", pid=2**22 - 1, host=this_host())
+
+    def unavailable(job_id: str) -> Any:
+        raise SchedulerNotAvailableError("no squeue")
+
+    monkeypatch.setattr(runtime, "job_state", unavailable)
+    assert ws.settle_ended_jobs(caller="the test") == []
+
+    states = {"8": JobState.COMPLETED, "9": JobState.RUNNING, "10": JobState.UNDETERMINED}
+    asked: list[str] = []
+
+    def answer(job_id: str) -> JobStatus:
+        asked.append(job_id)
+        return JobStatus(job_id=job_id, state=states[job_id], raw=states[job_id].value)
+
+    monkeypatch.setattr(runtime, "job_state", answer)
+    dry = ws.settle_ended_jobs(caller="the test", dry_run=True)
+    assert [r.id for r in dry] == [ended.id]
+    assert ws.runs.get(ended.id).status is ExecutionStatus.RUNNING
+    assert scratch.is_dir()
+
+    asked.clear()
+    settled = ws.settle_ended_jobs(caller="the test")
+    assert [r.id for r in settled] == [ended.id]
+    assert sorted(asked) == ["10", "8", "9"]
+    assert ws.runs.get(ended.id).error == "job 8 is completed; marked failed by the test"
+    assert ws.runs.list_reservations() == []
+    assert not scratch.exists()
+    for run in (live, lost, bare):
+        assert ws.runs.get(run.id).status is ExecutionStatus.RUNNING
+
+    asked.clear()
+    forced = ws.settle_ended_jobs(caller="the test", ended=["10"])
+    assert [r.id for r in forced] == [lost.id]
+    assert "10" not in asked
+    assert ws.runs.get(lost.id).error == "job 10 ended; marked failed by the test"

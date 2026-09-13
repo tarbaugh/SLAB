@@ -654,3 +654,91 @@ def test_memory_list_marks_a_memory_about_slab(memories: Path) -> None:
     assert {row["name"]: row["about_slab"] for row in rows} == {
         "run-lammps-keys": True, "srun-in-sandbox": False, "vllm-mamba-cache": False,
     }
+
+
+def _seed_job_runs(root: Path) -> dict[str, str]:
+    """Two running runs stamped with jobs, as a sandbox job leaves them."""
+    with Workspace(root) as ws:
+        ended = ws.runs.create(Run(name="ended", job_id="4242"))
+        held = ws.runs.reserve(
+            host="compute-7", holder_pid=1, budget_cpus=range(2), budget_gpus=(),
+            ntasks=1, job_id="4242",
+        )
+        ws.runs.claim_reservation(held.id, ended.id, host="compute-7", pid=1)
+        lost = ws.runs.create(Run(name="lost", job_id="4243"))
+        ws.runs.set_status(lost.id, "running", pid=1, host="compute-7")
+    return {"ended": ended.id, "lost": lost.id}
+
+
+@pytest.fixture
+def _scheduler(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A scheduler that says 4242 timed out and cannot place 4243."""
+    from foundation import runtime
+    from slab.hpc import JobState, JobStatus
+
+    states = {"4242": JobState.TIMEOUT, "4243": JobState.UNDETERMINED}
+
+    def answer(job_id: str) -> JobStatus:
+        return JobStatus(job_id=job_id, state=states[job_id], raw=states[job_id].value)
+
+    monkeypatch.setattr(runtime, "job_state", answer)
+
+
+@pytest.mark.usefixtures("_scheduler")
+def test_purge_marks_failed_the_runs_of_ended_jobs(tmp_path: Path) -> None:
+    """The dry run names the runs it would mark failed and changes nothing;
+    the purge marks them failed and releases their slices. A job the
+    scheduler cannot place keeps its runs."""
+    root = tmp_path / ".slab"
+    ids = _seed_job_runs(root)
+    dry = runner.invoke(app, ["purge", "-w", str(root), "--dry-run"])
+    assert dry.exit_code == 0, dry.output
+    assert dry.output.startswith("would mark failed runs of ended jobs: 1\n")
+    assert f"  {ids['ended']}  ended  job 4242\n" in dry.output
+    with Workspace(root) as ws:
+        assert ws.runs.get(ids["ended"]).status.value == "running"
+    result = runner.invoke(app, ["purge", "-w", str(root), "--yes"])
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith("marked failed runs of ended jobs: 1\n")
+    with Workspace(root) as ws:
+        failed = ws.runs.get(ids["ended"])
+        assert failed.status.value == "failed"
+        assert failed.error == "job 4242 is timeout; marked failed by slab purge"
+        assert ws.runs.list_reservations() == []
+        assert ws.runs.get(ids["lost"]).status.value == "running"
+
+
+@pytest.mark.usefixtures("_scheduler")
+def test_purge_job_takes_a_job_the_scheduler_cannot_place_as_ended(tmp_path: Path) -> None:
+    root = tmp_path / ".slab"
+    ids = _seed_job_runs(root)
+    result = runner.invoke(app, ["purge", "-w", str(root), "--yes", "--job", "4243"])
+    assert result.exit_code == 0, result.output
+    assert "marked failed runs of ended jobs: 2\n" in result.output
+    with Workspace(root) as ws:
+        assert ws.runs.get(ids["lost"]).error == "job 4243 ended; marked failed by slab purge"
+
+
+def test_purge_job_is_refused_while_the_job_is_in_the_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / ".slab"
+    ids = _seed_job_runs(root)
+    monkeypatch.setattr("slab_stack.cli.active_job_ids", lambda: frozenset({"4243"}))
+    result = runner.invoke(app, ["purge", "-w", str(root), "--yes", "--job", "4243"])
+    assert result.exit_code == 1
+    assert "job 4243 is still in the queue" in result.output
+    assert "slab hpc cancel 4243" in result.output
+    with Workspace(root) as ws:
+        assert ws.runs.get(ids["lost"]).status.value == "running"
+
+
+@pytest.mark.usefixtures("_scheduler")
+def test_purge_confirmation_names_the_runs_it_marks_failed(tmp_path: Path) -> None:
+    root = tmp_path / ".slab"
+    ids = _seed_job_runs(root)
+    result = runner.invoke(app, ["purge", "-w", str(root)], input="n\n")
+    assert result.exit_code == 1
+    assert "mark failed 1 run(s) of ended jobs and permanently delete" in result.output
+    with Workspace(root) as ws:
+        assert ws.runs.get(ids["ended"]).status.value == "running"

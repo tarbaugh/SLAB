@@ -955,43 +955,12 @@ def test_run_dry_run_releases_the_reservation(
         assert ws.runs.list_reservations() == []
 
 
-def test_runs_reap_job_fails_exactly_the_jobs_running_runs(root: Path) -> None:
-    """The batch script's exit trap: no liveness check, the job is ending.
-    Runs of other jobs, and the job's finished runs, are left as they are."""
-    from foundation.cli import runs_app
-    from foundation.models import Run
-
-    with Workspace(root) as ws:
-        doomed = ws.runs.create(Run(name="doomed", job_id="4242"))
-        ws.runs.set_status(doomed.id, "running", pid=1, host="compute-7")
-        done = ws.runs.create(Run(name="done", job_id="4242"))
-        ws.runs.set_status(done.id, "running", pid=1, host="compute-7")
-        ws.runs.set_status(done.id, "completed")
-        other = ws.runs.create(Run(name="other", job_id="4243"))
-        ws.runs.set_status(other.id, "running", pid=1, host="compute-7")
-        bare = ws.runs.create(Run(name="bare"))
-        ws.runs.set_status(bare.id, "running", pid=1, host="compute-7")
-    result = runner.invoke(runs_app, ["reap", "--job", "4242", "-w", str(root)])
-    assert result.exit_code == 0, result.output
-    assert f"failed  {doomed.id}  doomed  job 4242 ended" in result.output
-    assert "1 run(s) of job 4242 marked failed, 0 reservation(s) released" in result.output
-    with Workspace(root) as ws:
-        failed = ws.runs.get(doomed.id)
-        assert failed.status.value == "failed"
-        assert failed.error == "job 4242 ended; marked failed by slab runs reap --job"
-        assert ws.runs.get(done.id).status.value == "completed"
-        assert ws.runs.get(other.id).status.value == "running"
-        assert ws.runs.get(bare.id).status.value == "running"
-    again = runner.invoke(runs_app, ["reap", "--job", "4242", "-w", str(root)])
-    assert "0 run(s) of job 4242 marked failed" in again.output
-
-
 def test_runs_reap_settles_the_runs_of_an_ended_job(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The start reap in the sandbox batch script, as it runs on the host:
-    a run of a terminal job is failed and its reservation released, and a
-    run of a job the scheduler still runs stays running."""
+    """Where the scheduler answers, the reap fails a run of a terminal job
+    and releases its reservation, and a run of a job the scheduler still
+    runs stays running."""
     from foundation import runtime
     from foundation.cli import runs_app
     from foundation.models import Run

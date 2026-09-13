@@ -200,10 +200,22 @@ def purge(
     as_json: Annotated[
         bool, typer.Option("--json", help="Print the inventory as JSON.")
     ] = False,
+    jobs: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--job",
+            help="Take this scheduler job as ended (repeatable): its running runs "
+            "are marked failed even where the scheduler cannot say. Refused while "
+            "the scheduler still holds the job.",
+        ),
+    ] = None,
 ) -> None:
     """Delete all expired data for real: rows, bytes, session files, job files, scratch.
 
     The inventory comes first, and the confirmation names its totals.
+    Running runs whose scheduler job has ended are marked failed first,
+    with their slices released and their scratch removed; --job names a
+    job to take as ended where the scheduler cannot place it.
     Expired runs lose their database rows (run, transitions, artifact
     references, tasks, checks) and any artifact bytes no surviving run
     references. Session transcripts are deleted with their delegation
@@ -226,9 +238,16 @@ def purge(
     except (FoundationError, SlabError, OSError) as e:
         _fail(str(e))
     active = _active_jobs(root)
+    ended = frozenset(jobs or ())
+    for job in sorted(ended & active):
+        _fail(
+            f"job {job} is still in the queue, so its runs may be running; "
+            f"cancel it with 'slab hpc cancel {job}', which fails its runs"
+        )
     try:
         inventory = stack_ops.purge_inventory(
-            root, all_sessions=all_sessions, active=active, job_id_of=_job_id_of, dry_run=True
+            root, all_sessions=all_sessions, active=active, job_id_of=_job_id_of,
+            dry_run=True, ended=ended,
         )
     except (FoundationError, MasonError, SlabError, OSError) as e:
         _fail(str(e))
@@ -242,13 +261,19 @@ def purge(
         return
 
     if not yes:
+        settle = (
+            f"mark failed {len(inventory.settled)} run(s) of ended jobs and "
+            if inventory.settled
+            else ""
+        )
         typer.confirm(
-            f"permanently delete {inventory.summary()} from {root}?",
+            f"{settle}permanently delete {inventory.summary()} from {root}?",
             abort=True,
         )
     try:
         deleted = stack_ops.purge_inventory(
-            root, all_sessions=all_sessions, active=active, job_id_of=_job_id_of, dry_run=False
+            root, all_sessions=all_sessions, active=active, job_id_of=_job_id_of,
+            dry_run=False, ended=ended,
         )
     except (FoundationError, MasonError, SlabError, OSError) as e:
         _fail(str(e))

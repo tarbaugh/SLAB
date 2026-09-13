@@ -14,13 +14,11 @@ All notable changes to SLAB, newest first. Dates are commit dates on
   failed by <caller>`), so every reader that reaps closes them and
   their session records turn stale. A reservation belongs to a job
   (schema 7 adds `job_id` to reservations): a slice from another
-  allocation is never live for this budget. `slab runs reap --job ID`
-  fails a job's running runs without a liveness check, and the sandbox
-  batch script runs it from its EXIT trap, so scancel, a time limit,
-  and a normal exit all close the job's runs on the host. The batch
-  script also runs `slab runs reap` on the host at job start, where the
-  scheduler answers, so the next job settles the runs of a job that
-  ended without its trap.
+  allocation is never live for this budget. `slab purge` marks failed
+  the running runs of every job the scheduler reports ended before it
+  deletes anything (`Workspace.settle_ended_jobs`, no pid consulted), and
+  `slab purge --job ID` takes a job the scheduler cannot place as ended.
+  It refuses a job still in the queue.
 - A GPU launch gets one MPI rank per GPU unless told otherwise. A
   reservation sized with `gpus=` and no rank count takes one rank per
   gpu and the free cpus as threads, where it took the job's rank count
