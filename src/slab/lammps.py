@@ -46,6 +46,8 @@ class LammpsOutcome:
     argv: tuple[str, ...]
     log: str
     screen: str
+    skiprun: bool = False
+    dropped: tuple[str, ...] = ()
 
 
 def lammps_command(command: str | None = None) -> str:
@@ -97,19 +99,25 @@ def describe_lammps(
 
     The resolved command, the detected version, and the setup lines, from
     the engine's own probe, so a script and a force call agree on which
-    LAMMPS they name.
+    LAMMPS they name. ``skiprun`` says whether the build accepts the
+    ``-skiprun`` flag a dry run needs; it is read from the same ``-h``
+    capture as the version and is not part of the cache identity.
 
     Examples:
         >>> describe_lammps("definitely-not-installed-lmp")["engine"]
         'lammps'
+        >>> describe_lammps("definitely-not-installed-lmp")["skiprun"]
+        False
     """
-    from slab.backends import describe_engine
+    from slab.backends import _lammps_skiprun, describe_engine
 
     options: dict[str, Any] = {"command": command}
     if setup is not None:
         options["setup"] = setup
     described = describe_engine("lammps", options)
-    return {key: value for key, value in described.items() if key != "source"}
+    identity = {key: value for key, value in described.items() if key != "source"}
+    identity["skiprun"] = _lammps_skiprun(options)
+    return identity
 
 
 LAMMPS_FACTORY = "slab.backends.lammps_calculator"
@@ -249,6 +257,7 @@ def run_lammps_script(
     command: str | None = None,
     setup: str | tuple[str, ...] | list[str] | None = None,
     timeout_s: float = 86400.0,
+    skiprun: bool = False,
 ) -> LammpsOutcome:
     """Run ``in.lammps`` in *cwd* whole and classify the outcome.
 
@@ -261,6 +270,15 @@ def run_lammps_script(
     Success returns the log and the screen text; failure (a nonzero exit,
     or an ``ERROR`` line in the log or on the screen) raises
     :class:`~slab.errors.LammpsScriptError` carrying both.
+
+    With *skiprun* the script is a dry run: ``-skiprun`` is appended to
+    the argv, so LAMMPS sets up every style, fix, and compute, runs each
+    command in order, and integrates no step of any ``run`` or
+    ``minimize``. The flag works through a ``timer timeout 0`` that a
+    ``timer`` command in the script would override, so every ``timer``
+    line is dropped from the ``in.lammps`` LAMMPS reads (see
+    :func:`drop_timer_lines`) and the dropped lines ride on the outcome.
+    A build that does not list ``-skiprun`` in its ``-h`` is refused.
     """
     from slab.backends import _launcher_guard, _payload_guard, _setup_guard
 
@@ -272,8 +290,18 @@ def run_lammps_script(
     else:
         _require_available(resolved)
         _launcher_guard(resolved, "lammps")
-    run_argv = _run_argv(resolved, lines)
     directory = Path(cwd)
+    dropped: tuple[str, ...] = ()
+    if skiprun:
+        if not describe_lammps(command, setup)["skiprun"]:
+            raise LammpsScriptError(
+                f"this LAMMPS build ({resolved}) does not accept -skiprun (added in 2022); "
+                "a dry run needs it; upgrade the build or run for real"
+            )
+        script_path = directory / INPUT_NAME
+        kept, dropped = drop_timer_lines(script_path.read_text(encoding="utf-8"))
+        script_path.write_text(kept, encoding="utf-8")
+    run_argv = _run_argv(resolved, lines, skiprun=skiprun)
     env = {**os.environ, "LANG": "C", "LC_ALL": "C"}
     try:
         process = subprocess.Popen(
@@ -307,7 +335,45 @@ def run_lammps_script(
         raise LammpsScriptError(
             f"LAMMPS failed (exit {process.returncode}):\n  {evidence}", log=log, screen=screen
         )
-    return LammpsOutcome(command=resolved, argv=tuple(run_argv), log=log, screen=screen)
+    return LammpsOutcome(
+        command=resolved,
+        argv=tuple(run_argv),
+        log=log,
+        screen=screen,
+        skiprun=skiprun,
+        dropped=dropped,
+    )
+
+
+def drop_timer_lines(script: str) -> tuple[str, tuple[str, ...]]:
+    r"""The script without its ``timer`` commands, and the lines that were dropped.
+
+    ``-skiprun`` inserts ``timer timeout 0 every 1`` at the top of the
+    input, and a later ``timer`` command in the script overrides it, so
+    the run would integrate every step after all. A line is dropped when
+    its first token is ``timer``; comments and blank lines stay, and the
+    line ending is kept.
+
+    Examples:
+        >>> kept, dropped = drop_timer_lines(
+        ...     "units metal\n  timer timeout 0:10:00 every 100\n# timer stays\nrun 10\n"
+        ... )
+        >>> kept
+        'units metal\n# timer stays\nrun 10\n'
+        >>> dropped
+        ('  timer timeout 0:10:00 every 100',)
+        >>> drop_timer_lines("run 10\n")
+        ('run 10\n', ())
+    """
+    kept: list[str] = []
+    dropped: list[str] = []
+    for line in script.splitlines(keepends=True):
+        tokens = line.split()
+        if tokens and tokens[0] == "timer":
+            dropped.append(line.rstrip("\r\n"))
+        else:
+            kept.append(line)
+    return "".join(kept), tuple(dropped)
 
 
 _KOKKOS_MODE = re.compile(r"^KOKKOS mode\b.*\bis enabled", re.MULTILINE)
@@ -515,13 +581,13 @@ def _has_error(text: str) -> bool:
     return any(line.strip().startswith("ERROR") for line in text.splitlines())
 
 
-def _run_argv(command: str, setup: tuple[str, ...]) -> list[str]:
+def _run_argv(command: str, setup: tuple[str, ...], *, skiprun: bool = False) -> list[str]:
     """The argv to execute: the command directly, or through a setup shell.
 
     With setup lines the invocation becomes a fail-fast login shell, so
     the ``module`` shell function exists and a failing load kills the run
     instead of exec'ing into the wrong environment, exactly the engine
-    wrapper's semantics.
+    wrapper's semantics. *skiprun* appends ``-skiprun`` after the log.
     """
     try:
         payload = shlex.split(command)
@@ -530,6 +596,8 @@ def _run_argv(command: str, setup: tuple[str, ...]) -> list[str]:
     if not payload:
         raise LammpsScriptError("the LAMMPS command is empty")
     args = [*payload, "-in", INPUT_NAME, "-log", LOG_NAME]
+    if skiprun:
+        args.append("-skiprun")
     if not setup:
         return args
     quoted = " ".join(shlex.quote(token) for token in args)

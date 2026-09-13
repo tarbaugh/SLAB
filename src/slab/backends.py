@@ -1076,9 +1076,14 @@ def _lammps_version(options: dict[str, Any]) -> str | None:
         return None
 
 
-@functools.lru_cache(maxsize=64)
 def _probe_lammps_version(command: str, identity: tuple[str | int, ...]) -> str | None:
-    """Run the payload's ``-h`` once and parse the LAMMPS version banner.
+    """The LAMMPS version banner from the payload's ``-h``, or None."""
+    return _lammps_banner_version(_probe_lammps_help(command, identity))
+
+
+@functools.lru_cache(maxsize=64)
+def _probe_lammps_help(command: str, identity: tuple[str | int, ...]) -> str | None:
+    """Run the payload's ``-h`` once and return what it printed.
 
     ``-h`` is required — LAMMPS without arguments blocks reading stdin.
     Runs in a private temp dir under a hard timeout, and never through an
@@ -1086,7 +1091,8 @@ def _probe_lammps_version(command: str, identity: tuple[str | int, ...]) -> str 
     consume a job step for a banner the bare binary prints identically).
     Every failure path returns None. ``identity`` exists to key the memo
     cache, exactly like the qe probe: one spawn per binary-set identity,
-    and a replaced binary — payload included — is re-probed.
+    and a replaced binary — payload included — is re-probed. The version
+    banner and the ``-skiprun`` line are both read from this one capture.
     """
     del identity
     probe = _probe_argv(command)
@@ -1105,13 +1111,58 @@ def _probe_lammps_version(command: str, identity: tuple[str | int, ...]) -> str 
                 timeout=_VERSION_PROBE_TIMEOUT_S,
                 check=False,
             )
-        match = _LAMMPS_BANNER.search(completed.stdout)
-        return match.group(1).strip() if match else None
+        return str(completed.stdout)
     except Exception:
         return None
 
 
 _LAMMPS_BANNER = re.compile(r"Massively Parallel Simulator\s*-\s*(.+)")
+_LAMMPS_SKIPRUN = re.compile(r"^-skiprun\b", re.MULTILINE)
+
+
+def _lammps_banner_version(help_text: str | None) -> str | None:
+    """The version a ``-h`` capture names, or None.
+
+    Examples:
+        >>> _lammps_banner_version("...Massively Parallel Simulator - 22 Jul 2025")
+        '22 Jul 2025'
+        >>> _lammps_banner_version(None) is None
+        True
+    """
+    if help_text is None:
+        return None
+    match = _LAMMPS_BANNER.search(help_text)
+    return match.group(1).strip() if match else None
+
+
+def _lammps_skiprun(options: dict[str, Any]) -> bool:
+    """Whether the LAMMPS that ``engine="lammps"`` would run accepts ``-skiprun``.
+
+    Read from the same ``-h`` capture as the version: a build that lists
+    ``-skiprun`` (added in 2022) skips the loops of ``run`` and
+    ``minimize`` and still sets up every pair style, fix, and compute. A
+    build whose help cannot be read reports False.
+
+    Examples:
+        >>> _lammps_skiprun({"command": "definitely-not-installed-lmp"})
+        False
+    """
+    return _LAMMPS_SKIPRUN.search(_lammps_help(options) or "") is not None
+
+
+def _lammps_help(options: dict[str, Any]) -> str | None:
+    """The ``-h`` output of the LAMMPS *options* name, or None. Never raises."""
+    try:
+        command = _lammps_locator(options)
+        setup = _lammps_setup(options.get("setup"))
+        if setup:
+            return _setup_shell_help(setup, command)
+        identity = _executable_identity(command)
+        if identity is None:
+            return None
+        return _probe_lammps_help(command, identity)
+    except Exception:  # pragma: no cover - defensive: lru_cache internals
+        return None
 
 
 def _lammps_setting(key: str) -> str | None:
@@ -2013,10 +2064,38 @@ def _setup_shell_version(setup: tuple[str, ...], command: str, *, kind: str) -> 
     return _probe_setup_shell_version(setup, command, kind, resolved)
 
 
-@functools.lru_cache(maxsize=64)
+def _setup_shell_help(setup: tuple[str, ...], command: str) -> str | None:
+    """The LAMMPS ``-h`` output probed INSIDE the setup shell, or None."""
+    token = _setup_probe_token(command)
+    if token is None:
+        return None
+    resolved, _detail = _setup_which(setup, token)
+    if resolved is None:
+        return None
+    return _probe_setup_shell(setup, command, "lammps", resolved)
+
+
 def _probe_setup_shell_version(
     setup: tuple[str, ...], command: str, kind: str, identity: tuple[str, int]
 ) -> str | None:
+    captured = _probe_setup_shell(setup, command, kind, identity)
+    if kind == "lammps":
+        return _lammps_banner_version(captured)
+    if captured is None:
+        return None
+    try:
+        from ase.calculators.espresso import EspressoProfile
+
+        return str(EspressoProfile.parse_version(captured))
+    except Exception:
+        return None
+
+
+@functools.lru_cache(maxsize=64)
+def _probe_setup_shell(
+    setup: tuple[str, ...], command: str, kind: str, identity: tuple[str, int]
+) -> str | None:
+    """What the engine prints when started inside the setup shell, or None."""
     del identity  # keys the memo, exactly like the no-setup probes
     probe = _probe_argv(command)
     if probe is None:
@@ -2038,12 +2117,7 @@ def _probe_setup_shell_version(
                 timeout=_SETUP_PROBE_TIMEOUT_S,
                 check=False,
             )
-        if kind == "lammps":
-            match = _LAMMPS_BANNER.search(completed.stdout)
-            return match.group(1).strip() if match else None
-        from ase.calculators.espresso import EspressoProfile
-
-        return str(EspressoProfile.parse_version(completed.stdout))
+        return str(completed.stdout)
     except Exception:
         return None
 

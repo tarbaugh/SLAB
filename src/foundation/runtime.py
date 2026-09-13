@@ -151,12 +151,23 @@ class ActiveRun:
 
     Exposes the run's identity, artifact declaration (:meth:`keep`), and check
     registration (:meth:`check`); the ``@task`` tracer records through it.
+    ``dry_run`` is True inside a throwaway run opened by
+    ``Workspace.start_run(dry_run=True)``: a task that can run its engine
+    without integrating anything (``run_lammps`` under ``-skiprun``) reads it.
     """
 
-    def __init__(self, runs: SQLiteRunStore, artifacts: ArtifactStore, run_id: str) -> None:
+    def __init__(
+        self,
+        runs: SQLiteRunStore,
+        artifacts: ArtifactStore,
+        run_id: str,
+        *,
+        dry_run: bool = False,
+    ) -> None:
         self.runs = runs
         self.artifacts = artifacts
         self.id = run_id
+        self.dry_run = dry_run
         self._checks: list[tuple[str, _CheckFn]] = []
 
     def __repr__(self) -> str:
@@ -509,6 +520,7 @@ class Workspace:
         intent: str | None = None,
         session: str | None = None,
         reservation: Reservation | str | None = None,
+        dry_run: bool = False,
     ) -> Iterator[ActiveRun]:
         """Open a traced run; yield its :class:`ActiveRun` handle.
 
@@ -538,6 +550,11 @@ class Workspace:
         the run ends. A reservation that was released, is already claimed,
         or was made for another host is refused with
         :class:`ResourcesError` before the run exists.
+
+        *dry_run* marks the run as a rehearsal: the handle's ``dry_run``
+        is True, and a task that can rehearse its engine (``run_lammps``
+        under ``-skiprun``) integrates nothing. The run record itself is
+        an ordinary run; open it in a throwaway workspace.
 
         Raises:
             NestedRunError: A run is already active in this context.
@@ -585,7 +602,7 @@ class Workspace:
             self.runs.set_status(
                 created.id, ExecutionStatus.RUNNING, pid=os.getpid(), host=host
             )
-        active = ActiveRun(self.runs, self.artifacts, created.id)
+        active = ActiveRun(self.runs, self.artifacts, created.id, dry_run=dry_run)
         token = _CURRENT.set(active)
         # Every scratch directory a calculation makes inside the run is
         # stamped with the run's id (slab.scratch reads the variable), so

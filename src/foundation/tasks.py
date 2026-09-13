@@ -1010,6 +1010,8 @@ def _lammps_identity(arguments: dict[str, Any]) -> dict[str, Any]:
     setup = arguments.get("setup") if arguments.get("setup") is not None else build["setup"]
     described = describe_lammps(command=command, setup=setup)
     described["build"] = build["build"]
+    # Whether the build accepts -skiprun changes no result: not identity.
+    described.pop("skiprun", None)
     return described
 
 
@@ -1100,9 +1102,12 @@ def run_lammps(
     ``enabled``, ``gpus``, ``threads``, the ``/kk`` styles that ran, and
     the ``switches`` the command asked for), ``types``, ``files`` (the
     kept names of what the script wrote), ``artifacts`` (name to hash),
-    ``warnings`` (the log's WARNING lines, deduplicated), and
-    ``n_warnings``. A script that finishes with bad physics is not a
-    failure here: judge ``result`` with a ``@check``.
+    ``warnings`` (the log's WARNING lines, deduplicated), ``n_warnings``,
+    ``skiprun`` (True inside a dry run, where LAMMPS ran under
+    ``-skiprun`` and integrated no step), and ``dropped_lines`` (the
+    ``timer`` lines a dry run removed from the script LAMMPS read). A
+    script that finishes with bad physics is not a failure here: judge
+    ``result`` with a ``@check``.
 
     Args:
         script: The full input-script text, agent-authored.
@@ -1151,7 +1156,11 @@ def run_lammps(
         before = {path.name for path in scratch.iterdir()}
         try:
             outcome = run_lammps_script(
-                cwd=scratch, command=command, setup=setup_lines, timeout_s=timeout_s
+                cwd=scratch,
+                command=command,
+                setup=setup_lines,
+                timeout_s=timeout_s,
+                skiprun=active is not None and active.dry_run,
             )
         except LammpsScriptError as e:
             if active is not None:
@@ -1212,6 +1221,8 @@ def run_lammps(
         "artifacts": artifact_hashes,
         "warnings": warnings,
         "n_warnings": len(warnings),
+        "skiprun": outcome.skiprun,
+        "dropped_lines": list(outcome.dropped),
     }
     return result, info
 

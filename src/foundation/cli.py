@@ -114,6 +114,15 @@ def run(
             "its slice: affinity mask, OMP_NUM_THREADS, CUDA_VISIBLE_DEVICES.",
         ),
     ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Rehearse the script in a throwaway workspace: LAMMPS runs under "
+            "-skiprun and integrates no step, nothing lands in the store, and a JSON "
+            "report follows a 'dry run:' line.",
+        ),
+    ] = False,
 ) -> None:
     """Execute a workflow script; the run lands in quarantine.
 
@@ -124,6 +133,8 @@ def run(
     root = _ops.resolve_root(workspace)
     if reservation is not None:
         _enter_reservation(root, reservation)
+    if dry_run:
+        _dry_run(root, script, name, intent, session, tuple(args or ()), reservation)
     try:
         result = _ops.launch_script(
             root,
@@ -151,6 +162,47 @@ def run(
     # status 'running' because recording its failure itself failed.
     if result["status"] != "completed":
         raise typer.Exit(code=1)
+
+
+def _dry_run(
+    root: Path,
+    script: Path,
+    name: str | None,
+    intent: str | None,
+    session: str | None,
+    args: tuple[str, ...],
+    reservation: str | None,
+) -> NoReturn:
+    """Rehearse the script, print the report after ``dry run:``, and exit.
+
+    A reservation is released in the real store when the rehearsal ends,
+    because the throwaway run claims nothing and the launching session
+    waits on it. Exit 0 when the script reached its end and every
+    ``run_lammps`` set up cleanly, else 1.
+    """
+    try:
+        try:
+            report = _ops.launch_script(
+                root,
+                script,
+                name=name,
+                intent=intent,
+                session=session,
+                argv=args,
+                dry_run=True,
+            )
+        finally:
+            if reservation is not None:
+                with _open(root) as ws:
+                    ws.runs.release_reservation(reservation)
+    except (FoundationError, SlabError, FileNotFoundError) as e:
+        _fail(str(e))
+    typer.echo(_ops.DRY_RUN_MARKER)
+    typer.echo(json.dumps(report, indent=2))
+    clean = report["reached_end"] and all(
+        entry["outcome"] == "setup ok" for entry in report["lammps"]
+    )
+    raise typer.Exit(code=0 if clean else 1)
 
 
 def _enter_reservation(root: Path, reservation_id: str) -> None:

@@ -48,6 +48,7 @@ import time
 args = sys.argv[1:]
 if "-h" in args:
     print("Large-scale Atomic/Molecular Massively Parallel Simulator - 22 Jul 2025 - Update 4")
+    print("-skiprun                    : skip loops in run and minimize (-sr)")
     sys.exit(0)
 script = open(args[args.index("-in") + 1]).read()
 log_name = args[args.index("-log") + 1] if "-log" in args else "log.lammps"
@@ -645,3 +646,188 @@ def test_the_md_template_runs_verified_under_a_real_lammps(
     assert result["state"] == "verified", result
     assert result["checks_passed"] == result["checks_total"] == 2
     assert "tail of" in result["output"]
+
+
+# -- dry run ---------------------------------------------------------------------------
+
+
+TIMED_SCRIPT = EAM_SCRIPT.replace("thermo 10\n", "thermo 10\ntimer timeout 0:10:00 every 100\n")
+
+
+def test_describe_lammps_reports_whether_the_build_accepts_skiprun(
+    tmp_path: Path, fake_lmp: str
+) -> None:
+    assert describe_lammps(fake_lmp)["skiprun"] is True
+    older = _script(tmp_path / "older-lmp", _NO_LOG)  # its -h lists no -skiprun
+    assert describe_lammps(older)["skiprun"] is False
+    from foundation.tasks import _lammps_identity
+
+    assert "skiprun" not in _lammps_identity({"command": fake_lmp})  # not cache identity
+    cwd = tmp_path / "scratch"
+    cwd.mkdir()
+    (cwd / "in.lammps").write_text(EAM_SCRIPT)
+    with pytest.raises(LammpsScriptError, match="does not accept -skiprun"):
+        run_lammps_script(cwd=cwd, command=older, skiprun=True)
+
+
+def test_run_lammps_script_skiprun_appends_the_flag_and_drops_timer_lines(
+    tmp_path: Path, fake_lmp: str
+) -> None:
+    cwd = tmp_path / "scratch"
+    cwd.mkdir()
+    (cwd / "in.lammps").write_text(TIMED_SCRIPT.replace("Cu_u3.eam", "x"))
+    outcome = run_lammps_script(cwd=cwd, command=fake_lmp, skiprun=True)
+    assert outcome.argv[-3:] == ("-log", "log.lammps", "-skiprun")
+    assert outcome.skiprun is True
+    assert outcome.dropped == ("timer timeout 0:10:00 every 100",)
+    assert "timer" not in (cwd / "in.lammps").read_text()
+    plain = run_lammps_script(cwd=cwd, command=fake_lmp)
+    assert plain.skiprun is False and plain.dropped == () and "-skiprun" not in plain.argv
+
+
+def test_run_lammps_inside_a_dry_run_passes_skiprun_and_records_the_dropped_lines(
+    ws: Workspace, tmp_path: Path, fake_lmp: str
+) -> None:
+    potential = tmp_path / "Cu_u3.eam"
+    potential.write_text("comment\n29 63.55 3.615 fcc\n")
+    with ws.start_run(name="rehearsal", dry_run=True) as run:
+        assert run.dry_run is True
+        _, info = run_lammps(TIMED_SCRIPT, files=[str(potential)], command=fake_lmp, label="cu")
+    assert info["skiprun"] is True
+    assert info["argv"][-1] == "-skiprun"
+    assert info["dropped_lines"] == ["timer timeout 0:10:00 every 100"]
+    kept = ws.artifacts.get(info["artifacts"]["cu.in"]).read_text()
+    assert "timer" not in kept
+    with ws.start_run(name="real") as real:
+        assert real.dry_run is False
+        _, info = run_lammps(TIMED_SCRIPT, files=[str(potential)], command=fake_lmp)
+    assert info["skiprun"] is False and info["dropped_lines"] == []
+    assert "-skiprun" not in info["argv"]
+
+
+def test_dry_run_reports_each_run_lammps_call_and_the_python_after_it(
+    tmp_path: Path, fake_lmp: str
+) -> None:
+    """The report lists every run_lammps call in order with its outcome, the
+    files it would keep, and the traceback of the Python that died after it."""
+    from foundation._ops import launch_script
+
+    potential = tmp_path / "Cu_u3.eam"
+    potential.write_text("comment\n29 63.55 3.615 fcc\n")
+    dying = tmp_path / "dying.py"
+    dying.write_text(
+        "from foundation.tasks import run_lammps\n"
+        f"script = {EAM_SCRIPT!r}\n"
+        f"result, info = run_lammps(script, files=[{str(potential)!r}], "
+        f"command={fake_lmp!r}, label='cu')\n"
+        "print(result['msd'])\n"
+    )
+    report = launch_script(tmp_path / "ws", dying, dry_run=True)
+    assert report["reached_end"] is False
+    assert "KeyError: 'msd'" in report["traceback"]
+    assert report["lammps"] == [{"label": "cu", "outcome": "setup ok"}]
+    assert report["outputs"] == ["cu.in", "cu.log", "cu-thermo.json", "cu.screen"]
+    assert not (tmp_path / "ws").exists()
+    broken = tmp_path / "broken.py"
+    broken.write_text(
+        "from foundation.tasks import run_lammps\n"
+        f"run_lammps({EAM_SCRIPT!r}, files=[{str(potential)!r}], command={fake_lmp!r})\n"
+        f"run_lammps('units metal\\npair_style nonsense\\nrun 10\\n', command={fake_lmp!r})\n"
+    )
+    report = launch_script(tmp_path / "ws", broken, dry_run=True)
+    assert report["reached_end"] is False
+    assert report["lammps"] == [
+        {"label": "lammps", "outcome": "setup ok"},
+        {
+            "label": "lammps",
+            "outcome": "ERROR: Unrecognized pair style 'nonsense' (src/force.cpp:275)",
+        },
+    ]
+
+
+@pytest.mark.skipif(not os.environ.get("SLAB_TEST_LMP"), reason="set $SLAB_TEST_LMP to a real lmp")
+def test_a_real_lammps_dry_run_integrates_nothing_and_drops_the_timer(tmp_path: Path) -> None:
+    lmp = os.environ["SLAB_TEST_LMP"]
+    assert describe_lammps(lmp)["skiprun"] is True
+    cwd = tmp_path / "scratch"
+    cwd.mkdir()
+    script = SCRIPT.replace("thermo 100\n", "thermo 100\ntimer timeout 0:10:00 every 100\n")
+    (cwd / "in.lammps").write_text(script)
+    from ase.io import write as ase_write
+
+    ase_write(cwd / "structure.data", _argon(), format="lammps-data", masses=True)
+    outcome = run_lammps_script(cwd=cwd, command=lmp, skiprun=True)
+    assert outcome.dropped == ("timer timeout 0:10:00 every 100",)
+    assert "Loop time" not in outcome.log and "Total wall time: 0:00:00" in outcome.log
+    assert lammps_thermo(outcome.log) == []
+    assert (cwd / "ar.dump").stat().st_size == 0
+    assert (cwd / "ar-temp.txt").read_text().count("\n") == 2  # the two header lines
+    assert "atoms" in (cwd / "ar-final.data").read_text()
+
+
+STAGED_SCRIPT = """\
+from ase.build import bulk
+
+from foundation.tasks import run_lammps
+
+atoms = bulk("Ar", "fcc", a=5.26, cubic=True) * (3, 3, 3)
+script = '''\\
+units metal
+atom_style atomic
+boundary p p p
+read_data structure.data
+pair_style lj/cut 8.5
+pair_coeff 1 1 0.0104 3.40
+timer timeout 0:10:00 every 100
+velocity all create 300.0 4928459 mom yes rot yes dist gaussian
+timestep 0.002
+fix nvt all nvt temp 300.0 300.0 0.2
+fix avg all ave/time 10 10 100 c_thermo_temp file ar-temp.txt
+thermo 100
+thermo_style custom step temp pe ke etotal press vol
+run 1000
+unfix nvt
+fix npt all npt temp 300.0 300.0 0.2 iso 0.0 0.0 2.0
+run 1000
+unfix nosuch
+write_data ar-final.data
+'''
+result, info = run_lammps(script, atoms=atoms, label="ar")
+"""
+
+
+@pytest.mark.skipif(not os.environ.get("SLAB_TEST_LMP"), reason="set $SLAB_TEST_LMP to a real lmp")
+def test_a_real_dry_run_finds_a_stage_three_error_before_any_run_is_paid_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from foundation._ops import launch_script
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "slab.toml").write_text(
+        f'[engines.lammps]\ncommand = "{os.environ["SLAB_TEST_LMP"]}"\n'
+    )
+    staged = tmp_path / "staged.py"
+    staged.write_text(STAGED_SCRIPT)
+    report = launch_script(tmp_path / ".slab", staged, dry_run=True)
+    assert report["reached_end"] is False
+    (entry,) = report["lammps"]
+    assert entry["label"] == "ar"
+    assert "Could not find fix ID nosuch" in entry["outcome"]
+    assert "Could not find fix ID nosuch" in report["traceback"]
+    assert not (tmp_path / ".slab").exists()
+    clean = tmp_path / "clean.py"
+    clean.write_text(
+        STAGED_SCRIPT.replace("unfix nosuch\n", "")
+        + "print('steps', result['steps'], 'tables', result['tables'], "
+        "'dropped', info['dropped_lines'])\n"
+        "from foundation import check\n"
+        "@check\ndef held():\n    assert result['thermo']['Temp'] > 0\n"
+    )
+    report = launch_script(tmp_path / ".slab", clean, dry_run=True, capture_output=True)
+    assert report["reached_end"] is True, report
+    assert report["lammps"] == [{"label": "ar", "outcome": "setup ok"}]
+    assert "steps 0 tables [] dropped ['timer timeout 0:10:00 every 100']" in report["output"]
+    assert report["checks"] == [
+        {"name": "held", "passed": False, "message": "check raised KeyError: 'Temp'"}
+    ]
+    assert {"ar-temp.txt", "ar-final.data", "ar.in", "ar.log"} <= set(report["outputs"])
