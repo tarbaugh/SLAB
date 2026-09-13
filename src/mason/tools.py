@@ -1476,10 +1476,17 @@ def _add_workflow_tools(
     def _reaped_note(reaped: list[Any], caller: str) -> str:
         if not reaped:
             return ""
-        ids = ", ".join(r.id[:10] for r in reaped)
+        # The run's own error line says why: 'process N on H is gone' or
+        # 'job N is cancelled'; here it is shortened to what the agent needs.
+        items = ", ".join(
+            f"{r.id[:10]} (job {r.job_id} ended)"
+            if (r.error or "").startswith("job ")
+            else f"{r.id[:10]} (process gone)"
+            for r in reaped
+        )
         return (
-            f"(marked failed by {caller}: {ids}; each was at status running and its "
-            f"recorded process on this host is gone)\n"
+            f"(marked failed by {caller}: {items}; each was at status running "
+            f"and its process is gone or its job has ended)\n"
         )
 
     def _session_filter(raw: object) -> str | None:

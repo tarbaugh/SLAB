@@ -40,7 +40,7 @@ from foundation.errors import (
 from foundation.lifecycle import ExecutionStatus, LifecycleState
 from foundation.models import ArtifactRole, Reservation, Run, utcnow
 from foundation.retention import DEFAULT_POLICY, RetentionPolicy, _reachable_hashes, sweep_scratch
-from foundation.runtime import Workspace, describe_liveness, this_host
+from foundation.runtime import Workspace, describe_liveness, this_host, this_job
 from foundation.serialize import loads
 from slab.scratch import RUN_ENV, scratch_root
 
@@ -221,7 +221,7 @@ def free_resources(ws: Workspace) -> dict[str, Any]:
     # One read: a reservation that ends between two reads would be listed
     # by one and missing from the other, and the tool is called exactly
     # while concurrent launches finish.
-    live = ws.runs.live_reservations(this_host())
+    live = ws.runs.live_reservations(this_host(), this_job())
     answer = ws.free_resources(live=live)
     answer["held"] = [describe_reservation(row) for row in live]
     return answer
@@ -1666,31 +1666,15 @@ def cancel_job(job_id: str, *, workspace: str | os.PathLike[str] | None = None) 
         return summary
     with Workspace(workspace) as ws:
         stamped = ws.runs.list_runs(job_id=job_id)
-        doomed = [run for run in stamped if run.status == ExecutionStatus.RUNNING]
-        if not doomed:
+        if not any(run.status == ExecutionStatus.RUNNING for run in stamped):
             return summary
-        held_before = {r.id: r for r in ws.runs.list_reservations()}
-        failed_ids: set[str] = set()
-        for run in doomed:
-            with suppress(IllegalStatusChangeError):  # it may end under us; fine
-                failed = ws.runs.set_status(
-                    run.id,
-                    ExecutionStatus.FAILED,
-                    error=f"job {job_id} cancelled by the operator; the process died with it",
-                )
-                summary["runs_failed"].append({"id": failed.id, "name": failed.name})
-                failed_ids.add(failed.id)
-        ws.release_dead()
-        still = {r.id for r in ws.runs.list_reservations()}
-        # Only the slices the job's own runs held: release_dead sweeps this
-        # host's other dead reservations too, and they are not the cancel's.
-        summary["reservations_released"] = [
-            {"id": held.id, "slice": describe_resources(held.slice)}
-            for held in held_before.values()
-            if held.id not in still and held.run_id in failed_ids
-        ]
-        scratch = sweep_scratch(ws, only=failed_ids)
-        summary["scratch_removed"] = [entry["path"] for entry in scratch.removed]
+        summary.update(
+            fail_job_runs(
+                ws,
+                job_id,
+                reason=f"job {job_id} cancelled by the operator; the process died with it",
+            )
+        )
         # The cutoff is the job's first run, finished or not: a fact the job
         # recorded during a run that completed is as unverified as any other.
         earliest = min(run.created_at for run in stamped)
@@ -1702,6 +1686,61 @@ def cancel_job(job_id: str, *, workspace: str | os.PathLike[str] | None = None) 
         }
         for memory in memory_store.written_since(earliest)
     ]
+    return summary
+
+
+def fail_job_runs(ws: Workspace, job_id: str, *, reason: str) -> dict[str, Any]:
+    """Mark failed every running run stamped with *job_id*, and settle what they held.
+
+    No liveness is checked: the caller knows the job is ending, because
+    the operator cancelled it or the batch script's exit trap is running.
+    Each run is failed with *reason* as its error line. The reservations
+    the failed runs held are released with the host's other dead
+    reservations, and the scratch directories the runs made are removed.
+    Returns ``runs_failed`` (id and name), ``reservations_released`` (id
+    and slice), and ``scratch_removed`` (paths).
+
+    Examples:
+        >>> import tempfile
+        >>> from foundation.models import Run
+        >>> ws = Workspace(tempfile.mkdtemp())
+        >>> mine = ws.runs.create(Run(name="in-job", job_id="7"))
+        >>> _ = ws.runs.set_status(mine.id, "running", pid=1, host="n1")
+        >>> other = ws.runs.create(Run(name="other-job", job_id="8"))
+        >>> _ = ws.runs.set_status(other.id, "running", pid=1, host="n1")
+        >>> settled = fail_job_runs(ws, "7", reason="job 7 ended")
+        >>> [r["name"] for r in settled["runs_failed"]]
+        ['in-job']
+        >>> ws.runs.get(other.id).status.value
+        'running'
+        >>> ws.close()
+    """
+    summary: dict[str, Any] = {
+        "runs_failed": [],
+        "reservations_released": [],
+        "scratch_removed": [],
+    }
+    doomed = ws.runs.list_runs(job_id=job_id, status=ExecutionStatus.RUNNING)
+    if not doomed:
+        return summary
+    held_before = {r.id: r for r in ws.runs.list_reservations()}
+    failed_ids: set[str] = set()
+    for run in doomed:
+        with suppress(IllegalStatusChangeError):  # it may end under us; fine
+            failed = ws.runs.set_status(run.id, ExecutionStatus.FAILED, error=reason)
+            summary["runs_failed"].append({"id": failed.id, "name": failed.name})
+            failed_ids.add(failed.id)
+    ws.release_dead()
+    still = {r.id for r in ws.runs.list_reservations()}
+    # Only the slices the job's own runs held: release_dead sweeps this
+    # host's other dead reservations too, and they are not this job's.
+    summary["reservations_released"] = [
+        {"id": held.id, "slice": describe_resources(held.slice)}
+        for held in held_before.values()
+        if held.id not in still and held.run_id in failed_ids
+    ]
+    scratch = sweep_scratch(ws, only=failed_ids)
+    summary["scratch_removed"] = [entry["path"] for entry in scratch.removed]
     return summary
 
 

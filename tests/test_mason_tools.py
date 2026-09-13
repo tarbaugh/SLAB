@@ -1520,7 +1520,7 @@ def test_wait_for_run_and_list_runs_report_a_dead_process(box: Toolbox, tmp_path
 
     second = _dead_run(tmp_path / ".slab", "killed-too")
     listed = box.dispatch(_call("list_runs"))
-    assert listed.startswith(f"(marked failed by list_runs: {second[:10]};")
+    assert listed.startswith(f"(marked failed by list_runs: {second[:10]} (process gone);")
     lines = listed.splitlines()
     assert all("running" not in line for line in lines[1:])
     assert sum("failed" in line for line in lines[1:]) == 2

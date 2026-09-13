@@ -1,6 +1,7 @@
 """Tests for Workspace, the run context, and check evaluation/gating."""
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -656,3 +657,123 @@ def test_start_run_exports_the_run_id_and_restores_it(
     with ws.start_run(name="nested-value") as run:
         assert os.environ["SLAB_RUN_ID"] == run.id
     assert os.environ["SLAB_RUN_ID"] == "outer"
+
+
+# -- a run is live only while its job is -----------------------------------------
+
+
+def test_a_run_of_another_job_is_not_alive_here_and_holds_no_slice(
+    ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two runs on this host with this very pid, one from this job and one
+    from another: the other is 'other-job', never 'alive', and its slice
+    does not count against this job's budget."""
+    import os
+
+    from foundation.models import Run
+    from foundation.runtime import describe_liveness, run_liveness, this_host
+    from slab.resources import Budget
+
+    monkeypatch.setenv("SLURM_JOB_ID", "7")
+    budget = Budget(cpus=(0, 1, 2, 3))
+    mine = ws.runs.create(Run(name="mine", job_id="7"))
+    theirs = ws.runs.create(Run(name="theirs", job_id="8"))
+    held_mine = ws.reserve(ntasks=2, budget=budget)
+    assert held_mine.job_id == "7"
+    held_theirs = ws.runs.reserve(
+        host=this_host(), holder_pid=os.getpid(), budget_cpus=budget.cpus, budget_gpus=(),
+        ntasks=2, job_id="8",
+    )
+    ws.runs.claim_reservation(held_mine.id, mine.id, host=this_host(), pid=os.getpid())
+    ws.runs.claim_reservation(held_theirs.id, theirs.id, host=this_host(), pid=os.getpid())
+    assert run_liveness(ws.runs.get(mine.id)) == "alive"
+    assert run_liveness(ws.runs.get(theirs.id)) == "other-job"
+    assert describe_liveness(ws.runs.get(theirs.id)) == (
+        f"process {os.getpid()} on {this_host()} belongs to job 8, not this job (7); "
+        "liveness not checked from here"
+    )
+    free = ws.free_resources(budget=budget)
+    assert free["reservations"] == [held_mine.id]
+    assert free["free"]["cpus"] == [2, 3]
+    # No scheduler here: neither run is reaped, and neither slice is released.
+    assert ws.reap_dead(caller="the test") == []
+    assert {r.id for r in ws.runs.list_reservations()} == {held_mine.id, held_theirs.id}
+
+
+def _job_answer(state: str) -> Any:
+    from slab.hpc import JobState, JobStatus
+
+    def answer(job_id: str) -> JobStatus:
+        return JobStatus(job_id=job_id, state=JobState(state), raw=state.upper())
+
+    return answer
+
+
+def test_reap_dead_fails_the_runs_of_an_ended_job(
+    ws: Workspace, scratch_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The scheduler's word closes a run wherever it ran: a cancelled job's
+    run is failed, its reservation released, its scratch removed. A running
+    job, an undetermined answer, and no scheduler at all leave it alone."""
+    import os
+
+    from conftest import seed_scratch
+    from foundation import runtime
+    from foundation.models import Run
+    from foundation.runtime import run_liveness, this_host
+    from slab.hpc import SchedulerNotAvailableError
+
+    monkeypatch.setenv("SLURM_JOB_ID", "7")
+    jobbed = ws.runs.create(Run(name="in-job-8", job_id="8"))
+    held = ws.runs.reserve(
+        host=this_host(), holder_pid=os.getpid(), budget_cpus=range(2), budget_gpus=(),
+        ntasks=1, job_id="8",
+    )
+    ws.runs.claim_reservation(held.id, jobbed.id, host=this_host(), pid=os.getpid())
+    scratch = seed_scratch(scratch_root, "slab-lammps-8", run_id=jobbed.id)
+    asked: list[str] = []
+
+    def unavailable(job_id: str) -> Any:
+        asked.append(job_id)
+        raise SchedulerNotAvailableError("no squeue")
+
+    monkeypatch.setattr(runtime, "job_state", unavailable)
+    assert ws.reap_dead(caller="the test") == []
+    assert asked == ["8"]
+    monkeypatch.setattr(runtime, "job_state", _job_answer("running"))
+    assert ws.reap_dead(caller="the test") == []
+    monkeypatch.setattr(runtime, "job_state", _job_answer("undetermined"))
+    assert ws.reap_dead(caller="the test") == []
+    assert ws.runs.get(jobbed.id).status is ExecutionStatus.RUNNING
+    assert run_liveness(ws.runs.get(jobbed.id)) == "other-job"
+    assert scratch.is_dir()
+
+    monkeypatch.setattr(runtime, "job_state", _job_answer("cancelled"))
+    reaped = ws.reap_dead(caller="the test")
+    assert [r.id for r in reaped] == [jobbed.id]
+    after = ws.runs.get(jobbed.id)
+    assert after.status is ExecutionStatus.FAILED
+    assert after.error == "job 8 is cancelled; marked failed by the test"
+    assert ws.runs.list_reservations() == []
+    assert not scratch.exists()
+
+
+def test_a_session_record_is_stale_once_its_runs_were_failed_by_job_end(
+    ws: Workspace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A harness record whose only running run belongs to an ended job turns
+    stale when the reap closes that run, so purge may delete it."""
+    from foundation import runtime
+    from foundation.models import Run
+    from foundation.session_record import SessionRecord, stale_records
+
+    records = tmp_path / "records"
+    SessionRecord(records, "sess-old", client="mcp").record({"type": "start"})
+    run = ws.runs.create(Run(name="in-job", job_id="8", session="sess-old"))
+    ws.runs.set_status(run.id, "running", pid=1, host="compute-7")
+    assert stale_records(records, runs=ws.runs, keep_newest=False) == []
+    monkeypatch.setattr(runtime, "job_state", _job_answer("timeout"))
+    assert [r.id for r in ws.reap_dead(caller="the test")] == [run.id]
+    assert ws.runs.get(run.id).error == "job 8 is timeout; marked failed by the test"
+    stale = stale_records(records, runs=ws.runs, keep_newest=False)
+    assert [r.session_id for r in stale] == ["sess-old"]

@@ -333,7 +333,9 @@ class Reservation(BaseModel):
     claims it: ``run_id`` is None until then. A reservation is live while
     its holder process is alive and unclaimed, or claimed by a run that is
     running and alive; the store derives what is free from the live rows
-    and keeps no counter.
+    and keeps no counter. ``job_id`` is the scheduler job the reserver
+    ran under, because a budget is one allocation and a slice of another
+    job's allocation is never this one's.
 
     Examples:
         >>> r = Reservation(host="n1", cpus=(0, 1), gpus=("0",), ntasks=2, holder_pid=1)
@@ -354,6 +356,7 @@ class Reservation(BaseModel):
     holder_pid: int
     created_at: datetime = Field(default_factory=utcnow)
     run_id: str | None = None
+    job_id: str | None = None
 
     @property
     def slice(self) -> dict[str, Any]:

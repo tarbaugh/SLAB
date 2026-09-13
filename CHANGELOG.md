@@ -5,6 +5,19 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- A run is live only while its job is. `run_liveness` adds two
+  verdicts: `other-job`, a run stamped with a scheduler job that is not
+  this process's, whose pid means nothing here because a sandbox job
+  has its own PID namespace, and `job-ended`, a run whose job the
+  scheduler reports terminal. `reap_dead` resolves each job once per
+  sweep and fails the runs of ended jobs (`job N is cancelled; marked
+  failed by <caller>`), so every reader that reaps closes them and
+  their session records turn stale. A reservation belongs to a job
+  (schema 7 adds `job_id` to reservations): a slice from another
+  allocation is never live for this budget. `slab runs reap --job ID`
+  fails a job's running runs without a liveness check, and the sandbox
+  batch script runs it from its EXIT trap, so scancel, a time limit,
+  and a normal exit all close the job's runs on the host.
 - A GPU launch gets one MPI rank per GPU unless told otherwise. A
   reservation sized with `gpus=` and no rank count takes one rank per
   gpu and the free cpus as threads, where it took the job's rank count
@@ -16,7 +29,6 @@ All notable changes to SLAB, newest first. Dates are commit dates on
   its launch beside the gpu ids. The lammps-scripting and
   lammps-potentials skills, the md-expert card, the `launch_workflow`
   description, and the sandbox context state the rule.
-
 - `run_lammps` prefers the YAML thermo output of LAMMPS.
   `slab.outputs.lammps_thermo` reads every table a script printed as a
   YAML document (`thermo_modify line yaml`) by schema, and reads the

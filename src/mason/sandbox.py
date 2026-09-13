@@ -1989,7 +1989,14 @@ def render_sandbox_script(
         f'{slab} mason sandbox bridge "$BRIDGE" "$UPSTREAM"'
         f"{_key_flag(agent)}{_header_flags(agent)} &",
         "BRIDGE_PID=$!",
-        "trap 'kill \"$BRIDGE_PID\" 2>/dev/null || true' EXIT",
+        # One EXIT trap on the host, outside the container: a normal exit,
+        # scancel's SIGTERM, and the time-limit signal all run it after the
+        # container is gone, so the job closes its own runs and frees their
+        # slices; nothing else would advance a record the job leaves at
+        # 'running'.
+        "trap 'kill \"$BRIDGE_PID\" 2>/dev/null || true; "
+        f'{slab} runs reap --job "$SLURM_JOB_ID" -w {shlex.quote(str(workspace_root))}'
+        " || true' EXIT",
         'for _ in $(seq 50); do [ -S "$BRIDGE" ] && break; sleep 0.1; done',
         *GPU_ID_LINES,
     ]

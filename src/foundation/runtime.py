@@ -26,10 +26,11 @@ from __future__ import annotations
 
 import os
 import socket
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from pathlib import Path
+from types import EllipsisType
 from typing import TYPE_CHECKING, Any, overload
 
 from foundation.artifacts import ArtifactStore
@@ -57,6 +58,7 @@ from foundation.retention import (
 )
 from foundation.serialize import dumps
 from foundation.store import SQLiteRunStore
+from slab.hpc import JobState, SchedulerError, job_state
 from slab.scratch import RUN_ENV, process_alive
 
 if TYPE_CHECKING:
@@ -400,25 +402,80 @@ def this_host() -> str:
     return socket.gethostname()
 
 
-def run_liveness(run: Run, *, host: str | None = None) -> str:
-    """Where a running run's process stands, as seen from *host* (this one by default).
+def this_job() -> str | None:
+    """The scheduler job this process runs under, or None outside a job.
 
-    One of ``alive`` (the recorded process exists here), ``gone`` (it does
-    not), ``elsewhere`` (the run was started on another host, so nothing
-    can be checked from here), or ``unrecorded`` (the run predates the
-    pid stamp, or is not running).
+    Every batch job, sandbox jobs included, carries ``$SLURM_JOB_ID``. It
+    is read here and nowhere else, so a run's stamp, a reservation's
+    stamp, and a liveness verdict all name the same job.
 
     Examples:
-        >>> run_liveness(Run(status="running", pid=os.getpid(), host=this_host()))
+        >>> before = os.environ.pop("SLURM_JOB_ID", None)
+        >>> this_job() is None
+        True
+        >>> os.environ["SLURM_JOB_ID"] = "4242"
+        >>> this_job()
+        '4242'
+        >>> _ = os.environ.pop("SLURM_JOB_ID")
+        >>> if before is not None: os.environ["SLURM_JOB_ID"] = before
+    """
+    return os.environ.get("SLURM_JOB_ID") or None
+
+
+def run_liveness(
+    run: Run,
+    *,
+    host: str | None = None,
+    job: str | EllipsisType | None = ...,
+    job_states: Mapping[str, JobState] | None = None,
+) -> str:
+    """Where a running run's process stands, as seen from *host* (this one
+    by default) inside *job* (this process's job by default).
+
+    One of ``job-ended`` (the run's job is terminal in *job_states*, so
+    its process died with the job wherever it ran), ``other-job`` (the
+    run's job is set and is not *job*, so its pid means nothing here:
+    a sandbox job has its own PID namespace, and a pid from another
+    job can match an unrelated process), ``alive`` (the recorded process
+    exists here), ``gone`` (it does not), ``elsewhere`` (the run was
+    started on another host, so nothing can be checked from here), or
+    ``unrecorded`` (the run predates the pid stamp, or is not running).
+    *job_states* maps job ids to the scheduler's answer, resolved once
+    per sweep by the caller; without it ``job-ended`` is never returned.
+
+    Examples:
+        >>> run_liveness(Run(status="running", pid=os.getpid(), host=this_host()), job=None)
         'alive'
+        >>> run_liveness(Run(status="running", pid=2**22 - 1, host=this_host()), job=None)
+        'gone'
         >>> run_liveness(Run(status="running", pid=os.getpid(), host="another-node"))
         'elsewhere'
         >>> run_liveness(Run(status="running"))
         'unrecorded'
         >>> run_liveness(Run(status="completed", pid=1, host=this_host()))
         'unrecorded'
+        >>> stamped = Run(status="running", pid=os.getpid(), host=this_host(), job_id="7")
+        >>> run_liveness(stamped, job="7")
+        'alive'
+        >>> run_liveness(stamped, job="8")
+        'other-job'
+        >>> run_liveness(stamped, job=None)
+        'other-job'
+        >>> run_liveness(stamped, job="8", job_states={"7": JobState.CANCELLED})
+        'job-ended'
+        >>> run_liveness(stamped, job="7", job_states={"7": JobState.RUNNING})
+        'alive'
     """
-    if run.status is not ExecutionStatus.RUNNING or run.pid is None or run.host is None:
+    if run.status is not ExecutionStatus.RUNNING:
+        return "unrecorded"
+    if run.job_id is not None:
+        state = (job_states or {}).get(run.job_id)
+        if state is not None and state.is_terminal:
+            return "job-ended"
+        here_job = this_job() if job is ... else job
+        if run.job_id != here_job:
+            return "other-job"
+    if run.pid is None or run.host is None:
         return "unrecorded"
     here = host if host is not None else this_host()
     if run.host != here:
@@ -426,7 +483,13 @@ def run_liveness(run: Run, *, host: str | None = None) -> str:
     return "alive" if process_alive(run.pid) else "gone"
 
 
-def describe_liveness(run: Run, *, host: str | None = None) -> str:
+def describe_liveness(
+    run: Run,
+    *,
+    host: str | None = None,
+    job: str | EllipsisType | None = ...,
+    job_states: Mapping[str, JobState] | None = None,
+) -> str:
     """One phrase for a listing: what :func:`run_liveness` found and why.
 
     Examples:
@@ -434,19 +497,51 @@ def describe_liveness(run: Run, *, host: str | None = None) -> str:
         'process 7 on n1, not this host (n2); liveness not checked from here'
         >>> describe_liveness(Run(status="running"))
         'no process recorded; liveness unknown'
+        >>> stamped = Run(status="running", pid=7, host="n1", job_id="7")
+        >>> describe_liveness(stamped, host="n1", job="8")
+        'process 7 on n1 belongs to job 7, not this job (8); liveness not checked from here'
+        >>> describe_liveness(stamped, host="n1", job=None, job_states={"7": JobState.TIMEOUT})
+        'job 7 is timeout; the process died with it'
     """
-    verdict = run_liveness(run, host=host)
+    verdict = run_liveness(run, host=host, job=job, job_states=job_states)
+    where = f"process {run.pid} on {run.host}"
+    if run.job_id is not None:
+        where += f" (job {run.job_id})"
     if verdict == "alive":
-        return f"process {run.pid} on {run.host} is alive"
+        return f"{where} is alive"
     if verdict == "gone":
-        return f"process {run.pid} on {run.host} is gone"
+        return f"{where} is gone"
     if verdict == "elsewhere":
         here = host if host is not None else this_host()
+        return f"{where}, not this host ({here}); liveness not checked from here"
+    if verdict == "other-job":
+        here_job = this_job() if job is ... else job
         return (
-            f"process {run.pid} on {run.host}, not this host ({here}); "
-            f"liveness not checked from here"
+            f"process {run.pid} on {run.host} belongs to job {run.job_id}, not this job "
+            f"({here_job or 'none'}); liveness not checked from here"
         )
+    if verdict == "job-ended":
+        state = (job_states or {})[str(run.job_id)]
+        return f"job {run.job_id} is {state.value}; the process died with it"
     return "no process recorded; liveness unknown"
+
+
+def job_states_for(runs: Iterable[Run]) -> dict[str, JobState]:
+    """Ask the scheduler once about every distinct job the *runs* were stamped with.
+
+    An empty mapping where the scheduler cannot be reached (inside a
+    sandbox there is no ``squeue``) or the runs carry no job, so a
+    caller that cannot know never fails a run for it. An ``undetermined``
+    answer is kept as such and is not terminal.
+    """
+    jobs = sorted({run.job_id for run in runs if run.job_id is not None})
+    states: dict[str, JobState] = {}
+    for job_id in jobs:
+        try:
+            states[job_id] = job_state(job_id).state
+        except SchedulerError:
+            return {}
+    return states
 
 
 def _claimable_from(reservation: Reservation, host: str) -> Reservation:
@@ -585,7 +680,7 @@ class Workspace:
                 session=resolve_session_id(session),
                 # Every batch job, sandbox jobs included, carries the variable,
                 # so a cancel of the job can find the runs it takes down.
-                job_id=os.environ.get("SLURM_JOB_ID") or None,
+                job_id=this_job(),
             )
         )
         if reservation_id is not None:
@@ -685,6 +780,7 @@ class Workspace:
         return self.runs.reserve(
             host=host if host is not None else this_host(),
             holder_pid=holder_pid if holder_pid is not None else os.getpid(),
+            job_id=this_job(),
             budget_cpus=found.cpus,
             budget_gpus=found.gpus,
             ntasks=ntasks,
@@ -707,7 +803,9 @@ class Workspace:
         cpu ids and gpu ids, ``budget`` says where its gpu ids came from
         (``gpu_source``, see :func:`slab.resources.budget`), and
         ``reservations`` lists the ids of the live reservations that hold
-        the difference. Derived, never counted.
+        the difference. Derived, never counted. The budget is one
+        allocation, so only the reservations of this process's job
+        (:func:`this_job`) count against it.
         A caller that has already read the live reservations passes them
         as *live*, so one answer rests on one read.
         """
@@ -716,7 +814,7 @@ class Workspace:
         found = budget if budget is not None else discover_budget()
         where = host if host is not None else this_host()
         if live is None:
-            live = self.runs.live_reservations(where)
+            live = self.runs.live_reservations(where, this_job())
         used_cpus = {cpu for row in live for cpu in row.cpus}
         used_gpus = {gpu for row in live for gpu in row.gpus}
         return {
@@ -737,26 +835,35 @@ class Workspace:
         """Release every reservation on this host that no live process holds.
 
         An unclaimed reservation whose holder died, and a claimed one whose
-        run is no longer running and alive, are deleted and returned.
+        run is no longer running and alive, are deleted and returned. Only
+        the reservations of this process's job are judged, because another
+        job's process cannot be seen from here.
         :meth:`reap_dead` calls this, so every reap and every wait poll
         cleans up.
         """
-        return self.runs.release_dead(this_host())
+        return self.runs.release_dead(this_host(), this_job())
 
     def reap_dead(self, *, caller: str) -> list[Run]:
-        """Mark failed every running run whose process on this host is gone.
+        """Mark failed every running run whose process is gone, or whose job ended.
 
         A hard-killed process (SIGKILL, OOM, a node reboot) leaves its run at
         status ``running`` forever, and a reader of the record cannot tell it
-        from a live one. Each running run stamped with this host's name is
-        checked with its pid; a run stamped with another host is left alone,
-        because nothing about that host can be seen from here, and so is a
-        run from before the stamp existed. *caller* names who marked the run
-        in its error line. Returns the runs marked failed. The reservations
-        those runs held, and every other dead reservation on this host, are
-        released on the way (:meth:`release_dead`), and the scratch
-        directories those runs made are removed
-        (:func:`foundation.retention.sweep_scratch`).
+        from a live one. Each running run stamped with this host's name and
+        this job is checked with its pid. A run stamped with a job is also
+        judged by the scheduler: the distinct job ids of the running runs
+        are resolved once (:func:`job_states_for`), and a run whose job is
+        terminal (cancelled, timed out, failed, completed) is marked failed
+        wherever it ran, because its process died with the job. A run of
+        another job that is not terminal is left alone by pid, a run stamped
+        with another host is left alone, because nothing about that host
+        can be seen from here, and so is a run from before the stamp
+        existed. Where the scheduler cannot be reached, or answers
+        ``undetermined``, no run is failed for its job. *caller* names who
+        marked the run in its error line. Returns the runs marked failed.
+        The reservations those runs held, and every other dead reservation
+        of this job on this host, are released on the way
+        (:meth:`release_dead`), and the scratch directories those runs made
+        are removed (:func:`foundation.retention.sweep_scratch`).
 
         Examples:
             >>> import tempfile
@@ -775,20 +882,21 @@ class Workspace:
             >>> ws.close()
         """
         reaped: list[Run] = []
-        for run in self.runs.list_runs(status=ExecutionStatus.RUNNING):
-            if run_liveness(run) != "gone":
+        running = self.runs.list_runs(status=ExecutionStatus.RUNNING)
+        states = job_states_for(running)
+        for run in running:
+            verdict = run_liveness(run, job_states=states)
+            if verdict == "gone":
+                error = f"process {run.pid} on {run.host} is gone; marked failed by {caller}"
+            elif verdict == "job-ended":
+                error = (
+                    f"job {run.job_id} is {states[str(run.job_id)].value}; "
+                    f"marked failed by {caller}"
+                )
+            else:
                 continue
             with suppress(IllegalStatusChangeError):  # it may finish under us; fine
-                reaped.append(
-                    self.runs.set_status(
-                        run.id,
-                        ExecutionStatus.FAILED,
-                        error=(
-                            f"process {run.pid} on {run.host} is gone; "
-                            f"marked failed by {caller}"
-                        ),
-                    )
-                )
+                reaped.append(self.runs.set_status(run.id, ExecutionStatus.FAILED, error=error))
         self.release_dead()
         if reaped:
             sweep_scratch(self, only=[run.id for run in reaped])

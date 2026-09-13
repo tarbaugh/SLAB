@@ -57,7 +57,7 @@ from foundation.models import (
 )
 from slab.scratch import process_alive
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -147,7 +147,8 @@ CREATE TABLE IF NOT EXISTS reservations (
     threads     INTEGER NOT NULL,
     holder_pid  INTEGER NOT NULL,
     created_at  TEXT NOT NULL,
-    run_id      TEXT REFERENCES runs(id) ON DELETE CASCADE
+    run_id      TEXT REFERENCES runs(id) ON DELETE CASCADE,
+    job_id      TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_reservations_host ON reservations(host);
 """
@@ -185,6 +186,9 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
     6: (  # the scheduler job a run started under, so a cancel finds its runs
         "ALTER TABLE runs ADD COLUMN job_id TEXT",
         "CREATE INDEX IF NOT EXISTS ix_runs_job_id ON runs(job_id)",
+    ),
+    7: (  # the job an unclaimed reservation was made under: a budget is one allocation
+        "ALTER TABLE reservations ADD COLUMN job_id TEXT",
     ),
 }
 
@@ -461,6 +465,7 @@ class RunStore(Protocol):
         gpus: int = 0,
         default_ntasks: int = 1,
         default_threads: int = 1,
+        job_id: str | None = None,
     ) -> Reservation:
         """Check out a slice of *host*; raise ``ResourcesError`` when it does not fit."""
         ...
@@ -473,8 +478,8 @@ class RunStore(Protocol):
         """Every reservation row, oldest first, optionally on one host."""
         ...
 
-    def live_reservations(self, host: str) -> list[Reservation]:
-        """The reservations on *host* that still hold their slice."""
+    def live_reservations(self, host: str, job_id: str | None = None) -> list[Reservation]:
+        """The reservations on *host* that still hold a slice of *job_id*'s budget."""
         ...
 
     def claim_reservation(
@@ -491,8 +496,8 @@ class RunStore(Protocol):
         """Delete one reservation; return it, or None when it was already gone."""
         ...
 
-    def release_dead(self, host: str) -> list[Reservation]:
-        """Delete every reservation on *host* that is no longer live."""
+    def release_dead(self, host: str, job_id: str | None = None) -> list[Reservation]:
+        """Delete every reservation of *job_id* on *host* that is no longer live."""
         ...
 
     def run_for_reservation(self, reservation_id: str) -> Run | None:
@@ -1408,11 +1413,13 @@ class SQLiteRunStore:
         gpus: int = 0,
         default_ntasks: int = 1,
         default_threads: int = 1,
+        job_id: str | None = None,
     ) -> Reservation:
         """Check out a slice of *host* for *holder_pid*; refuse when it does not fit.
 
         One ``BEGIN IMMEDIATE`` transaction computes what is free (the
-        budget minus the live reservations on the host), picks the lowest
+        budget minus the live reservations of *job_id* on the host, see
+        :meth:`live_reservations`), picks the lowest
         free cpu ids and gpu ids, and inserts the row, so two reservers on
         one store serialize and the second sees the first. A sized request
         (``ntasks`` or ``threads`` given) takes ``ntasks * threads`` cpus
@@ -1455,7 +1462,7 @@ class SQLiteRunStore:
         if gpus < 0:
             raise ValueError(f"gpus must be zero or a positive integer, not {gpus!r}")
         with self._txn() as conn:
-            live = self._live_reservations(conn, host)
+            live = self._live_reservations(conn, host, job_id)
             used_cpus = {cpu for row in live for cpu in row.cpus}
             used_gpus = {gpu for row in live for gpu in row.gpus}
             free_cpus = [cpu for cpu in budget_cpus if cpu not in used_cpus]
@@ -1517,10 +1524,11 @@ class SQLiteRunStore:
                 ntasks=count,
                 threads=width,
                 holder_pid=holder_pid,
+                job_id=job_id,
             )
             conn.execute(
                 "INSERT INTO reservations (id, host, cpus, gpus, ntasks, threads, holder_pid,"
-                " created_at, run_id) VALUES (?,?,?,?,?,?,?,?,NULL)",
+                " created_at, run_id, job_id) VALUES (?,?,?,?,?,?,?,?,NULL,?)",
                 (
                     reservation.id,
                     reservation.host,
@@ -1530,6 +1538,7 @@ class SQLiteRunStore:
                     reservation.threads,
                     reservation.holder_pid,
                     reservation.created_at.isoformat(),
+                    reservation.job_id,
                 ),
             )
         return reservation
@@ -1559,17 +1568,37 @@ class SQLiteRunStore:
             rows = self._conn.execute(sql, params).fetchall()
         return [_row_to_reservation(row) for row in rows]
 
-    def live_reservations(self, host: str) -> list[Reservation]:
-        """The reservations on *host* that still hold their slice.
+    def live_reservations(self, host: str, job_id: str | None = None) -> list[Reservation]:
+        """The reservations on *host* that still hold a slice of *job_id*'s budget.
 
         Live means unclaimed with its holder process alive, or claimed by a
         run that is running and whose process is alive (a running run with
         no process recorded is taken as live, because nothing says
-        otherwise). Liveness is judged with signals, so *host* must be
-        this host for the answer to mean anything.
+        otherwise). A budget is one allocation: a reservation whose run,
+        or whose holder, was stamped with a job other than *job_id* holds
+        nothing of this budget and is never live for the caller, whatever
+        its process is doing, because a sandbox job's PID namespace makes
+        a pid from another job meaningless here. Two None job ids (no
+        scheduler) keep the host rule alone. Liveness is judged with
+        signals, so *host* must be this host for the answer to mean
+        anything.
+
+        Examples:
+            >>> store = SQLiteRunStore(":memory:")
+            >>> mine = store.reserve(host="n1", holder_pid=os.getpid(),
+            ...     budget_cpus=range(4), budget_gpus=(), ntasks=1, job_id="7")
+            >>> theirs = store.reserve(host="n1", holder_pid=os.getpid(),
+            ...     budget_cpus=range(4), budget_gpus=(), ntasks=1, job_id="8")
+            >>> [r.job_id for r in store.live_reservations("n1", "7")]
+            ['7']
+            >>> [r.job_id for r in store.live_reservations("n1", "8")]
+            ['8']
+            >>> store.live_reservations("n1", None)
+            []
+            >>> store.close()
         """
         with self._lock:
-            return self._live_reservations(self._conn, host)
+            return self._live_reservations(self._conn, host, job_id)
 
     def claim_reservation(
         self, reservation_id: str, run_id: str, *, host: str, pid: int | None = None
@@ -1657,13 +1686,19 @@ class SQLiteRunStore:
             conn.execute("DELETE FROM reservations WHERE id = ?", (reservation_id,))
             return _row_to_reservation(row)
 
-    def release_dead(self, host: str) -> list[Reservation]:
-        """Delete every reservation on *host* that is no longer live; return them."""
+    def release_dead(self, host: str, job_id: str | None = None) -> list[Reservation]:
+        """Delete every reservation of *job_id* on *host* that is no longer live.
+
+        A reservation of another job is left alone: its process cannot be
+        judged from here, and its slice is not this budget's. Returns the
+        released rows.
+        """
         with self._txn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM reservations WHERE host = ? ORDER BY created_at, id", (host,)
-            ).fetchall()
-            live = {row.id for row in self._live_reservations(conn, host)}
+            rows = [
+                row for row in self._reservation_rows(conn, host)
+                if _reservation_job(row) == job_id
+            ]
+            live = {row.id for row in self._live_reservations(conn, host, job_id)}
             dead = [_row_to_reservation(row) for row in rows if row["id"] not in live]
             for reservation in dead:
                 conn.execute("DELETE FROM reservations WHERE id = ?", (reservation.id,))
@@ -1683,15 +1718,23 @@ class SQLiteRunStore:
             ).fetchone()
         return None if row is None else _row_to_run(row)
 
-    def _live_reservations(self, conn: sqlite3.Connection, host: str) -> list[Reservation]:
-        rows = conn.execute(
-            "SELECT r.*, runs.status AS run_status, runs.pid AS run_pid"
+    def _reservation_rows(self, conn: sqlite3.Connection, host: str) -> list[sqlite3.Row]:
+        """Every reservation on *host* joined with its run's status, pid, and job."""
+        return conn.execute(
+            "SELECT r.*, runs.status AS run_status, runs.pid AS run_pid,"
+            " runs.job_id AS run_job_id"
             " FROM reservations r LEFT JOIN runs ON runs.id = r.run_id"
             " WHERE r.host = ? ORDER BY r.created_at, r.id",
             (host,),
         ).fetchall()
+
+    def _live_reservations(
+        self, conn: sqlite3.Connection, host: str, job_id: str | None
+    ) -> list[Reservation]:
         live: list[Reservation] = []
-        for row in rows:
+        for row in self._reservation_rows(conn, host):
+            if _reservation_job(row) != job_id:
+                continue
             if row["run_id"] is None:
                 alive = process_alive(int(row["holder_pid"]))
             elif row["run_status"] == ExecutionStatus.PENDING.value:
@@ -1801,6 +1844,13 @@ def _row_to_run(row: sqlite3.Row) -> Run:
     )
 
 
+def _reservation_job(row: sqlite3.Row) -> str | None:
+    """The job a reservation belongs to: its run's job once claimed, else its own."""
+    if row["run_id"] is not None and row["run_job_id"] is not None:
+        return str(row["run_job_id"])
+    return None if row["job_id"] is None else str(row["job_id"])
+
+
 def _row_to_reservation(row: sqlite3.Row) -> Reservation:
     return Reservation(
         id=row["id"],
@@ -1812,6 +1862,7 @@ def _row_to_reservation(row: sqlite3.Row) -> Reservation:
         holder_pid=row["holder_pid"],
         created_at=datetime.fromisoformat(row["created_at"]),
         run_id=row["run_id"],
+        job_id=row["job_id"],
     )
 
 

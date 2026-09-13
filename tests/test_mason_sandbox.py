@@ -147,6 +147,20 @@ def test_render_carries_the_job_id_into_the_container(tmp_path: Path) -> None:
     assert "Do not cancel from" in context
 
 
+def test_render_closes_the_jobs_runs_from_its_exit_trap(tmp_path: Path) -> None:
+    """One EXIT trap on the host, after the container: a normal exit, scancel's
+    SIGTERM, and the time-limit signal all fail the job's running runs and
+    free their slices, and the trap is not inside the container."""
+    script, _, _ = _render(tmp_path, _agent(), _slab_cfg())
+    traps = [line for line in script.splitlines() if line.startswith("trap ") and "BRIDGE" in line]
+    (trap,) = traps
+    assert 'runs reap --job "$SLURM_JOB_ID" -w ' in trap
+    assert str(tmp_path / "ws") in trap
+    assert 'kill "$BRIDGE_PID"' in trap and trap.endswith("|| true' EXIT")
+    inner_start = script.index("apptainer exec")
+    assert "runs reap --job" not in script[inner_start:]
+
+
 def _fake_nvidia_smi(directory: Path, devices: int) -> Path:
     """A ``nvidia-smi`` that lists *devices* GPUs the way ``-L`` does."""
     directory.mkdir(exist_ok=True)

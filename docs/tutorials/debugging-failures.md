@@ -333,7 +333,27 @@ Mason runs the same check at session start and on every
 process is gone" at once instead of blocking on a dead record.
 
 A run stamped with another host's name is not judged from here, and the
-listing says so. When the run belongs to a job you are cancelling, do not
+listing says so.
+
+A run is live only while its job is. Every run started inside a batch
+job carries the job id. A run from another job is never judged by its
+pid, because a sandbox job has its own process namespace, and the same
+pid can name an unrelated process in the next job on that node. The
+listing says `belongs to job N, not this job`. The reap also asks the
+scheduler about each job once, and marks failed every running run whose
+job is cancelled, timed out, failed, or completed, with the error line
+`job N is cancelled; marked failed by slab runs reap`. Where there is no
+scheduler, or the scheduler cannot say, no run is failed for its job.
+A reservation belongs to a job as well, so a slice from another
+allocation never counts against this budget.
+
+The sandbox batch script closes its own runs. Its exit trap runs
+`slab runs reap --job "$SLURM_JOB_ID"` on the host after the container
+is gone, so a normal exit, an `scancel`, and a time limit all mark the
+job's running runs failed and release their slices. Run the same command
+by hand for a job that ended some other way.
+
+When the run belongs to a job you are cancelling, do not
 retire it by hand. `slab hpc cancel <job>` marks every running run of that
 job failed, releases their reservations, and lists the memories the job
 wrote. See [Cancel a job](hpc-config.md#cancel-a-job). For a run whose

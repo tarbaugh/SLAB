@@ -30,6 +30,7 @@ from foundation import (
     TaskRecord,
     utcnow,
 )
+from foundation.store import SCHEMA_VERSION
 
 Q = LifecycleState.QUARANTINED
 V = LifecycleState.VERIFIED
@@ -481,7 +482,7 @@ def test_migrates_v1_database_in_place(db_path: Path) -> None:
         assert loaded.session is None  # every later migration ran too
         assert (loaded.pid, loaded.host, loaded.resources) == (None, None, None)
         conn = sqlite3.connect(db_path)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         conn.close()
 
 
@@ -513,7 +514,7 @@ def test_migrates_v2_database_in_place(db_path: Path) -> None:
         assert s2.get(fresh.id).session == "chat-1"
         assert [r.id for r in s2.list_runs(session="chat-1")] == [fresh.id]
         conn = sqlite3.connect(db_path)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         indexes = {row[1] for row in conn.execute("PRAGMA index_list(runs)")}
         assert "ix_runs_session" in indexes
         conn.close()
@@ -544,7 +545,7 @@ def test_migrates_v3_database_in_place(db_path: Path) -> None:
         assert (stamped.pid, stamped.host) == (4242, "node7")
         assert s2.get(fresh.id).pid == 4242
         conn = sqlite3.connect(db_path)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         conn.close()
 
 
@@ -576,7 +577,7 @@ def test_migrates_v4_database_in_place(db_path: Path) -> None:
             "cpus": [0], "gpus": [], "ntasks": 1, "threads": 1, "reservation": held.id,
         }
         conn = sqlite3.connect(db_path)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         indexes = {row[1] for row in conn.execute("PRAGMA index_list(reservations)")}
         assert "ix_reservations_host" in indexes
         conn.close()
@@ -1126,8 +1127,10 @@ def test_two_reservers_on_one_store_never_overlap(
     first_inside = threading.Event()
     original = Store._live_reservations
 
-    def slow(self: Store, conn: sqlite3.Connection, host: str) -> list:  # type: ignore[type-arg]
-        rows = original(self, conn, host)
+    def slow(  # type: ignore[type-arg]
+        self: Store, conn: sqlite3.Connection, host: str, job_id: str | None = None
+    ) -> list:
+        rows = original(self, conn, host, job_id)
         if threading.current_thread().name == "first":
             first_inside.set()
             time.sleep(0.4)
@@ -1308,6 +1311,7 @@ def test_migrates_v5_database_in_place(db_path: Path) -> None:
     conn = sqlite3.connect(db_path)
     conn.execute("DROP INDEX IF EXISTS ix_runs_job_id")
     conn.execute("ALTER TABLE runs DROP COLUMN job_id")
+    conn.execute("ALTER TABLE reservations DROP COLUMN job_id")
     conn.execute("PRAGMA user_version = 5")
     conn.close()
 
@@ -1316,7 +1320,7 @@ def test_migrates_v5_database_in_place(db_path: Path) -> None:
         stamped = s2.create(Run(name="in-job", job_id="4242"))
         assert s2.get(stamped.id).job_id == "4242"
         conn = sqlite3.connect(db_path)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         indexes = {row[1] for row in conn.execute("PRAGMA index_list(runs)")}
         assert "ix_runs_job_id" in indexes
         conn.close()
@@ -1355,3 +1359,65 @@ def test_start_run_stamps_the_job_from_the_environment(
         assert ws.runs.get(batched.id).job_id == "4242"
         assert ws.runs.get(blank.id).job_id is None
         assert ws.runs.get(interactive.id).job_id is None
+
+
+def test_migrates_v6_database_in_place(db_path: Path) -> None:
+    """A workspace from before reservations carried a job (schema v6) opens
+    cleanly: old reservation rows read back with job_id=None, and a new one
+    takes a job."""
+    import os
+
+    with SQLiteRunStore(db_path) as s1:
+        held = s1.reserve(host="n1", holder_pid=os.getpid(), budget_cpus=range(2), budget_gpus=())
+    conn = sqlite3.connect(db_path)
+    conn.execute("ALTER TABLE reservations DROP COLUMN job_id")
+    conn.execute("PRAGMA user_version = 6")
+    conn.close()
+
+    with SQLiteRunStore(db_path) as s2:
+        assert s2.get_reservation(held.id).job_id is None
+        stamped = s2.reserve(
+            host="n2", holder_pid=os.getpid(), budget_cpus=range(2), budget_gpus=(), job_id="7"
+        )
+        assert s2.get_reservation(stamped.id).job_id == "7"
+        assert [r.id for r in s2.live_reservations("n1", None)] == [held.id]
+        conn = sqlite3.connect(db_path)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        conn.close()
+
+
+def test_a_reservation_of_another_job_holds_none_of_this_budget(store: SQLiteRunStore) -> None:
+    """Same host, same pid, different jobs: a sandbox job has its own PID
+    namespace, so the other job's run is not judged by its pid here. Its
+    reservation is not live for this job, and release_dead leaves it alone."""
+    import os
+
+    mine = store.create(Run(name="mine", job_id="7"))
+    theirs = store.create(Run(name="theirs", job_id="8"))
+    held_mine = store.reserve(
+        host="n1", holder_pid=os.getpid(), budget_cpus=range(4), budget_gpus=(), ntasks=1,
+        job_id="7",
+    )
+    held_theirs = store.reserve(
+        host="n1", holder_pid=os.getpid(), budget_cpus=range(4), budget_gpus=(), ntasks=1,
+        job_id="8",
+    )
+    # The second reserve saw none of the first: both took cpu 0.
+    assert held_mine.cpus == held_theirs.cpus == (0,)
+    store.claim_reservation(held_mine.id, mine.id, host="n1", pid=os.getpid())
+    store.claim_reservation(held_theirs.id, theirs.id, host="n1", pid=os.getpid())
+    assert [r.id for r in store.live_reservations("n1", "7")] == [held_mine.id]
+    assert [r.id for r in store.live_reservations("n1", "8")] == [held_theirs.id]
+    assert store.live_reservations("n1", None) == []
+    # An unclaimed row from a holder outside any job is judged under the host rule alone.
+    bare = store.reserve(host="n1", holder_pid=os.getpid(), budget_cpus=range(4), budget_gpus=())
+    assert [r.id for r in store.live_reservations("n1", None)] == [bare.id]
+    assert store.release_dead("n1", "7") == []
+    # An unclaimed row of this job whose holder is gone is released by this
+    # job's release_dead; the other job's rows are not touched.
+    stray = store.reserve(
+        host="n1", holder_pid=2**22 - 1, budget_cpus=range(4), budget_gpus=(), job_id="7"
+    )
+    assert [r.id for r in store.release_dead("n1", "7")] == [stray.id]
+    assert {r.id for r in store.list_reservations()} == {held_mine.id, held_theirs.id, bare.id}
+    assert [r.id for r in store.release_dead("n1", "8")] == []
