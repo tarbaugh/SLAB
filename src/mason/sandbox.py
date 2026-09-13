@@ -1762,6 +1762,16 @@ def _sandbox_context(
         "  and refuses a slice that does not fit what is free. `list_engines`"
     )
     lines.append("  reports the budget and what is free right now.")
+    lines.append(
+        "- A GPU launch runs one MPI rank per GPU: size it with gpus alone (one"
+    )
+    lines.append(
+        "  rank per gpu, the free cpus as threads) or with ntasks equal to gpus."
+    )
+    lines.append(
+        "  The gpu build refuses more ranks than gpus; an exclusive-mode device"
+    )
+    lines.append("  serves one process.")
     if tools:
         lines.extend(
             [

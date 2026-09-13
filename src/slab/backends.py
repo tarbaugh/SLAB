@@ -98,7 +98,7 @@ from slab.engines import (
     registry_engine_names,
 )
 from slab.errors import EngineNotAvailableError
-from slab.resources import envelope, fill
+from slab.resources import envelope, fill, one_rank_per_gpu
 
 
 class Calculator(Protocol):
@@ -844,7 +844,7 @@ def _lammps_calculator(**options: Any) -> Any:
             "'files': ['/path/to/Cu.eam.alloy']} — without them ASE would "
             "silently fall back to a dimensionless lj/cut toy potential"
         )
-    command = fill(_lammps_template({"command": command}), envelope())
+    command = _lammps_launch_command({"command": command})
     setup = _lammps_setup(options.pop("setup", None))
     _payload_guard(command, "lammps")
     run_command = command
@@ -1003,6 +1003,26 @@ def _lammps_locator(options: dict[str, Any]) -> str:
     command asks for ``{gpus}`` and the launch holds none.
     """
     return fill(_lammps_template(options), envelope())
+
+
+def _lammps_launch_command(options: dict[str, Any], *, build: str | None = None) -> str:
+    """The command a LAMMPS launch runs: :func:`_lammps_locator` behind the rank guard.
+
+    When the command comes from the gpu build, the launch must run one
+    MPI rank per GPU (:func:`slab.resources.one_rank_per_gpu`), and a
+    launch shaped otherwise is refused before anything starts. *build*
+    names the build a caller resolved the command from (``run_lammps``
+    does); unset, the build is the slice's choice when ``command`` is
+    absent, and a per-call ``command`` is the caller's own shape, filled
+    as written. A listing or a cache identity goes through
+    :func:`_lammps_locator` and is never refused, because nothing runs
+    there.
+    """
+    if build is None and options.get("command") is None:
+        build = _lammps_build_name()
+    if build == "gpu":
+        one_rank_per_gpu(envelope(), build="gpu")
+    return _lammps_locator(options)
 
 
 def _lammps_template(options: dict[str, Any]) -> str:

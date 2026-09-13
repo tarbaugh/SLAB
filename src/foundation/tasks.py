@@ -1156,6 +1156,7 @@ def run_lammps(
     staged = _staged_lammps_files(files, script)
     types = _lammps_types(atoms, specorder, script)
     build = lammps_build(engine)
+    own_shape = command is not None  # a per-call command is the caller's own launch shape
     command = command or build["command"]
     if setup is None:
         setup = build["setup"]
@@ -1185,6 +1186,7 @@ def run_lammps(
                 setup=setup_lines,
                 timeout_s=timeout_s,
                 dry_run=active is not None and active.dry_run,
+                build=None if own_shape else build["build"],
             )
         except LammpsScriptError as e:
             if active is not None:
@@ -1588,14 +1590,18 @@ def _note_device_error(e: LammpsScriptError) -> None:
     script: the device is held by another process, or it is outside this
     job's allocation. The note says which ids the launch held, how many
     the budget listed, and where the budget's ids came from, so the reader
-    checks the machine and not the input.
+    checks the machine and not the input. ``cudaErrorDevicesUnavailable``
+    is also what a device in exclusive compute mode answers to the second
+    rank that opens it, so that error adds the rank and gpu counts of the
+    launch beside the ids.
     """
     from slab.resources import budget, envelope
 
     line = cuda_device_error(e.screen) or cuda_device_error(e.log)
     if line is None:
         return
-    held = ",".join(envelope().gpus) or "none"
+    env = envelope()
+    held = ",".join(env.gpus) or "none"
     found = budget()
     e.add_note(
         f"the launch held gpu id(s) {held} from a budget of {len(found.gpus)} "
@@ -1603,6 +1609,12 @@ def _note_device_error(e: LammpsScriptError) -> None:
         f"by another process or is outside this job's allocation; check nvidia-smi "
         f"inside the job"
     )
+    if "cudaErrorDevicesUnavailable" in line:
+        e.add_note(
+            f"{env.ntasks} rank(s) on {len(env.gpus)} gpu(s); an exclusive-mode device "
+            f"serves one process, so size a GPU launch with gpus= alone or with ntasks "
+            f"equal to gpus"
+        )
 
 
 # Extensions atomsk writes that ASE reads only under an explicit format name.

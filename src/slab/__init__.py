@@ -29,11 +29,12 @@ Examples:
 
 from slab._version import __version__
 from slab.config import ConfigError
-from slab.errors import EngineNotAvailableError, SlabError
+from slab.errors import EngineNotAvailableError, ResourcesError, SlabError
 
 __all__ = [
     "ConfigError",
     "EngineNotAvailableError",
+    "ResourcesError",
     "SlabError",
     "__version__",
 ]

@@ -1416,8 +1416,11 @@ class SQLiteRunStore:
         free cpu ids and gpu ids, and inserts the row, so two reservers on
         one store serialize and the second sees the first. A sized request
         (``ntasks`` or ``threads`` given) takes ``ntasks * threads`` cpus
-        and ``gpus`` gpus. An unsized one takes every free cpu, with the
-        rank and thread counts from the defaults, shrunk to fit. The
+        and ``gpus`` gpus. An unsized one takes every free cpu. Without
+        gpus its rank and thread counts come from the defaults, shrunk to
+        fit. With gpus it takes one rank per gpu and the free cpus as
+        threads across them, because a KOKKOS build gives each MPI rank
+        one device and a rank past the first on a device fails. The
         refusal carries the free ids. A count below one is a
         :class:`ValueError`: ``None`` means unsized, and a zero-rank launch
         is a mistake the caller should hear about, not a launch of one.
@@ -1438,6 +1441,12 @@ class SQLiteRunStore:
             ... except ResourcesError as e:
             ...     print(e.free)
             {'cpus': [], 'gpus': ['1']}
+            >>> store.close()
+            >>> store = SQLiteRunStore(":memory:")
+            >>> gpu = store.reserve(host="n1", holder_pid=os.getpid(),
+            ...     budget_cpus=range(8), budget_gpus=("0", "1"), gpus=2)
+            >>> (gpu.ntasks, gpu.threads, gpu.cpus, gpu.gpus)
+            (2, 4, (0, 1, 2, 3, 4, 5, 6, 7), ('0', '1'))
             >>> store.close()
         """
         for key, value in (("ntasks", ntasks), ("threads", threads)):
@@ -1463,10 +1472,24 @@ class SQLiteRunStore:
                         free=free,
                     )
                 cpus = list(free_cpus)
-                count = max(1, min(default_ntasks, len(cpus)))
-                width = max(1, default_threads)
-                if count * width > len(cpus):
-                    width = max(1, len(cpus) // count)
+                if gpus > 0:
+                    # One MPI rank per GPU; the cpus become threads across them.
+                    if gpus > len(cpus):
+                        raise ResourcesError(
+                            f"{gpus} gpu(s) asked, one rank per gpu, but only "
+                            f"{len(free_cpus)} of {len(budget_cpus)} cpu(s) are free on "
+                            f"{host} ({held}); free gpus: {len(free_gpus)} of "
+                            f"{len(budget_gpus)}. Ask for fewer gpus or wait for a run "
+                            f"to finish",
+                            free=free,
+                        )
+                    count = gpus
+                    width = max(1, len(cpus) // gpus)
+                else:
+                    count = max(1, min(default_ntasks, len(cpus)))
+                    width = max(1, default_threads)
+                    if count * width > len(cpus):
+                        width = max(1, len(cpus) // count)
             else:
                 count = ntasks if ntasks is not None else 1
                 width = threads if threads is not None else 1

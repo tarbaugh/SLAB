@@ -5,6 +5,18 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- A GPU launch gets one MPI rank per GPU unless told otherwise. A
+  reservation sized with `gpus=` and no rank count takes one rank per
+  gpu and the free cpus as threads, where it took the job's rank count
+  before and put every rank on one device. The gpu build refuses a
+  launch with more ranks than gpus before LAMMPS starts
+  (`slab.resources.one_rank_per_gpu`, a `slab.errors.ResourcesError`
+  that Foundation's `ResourcesError` now derives from). A run that dies
+  with `cudaErrorDevicesUnavailable` records the rank and gpu counts of
+  its launch beside the gpu ids. The lammps-scripting and
+  lammps-potentials skills, the md-expert card, the `launch_workflow`
+  description, and the sandbox context state the rule.
+
 - `run_lammps` prefers the YAML thermo output of LAMMPS.
   `slab.outputs.lammps_thermo` reads every table a script printed as a
   YAML document (`thermo_modify line yaml`) by schema, and reads the

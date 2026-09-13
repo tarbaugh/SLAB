@@ -22,6 +22,8 @@ import traceback as _traceback
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Self
 
+from slab.errors import ResourcesError as SlabResourcesError
+
 if TYPE_CHECKING:
     from foundation.lifecycle import ExecutionStatus, LifecycleState
 
@@ -396,16 +398,14 @@ class MemoryStoreError(FoundationError):
     """
 
 
-class ResourcesError(FoundationError):
+class ResourcesError(SlabResourcesError, FoundationError):
     """A launch's slice does not fit, or a reservation cannot be claimed.
 
     Carries ``free`` (the cpu and gpu ids free on the host when the request
     was refused) so a caller can size the next request without asking again.
+    The base class is :class:`slab.errors.ResourcesError`, which the engine
+    layer raises when a launch's shape does not fit the build it runs.
     """
-
-    def __init__(self, message: str, *, free: dict[str, list[object]] | None = None) -> None:
-        super().__init__(message)
-        self.free = free if free is not None else {"cpus": [], "gpus": []}
 
 
 class StorageError(FoundationError):

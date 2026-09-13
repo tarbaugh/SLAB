@@ -310,8 +310,10 @@ def build_server(
         CUDA_VISIBLE_DEVICES, and a slice that does not fit is refused with
         the free amounts (list_engines reports 'budget' and 'free'). A
         sized launch runs as a child process; an unsized one runs here and
-        reserves every free cpu, and gpus without ntasks takes every free
-        cpu and the gpus asked. The result includes the run id, final
+        reserves every free cpu, and gpus without ntasks takes the gpus
+        asked and one MPI rank per gpu, with the free cpus as threads.
+        Size a GPU launch with gpus alone, or with ntasks equal to gpus;
+        the gpu build refuses more ranks than gpus. The result includes the run id, final
         state (verified if all checks passed), the 'resources' it held, and
         captured output; on failure it includes the structured 'failure'
         record (traceback and diagnostic notes). If recording the failure

@@ -27,6 +27,21 @@ class JobSizeError(SlabError):
     partition declares no node to size against."""
 
 
+class ResourcesError(SlabError):
+    """A launch's size does not fit: the slice it asks for, or the build it runs.
+
+    Carries ``free`` (the cpu and gpu ids free on the host when a slice
+    was refused; empty when the refusal is about the launch's own shape)
+    so a caller can size the next request without asking again.
+    Foundation's :class:`foundation.errors.ResourcesError` derives from
+    this one, so a caller that catches it sees both.
+    """
+
+    def __init__(self, message: str, *, free: dict[str, list[object]] | None = None) -> None:
+        super().__init__(message)
+        self.free = free if free is not None else {"cpus": [], "gpus": []}
+
+
 class BuilderNotAvailableError(SlabError):
     """A structure builder's executable cannot be found on this machine."""
 

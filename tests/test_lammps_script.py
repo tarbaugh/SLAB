@@ -21,7 +21,7 @@ from ase.build import bulk
 
 from foundation import ExecutionStatus, Workspace
 from foundation.tasks import run_lammps, series
-from slab.errors import EngineNotAvailableError, LammpsScriptError
+from slab.errors import EngineNotAvailableError, LammpsScriptError, ResourcesError
 from slab.lammps import (
     LOG_NAME,
     SCREEN_NAME,
@@ -582,6 +582,49 @@ def test_run_lammps_follows_the_slice_to_the_gpu_build(
     assert over["kokkos"]["enabled"] is False
 
 
+def test_the_gpu_build_refuses_more_ranks_than_gpus_before_lammps_starts(
+    ws: Workspace, tmp_path: Path, fake_lmp: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A launch that holds four ranks and one gpu is refused on the gpu build
+    before anything runs, naming both counts; one rank per gpu is admitted,
+    the cpu build takes any sizing, a per-call command is the caller's own
+    shape, and a listing under the same envelope is never refused."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("SLAB_ENGINES", raising=False)
+    _gpu_table(tmp_path, fake_lmp, monkeypatch)
+    monkeypatch.setenv("SLAB_CPUS", "0,1,2,3")
+    monkeypatch.setenv("SLAB_GPUS", "0")
+    monkeypatch.setenv("SLAB_NTASKS", "4")
+    assert lammps_builds()["gpu"]["kokkos"]["gpus"] == 1  # the listing still answers
+    assert describe_lammps()["engine"] == "lammps"  # and so does the cache identity
+    from slab.backends import _lammps_launch_command, _lammps_locator
+
+    assert _lammps_locator({"command": None}).endswith("-k on g 1 -sf kk")
+    with pytest.raises(ResourcesError, match=r"4 rank\(s\) on 1 gpu\(s\)"):
+        _lammps_launch_command({"command": None})  # the ASE calculator's own resolution
+    with (
+        pytest.raises(ResourcesError, match=r"4 rank\(s\) on 1 gpu\(s\): the lammps build 'gpu'"),
+        ws.start_run(name="wide") as run,
+    ):
+        run_lammps(SCRIPT, atoms=_argon(), label="wide")
+    assert ws.runs.get(run.id).status is ExecutionStatus.FAILED
+    assert not [a for a in ws.runs.list_artifacts(run.id) if a.name.endswith(".log")]
+    with ws.start_run(name="own-shape"):
+        _, own = run_lammps(SCRIPT, atoms=_argon(), label="own", command=f"{fake_lmp} -k on g 1")
+    assert own["kokkos"]["gpus"] == 1
+    monkeypatch.setenv("SLAB_NTASKS", "1")
+    monkeypatch.setenv("SLAB_THREADS", "4")
+    with ws.start_run(name="one-per-gpu"):
+        _, one = run_lammps(SCRIPT, atoms=_argon(), label="one")
+    assert one["build"] == "gpu" and one["kokkos"]["gpus"] == 1
+    monkeypatch.setenv("SLAB_GPUS", "")
+    monkeypatch.setenv("SLAB_NTASKS", "4")
+    monkeypatch.setenv("SLAB_THREADS", "1")
+    with ws.start_run(name="cpu"):
+        _, cpu = run_lammps(SCRIPT, atoms=_argon(), label="cpu")
+    assert cpu["build"] == "cpu" and cpu["kokkos"]["enabled"] is False
+
+
 def test_run_lammps_types_follow_specorder_and_warnings_are_collected(
     ws: Workspace, fake_lmp: str
 ) -> None:
@@ -634,6 +677,7 @@ def test_a_device_error_is_quoted_from_the_screen_and_names_the_slice(
     monkeypatch.setenv("SLAB_GPU_SOURCE", "slurm_job_gpus")
     monkeypatch.setenv("SLAB_GPUS", "1")
     monkeypatch.setenv("SLAB_CPUS", "0")
+    monkeypatch.setenv("SLAB_NTASKS", "4")
     workflow = tmp_path / "gpu.py"
     workflow.write_text(
         "from foundation.tasks import run_lammps\n"
@@ -651,6 +695,10 @@ def test_a_device_error_is_quoted_from_the_screen_and_names_the_slice(
         "the launch held gpu id(s) 1 from a budget of 1 (source: slurm_job_gpus); a device "
         "that refuses within seconds is held by another process or is outside this job's "
         "allocation; check nvidia-smi inside the job"
+    ) in notes
+    assert (
+        "4 rank(s) on 1 gpu(s); an exclusive-mode device serves one process, so size a "
+        "GPU launch with gpus= alone or with ntasks equal to gpus"
     ) in notes
     with Workspace(tmp_path / "ws") as ws:
         details = run_details(ws, result["run_id"])

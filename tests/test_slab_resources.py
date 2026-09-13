@@ -7,7 +7,7 @@ import os
 import pytest
 
 from slab.config import Partition
-from slab.errors import EngineNotAvailableError, JobSizeError
+from slab.errors import EngineNotAvailableError, JobSizeError, ResourcesError
 from slab.resources import (
     Budget,
     Envelope,
@@ -20,6 +20,7 @@ from slab.resources import (
     fill,
     gres_gpus,
     job_size,
+    one_rank_per_gpu,
     placeholders,
 )
 
@@ -209,6 +210,21 @@ def test_fill_refuses_gpus_when_the_launch_holds_none() -> None:
         fill("lmp -k on g {gpus}", Envelope(cpus=(0,)))
     # ${gpus} is not a request for GPUs.
     assert fill("lmp -k on g ${gpus}", Envelope(cpus=(0,))) == "lmp -k on g ${gpus}"
+
+
+def test_one_rank_per_gpu_refuses_more_ranks_than_gpus() -> None:
+    """The KOKKOS rule: a launch on the gpu build holds at most one MPI rank
+    per gpu. Equal counts pass, threads are free, and a launch without a gpu
+    is not judged here (fill refuses that one when the build asks for it)."""
+    one_rank_per_gpu(Envelope(cpus=(0, 1, 2, 3), gpus=("0",), ntasks=1, threads=4))
+    one_rank_per_gpu(Envelope(cpus=(0, 1), gpus=("0", "1"), ntasks=2))
+    one_rank_per_gpu(Envelope(cpus=(0, 1, 2, 3), gpus=(), ntasks=4))
+    with pytest.raises(ResourcesError, match=r"4 rank\(s\) on 1 gpu\(s\): the lammps build") as e:
+        one_rank_per_gpu(Envelope(cpus=(0, 1, 2, 3), gpus=("0",), ntasks=4))
+    assert "ntasks equal to gpus" in str(e.value)
+    assert e.value.free == {"cpus": [], "gpus": []}
+    with pytest.raises(ResourcesError, match="the lammps build 'lammps-kokkos'"):
+        one_rank_per_gpu(Envelope(cpus=(0, 1), gpus=("0",), ntasks=2), build="lammps-kokkos")
 
 
 # -- job sizes -----------------------------------------------------------------

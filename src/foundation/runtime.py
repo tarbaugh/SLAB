@@ -659,9 +659,12 @@ class Workspace:
         *ntasks* and *threads* size the slice (``ntasks * threads`` cpus)
         and *gpus* counts the gpus. With neither count the whole free cpu
         budget is taken, so an unsized launch is accounted for like any
-        other. *budget* is this process's :func:`slab.resources.budget`
-        unless given, and the rank and thread defaults of an unsized slice
-        are this process's :func:`slab.resources.envelope`.
+        other. With *gpus* and neither count the launch runs one rank per
+        gpu and the free cpus as threads, because a KOKKOS build gives
+        each MPI rank one device. *budget* is this process's
+        :func:`slab.resources.budget` unless given, and the rank and
+        thread defaults of an unsized cpu slice are this process's
+        :func:`slab.resources.envelope`.
 
         Examples:
             >>> import tempfile

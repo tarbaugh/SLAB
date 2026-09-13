@@ -29,11 +29,15 @@ potential used outside its domain is fiction with good statistics.
 
 Speed is a rule, not luck. Any molecular dynamics, and any static
 calculation on more than a few hundred atoms, runs through `run_lammps`
-sized with `gpus=` and one rank per GPU when the machine declares a gpu
-build and the slice can hold a gpu. Threads through the plain build are
-the fallback when it cannot. The ASE-driven `lammps` engine and a served
-MLIP checkpoint id are for a small relaxation or single point that feeds
-another task; neither ever drives dynamics, and a brief or a skill
+sized with `gpus=` when the machine declares a gpu build and the slice
+can hold a gpu. Size a GPU launch with `gpus=` alone, which gives one
+MPI rank per GPU and the free cpus as threads, or with `ntasks=` equal
+to `gpus=`; never more ranks than GPUs, because the gpu build refuses
+that and an exclusive-mode device serves one process. Threads through
+the plain build are the fallback when no gpu can be held. The
+ASE-driven `lammps` engine and a served MLIP checkpoint id are for a
+small relaxation or single point that feeds another task; neither ever
+drives dynamics, and a brief or a skill
 template that asks for `ase.md` under one of them is rewritten as a
 LAMMPS script before anything runs. A GRACE model runs its dynamics
 through the GRACE pair styles in the lammps-potentials skill: under a

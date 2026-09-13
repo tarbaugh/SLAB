@@ -120,11 +120,12 @@ own flags after the switches. SLAB adds no switch: a build without
 contains. The `lammps` entry of `list_engines` lists every build with
 its command and the switches parsed from it. A build whose command
 holds `{ntasks}`, `{threads}`, or `{gpus}` is marked `sized per launch`:
-SLAB fills those from the launch's size, so `ntasks=2, gpus=2` on the
-launch runs `-np 2 ... g 2` (`gpus=2` alone takes every free cpu and
-two gpus), and a gpu build that asks `{gpus}` under a launch without
-one is refused naming the build. A build that hardcodes its numbers
-runs as written whatever the launch held. Read the listing before a
+SLAB fills those from the launch's size, so `gpus=2` on the launch
+runs `-np 2 ... g 2` with one rank per GPU and the free cpus as threads
+(`ntasks=2, gpus=2` says the same), a launch with more ranks than gpus
+is refused before LAMMPS starts, and a gpu build that asks `{gpus}`
+under a launch without one is refused naming the build. A build that
+hardcodes its numbers runs as written whatever the launch held. Read the listing before a
 GPU run. When the machine declares no gpu build, pass `command=` with
 the switches on that call alone, and report the missing build as a
 machine fact.

@@ -295,9 +295,19 @@ information and no mechanism, so it has no switch in the ledger.
 
 An unsized launch is accounted for like any other. It reserves every free
 cpu and no gpu, and it runs in the session's own process as before. A
-launch that names `gpus` but no `ntasks` takes every free cpu and the
-gpus asked. A `background=true` launch is always the child, sized or
+launch that names `gpus` but no `ntasks` takes the gpus asked and one
+MPI rank per gpu, and it takes every free cpu as threads across those
+ranks. A `background=true` launch is always the child, sized or
 not, so no tool timeout can reach it.
+
+A GPU launch runs one MPI rank per GPU. The KOKKOS package gives each
+rank one device, so a second rank on the same device opens a device
+another rank holds, and a device in exclusive compute mode refuses it
+with `cudaErrorDevicesUnavailable`. Size a GPU launch with `gpus` alone,
+or with `ntasks` equal to `gpus`. The gpu build refuses a launch with
+more ranks than gpus before LAMMPS starts, and the refusal names both
+counts. When a run still dies with that error, the failure record adds
+the rank and gpu counts of the launch beside the gpu ids it held.
 
 The enforcement matches the statement. A slice that does not fit what is
 free is refused as a tool result that carries the free amounts, and the

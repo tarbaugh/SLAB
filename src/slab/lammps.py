@@ -72,6 +72,33 @@ def lammps_command(command: str | None = None) -> str:
     return _lammps_locator({"command": command})
 
 
+def lammps_launch_command(command: str | None = None, *, build: str | None = None) -> str:
+    """The command a script launch runs: :func:`lammps_command` behind the rank guard.
+
+    The gpu build runs one MPI rank per GPU, so a launch that holds more
+    ranks than gpus is refused with :class:`slab.errors.ResourcesError`
+    before LAMMPS starts (:func:`slab.resources.one_rank_per_gpu`).
+    *build* names the build *command* was resolved from
+    (:func:`lammps_build`); unset, the slice's choice is looked up when
+    *command* is absent, and a per-call *command* is filled as written.
+
+    Examples:
+        >>> lammps_launch_command("/opt/lammps/bin/lmp")
+        '/opt/lammps/bin/lmp'
+        >>> import os
+        >>> os.environ.update(SLAB_CPUS="0,1,2,3", SLAB_GPUS="0", SLAB_NTASKS="4")
+        >>> lammps_launch_command("mpirun -np {ntasks} lmp -k on g {gpus} -sf kk", build="gpu")
+        Traceback (most recent call last):
+        ...
+        slab.errors.ResourcesError: 4 rank(s) on 1 gpu(s): the lammps build 'gpu' runs ...
+        >>> for name in ("SLAB_CPUS", "SLAB_GPUS", "SLAB_NTASKS"):
+        ...     del os.environ[name]
+    """
+    from slab.backends import _lammps_launch_command
+
+    return _lammps_launch_command({"command": command}, build=build)
+
+
 def lammps_template(command: str | None = None) -> str:
     """The LAMMPS command as written, placeholders unfilled: what a listing shows.
 
@@ -289,6 +316,7 @@ def run_lammps_script(
     setup: str | tuple[str, ...] | list[str] | None = None,
     timeout_s: float = 86400.0,
     dry_run: bool = False,
+    build: str | None = None,
 ) -> LammpsOutcome:
     """Run ``in.lammps`` in *cwd* whole and classify the outcome.
 
@@ -308,10 +336,14 @@ def run_lammps_script(
     sets up every style, fix, and compute, runs each command in order,
     prints one thermo row and one loop line per loop, and integrates no
     step. The original lines ride on the outcome as ``rewritten``.
+
+    *build* names the build *command* came from, so the gpu build's rule
+    of one MPI rank per GPU is checked before LAMMPS starts
+    (:func:`lammps_launch_command`).
     """
     from slab.backends import _launcher_guard, _payload_guard, _setup_guard
 
-    resolved = lammps_command(command)
+    resolved = lammps_launch_command(command, build=build)
     lines = lammps_setup(setup)
     _payload_guard(resolved, "lammps")
     if lines:

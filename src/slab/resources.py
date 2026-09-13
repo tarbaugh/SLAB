@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from slab.config import Partition, memory_mb
-from slab.errors import EngineNotAvailableError, JobSizeError
+from slab.errors import EngineNotAvailableError, JobSizeError, ResourcesError
 
 PLACEHOLDERS = ("ntasks", "threads", "gpus")
 _PLACEHOLDER = re.compile(r"(?<!\$)\{(ntasks|threads|gpus)\}")
@@ -269,6 +269,32 @@ def fill(command: str, env: Envelope, *, route: str | None = None) -> str:
         )
     values = {"ntasks": str(env.ntasks), "threads": str(env.threads), "gpus": str(len(env.gpus))}
     return _PLACEHOLDER.sub(lambda match: values[match.group(1)], command)
+
+
+def one_rank_per_gpu(env: Envelope, *, build: str = "gpu") -> None:
+    """Refuse a GPU launch that runs more MPI ranks than it holds gpus.
+
+    A KOKKOS build gives each MPI rank one device, so every rank past the
+    number of gpus opens a device another rank already holds, and a device
+    in exclusive compute mode refuses all but the first
+    (``cudaErrorDevicesUnavailable``). The rule is the KOKKOS package's
+    own: one MPI rank per GPU. A launch that holds no gpu is not judged
+    here; :func:`fill` refuses that one when the build asks for ``{gpus}``.
+
+    Examples:
+        >>> one_rank_per_gpu(Envelope(cpus=(0, 1), gpus=("0",), ntasks=1, threads=2))
+        >>> one_rank_per_gpu(Envelope(cpus=(0, 1, 2, 3), gpus=("0",), ntasks=4))
+        Traceback (most recent call last):
+        ...
+        slab.errors.ResourcesError: 4 rank(s) on 1 gpu(s): the lammps build 'gpu' runs ...
+    """
+    if env.gpus and env.ntasks > len(env.gpus):
+        raise ResourcesError(
+            f"{env.ntasks} rank(s) on {len(env.gpus)} gpu(s): the lammps build {build!r} "
+            f"runs one MPI rank per GPU, and every rank past the first on a device "
+            f"fails on an exclusive-mode device. Size the launch with gpus= alone "
+            f"(one rank per gpu, the free cpus as threads) or with ntasks equal to gpus"
+        )
 
 
 class JobSize(BaseModel):

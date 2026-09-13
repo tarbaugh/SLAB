@@ -463,14 +463,19 @@ build runs, leave it unsized and the plain build runs. Read the
 after it.
 
 The production launch, inside a sandbox or an allocation, sizes the run
-with `gpus=` and one MPI task per GPU:
+with `gpus=` alone:
 
 ```
-launch_workflow(script="md.py", gpus=2, ntasks=2)
+launch_workflow(script="md.py", gpus=2)
 ```
 
-The call reserves the GPUs and the cpus before the run starts and is
-refused with the free amounts when they are taken. Before a second
+That gives one MPI rank per GPU and the free cpus as threads across the
+ranks; `ntasks=` equal to `gpus=` says the same. Never ask for more
+ranks than GPUs. The gpu build refuses such a launch before LAMMPS
+starts, because every rank past the first on a device fails on an
+exclusive-mode device with `cudaErrorDevicesUnavailable`. The call
+reserves the GPUs and the cpus before the run starts and is refused
+with the free amounts when they are taken. Before a second
 concurrent launch, call `free_resources`, because the free amounts in
 the environment block were read when the prompt was built and the first
 launch now holds its slice. On a login node the same run is a job on

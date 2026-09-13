@@ -525,6 +525,8 @@ def test_cli_render_writes_both_files_and_next_steps(
     assert "read these files" in result.output
     context = (tmp_path / "sandbox" / "context.md").read_text()
     assert context.startswith("# Sandbox")
+    assert "A GPU launch runs one MPI rank per GPU: size it with gpus alone" in context
+    assert "The gpu build refuses more ranks than gpus" in context
     assert str(tmp_path / "sandbox" / "context.md") in script  # SLAB_SANDBOX_CONTEXT
 
 

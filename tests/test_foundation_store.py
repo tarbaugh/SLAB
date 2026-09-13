@@ -1267,6 +1267,35 @@ def test_the_unsized_refusal_names_the_free_gpus(store: SQLiteRunStore) -> None:
     assert e.value.free == {"cpus": [], "gpus": ["1"]}
 
 
+def test_an_unsized_gpu_launch_takes_one_rank_per_gpu(store: SQLiteRunStore) -> None:
+    """gpus= without ntasks or threads runs one MPI rank per gpu and spreads the
+    free cpus as threads, whatever the job's rank count: a KOKKOS build gives
+    each rank one device. Without gpus the defaults still size the launch."""
+    import os
+
+    from foundation.errors import ResourcesError
+
+    who = {"host": "n1", "holder_pid": os.getpid()}
+    one = store.reserve(budget_cpus=range(36), budget_gpus=("0",), gpus=1, default_ntasks=36, **who)
+    assert (one.ntasks, one.threads, one.gpus) == (1, 36, ("0",))
+    assert one.cpus == tuple(range(36))
+    store.release_reservation(one.id)
+    two = store.reserve(
+        budget_cpus=range(8), budget_gpus=("0", "1"), gpus=2, default_ntasks=8, **who
+    )
+    assert (two.ntasks, two.threads, two.cpus, two.gpus) == (2, 4, tuple(range(8)), ("0", "1"))
+    store.release_reservation(two.id)
+    odd = store.reserve(budget_cpus=range(7), budget_gpus=("0", "1"), gpus=2, **who)
+    assert (odd.ntasks, odd.threads, odd.cpus) == (2, 3, tuple(range(7)))
+    store.release_reservation(odd.id)
+    plain = store.reserve(budget_cpus=range(8), budget_gpus=("0", "1"), default_ntasks=8, **who)
+    assert (plain.ntasks, plain.threads, plain.gpus) == (8, 1, ())
+    store.release_reservation(plain.id)
+    with pytest.raises(ResourcesError, match=r"4 gpu\(s\) asked, one rank per gpu, but only") as e:
+        store.reserve(budget_cpus=range(2), budget_gpus=("0", "1", "2", "3"), gpus=4, **who)
+    assert e.value.free == {"cpus": [0, 1], "gpus": ["0", "1", "2", "3"]}
+
+
 # -- the job a run started under ---------------------------------------------------
 
 
