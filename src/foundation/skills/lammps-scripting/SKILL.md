@@ -84,14 +84,106 @@ result, info = run_lammps(SCRIPT, atoms=STRUCTURE, files=["W.eam.fs"], label="w-
   outer guard, and `timer timeout` inside the script (section 7) stops
   the run cleanly before either.
 
-What comes back:
+What comes back is `result`, printed here from the template run as it
+is (`pprint(result, sort_dicts=False)`), so nothing about its shape has
+to be remembered or guessed:
 
-- `result["thermo"]`: the last thermo row, keyed by column name.
-- `result["tables"]`: one entry per thermo table with `columns`,
-  `first`, `last`, `rows`, the `loop` line (steps, atoms, seconds), and
-  `tail` (mean and std of every column over the last half of the rows),
-  the numbers a `@check` judges.
-- `result["steps"]` and `result["wall_time"]`.
+```python
+{'label': 'ar-nvt',
+ 'thermo': {'Step': 2000,
+            'Temp': 287.34524,
+            'PotEng': -5.2415743,
+            'KinEng': 3.9742248,
+            'TotEng': -1.2673495,
+            'Press': 7799.2977,
+            'Volume': 3929.3526},
+ 'tables': [{'columns': ['Step',
+                         'Temp',
+                         'PotEng',
+                         'KinEng',
+                         'TotEng',
+                         'Press',
+                         'Volume'],
+             'first': {'Step': 0,
+                       'Temp': 300,
+                       'PotEng': -8.3818426,
+                       'KinEng': 4.1492507,
+                       'TotEng': -4.2325919,
+                       'Press': 1276.3849,
+                       'Volume': 3929.3526},
+             'last': {'Step': 2000,
+                      'Temp': 287.34524,
+                      'PotEng': -5.2415743,
+                      'KinEng': 3.9742248,
+                      'TotEng': -1.2673495,
+                      'Press': 7799.2977,
+                      'Volume': 3929.3526},
+             'n_rows': 21,
+             'loop': {'seconds': 0.0471725,
+                      'procs': 1,
+                      'steps': 2000,
+                      'atoms': 108},
+             'tail': {'n_rows': 11,
+                      'mean': {'Step': 1500.0,
+                               'Temp': 303.1883590909091,
+                               'PotEng': -4.8320841727272725,
+                               'KinEng': 4.193348318181818,
+                               'TotEng': -0.6387358388181817,
+                               'Press': 8675.960354545454,
+                               'Volume': 3929.3525999999997},
+                      'std': {'Step': 316.22776601683796,
+                              'Temp': 17.687067925615477,
+                              'PotEng': 0.26138224059907544,
+                              'KinEng': 0.2446269188014934,
+                              'TotEng': 0.3973099484859172,
+                              'Press': 540.569720729633,
+                              'Volume': 4.547473508864641e-13}}}],
+ 'averages': {'ar-nvt-avg.dat': {'columns': ['TimeStep',
+                                             'c_thermo_temp',
+                                             'c_thermo_press'],
+                                 'first': {'TimeStep': 100,
+                                           'c_thermo_temp': 171.058,
+                                           'c_thermo_press': 4880.43},
+                                 'last': {'TimeStep': 2000,
+                                          'c_thermo_temp': 285.596,
+                                          'c_thermo_press': 8245.7},
+                                 'n_rows': 20,
+                                 'loop': None,
+                                 'tail': {'n_rows': 10,
+                                          'mean': {'TimeStep': 1550.0,
+                                                   'c_thermo_temp': 301.6838,
+                                                   'c_thermo_press': 8786.126999999999},
+                                          'std': {'TimeStep': 287.22813232690146,
+                                                  'c_thermo_temp': 19.127423411426857,
+                                                  'c_thermo_press': 414.93737997558117}}}},
+ 'steps': 2000,
+ 'seconds': 0.0471725,
+ 'atoms': 108,
+ 'rate': {'steps_per_s': 42397.58333774975,
+          'atom_steps_per_s': 4578939.000476973},
+ 'wall_time': '0:00:00',
+ 'artifacts': {'thermo': '19cdefe1a3645216199442cb8e2dcf5b5004fb694261c9c76ba1d7fac4de7198',
+               'averages': 'a2def63b38479acf9e5230b36857ab7cdb8af641698d1e0e2df7e801c517cbba'}}
+```
+
+- `result["rate"]` and `result["seconds"]` are numbers from the loop
+  lines; `wall_time` is LAMMPS's own text, for the report, never for
+  arithmetic. `n_rows` is a count; the rows themselves are not in
+  `result`.
+- `result["averages"]` holds every `fix ave/time` file the script wrote,
+  parsed, keyed by basename, in the same shape as a thermo table, with
+  `loop` None. The full parse is the `{label}-averages.json` artifact.
+- `series(result, 0)` or `series(result, "ar-nvt-avg.dat")` from
+  `foundation.tasks` gives the full rows of a thermo table by index or
+  of an averages file by basename, one dict per row keyed by column,
+  read from the parsed artifacts (a cache hit still resolves them). It
+  is the one way to a time series. Never write your own parser for a
+  log, a `-thermo.json`, or a `.dat` file.
+- Every output the script names (`dump`, `write_data`, `write_restart`,
+  `restart`, `fix ... file`) is a bare basename, so the run keeps it.
+  A path with a directory component is refused before LAMMPS starts,
+  because a file written into the project directory is not an
+  artifact of any run and the analysis then rests on nothing.
 - `info["kokkos"]`: what the log says KOKKOS did. `enabled`, `gpus` per
   node, `threads` per task, the `/kk` `styles` that ran, and under
   `switches` what the command asked for. Quote it in the notebook for
@@ -99,9 +191,11 @@ What comes back:
   host. `info["argv"]` is the exact argument vector that ran.
 - `info["artifacts"]`: `{label}.in`, `{label}.log`, `{label}.screen`,
   `{label}-structure.data`, `{label}-thermo.json` (every table, every
-  row), and every file the script wrote (dumps, restarts, `write_data`
-  output, `fix ave/time` files). Read them with `read_artifact`; the
-  log digest shows each table's ends and the warnings.
+  row), `{label}-averages.json`, and every file the script wrote
+  (dumps, restarts, `write_data` output, `fix ave/time` files). Read
+  them with `read_artifact`; the log digest shows each table's ends and
+  the warnings, and a `fix ave/time` file digests to its fix, columns,
+  and ends.
 
 A script that dies keeps `{label}-failed.in`, `.log`, and `.screen`,
 and the failure record's notes carry the `ERROR` line with the command
@@ -195,10 +289,14 @@ write_data w-nvt-final.data
   kept as an artifact, so choose `N` for the analysis, not for comfort:
   a frame every few hundred steps is usual.
 - `fix ID all ave/time Nevery Nrepeat Nfreq c_thermo_temp c_thermo_press
-  file averages.txt` writes running averages of any compute or variable
-  to a file the task keeps. `compute msd all msd` and `compute rdf all
-  rdf 100` feed it: `c_msd[4]` is the total mean-squared displacement,
-  and `c_rdf[*]` with `mode vector` writes the histogram.
+  file averages.dat` writes running averages of any compute or variable
+  to a file the task keeps, and the file comes back parsed under
+  `result["averages"]["averages.dat"]` with its full rows through
+  `series(result, "averages.dat")`. `compute msd all msd` and
+  `compute rdf all rdf 100` feed it: `c_msd[4]` is the total
+  mean-squared displacement, and `c_rdf[*]` with `mode vector` writes
+  the histogram, which comes back as the artifact only (`mode:
+  "vector"`, no rows in the summary). Name the file by bare basename.
 - `write_data final.data` at the end, and `restart 10000 restart.*.bin`
   during the run, so a later script can continue with `read_restart`.
   A restart file does not carry the potential file; restate
@@ -287,6 +385,13 @@ sits within a stated tolerance of the target, the tail of the total
 energy in NVE does not drift, and the pressure under NPT averages to
 the target. State the tolerances before the run.
 
+A slope, a fit, or any number that needs more than the ends and the
+tail reads the rows through `series(result, -1)` for the last thermo
+table or `series(result, "msd.dat")` for an averages file, one dict per
+row keyed by column. Do not parse the log, the `-thermo.json`, or a
+`.dat` file yourself; a hand-written parser is what crashed the
+analysis of a finished MD leg in one real campaign.
+
 Then measure the equilibration from the full table:
 
     python <skill root>/scripts/thermo_report.py w-nvt-thermo.json --tail 0.5
@@ -320,6 +425,8 @@ and the run id. A number without a run id is a rumor.
 | `Neighbor list overflow, boost neigh_modify one` | too many neighbors per atom for the page | `neigh_modify one 10000 page 100000` |
 | `Illegal ... command` | syntax | read the context line the failure record carries; it is the command that died |
 | `WARNING: One or more atoms are time integrated more than once` | two integrators on one group | keep one |
+| `KeyError: 0` or `KeyError: 'rows'` on `result["tables"][i]` in your own script | `n_rows` is a count; the summary holds no rows | `series(result, i)` for the rows |
+| `TypeError: unsupported operand ... 'str'` on `result["wall_time"]` in your own script | `wall_time` is LAMMPS's text | `result["seconds"]` or `result["rate"]` for arithmetic |
 
 The failure record carries the `ERROR` line and the line before it,
 the kept `{label}-failed.log` has the rest, and `{label}-failed.screen`

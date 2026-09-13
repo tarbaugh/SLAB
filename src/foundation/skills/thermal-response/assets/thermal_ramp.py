@@ -11,8 +11,8 @@ cell is not cubic), and latent heat between two phases' ladders.
 One ``run_lammps`` call runs the whole ladder as one continuous
 trajectory. Each rung is two ``run`` commands under Nose-Hoover NPT
 (``fix npt``): an equilibration whose rows are discarded, and an
-averaging span whose thermo rows the workflow reads back from the run's
-``-thermo.json`` artifact. Every row of ``ramp.json`` carries the atom
+averaging span whose thermo rows the workflow reads back with
+``series``. Every row of ``ramp.json`` carries the atom
 count, the pressure, H = E + PV at the set pressure, the measured
 temperature, the mean cell lengths, and block standard errors, so the
 fit can use them.
@@ -28,7 +28,7 @@ from ase import units
 from ase.build import bulk
 
 from foundation import check, current_run
-from foundation.tasks import run_lammps
+from foundation.tasks import run_lammps, series
 
 STRUCTURE = bulk("Ar", "fcc", a=5.26, cubic=True) * (3, 3, 3)
 # Argon: epsilon 0.0104 eV, sigma 3.40 A, in metal units. The masses ride
@@ -99,11 +99,10 @@ def _block_se(values: np.ndarray) -> float:
     return float(np.std(blocks, ddof=1) / np.sqrt(len(blocks)))
 
 
-def _rung(table: dict[str, Any], temperature: float, direction: str) -> dict[str, Any]:
+def _rung(rows: list[dict[str, Any]], temperature: float, direction: str) -> dict[str, Any]:
     """One ramp.json row from the averaging table's rows, its first row dropped."""
-    columns = table["columns"]
-    block = np.asarray(table["rows"][1:], dtype=float)
-    column = {name: block[:, index] for index, name in enumerate(columns)}
+    kept = rows[1:]
+    column = {name: np.asarray([row[name] for row in kept], dtype=float) for name in kept[0]}
     pressure_ev_a3 = PRESSURE_BAR * units.bar
     volumes = column["Volume"]
     enthalpies = column["TotEng"] + pressure_ev_a3 * volumes
@@ -127,17 +126,15 @@ def _rung(table: dict[str, Any], temperature: float, direction: str) -> dict[str
 result, info = run_lammps(SCRIPT, atoms=STRUCTURE, label=LABEL)
 active = current_run()
 assert active is not None, "run this template through launch_workflow"
-tables = json.loads(
-    active.artifacts.get(info["artifacts"][f"{LABEL}-thermo.json"]).read_text(encoding="utf-8")
-)
+n_tables = len(result["tables"])
 print(
     f"LAMMPS {info['version']}: {result['steps']} steps over {len(ladder)} rung(s), "
-    f"{len(tables)} thermo tables"
+    f"{n_tables} thermo tables"
 )
 rows: list[dict[str, Any]] = []
 for i, temperature in enumerate(ladder):
     direction = "up" if i < len(TEMPERATURES) else "down"
-    rows.append(_rung(tables[2 * i + 1], temperature, direction))
+    rows.append(_rung(series(result, 2 * i + 1), temperature, direction))
     print(
         f"T = {temperature:.0f} K ({direction}): <H> = {rows[-1]['H']:.4f} eV, "
         f"<V> = {rows[-1]['V']:.2f} A^3 (measured {rows[-1]['T_measured']:.0f} K)"
@@ -151,7 +148,7 @@ active.keep("ramp.json", Path("ramp.json"))
 
 @check
 def one_row_per_rung() -> bool:
-    return len(rows) == len(ladder) and len(tables) == 2 * len(ladder)
+    return len(rows) == len(ladder) and n_tables == 2 * len(ladder)
 
 
 @check

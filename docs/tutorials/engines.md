@@ -346,13 +346,16 @@ fix integrate all nvt temp 300.0 300.0 0.2
 thermo 100
 thermo_style custom step temp pe ke etotal press vol
 dump traj all custom 500 ar.dump id type x y z
+fix avg all ave/time 10 10 100 c_thermo_temp c_thermo_press file ar-avg.dat
 run 2000
 write_data ar-final.data
 """
 result, info = run_lammps(script, atoms=atoms, label="ar")
 table = result["tables"][-1]
-print(f"LAMMPS {info['version']}: {result['steps']} steps in {table['loop']['seconds']:.2f} s")
-print(f"tail mean T = {table['tail']['mean']['Temp']:.1f} K over {table['tail']['rows']} rows")
+print(f"LAMMPS {info['version']}: {result['steps']} steps in {result['seconds']:.2f} s, "
+      f"{result['rate']['steps_per_s']:.0f} steps/s")
+print(f"tail mean T = {table['tail']['mean']['Temp']:.1f} K over {table['tail']['n_rows']} rows")
+print(f"averages: {list(result['averages'])}, {result['averages']['ar-avg.dat']['n_rows']} rows")
 print(f"artifacts: {sorted(info['artifacts'])}")
 
 
@@ -363,18 +366,26 @@ def the_thermostat_held() -> None:
 
 <!-- no-verify -->
 ```text
-LAMMPS 22 Jul 2025 - Update 4: 2000 steps in 0.04 s
+LAMMPS 22 Jul 2025 - Update 4: 2000 steps in 0.05 s, 41503 steps/s
 tail mean T = 303.2 K over 11 rows
-artifacts: ['ar-final.data', 'ar-structure.data', 'ar-thermo.json', 'ar.dump', 'ar.in', 'ar.log', 'ar.screen']
-run 01m26dc9ykn0y3k4g8v3yrj8bh  ar-nvt  state=verified status=completed checks=1/1 tasks=1
+averages: ['ar-avg.dat'], 20 rows
+artifacts: ['ar-averages.json', 'ar-avg.dat', 'ar-final.data', 'ar-structure.data', 'ar-thermo.json', 'ar.dump', 'ar.in', 'ar.log', 'ar.screen']
+run 01m2dn7229d8gv27mqxjvstqtt  ar-nvt  state=verified status=completed checks=1/1 tasks=1
 ```
 
 The run kept the script, the log, the screen capture, the structure, the
-parsed thermo tables, and the two files the script wrote. `result` holds
-the last thermo row and, for each table, its ends, its loop line, and the
-mean and standard deviation of every column over the tail of its rows,
-which is what the check judged. The full tables are the `ar-thermo.json`
-artifact. The build follows the slice exactly as for the engine, and a
+parsed thermo tables, the parsed `fix ave/time` file, and the three files
+the script wrote. `result` holds the last thermo row and, for each table,
+its ends, its row count `n_rows`, its loop line, and the mean and standard
+deviation of every column over the tail of its rows, which is what the
+check judged. `seconds`, `atoms`, and `rate` come from the loop lines, so
+a step rate is never computed by hand; `wall_time` is LAMMPS's own text.
+`averages` holds every `fix ave/time` file in the same shape as a table.
+The full rows are the `ar-thermo.json` and `ar-averages.json` artifacts,
+and `foundation.tasks.series(result, 0)` or `series(result, "ar-avg.dat")`
+reads them back as one dict per row. Every output the script names is a
+bare basename, so the run keeps it; a path with a directory component is
+refused before LAMMPS starts. The build follows the slice exactly as for the engine, and a
 KOKKOS or MPI launch rides in the build's command. `info["build"]` names
 the build that ran, `cpu`, `gpu`, or an alias. The build, the command,
 the detected version, the setup lines, and the content of every staged

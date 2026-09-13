@@ -5,6 +5,16 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- The `run_lammps` result needs no memory. It carries `seconds`,
+  `atoms`, and `rate` from the loop lines, `n_rows` where a count used
+  to be called `rows`, `averages` with every `fix ave/time` file parsed
+  (`slab.outputs.lammps_ave_time`, also digested on `read_artifact`),
+  `label`, and the hashes of the parsed `-thermo.json` and
+  `-averages.json` artifacts, which `foundation.tasks.series` reads
+  back as rows keyed by column. A script whose output name carries a
+  directory component is refused before LAMMPS starts. The
+  lammps-scripting skill shows the captured result and the template
+  prints the rate.
 - Close contacts are pushed apart before the real potential sees a
   cell. The md-expert card and the atomsk-structures, atomsk-defects,
   atomsk-interfaces, melt-quench, and lammps-scripting skills say to

@@ -69,6 +69,8 @@ def digest(name: str, text: str) -> str | None:
         return pwscf_digest(name, text)
     if _looks_like_lammps_log(head):
         return lammps_log_digest(name, text)
+    if _looks_like_ave_time(head):
+        return lammps_ave_time_digest(name, text)
     if _looks_like_extxyz(head, name):
         return extxyz_digest(name, text)
     return None
@@ -475,6 +477,124 @@ def _is_numeric_row(stripped: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+# -- fix ave/time --------------------------------------------------------------
+
+_AVE_TIME_HEAD = "# Time-averaged data for fix "
+
+
+def _looks_like_ave_time(head: str) -> bool:
+    """A ``fix ave/time`` file opens with its own first line.
+
+    Examples:
+        >>> _looks_like_ave_time("# Time-averaged data for fix avg\\n# TimeStep c_t\\n")
+        True
+        >>> _looks_like_ave_time("# TimeStep c_t\\n100 1.0\\n")
+        False
+    """
+    first = next((line for line in head.splitlines() if line.strip()), "")
+    return first.startswith(_AVE_TIME_HEAD)
+
+
+def lammps_ave_time(text: str) -> dict[str, Any]:
+    """Parse one ``fix ave/time`` output file.
+
+    The file opens with ``# Time-averaged data for fix <id>`` and a column
+    line ``# TimeStep col1 col2 ...``. In scalar mode every later line is
+    one numeric row, returned as ``rows`` with integers kept as integers.
+    In vector mode (``mode vector``) a third header line ``# Row col1
+    ...`` names the per-row columns, and each block is a ``TimeStep
+    Number-of-rows`` line followed by that many rows. The vector layout
+    is recognised and reported, with ``columns`` from the ``# Row`` line
+    and ``rows`` left empty, because the blocks belong to the artifact,
+    not to a summary. A file that is not a ``fix ave/time`` file raises
+    ``ValueError``.
+
+    Examples:
+        >>> scalar = (
+        ...     "# Time-averaged data for fix avg\\n"
+        ...     "# TimeStep c_thermo_temp c_thermo_press\\n"
+        ...     "100 168.698 4991.83\\n200 178.055 6233.87\\n"
+        ... )
+        >>> parsed = lammps_ave_time(scalar)
+        >>> parsed["fix"], parsed["mode"], parsed["columns"]
+        ('avg', 'scalar', ['TimeStep', 'c_thermo_temp', 'c_thermo_press'])
+        >>> parsed["rows"]
+        [[100, 168.698, 4991.83], [200, 178.055, 6233.87]]
+        >>> vector = (
+        ...     "# Time-averaged data for fix vec\\n"
+        ...     "# TimeStep Number-of-rows\\n"
+        ...     "# Row c_rdf[1] c_rdf[2]\\n"
+        ...     "100 2\\n1 0.425 0\\n2 1.275 0.5\\n"
+        ... )
+        >>> lammps_ave_time(vector)
+        {'fix': 'vec', 'mode': 'vector', 'columns': ['Row', 'c_rdf[1]', 'c_rdf[2]'], 'rows': []}
+        >>> lammps_ave_time("# TimeStep c_t\\n100 1.0\\n")
+        Traceback (most recent call last):
+        ...
+        ValueError: not a fix ave/time file: the first line is '# TimeStep c_t'
+    """
+    lines = [line for line in text.splitlines() if line.strip()]
+    first = lines[0].strip() if lines else ""
+    if not first.startswith(_AVE_TIME_HEAD):
+        raise ValueError(f"not a fix ave/time file: the first line is {first!r}")
+    fix = first[len(_AVE_TIME_HEAD) :].strip()
+    headers = [line.strip()[1:].split() for line in lines[1:3] if line.strip().startswith("#")]
+    if not headers:
+        raise ValueError(f"fix ave/time file for fix {fix!r} has no column line")
+    if len(headers) > 1 and headers[1][:1] == ["Row"]:
+        return {"fix": fix, "mode": "vector", "columns": headers[1], "rows": []}
+    columns = headers[0]
+    rows = [
+        [_number(token) for token in line.split()]
+        for line in lines[2:]
+        if not line.strip().startswith("#") and _is_numeric_row(line.strip())
+    ]
+    return {"fix": fix, "mode": "scalar", "columns": columns, "rows": rows}
+
+
+def lammps_ave_time_digest(name: str, text: str) -> str:
+    """The digest of one ``fix ave/time`` file: the fix, the columns, the ends.
+
+    Examples:
+        >>> text = (
+        ...     "# Time-averaged data for fix avg\\n# TimeStep c_thermo_temp\\n"
+        ...     "100 168.698\\n200 178.055\\n300 225.661\\n"
+        ... )
+        >>> print(lammps_ave_time_digest("ar-avg.dat", text))
+        fix ave/time digest: ar-avg.dat (fix avg, scalar mode, 3 rows)
+        columns: TimeStep c_thermo_temp
+        first: 100 168.698
+        last:  300 225.661
+    """
+    try:
+        parsed = lammps_ave_time(text)
+    except ValueError as e:
+        return f"fix ave/time digest: {name} (unreadable: {e})"
+    out = []
+    if parsed["mode"] == "vector":
+        blocks = sum(
+            1
+            for line in text.splitlines()
+            if _is_numeric_row(line.strip()) and len(line.split()) == 2
+        )
+        out.append(
+            f"fix ave/time digest: {name} (fix {parsed['fix']}, vector mode, "
+            f"{blocks} block(s); the blocks are in the file itself)"
+        )
+        out.append("columns: " + " ".join(parsed["columns"]))
+        return "\n".join(out)
+    rows = parsed["rows"]
+    out.append(
+        f"fix ave/time digest: {name} (fix {parsed['fix']}, scalar mode, {len(rows)} rows)"
+    )
+    out.append("columns: " + " ".join(parsed["columns"]))
+    if rows:
+        out.append("first: " + " ".join(str(v) for v in rows[0]))
+        if len(rows) > 1:
+            out.append("last:  " + " ".join(str(v) for v in rows[-1]))
+    return "\n".join(out)
 
 
 # -- extended XYZ --------------------------------------------------------------

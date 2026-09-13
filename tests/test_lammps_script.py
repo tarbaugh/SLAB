@@ -107,7 +107,10 @@ for raw in script.splitlines():
             handle.write(b"restart")
     elif cmd == "fix" and "ave/time" in tok and "file" in tok:
         with open(tok[tok.index("file") + 1], "w") as handle:
-            handle.write("# Time-averaged data\\n")
+            handle.write("# Time-averaged data for fix %s\\n" % tok[1])
+            handle.write("# TimeStep c_thermo_temp\\n")
+            for k in range(1, 11):
+                handle.write("%d %.3f\\n" % (100 * k, temp * (1.0 + 0.01 * (k % 3 - 1))))
     elif cmd == "print" and "slow" in line:
         time.sleep(30)
     elif cmd == "run":
@@ -327,8 +330,8 @@ def test_run_lammps_keeps_the_log_the_thermo_and_what_the_script_wrote(
         "Step", "Temp", "PotEng", "KinEng", "TotEng", "Press", "Volume",
     }
     table = result["tables"][0]
-    assert table["rows"] == 11 and table["loop"]["atoms"] == 32 and table["loop"]["steps"] == 1000
-    assert table["tail"]["rows"] == 6
+    assert table["n_rows"] == 11 and table["loop"]["atoms"] == 32 and table["loop"]["steps"] == 1000
+    assert table["tail"]["n_rows"] == 6
     assert table["tail"]["mean"]["Temp"] == pytest.approx(300.0, abs=2.0)
     assert result["steps"] == 1000 and result["wall_time"] == "0:00:01"
     assert info["types"] == {1: "Ar"} and info["version"] == "22 Jul 2025 - Update 4"
@@ -565,7 +568,7 @@ def test_run_lammps_types_follow_specorder_and_warnings_are_collected(
     data = ws.artifacts.get(info["artifacts"]["alloy-structure.data"]).read_text()
     assert "2 atom types" in data
     assert info["warnings"] == ["WARNING: Inconsistent image flags (src/domain.cpp:1)"]
-    assert result["tables"][0]["rows"] == 11  # the warning inside the table did not cut it
+    assert result["tables"][0]["n_rows"] == 11  # the warning inside the table did not cut it
     assert ws.runs.get(run.id).status is ExecutionStatus.COMPLETED
 
 
@@ -645,3 +648,90 @@ def test_the_md_template_runs_verified_under_a_real_lammps(
     assert result["state"] == "verified", result
     assert result["checks_passed"] == result["checks_total"] == 2
     assert "tail of" in result["output"]
+
+
+# -- the result needs no memory ------------------------------------------------------
+
+
+def test_run_lammps_result_carries_rate_seconds_atoms_and_parsed_averages(
+    ws: Workspace, fake_lmp: str
+) -> None:
+    """Every number the campaign computed by hand is on the result, typed:
+    seconds and rate are floats, n_rows is a count, wall_time stays text."""
+    with ws.start_run(name="ar-nvt") as run:
+        result, info = run_lammps(SCRIPT, atoms=_argon(), label="ar", command=fake_lmp)
+    assert result["label"] == "ar"
+    assert result["steps"] == 1000 and result["atoms"] == 32
+    assert result["seconds"] == pytest.approx(0.0123)
+    assert result["rate"]["steps_per_s"] == pytest.approx(1000 / 0.0123)
+    assert result["rate"]["atom_steps_per_s"] == pytest.approx(32 * 1000 / 0.0123)
+    assert isinstance(result["wall_time"], str)
+    table = result["tables"][0]
+    assert table["n_rows"] == 11 and "rows" not in table
+    assert table["tail"]["n_rows"] == 6
+    # The fix ave/time file came back parsed, in the shape of a table.
+    assert list(result["averages"]) == ["ar-temp.txt"]
+    average = result["averages"]["ar-temp.txt"]
+    assert average["columns"] == ["TimeStep", "c_thermo_temp"]
+    assert average["n_rows"] == 10 and average["loop"] is None
+    assert average["first"]["TimeStep"] == 100 and average["last"]["TimeStep"] == 1000
+    assert average["tail"]["mean"]["c_thermo_temp"] == pytest.approx(300.0, rel=0.02)
+    # The parsed files are artifacts, and the result names their hashes.
+    assert set(info["artifacts"]) >= {"ar-thermo.json", "ar-averages.json"}
+    assert result["artifacts"]["thermo"] == info["artifacts"]["ar-thermo.json"]
+    assert result["artifacts"]["averages"] == info["artifacts"]["ar-averages.json"]
+    full = json.loads(ws.artifacts.get(result["artifacts"]["averages"]).read_text())
+    assert full["ar-temp.txt"]["fix"] == "avg" and len(full["ar-temp.txt"]["rows"]) == 10
+    assert ws.runs.get(run.id).status is ExecutionStatus.COMPLETED
+
+
+def test_series_is_the_one_way_to_a_time_series(
+    ws: Workspace, fake_lmp: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """series() reads the full rows back from the parsed artifacts, keyed by
+    column, from the result, from the info, or from the run id; after a cache
+    hit the hashes still resolve, so a later run reads the earlier series."""
+    from foundation.errors import FoundationError
+    from foundation.tasks import series
+
+    monkeypatch.setenv("SLAB_WORKSPACE", str(ws.root))
+    with ws.start_run(name="first") as first:
+        result, info = run_lammps(SCRIPT, atoms=_argon(), label="ar", command=fake_lmp)
+        rows = series(result, 0)
+        assert len(rows) == 11 and rows[0]["Step"] == 0 and rows[-1]["Step"] == 1000
+        assert set(rows[0]) == set(result["tables"][0]["columns"])
+        assert series(result, -1) == rows
+        averaged = series(result, "ar-temp.txt")
+        assert [row["TimeStep"] for row in averaged] == list(range(100, 1100, 100))
+        assert series(info, "ar-temp.txt") == averaged
+        with pytest.raises(FoundationError, match=r"no fix ave/time file 'nope.dat'.*ar-temp.txt"):
+            series(result, "nope.dat")
+        with pytest.raises(FoundationError, match="no thermo table 3; the run printed 1"):
+            series(result, 3)
+    assert series(first.id, 0, label="ar") == rows
+    with ws.start_run(name="second") as second:
+        again, _ = run_lammps(SCRIPT, atoms=_argon(), label="ar", command=fake_lmp)
+        assert series(again, "ar-temp.txt") == averaged
+    assert ws.runs.list_tasks(second.id)[0].cache_hit
+    assert not ws.runs.list_tasks(first.id)[0].cache_hit
+
+
+def test_run_lammps_refuses_an_output_path_with_a_directory(ws: Workspace, fake_lmp: str) -> None:
+    """A fix ave/time file written into the project directory is not an
+    artifact of any run; the script is refused before LAMMPS starts."""
+    for line in (
+        "fix avg all ave/time 10 10 100 c_thermo_temp file /tmp/proj/avg.dat",
+        "dump traj all custom 500 out/ar.dump id type x y z",
+        "write_data results/final.data",
+        "write_restart ~/ar.restart",
+        "restart 1000 chk/ar.restart",
+    ):
+        script = SCRIPT.replace("run 1000\n", f"{line}\nrun 1000\n")
+        with (
+            ws.start_run(name="bad"),
+            pytest.raises(LammpsScriptError, match="a path with a directory component"),
+        ):
+            run_lammps(script, atoms=_argon(), label="ar", command=fake_lmp)
+    # Refused before LAMMPS started: no run kept failure evidence.
+    for run in ws.runs.list_runs():
+        assert not [a for a in ws.runs.list_artifacts(run.id) if "failed" in a.name]

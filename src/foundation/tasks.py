@@ -28,7 +28,7 @@ import shlex
 import shutil
 import tarfile
 import tempfile
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any, Literal
@@ -69,7 +69,7 @@ from slab.lammps import (
     script_scratch_dir,
 )
 from slab.mp import describe_mp, mp_root, structure_path
-from slab.outputs import lammps_thermo
+from slab.outputs import lammps_ave_time, lammps_thermo
 
 
 # cache_extra folds the resolved engine's identity (source + the registry's
@@ -1082,18 +1082,31 @@ def run_lammps(
     structure as ``{label}-structure.data``, every file the script wrote
     (dumps, restarts, data files, ``fix ave/time`` output) as
     ``{label}-<name>`` (or under its own name when that already starts
-    with the label), and the thermo tables parsed to
-    ``{label}-thermo.json``. Nothing is copied into the working
-    directory; read the artifacts back by name. Every byte a dump writes
-    is kept, so size the dump intervals. A script that dies keeps the
-    same files under ``{label}-failed`` names, and the ``ERROR`` lines
-    with one line of context become notes on the failure record.
+    with the label), the thermo tables parsed to ``{label}-thermo.json``,
+    and every ``fix ave/time`` file parsed to ``{label}-averages.json``.
+    Nothing is copied into the working directory; read the artifacts
+    back by name, or a time series with :func:`series`. Every output the
+    script names (``dump``, ``write_data``, ``write_restart``,
+    ``restart``, ``fix ... file``) is a bare basename, so the run keeps
+    it; a path with a directory component is refused before anything
+    runs. Every byte a dump writes is kept, so size the dump intervals.
+    A script that dies keeps the same files under ``{label}-failed``
+    names, and the ``ERROR`` lines with one line of context become notes
+    on the failure record.
 
     Returns ``(result, info)``. *result* is the physics: ``thermo`` (the
     last row of the last thermo table, keyed by column), ``tables`` (one
-    entry per table: columns, first and last row, row count, and the loop
-    line's steps, atoms, and seconds), ``steps`` (the sum over loops),
-    and ``wall_time`` (LAMMPS's own total). *info* is the machine side:
+    entry per table: ``columns``, ``first`` and ``last`` row, ``n_rows``,
+    the ``loop`` line's steps, atoms, and seconds, or None for a table
+    without one, and ``tail`` statistics), ``averages`` (one entry per
+    ``fix ave/time`` file the script wrote, keyed by basename, in the
+    same shape as a table), ``steps`` (the sum over loops), ``seconds``
+    (the sum of the loop lines' seconds), ``atoms`` (the last loop
+    line's count), ``rate`` (``steps_per_s`` and ``atom_steps_per_s``
+    from the loop lines), ``wall_time`` (LAMMPS's own text, for the
+    report, never for arithmetic), ``label``, and ``artifacts`` (the
+    hashes of the parsed ``thermo`` and ``averages`` files, which
+    :func:`series` reads). *info* is the machine side:
     ``build`` (``cpu``, ``gpu``, or an alias name), ``command``, ``argv``
     (the exact argument vector that ran), ``version``, ``setup``,
     ``kokkos`` (what the log says KOKKOS did:
@@ -1124,6 +1137,7 @@ def run_lammps(
         )
     if not script.strip():
         raise LammpsScriptError("the script is empty")
+    _check_output_paths(script)
     staged = _staged_lammps_files(files, script)
     types = _lammps_types(atoms, specorder, script)
     build = lammps_build(engine)
@@ -1167,6 +1181,9 @@ def run_lammps(
         tables = lammps_thermo(outcome.log)
         thermo_path = scratch / "thermo.json"
         thermo_path.write_text(_json_dumps(tables), encoding="utf-8")
+        averages = _ave_time_files(produced)
+        averages_path = scratch / "averages.json"
+        averages_path.write_text(_json_dumps(averages), encoding="utf-8")
         artifact_hashes: dict[str, str] = {}
         kept_files: list[str] = []
         if active is not None:
@@ -1174,6 +1191,7 @@ def run_lammps(
                 (scratch / INPUT_NAME, f"{name}.in"),
                 (scratch / LOG_NAME, f"{name}.log"),
                 (thermo_path, f"{name}-thermo.json"),
+                (averages_path, f"{name}-averages.json"),
             ]
             if atoms is not None:
                 to_keep.append((scratch / STRUCTURE_DATA, f"{name}-{STRUCTURE_DATA}"))
@@ -1193,11 +1211,23 @@ def run_lammps(
         shutil.rmtree(scratch, ignore_errors=True)
     warnings = _lammps_warnings(outcome.log)
     wall = _LMP_WALL.search(outcome.log)
+    loops = [table["loop"] for table in tables if table.get("loop")]
     result: dict[str, Any] = {
+        "label": name,
         "thermo": _last_thermo_row(tables),
         "tables": [_table_summary(table) for table in tables],
-        "steps": sum(int(table["loop"]["steps"]) for table in tables if table.get("loop")),
+        "averages": {
+            basename: _table_summary(parsed) for basename, parsed in averages.items()
+        },
+        "steps": sum(int(loop["steps"]) for loop in loops),
+        "seconds": sum(float(loop["seconds"]) for loop in loops),
+        "atoms": int(loops[-1]["atoms"]) if loops else None,
+        "rate": _lammps_rate(loops),
         "wall_time": wall.group(1) if wall else None,
+        "artifacts": {
+            "thermo": artifact_hashes.get(f"{name}-thermo.json"),
+            "averages": artifact_hashes.get(f"{name}-averages.json"),
+        },
     }
     info: dict[str, Any] = {
         "engine": "lammps",
@@ -1294,16 +1324,29 @@ def _last_thermo_row(tables: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _table_summary(table: dict[str, Any]) -> dict[str, Any]:
-    """One thermo table, bounded: its ends, its loop line, and tail statistics.
+    """One table, bounded: its ends, its row count, its loop line, and tail statistics.
 
-    The tail is the last half of the rows (at least one), the span a
-    ``@check`` judges an equilibrated average on; the full table is the
-    ``-thermo.json`` artifact.
+    Serves a thermo table and a parsed ``fix ave/time`` file alike. The
+    tail is the last half of the rows (at least one), the span a
+    ``@check`` judges an equilibrated average on. ``n_rows`` is a count;
+    the rows themselves are the ``-thermo.json`` or ``-averages.json``
+    artifact, read with :func:`series`. ``loop`` is None for a table
+    without a loop line (an averages file, or a table LAMMPS never
+    finished).
+
+    Examples:
+        >>> summary = _table_summary(
+        ...     {"columns": ["Step", "Temp"], "rows": [[0, 300.0], [10, 310.0]], "loop": None}
+        ... )
+        >>> summary["n_rows"], summary["first"], summary["last"], summary["loop"]
+        (2, {'Step': 0, 'Temp': 300.0}, {'Step': 10, 'Temp': 310.0}, None)
+        >>> summary["tail"]["n_rows"], summary["tail"]["mean"]["Temp"]
+        (1, 310.0)
     """
     columns = list(table["columns"])
     rows = table["rows"]
     tail_rows = rows[max(1, len(rows) // 2) :] if len(rows) > 1 else rows
-    tail: dict[str, Any] = {"rows": len(tail_rows), "mean": {}, "std": {}}
+    tail: dict[str, Any] = {"n_rows": len(tail_rows), "mean": {}, "std": {}}
     if tail_rows:
         block = np.asarray(tail_rows, dtype=float)
         for index, column in enumerate(columns):
@@ -1313,10 +1356,160 @@ def _table_summary(table: dict[str, Any]) -> dict[str, Any]:
         "columns": columns,
         "first": dict(zip(columns, rows[0], strict=False)) if rows else {},
         "last": dict(zip(columns, rows[-1], strict=False)) if rows else {},
-        "rows": len(rows),
+        "n_rows": len(rows),
         "loop": table.get("loop"),
         "tail": tail,
     }
+
+
+def _lammps_rate(loops: list[dict[str, Any]]) -> dict[str, float | None]:
+    """The step rate the loop lines give: steps and atom-steps per second.
+
+    Examples:
+        >>> _lammps_rate([{"steps": 1000, "atoms": 108, "seconds": 0.5}])
+        {'steps_per_s': 2000.0, 'atom_steps_per_s': 216000.0}
+        >>> _lammps_rate([])
+        {'steps_per_s': None, 'atom_steps_per_s': None}
+    """
+    seconds = sum(float(loop["seconds"]) for loop in loops)
+    if not loops or seconds <= 0:
+        return {"steps_per_s": None, "atom_steps_per_s": None}
+    steps = sum(int(loop["steps"]) for loop in loops)
+    atom_steps = sum(int(loop["steps"]) * int(loop["atoms"]) for loop in loops)
+    return {"steps_per_s": steps / seconds, "atom_steps_per_s": atom_steps / seconds}
+
+
+def _ave_time_files(produced: Sequence[Path]) -> dict[str, dict[str, Any]]:
+    """Every ``fix ave/time`` file among *produced*, parsed, keyed by basename."""
+    parsed: dict[str, dict[str, Any]] = {}
+    for path in produced:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        try:
+            parsed[path.name] = lammps_ave_time(text)
+        except ValueError:
+            continue
+    return parsed
+
+
+#: Output commands and the position of the file name they take.
+_OUTPUT_COMMANDS = {"dump": 5, "write_data": 1, "write_restart": 1, "restart": 2, "write_dump": 3}
+
+
+def _check_output_paths(script: str) -> None:
+    """Refuse a script whose output names carry a directory component.
+
+    The run keeps what the script writes beside it, by basename. A
+    ``dump``, ``write_data``, ``write_restart``, ``restart``,
+    ``write_dump``, or ``fix ... file`` that names a path elsewhere writes
+    outside the scratch, where nothing keeps it and the analysis then
+    rests on a file no run owns.
+
+    Examples:
+        >>> _check_output_paths("dump d all custom 100 traj.dump id type x y z\\nrun 10\\n")
+        >>> _check_output_paths("fix a all ave/time 1 1 10 c_t file /home/me/proj/avg.dat\\n")
+        Traceback (most recent call last):
+        ...
+        slab.errors.LammpsScriptError: line 1 writes '/home/me/proj/avg.dat', ...
+        >>> _check_output_paths("write_data out/final.data\\n")
+        Traceback (most recent call last):
+        ...
+        slab.errors.LammpsScriptError: line 1 writes 'out/final.data', ...
+    """
+    for number, raw in enumerate(script.splitlines(), start=1):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        tokens = line.split()
+        command = tokens[0]
+        targets: list[str] = []
+        if command in _OUTPUT_COMMANDS:
+            position = _OUTPUT_COMMANDS[command]
+            if len(tokens) > position:
+                targets.append(tokens[position])
+            if command == "restart":
+                targets.extend(tokens[position + 1 : position + 2])
+        elif command == "fix" and "file" in tokens[3:]:
+            index = tokens.index("file", 3)
+            if index + 1 < len(tokens):
+                targets.append(tokens[index + 1])
+        for target in targets:
+            if "/" in target or target.startswith("~"):
+                raise LammpsScriptError(
+                    f"line {number} writes {target!r}, a path with a directory "
+                    f"component; outputs are bare basenames so the run keeps them, "
+                    f"and you read them back as artifacts ({command} ... "
+                    f"{Path(target).name})"
+                )
+
+
+def series(
+    source: Mapping[str, Any] | str, name: int | str, *, label: str | None = None
+) -> list[dict[str, Any]]:
+    """The full rows of a thermo table or a ``fix ave/time`` file, keyed by column.
+
+    The one documented way to a time series from ``run_lammps``: a thermo
+    table by index (``0``, ``-1``) or an averages file by basename
+    (``"msd.dat"``), read from the ``-thermo.json`` or ``-averages.json``
+    artifact the run kept. *source* is the ``result`` dict (its
+    ``artifacts`` entry names the two parsed files, which a cache hit
+    still resolves), the ``info`` dict, or a run id, with *label* for a
+    run whose label was not ``lammps``. Each row is a dict keyed by
+    column, so a slope or a fit reads ``[row["Temp"] for row in rows]``
+    and never parses a file. A vector-mode averages file has no scalar
+    rows; read that artifact itself.
+
+    Examples:
+        >>> series({"artifacts": {}}, 0)
+        Traceback (most recent call last):
+        ...
+        foundation.errors.FoundationError: no parsed thermo artifact on this source; ...
+    """
+    import json
+
+    kind = "averages" if isinstance(name, str) else "thermo"
+    with _training_stores() as (runs, artifacts):
+        if isinstance(source, str):
+            ref = runs.get_artifact(source, f"{label or 'lammps'}-{kind}.json")
+            digest: str | None = ref.hash
+        else:
+            hashes = source.get("artifacts") or {}
+            digest = hashes.get(kind)
+            if digest is None:
+                digest = next(
+                    (value for key, value in hashes.items() if key.endswith(f"-{kind}.json")),
+                    None,
+                )
+        if digest is None:
+            raise FoundationError(
+                f"no parsed {kind} artifact on this source; pass the result or info dict "
+                f"a run_lammps call returned inside a run, or the run id with label="
+            )
+        data = json.loads(artifacts.get(digest).read_text(encoding="utf-8"))
+    if isinstance(name, str):
+        entry = data.get(name)
+        if entry is None:
+            raise FoundationError(
+                f"no fix ave/time file {name!r} in this run's averages; "
+                f"the files are: {', '.join(sorted(data)) or 'none'}"
+            )
+        if entry.get("mode") == "vector":
+            raise FoundationError(
+                f"{name!r} is a vector-mode ave/time file; its blocks are in the "
+                f"artifact itself, read it with read_artifact"
+            )
+        table = entry
+    else:
+        try:
+            table = data[name]
+        except IndexError:
+            raise FoundationError(
+                f"no thermo table {name}; the run printed {len(data)} table(s)"
+            ) from None
+    columns = list(table["columns"])
+    return [dict(zip(columns, row, strict=False)) for row in table["rows"]]
 
 
 def _json_dumps(value: Any) -> str:

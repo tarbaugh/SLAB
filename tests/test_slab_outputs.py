@@ -173,3 +173,34 @@ def test_digest_never_reads_a_script_as_a_lammps_log() -> None:
     # The ASE-driven capture opens with its echoed commands and still digests.
     text = (DATA / "lammps-cu-relax-final.log").read_text()
     assert digest("lammps-cu-relax-final.log", text) is not None
+
+
+def test_lammps_ave_time_reads_the_scalar_and_vector_captures() -> None:
+    """Real files a LAMMPS 22 Jul 2025 build wrote: a scalar `fix ave/time` of
+    temperature and pressure every 100 steps over 1500 steps, and a vector
+    one of a 10-bin `compute rdf`."""
+    from slab.outputs import lammps_ave_time, lammps_ave_time_digest
+
+    scalar = (DATA / "lammps-ar-ave-time-scalar.dat").read_text()
+    parsed = lammps_ave_time(scalar)
+    assert parsed["fix"] == "avg" and parsed["mode"] == "scalar"
+    assert parsed["columns"] == ["TimeStep", "c_thermo_temp", "c_thermo_press"]
+    assert len(parsed["rows"]) == 15
+    assert parsed["rows"][0] == [100, 168.698, 4991.83]
+    assert parsed["rows"][-1][0] == 1500
+    shown = lammps_ave_time_digest("probe-avg.dat", scalar)
+    assert shown.splitlines()[0] == (
+        "fix ave/time digest: probe-avg.dat (fix avg, scalar mode, 15 rows)"
+    )
+    assert "first: 100 168.698 4991.83" in shown
+    assert shown.splitlines()[-1].startswith("last:  1500 ")
+    assert digest("probe-avg.dat", scalar) == shown  # the dispatcher recognises the file
+
+    vector = (DATA / "lammps-ar-ave-time-vector.dat").read_text()
+    parsed = lammps_ave_time(vector)
+    assert parsed["fix"] == "vec" and parsed["mode"] == "vector"
+    assert parsed["columns"][:2] == ["Row", "c_rdf[1]"] and parsed["rows"] == []
+    shown = digest("vec.dat", vector)
+    assert shown is not None
+    assert "(fix vec, vector mode, 2 block(s); the blocks are in the file itself)" in shown
+    assert "columns: Row c_rdf[1] c_rdf[2] c_rdf[3]" in shown

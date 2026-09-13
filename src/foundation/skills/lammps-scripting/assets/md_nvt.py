@@ -48,6 +48,7 @@ thermo_style custom step temp pe ke etotal press vol
 thermo_modify flush yes
 dump traj all custom {DUMP_EVERY} {LABEL}.dump id type x y z vx vy vz
 dump_modify traj sort id
+fix avg all ave/time 10 10 {THERMO_EVERY} c_thermo_temp c_thermo_press file {LABEL}-avg.dat
 
 run {STEPS}
 write_data {LABEL}-final.data
@@ -58,14 +59,20 @@ table = result["tables"][-1]
 final = result["thermo"]
 tail = table["tail"]
 print(
-    f"LAMMPS {info['version']}: {result['steps']} steps, "
-    f"{table['loop']['atoms']} atoms, {table['loop']['seconds']:.2f} s"
+    f"LAMMPS {info['version']}: {result['steps']} steps, {result['atoms']} atoms, "
+    f"{result['seconds']:.2f} s, {result['rate']['steps_per_s']:.0f} steps/s, "
+    f"{result['rate']['atom_steps_per_s']:.3g} atom-steps/s"
 )
 print(
-    f"tail of {tail['rows']} rows: T={tail['mean']['Temp']:.1f} K "
+    f"tail of {tail['n_rows']} rows: T={tail['mean']['Temp']:.1f} K "
     f"(std {tail['std']['Temp']:.1f}), PotEng={tail['mean']['PotEng']:.3f} eV"
 )
 print(f"final row: step {final['Step']}, T={final['Temp']:.1f} K, Press={final['Press']:.0f} bar")
+average = result["averages"][f"{LABEL}-avg.dat"]
+print(
+    f"fix ave/time: {average['n_rows']} rows of {average['columns']}, "
+    f"tail mean T={average['tail']['mean']['c_thermo_temp']:.1f} K"
+)
 print(f"artifacts: {sorted(info['artifacts'])}")
 
 
