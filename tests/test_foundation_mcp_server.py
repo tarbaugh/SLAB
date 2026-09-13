@@ -539,7 +539,9 @@ def test_list_engines_reports_budget_and_free(root: Path, no_gpus: None) -> None
     server = build_server(root)
     answer = _call(server, "list_engines")
     assert answer["budget"]["gpus"] == 0 and answer["budget"]["cpus"] >= 1
-    assert answer["free"] == answer["budget"]
+    assert answer["budget"]["gpu_source"] == "cuda_visible_devices"
+    assert answer["budget"]["gpu_ids"] == []
+    assert answer["free"] == {"cpus": answer["budget"]["cpus"], "gpus": 0}
     with Workspace(root) as ws:
         ws.reserve(ntasks=1, holder_pid=os.getpid())
     after = _call(server, "list_engines")

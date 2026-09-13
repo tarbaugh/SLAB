@@ -371,6 +371,31 @@ a job within the same declared caps. `list_engines` reports each
 partition's `nodes`, `ntasks_per_node`, `cpus_per_task`, `mem`, `gres`,
 and `time_limit`, so the agent knows the caps before it submits.
 
+### The GPU budget is the allocation
+
+Inside a job, the gpu ids a process may use are the ones the scheduler
+gave that job, never the node's. SLAB reads them in this order and stops
+at the first that answers: `CUDA_VISIBLE_DEVICES` as written, then
+`SLURM_JOB_GPUS` or `SLURM_STEP_GPUS`, then `SLURM_GPUS_ON_NODE` or
+`SLURM_GPUS` as a count. A job that sets none of them holds no gpu.
+SLAB probes `nvidia-smi` for the ids only outside a job, because inside
+one the probe lists every device on the node, the ones other jobs hold
+included. The SLURM id variables hold the node's global ids. When the
+process can see more devices than the job holds, there is no cgroup
+device constraint and the global ids are the usable ones, so they pass
+through as written. When it sees exactly the job's devices, the job
+sees them renumbered from zero, and so does the budget. Every listing
+of the budget names the source of its gpu ids as `gpu_source`, and the
+doctor prints the budget with each device `nvidia-smi` lists. A device
+outside the allocation is marked, because a launch that named it would
+die in the driver within seconds. On a laptop without a gpu the two
+rows read:
+
+```text
+[=] gpu budget: 0 gpu(s), ids none (source: none)
+[=] gpus: nvidia-smi not found
+```
+
 ## A cluster maintainer's checklist
 
 1. Install SLAB into a shared environment.

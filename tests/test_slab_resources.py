@@ -33,6 +33,10 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "CUDA_VISIBLE_DEVICES",
         "SLURM_JOB_GPUS",
         "SLURM_STEP_GPUS",
+        "SLURM_GPUS_ON_NODE",
+        "SLURM_GPUS",
+        "SLURM_JOB_ID",
+        "SLAB_GPU_SOURCE",
         "SLURM_NTASKS",
         "SLURM_CPUS_PER_TASK",
     ):
@@ -46,19 +50,75 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_budget_gpus_precedence(clean_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
     """CUDA_VISIBLE_DEVICES first (empty means none), then SLURM's job or step
-    gpus, then the probe, then none. SLURM's variables hold the node's global
-    ids, which a cgroup-constrained job sees renumbered from zero, so only
-    their count is taken and the ids become 0, 1, ..."""
+    gpus, then a SLURM count, then the probe outside a job, then none. SLURM's
+    id variables hold the node's global ids: they pass through when the probe
+    sees more devices than the job holds (no cgroup constraint), and are
+    renumbered from zero when it sees exactly the job's devices."""
     monkeypatch.setattr("slab.resources._probed_gpus", lambda: ("0", "1", "2", "3"))
-    assert budget().gpus == ("0", "1", "2", "3")
+    assert (budget().gpus, budget().gpu_source) == (("0", "1", "2", "3"), "probed")
     monkeypatch.setenv("SLURM_STEP_GPUS", "2,3")
-    assert budget().gpus == ("0", "1")
+    assert (budget().gpus, budget().gpu_source) == (("2", "3"), "slurm_job_gpus")
     monkeypatch.setenv("SLURM_JOB_GPUS", "4-6")
-    assert budget().gpus == ("0", "1", "2")
+    assert budget().gpus == ("4", "5", "6")
+    monkeypatch.setattr("slab.resources._probed_gpus", lambda: ("0", "1", "2"))
+    assert budget().gpus == ("0", "1", "2")  # constrained: the probe sees the job's three
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
-    assert budget().gpus == ("1",)
+    assert (budget().gpus, budget().gpu_source) == (("1",), "cuda_visible_devices")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
-    assert budget().gpus == ()
+    assert (budget().gpus, budget().gpu_source) == ((), "cuda_visible_devices")
+
+
+def test_the_gpu_budget_is_the_allocation_inside_a_job(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The campaign case: a job holds one of the node's two devices without a
+    cgroup constraint, so the probe lists both. The id passes through as the
+    scheduler wrote it, and a job that names no gpu variable holds none."""
+    monkeypatch.setattr("slab.resources._probed_gpus", lambda: ("0", "1"))
+    monkeypatch.setenv("SLURM_JOB_ID", "4242")
+    monkeypatch.setenv("SLURM_JOB_GPUS", "1")
+    assert (budget().gpus, budget().gpu_source) == (("1",), "slurm_job_gpus")
+    monkeypatch.delenv("SLURM_JOB_GPUS")
+    assert (budget().gpus, budget().gpu_source) == ((), "none")
+    monkeypatch.setenv("SLURM_GPUS_ON_NODE", "1")
+    assert (budget().gpus, budget().gpu_source) == (("0",), "slurm_count")
+    monkeypatch.delenv("SLURM_GPUS_ON_NODE")
+    monkeypatch.setenv("SLURM_GPUS", "a100:2")
+    assert (budget().gpus, budget().gpu_source) == (("0", "1"), "slurm_count")
+    # The sandbox prologue set CUDA_VISIBLE_DEVICES and says where it got the ids.
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    monkeypatch.setenv("SLAB_GPU_SOURCE", "slurm_job_gpus")
+    assert (budget().gpus, budget().gpu_source) == (("1",), "slurm_job_gpus")
+
+
+def test_device_status_reads_nvidia_smi_or_says_it_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess
+
+    from slab.resources import device_status
+
+    monkeypatch.setattr("slab.resources.shutil.which", lambda name: None)
+    assert device_status() is None
+    monkeypatch.setattr("slab.resources.shutil.which", lambda name: "/usr/bin/nvidia-smi")
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "0, Default, 1234 MiB\n1, Default, 0 MiB\n", "")
+
+    monkeypatch.setattr("slab.resources.subprocess.run", fake_run)
+    assert device_status() == [
+        {"id": "0", "mode": "Default", "memory_used": "1234 MiB"},
+        {"id": "1", "mode": "Default", "memory_used": "0 MiB"},
+    ]
+    assert calls[0][1] == "--query-gpu=index,compute_mode,memory.used"
+
+    def failing_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 9, "", "NVIDIA-SMI has failed")
+
+    monkeypatch.setattr("slab.resources.subprocess.run", failing_run)
+    assert device_status() == []
 
 
 def test_budget_cpus_are_the_affinity_mask_or_the_machine(clean_env: None) -> None:

@@ -227,6 +227,54 @@ def free_resources(ws: Workspace) -> dict[str, Any]:
     return answer
 
 
+def budget_counts(
+    cpus: Sequence[int], gpus: Sequence[str], gpu_source: str
+) -> dict[str, Any]:
+    """The budget as a listing shows it: two counts, the gpu ids, and their source.
+
+    Examples:
+        >>> budget_counts((0, 1, 2, 3), ("1",), "slurm_job_gpus")
+        {'cpus': 4, 'gpus': 1, 'gpu_ids': ['1'], 'gpu_source': 'slurm_job_gpus'}
+    """
+    return {
+        "cpus": len(cpus),
+        "gpus": len(gpus),
+        "gpu_ids": list(gpus),
+        "gpu_source": gpu_source,
+    }
+
+
+def gpu_lines(gpu_ids: Sequence[str]) -> list[str]:
+    """One line per budget gpu with the memory it has in use, per ``nvidia-smi``.
+
+    An occupied device shows before a launch holds it. Nothing for an
+    empty budget; one line saying so when ``nvidia-smi`` is not on the
+    path or lists no device.
+
+    Examples:
+        >>> gpu_lines(())
+        []
+    """
+    from slab.resources import device_status
+
+    if not gpu_ids:
+        return []
+    devices = device_status()
+    if devices is None:
+        return ["  gpus: nvidia-smi not found"]
+    by_id = {device["id"]: device for device in devices}
+    lines: list[str] = []
+    for gpu_id in gpu_ids:
+        device = by_id.get(gpu_id)
+        if device is None:
+            lines.append(f"  gpu {gpu_id}: not listed by nvidia-smi")
+        else:
+            lines.append(
+                f"  gpu {gpu_id}: {device['memory_used']} used, mode {device['mode']}"
+            )
+    return lines
+
+
 def free_line(answer: dict[str, Any]) -> str:
     """The one-line trailer: ``free now: N cpu(s), M gpu(s)``.
 

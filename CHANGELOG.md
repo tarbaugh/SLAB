@@ -16,6 +16,21 @@ All notable changes to SLAB, newest first. Dates are commit dates on
   the lammps-scripting skill put the yaml line after each
   `thermo_style` line, and `slab doctor` says whether the plain build
   accepts it.
+- The gpu budget is the allocation, and a device error is quoted.
+  Inside a job `slab.resources.budget` reads `CUDA_VISIBLE_DEVICES`,
+  else `SLURM_JOB_GPUS` or `SLURM_STEP_GPUS` (the ids as written when
+  the node shows more devices than the job holds, renumbered from zero
+  under a cgroup constraint), else a SLURM count, else none; it probes
+  `nvidia-smi` only outside a job. `Budget` gains `gpu_source`, which
+  `list_engines`, `free_resources`, and `slab doctor` print, and the
+  doctor lists each device `nvidia-smi` shows, marking one outside the
+  allocation. The sandbox prologue resolves the ids in the same order
+  and exports `SLAB_GPU_SOURCE`. `free_resources` adds one line per
+  budget gpu with its memory in use. `run_lammps_script` reads the
+  screen's error lines when the log holds none, and a Kokkos abort or
+  a CUDA error counts as one; a CUDA device error adds a note to the
+  failure record naming the gpu ids the launch held, the budget, and
+  its source.
 - Mason and the MCP server dry-run a script on request and say when a
   launch skipped it. `launch_workflow` takes `dry_run`; the session
   records a `dry_run` event with the script text's digest, and a real

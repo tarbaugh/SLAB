@@ -1647,24 +1647,46 @@ def _tool_lines(snapshots: dict[str, SetupSnapshot] | None) -> list[str]:
 
 
 #: Prologue lines that compute ``SANDBOX_GPUS``, the ``CUDA_VISIBLE_DEVICES``
-#: the container gets. ``CUDA_VISIBLE_DEVICES`` passes through as set (an
-#: empty value means none). Otherwise ``SLURM_JOB_GPUS`` decides, but it
-#: holds the node's global ids (``2,3``, or a range ``0-1``), and a job
-#: under cgroup device constraints sees its devices renumbered from zero,
-#: so only its count is used and the ids become ``0,1,...``. POSIX shell,
-#: so the prologue needs no python of its own.
+#: the container gets, and ``SANDBOX_GPU_SOURCE``, where the ids came from.
+#: The order is the one :func:`slab.resources.budget` documents, so the
+#: budget inside the container agrees with the job outside it.
+#: ``CUDA_VISIBLE_DEVICES`` passes through as set (an empty value means
+#: none). Else ``SLURM_JOB_GPUS`` decides. It holds the node's global ids
+#: (``2,3``, or a range ``0-1``): when ``nvidia-smi -L`` lists more devices
+#: than the job holds there is no cgroup device constraint and the global
+#: ids are the usable ones, so they pass through, ranges expanded; when it
+#: lists exactly the job's devices (or is missing) the job sees them
+#: renumbered from zero, so the ids become ``0,1,...``. Else
+#: ``SLURM_GPUS_ON_NODE`` is a count. Else none: a job that names no gpu
+#: never probes the node. POSIX shell, so the prologue needs no python of
+#: its own.
 GPU_ID_LINES = (
-    'if [ "${CUDA_VISIBLE_DEVICES+set}" = set ]; then SANDBOX_GPUS="$CUDA_VISIBLE_DEVICES"; else',
-    '  SANDBOX_GPUS=""; _n=0',
-    '  for _entry in $(printf \'%s\' "${SLURM_JOB_GPUS:-}" | tr \',\' \' \'); do',
+    'if [ "${CUDA_VISIBLE_DEVICES+set}" = set ]; then',
+    '  SANDBOX_GPUS="$CUDA_VISIBLE_DEVICES"; SANDBOX_GPU_SOURCE=cuda_visible_devices',
+    'elif [ -n "${SLURM_JOB_GPUS:-}" ]; then',
+    '  SANDBOX_GPU_SOURCE=slurm_job_gpus; _ids=""; _n=0',
+    "  for _entry in $(printf '%s' \"$SLURM_JOB_GPUS\" | tr ',' ' '); do",
     '    case "$_entry" in',
-    "      *-*) _n=$((_n + ${_entry#*-} - ${_entry%-*} + 1)) ;;",
-    "      *) _n=$((_n + 1)) ;;",
+    '      *-*) _lo=${_entry%-*}; _hi=${_entry#*-}',
+    '           while [ "$_lo" -le "$_hi" ]; do _ids="${_ids:+$_ids,}$_lo"; _n=$((_n + 1));'
+    " _lo=$((_lo + 1)); done ;;",
+    '      *) _ids="${_ids:+$_ids,}$_entry"; _n=$((_n + 1)) ;;',
     "    esac",
     "  done",
-    '  _i=0; while [ "$_i" -lt "$_n" ]; do SANDBOX_GPUS="${SANDBOX_GPUS:+$SANDBOX_GPUS,}$_i";'
+    "  _seen=$(nvidia-smi -L 2>/dev/null | grep -c '^GPU ' || true)",
+    '  if [ "${_seen:-0}" -gt "$_n" ]; then SANDBOX_GPUS="$_ids"; else',
+    '    SANDBOX_GPUS=""; _i=0',
+    '    while [ "$_i" -lt "$_n" ]; do SANDBOX_GPUS="${SANDBOX_GPUS:+$SANDBOX_GPUS,}$_i";'
     " _i=$((_i + 1)); done",
+    "  fi",
+    'elif [ -n "${SLURM_GPUS_ON_NODE:-}" ]; then',
+    '  SANDBOX_GPU_SOURCE=slurm_count; SANDBOX_GPUS=""; _i=0',
+    '  while [ "$_i" -lt "${SLURM_GPUS_ON_NODE##*:}" ]; do'
+    ' SANDBOX_GPUS="${SANDBOX_GPUS:+$SANDBOX_GPUS,}$_i"; _i=$((_i + 1)); done',
+    "else",
+    '  SANDBOX_GPUS=""; SANDBOX_GPU_SOURCE=none',
     "fi",
+    'echo "gpu ids for the container: ${SANDBOX_GPUS:-none} (source: $SANDBOX_GPU_SOURCE)"',
 )
 
 
@@ -1767,8 +1789,11 @@ def _gpu_lines(gpus: int | None, gres: str | None) -> list[str]:
     held = f"{gpus} GPU(s)" if gpus is not None else "a GPU"
     return [
         f"- GPU: the host driver stack is mounted (--nv); the job holds {held} (gres {gres}).",
-        "  Their ids are the ones in CUDA_VISIBLE_DEVICES, exported from the job;",
-        "  `list_engines` lists the budget, and a launch holds some with gpus=.",
+        "  Their ids are the ones in CUDA_VISIBLE_DEVICES, resolved by the job's",
+        "  prologue from the scheduler's allocation (CUDA_VISIBLE_DEVICES as set,",
+        "  else SLURM_JOB_GPUS, else SLURM_GPUS_ON_NODE, else none; never a probe",
+        "  of the node). The budget is the allocation: `list_engines` lists the",
+        "  ids and their source (gpu_source), and a launch holds some with gpus=.",
     ]
 
 
@@ -2009,11 +2034,13 @@ def render_sandbox_script(
             # --cleanenv also strips the GPU ids and the thread count the
             # scheduler set, and the budget inside reads exactly these:
             # CUDA_VISIBLE_DEVICES as the prologue computed it (GPU_ID_LINES:
-            # as set, else one id per device SLURM_JOB_GPUS names, numbered
-            # from 0), SLURM_CPUS_PER_TASK for the default thread count of
-            # an unsized launch. Without them every launch would see no GPU
-            # and one thread.
+            # as set, else the ids SLURM_JOB_GPUS names, else a SLURM count,
+            # else none), SLAB_GPU_SOURCE so the budget inside reports where
+            # the prologue got them, SLURM_CPUS_PER_TASK for the default
+            # thread count of an unsized launch. Without them every launch
+            # would see no GPU and one thread.
             '--env CUDA_VISIBLE_DEVICES="$SANDBOX_GPUS"',
+            '--env SLAB_GPU_SOURCE="$SANDBOX_GPU_SOURCE"',
             '--env SLURM_CPUS_PER_TASK="${SLURM_CPUS_PER_TASK:-1}"',
             # OpenMPI inside the namespace: there is no ssh and no
             # scheduler, so component selection must not go looking for
