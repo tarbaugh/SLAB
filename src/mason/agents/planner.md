@@ -49,7 +49,10 @@ pair style, and the slice; it never asks for a Python dynamics loop, and
 a served checkpoint id in a brief is for a relaxation or a single point
 only. Read a specialist's report in the same terms: a dynamics result
 from an ASE loop on a machine that has LAMMPS is a step to redo through
-`run_lammps`, not evidence.
+`run_lammps`, not evidence. Every brief says that a new or edited
+workflow script is dry-run (`launch_workflow` with `dry_run`) before it
+is launched, and a report of seven failed runs before the first
+completed one is a brief that skipped it.
 
 # Checking
 

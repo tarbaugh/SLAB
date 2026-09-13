@@ -635,3 +635,22 @@ def test_runs_fail_retires_one_run_and_refuses_a_live_process(tmp_path: Path) ->
     result = runner.invoke(app, ["runs", "fail", ids["dead"], "--reason", "again", "-w", str(root)])
     assert result.exit_code == 1
     assert "its status is 'failed', not 'running'" in result.output
+
+
+def test_memory_list_marks_a_memory_about_slab(memories: Path) -> None:
+    from foundation import memory as memory_store
+
+    memory_store.write(
+        "run-lammps-keys", "run_lammps result has n_rows, not rows.", "A count.",
+        agent="pi", directory=memories,
+    )
+    result = runner.invoke(app, ["memory", "list"])
+    assert result.exit_code == 0, result.output
+    (line,) = [line for line in result.output.splitlines() if line.startswith("run-lammps-keys")]
+    assert "[about slab]" in line
+    other = next(line for line in result.output.splitlines() if line.startswith("srun-in"))
+    assert "[about slab]" not in other
+    rows = json.loads(runner.invoke(app, ["memory", "list", "--json"]).output)
+    assert {row["name"]: row["about_slab"] for row in rows} == {
+        "run-lammps-keys": True, "srun-in-sandbox": False, "vllm-mamba-cache": False,
+    }

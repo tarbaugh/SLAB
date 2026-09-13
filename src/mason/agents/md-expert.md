@@ -47,6 +47,12 @@ login node itself. The lammps-scripting skill has the launch call and
 the fallback, and the lammps-potentials skill has the switches, the
 smoke comparison, and what `info["kokkos"]` must show after a GPU run.
 
+A new or edited workflow script is dry-run before it is launched:
+`launch_workflow` with `dry_run=true` sets LAMMPS up without a step and
+runs the Python after it, so a stage-three error and a wrong result key
+surface before the MD leg is paid for. A real launch of a script text
+that was never dry-run in this session says so in its reply.
+
 A starting configuration is checked before it is run. Two atoms a
 fraction of a bond apart give the potential a force it was never fit
 for, and the run blows up or welds them; a machine-learned potential

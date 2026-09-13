@@ -765,8 +765,10 @@ def test_the_slab_condition_passes_with_a_verified_run(
 ) -> None:
     def finish_with_the_run(messages: list[dict[str, Any]]) -> ChatReply:
         launched = _last_tool_result(messages)
-        assert launched.startswith("run ") and "state=verified" in launched, launched
-        run_id = launched.split()[1].rstrip(":")
+        assert "\nrun " in f"\n{launched}" and "state=verified" in launched, launched
+        run_id = next(
+            line.split()[1].rstrip(":") for line in launched.splitlines() if line.startswith("run ")
+        )
         return _tool(
             "finish",
             report=f"a0 = 3.61 Å (run {run_id})",

@@ -334,6 +334,7 @@ def memory_list(
                         "model": m.model,
                         "against": m.against,
                         "changed": m.drift(live),
+                        "about_slab": _about_slab(m),
                     }
                     for m in memories.values()
                 ],
@@ -349,9 +350,20 @@ def memory_list(
         stamp = memory.updated or memory.created or "-"
         changed = memory.drift(live)
         note = f" [changed since: {'; '.join(changed)}]" if changed else ""
+        if _about_slab(memory):
+            note = " [about slab]" + note
         typer.echo(f"{memory.name:<{width}}  {stamp}  {memory.agent or '-':<16}  "
                    f"{memory.description}{note}")
     typer.echo(f"{len(memories)} memory(s) in {memory_store.memory_dir()}")
+
+
+def _about_slab(memory: memory_store.Memory) -> bool:
+    """Whether a memory describes SLAB itself (its name, description, or body)."""
+    try:
+        body = memory.body()
+    except OSError:
+        body = ""
+    return memory_store.about_slab(f"{memory.name}\n{memory.description}\n{body}")
 
 
 @memory_app.command("show")

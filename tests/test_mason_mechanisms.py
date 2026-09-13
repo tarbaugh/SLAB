@@ -100,6 +100,14 @@ def _call(tool: str, **arguments: object) -> ToolCall:
 # -- the registry -------------------------------------------------------------
 
 
+
+def _run_id(answer: str) -> str:
+    """The run id a launch_workflow reply names, after any warning line."""
+    for line in answer.splitlines():
+        if line.startswith("run ") and ":" in line:
+            return line.split()[1].rstrip(":")
+    raise AssertionError(f"no run line in {answer!r}")
+
 def test_every_mechanism_is_a_named_switch_with_evidence() -> None:
     names = [m.name for m in MECHANISMS]
     assert len(names) == len(set(names)) == 12
@@ -418,7 +426,7 @@ def test_failure_records_are_withheld_when_switched_off(tmp_path: Path) -> None:
     on = Mason(_session(tmp_path), client=FakeClient([]))
     result = on.toolbox.dispatch(_call("launch_workflow", script="bad.py", name="bad"))
     assert "status=failed" in result and "failure record:" in result
-    run_id = result.split()[1].rstrip(":")
+    run_id = _run_id(result)
     shown = on.toolbox.dispatch(_call("show_run", run_id=run_id))
     assert '"failure"' in shown
     on.session.release_session_lock()
@@ -428,7 +436,7 @@ def test_failure_records_are_withheld_when_switched_off(tmp_path: Path) -> None:
     )
     result = off.toolbox.dispatch(_call("launch_workflow", script="bad.py", name="bad2"))
     assert "status=failed" in result and "failure record:" not in result
-    shown = off.toolbox.dispatch(_call("show_run", run_id=result.split()[1].rstrip(":")))
+    shown = off.toolbox.dispatch(_call("show_run", run_id=_run_id(result)))
     assert '"failure"' not in shown and '"status": "failed"' in shown
 
 

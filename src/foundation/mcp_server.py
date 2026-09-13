@@ -28,6 +28,7 @@ import functools
 import os
 import sqlite3
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -46,8 +47,10 @@ except ImportError:  # pragma: no cover - mcp 1.x fallback
 from foundation import _ops
 from foundation import memory as memory_store
 from foundation import project as project_files
+from foundation._ops import NO_DRY_RUN_WARNING
 from foundation.errors import FoundationError, MemoryStoreError
 from foundation.lifecycle import LifecycleState
+from foundation.memory import ABOUT_SLAB_NOTE
 from foundation.runtime import Workspace
 from foundation.session_record import SessionRecord, new_session_id, validate_results
 from foundation.skills import SkillError, bundled_files, discover_skills
@@ -56,6 +59,11 @@ from slab.config import load_config as load_slab_config
 from slab.errors import SlabError
 
 _F = TypeVar("_F", bound=Callable[..., Any])
+
+
+#: The names of the tools this server exposes, filled as they are declared;
+#: a memory that names one describes SLAB itself.
+_TOOL_NAMES: list[str] = []
 
 
 def _surfaced(fn: _F) -> _F:
@@ -68,6 +76,9 @@ def _surfaced(fn: _F) -> _F:
     from — so they must travel under the pass-through type. Unexpected
     exceptions stay masked, which is the guard working as intended.
     """
+
+    if fn.__name__ not in _TOOL_NAMES:
+        _TOOL_NAMES.append(fn.__name__)
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -283,10 +294,17 @@ def build_server(
         ntasks: int | None = None,
         threads: int | None = None,
         gpus: int | None = None,
+        dry_run: bool = False,
     ) -> dict[str, Any]:
         """Execute a plain-Python workflow script in a fresh traced run that
         carries this server's session id. Always pass intent — why this run
-        exists. Size the launch with ntasks (MPI ranks), threads (per rank),
+        exists. Before the first real launch of a new or edited script, pass
+        dry_run=True: the script runs to its end or its first exception in a
+        throwaway workspace, every run_lammps call sets LAMMPS up and
+        integrates no step, nothing is recorded, and the result lists each
+        LAMMPS error, the checks (expected to fail), and the outputs. A real
+        launch of a script text this session never dry-ran carries a
+        'warning' field. Size the launch with ntasks (MPI ranks), threads (per rank),
         and gpus: the server reserves that slice of this host before the
         run starts, the run takes it as an affinity mask plus
         CUDA_VISIBLE_DEVICES, and a slice that does not fit is refused with
@@ -300,8 +318,14 @@ def build_server(
         itself failed (storage died mid-crash), a raw 'traceback' string
         appears instead and the run may be left at status 'running'. Use
         show_run for per-task failure evidence."""
+        import hashlib
         import shlex
 
+        try:
+            script_text = Path(script_path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            script_text = ""  # launch_script reports the missing file itself
+        digest = hashlib.sha256(script_text.encode("utf-8")).hexdigest()
         _positive("ntasks", ntasks)
         _positive("threads", threads)
         _positive("gpus", gpus, minimum=0)
@@ -319,6 +343,8 @@ def build_server(
         driver += ["--session", session_id, "-w", str(root)]
         if sized:
             driver += ["--reservation", reservation.id]
+        if dry_run:
+            driver += ["--dry-run"]
         record.record(
             {
                 "type": "command",
@@ -330,6 +356,7 @@ def build_server(
                 "cwd": str(project_dir),
                 "background": False,
                 "sized": sized,
+                "dry_run": dry_run,
                 "resources": reservation.slice,
                 "reservation": reservation.id,
             }
@@ -345,6 +372,7 @@ def build_server(
                     session=session_id,
                     cwd=project_dir,
                     wait=True,
+                    dry_run=dry_run,
                 )
             else:
                 result = _ops.launch_script(
@@ -355,6 +383,7 @@ def build_server(
                     session=session_id,
                     capture_output=True,
                     reservation=reservation,
+                    dry_run=dry_run,
                 )
         except (FoundationError, SlabError, OSError):
             # A launch that could not start gives its slice back. Anything
@@ -364,7 +393,23 @@ def build_server(
             with Workspace(root) as ws:
                 ws.runs.release_reservation(reservation.id)
             raise
+        if dry_run:
+            # A dry run claims no reservation: give the slice back and
+            # record the rehearsal against the script text.
+            with Workspace(root) as ws, suppress(FoundationError):
+                ws.runs.release_reservation(reservation.id)
+            ok = bool(result.get("reached_end")) and all(
+                entry.get("outcome") == "setup ok" for entry in result.get("lammps") or []
+            )
+            record.record({"type": "dry_run", "script": script_path, "digest": digest, "ok": ok})
+            return result
         _record_run_commands(result.get("run_id"), "launch_workflow")
+        if not any(
+            event.get("digest") == digest and event.get("ok")
+            for event in record.events()
+            if event.get("type") == "dry_run"
+        ):
+            result["warning"] = NO_DRY_RUN_WARNING
         return result
 
     @server.tool()
@@ -681,14 +726,21 @@ def build_server(
         reads to decide whether the fact applies. Re-using a name replaces
         that memory. Not for results (they belong to runs), project decisions
         (the notebook), or credentials (nowhere)."""
-        written = memory_store.write(
-            name,
-            description,
-            body,
-            agent="mcp",
-            against=memory_store.stamp(f"{description}\n{body}", software_versions()),
-        )
-        return {"name": written.name, "path": str(written.path), "against": dict(written.against)}
+        text = f"{name}\n{description}\n{body}"
+        versions = software_versions()
+        against = memory_store.stamp(text, versions)
+        about_slab = memory_store.about_slab(text, _TOOL_NAMES)
+        if about_slab and "slab-stack" in versions:
+            against.setdefault("slab-stack", versions["slab-stack"])
+        written = memory_store.write(name, description, body, agent="mcp", against=against)
+        answer: dict[str, Any] = {
+            "name": written.name,
+            "path": str(written.path),
+            "against": dict(written.against),
+        }
+        if about_slab:
+            answer["note"] = ABOUT_SLAB_NOTE.format(version=written.against.get("slab-stack", "?"))
+        return answer
 
     @server.tool()
     @_surfaced

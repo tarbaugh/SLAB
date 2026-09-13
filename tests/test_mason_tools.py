@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from foundation import Workspace
 from mason.client import ToolCall
 from mason.config import MasonConfig
 from mason.session import MasonSession
@@ -32,6 +33,14 @@ def _call(tool: str, /, **arguments: object) -> ToolCall:
 @pytest.fixture()
 def box(tmp_path: Path) -> Toolbox:
     return build_toolbox(_session(tmp_path))
+
+
+def _run_id(answer: str) -> str:
+    """The run id a launch_workflow reply names, after any warning line."""
+    for line in answer.splitlines():
+        if line.startswith("run ") and ":" in line:
+            return line.split()[1].rstrip(":")
+    raise AssertionError(f"no run line in {answer!r}")
 
 
 def _command_events(session: MasonSession) -> list[dict[str, object]]:
@@ -806,7 +815,7 @@ def test_a_foreground_sized_launch_runs_as_a_child_and_the_run_carries_resources
     assert "state=verified" in answer and "checks=1/1" in answer
     assert "resources held: 1 cpu(s)" in answer and "1 rank(s) x 1 thread(s)" in answer
     assert "env 1 1 ''" in answer  # the child ran inside the envelope
-    run_id = answer.split()[1].rstrip(":")
+    run_id = _run_id(answer)
     (launch,) = [e for e in _command_events(box.session) if e["kind"] == "launch"]
     assert launch["sized"] is True and launch["background"] is False
     assert "--reservation " in launch["command"]
@@ -853,7 +862,7 @@ def test_an_unsized_foreground_launch_reserves_the_whole_free_budget_in_process(
     (tmp_path / "wf.py").write_text("print('ok')\n")
     answer = box.dispatch(_call("launch_workflow", script="wf.py"))
     assert f"resources held: {_budget_cpus()} cpu(s)" in answer
-    run_id = answer.split()[1].rstrip(":")
+    run_id = _run_id(answer)
     with Workspace(box.session.workspace_root) as ws:
         run = ws.runs.get(run_id)
         assert run.pid == os.getpid()  # in-process, as before
@@ -1065,7 +1074,7 @@ def test_background_launch_detaches_and_wait_for_run_collects(
 def test_wait_for_run_reports_a_finished_run_by_id(box: Toolbox, tmp_path: Path) -> None:
     (tmp_path / "wf.py").write_text("print('ok')\n")
     launched = box.dispatch(_call("launch_workflow", script="wf.py"))
-    run_id = launched.split()[1].rstrip(":")
+    run_id = _run_id(launched)
     waited = box.dispatch(_call("wait_for_run", run_id=run_id, timeout_s=5))
     assert f"run {run_id}" in waited
     assert "status=completed" in waited
@@ -1251,7 +1260,7 @@ def test_show_run_folds_finished_tasks_unless_asked_for_everything(
     the recipes come back on request."""
     (tmp_path / "wf.py").write_text(_RELAX_SCRIPT)
     launched = box.dispatch(_call("launch_workflow", script="wf.py", intent="fold test"))
-    run_id = launched.split()[1].rstrip(":")
+    run_id = _run_id(launched)
     compact = box.dispatch(_call("show_run", run_id=run_id))
     assert '"tasks_summary": "1 completed"' in compact
     assert '"label": "cu"' in compact
@@ -1266,7 +1275,7 @@ def test_show_run_returns_one_task_in_full_on_request(box: Toolbox, tmp_path: Pa
     digging in the artifact store by hand for one task's output."""
     (tmp_path / "wf.py").write_text(_RELAX_SCRIPT)
     launched = box.dispatch(_call("launch_workflow", script="wf.py", intent="one task"))
-    run_id = launched.split()[1].rstrip(":")
+    run_id = _run_id(launched)
     by_label = json.loads(box.dispatch(_call("show_run", run_id=run_id, task="cu")))
     assert by_label["task"]["name"] == "relax" and '"recipe"' not in json.dumps(by_label["run"])
     assert "recipe" in by_label["task"] and "outputs" in by_label["task"]
@@ -1282,7 +1291,7 @@ def test_read_artifact_reads_a_runs_file_by_name_windowed(box: Toolbox, tmp_path
     hand for six minutes to read one .pwo. The tool reads it by name."""
     (tmp_path / "wf.py").write_text(_RELAX_SCRIPT)
     launched = box.dispatch(_call("launch_workflow", script="wf.py", intent="artifact"))
-    run_id = launched.split()[1].rstrip(":")
+    run_id = _run_id(launched)
     record = json.loads(box.dispatch(_call("show_run", run_id=run_id)))
     assert record["artifacts"], "the relax run keeps at least one artifact"
     name = record["artifacts"][0]["name"]
@@ -1424,7 +1433,7 @@ def test_read_artifact_digests_a_kept_engine_output(box: Toolbox, tmp_path: Path
         f"current_run().keep('si.pwo', Path({str(tmp_path / 'si.pwo')!r}))\n"
     )
     launched = box.dispatch(_call("launch_workflow", script="keep.py", intent="digest"))
-    run_id = launched.split()[1].rstrip(":")
+    run_id = _run_id(launched)
 
     def read(**arguments: object) -> str:
         call = ToolCall(id="ra", name="read_artifact", arguments=arguments, arguments_raw="{}")
@@ -1446,7 +1455,7 @@ def test_the_workflow_script_is_kept_as_the_runs_input_artifact(
     script behind a run; the run record now holds it by name."""
     (tmp_path / "wf.py").write_text(_RELAX_SCRIPT)
     launched = box.dispatch(_call("launch_workflow", script="wf.py", intent="script kept"))
-    run_id = launched.split()[1].rstrip(":")
+    run_id = _run_id(launched)
     record = json.loads(box.dispatch(_call("show_run", run_id=run_id)))
     scripts = [a for a in record["artifacts"] if a["name"] == "wf.py"]
     assert scripts and scripts[0]["role"] == "input"
@@ -1527,7 +1536,7 @@ def test_the_transcript_records_every_command_that_ran(tmp_path: Path) -> None:
     launched = box.dispatch(
         ToolCall(id="t2", name="launch_workflow", arguments=arguments, arguments_raw="{}")
     )
-    run_id = launched.split()[1].rstrip(":")
+    run_id = _run_id(launched)
     shell, launch, engine = _command_events(session)
     assert shell["kind"] == "shell" and shell["tool"] == "shell"
     assert shell["command"] == "echo hi" and shell["cwd"] == str(tmp_path)
@@ -1588,7 +1597,7 @@ def test_size_arguments_that_are_not_positive_integers_are_refused(
 def test_a_comment_naming_an_mpirun_is_not_an_mpirun(box: Toolbox, tmp_path: Path) -> None:
     (tmp_path / "noted.py").write_text("# note: mpirun -np 64 was too wide\nprint('ran')\n")
     answer = box.dispatch(_call("launch_workflow", script="noted.py", ntasks=1))
-    assert answer.startswith("run ") and "script output:\nran" in answer
+    assert "\nrun " in answer and "script output:\nran" in answer
     answer = box.dispatch(_call("shell", command="echo ok  # mpirun -np 99999"))
     assert answer.startswith("exit 0")
     # A real mpirun after a comment line is still judged.
@@ -1710,7 +1719,7 @@ def test_partial_outcome_names_the_files_and_runs_a_cut_child_left(tmp_path: Pat
     box.dispatch(_call("edit_file", path="md.py", old_string="'a'", new_string="'b'"))
     (tmp_path / "wf.py").write_text("x = 1\n")
     answer = box.dispatch(_call("launch_workflow", script="wf.py"))
-    run_id = answer.split("run ")[1].split(":")[0]
+    run_id = _run_id(answer)
     outcome = partial_outcome(child)
     assert outcome.startswith("[partial outcome: the specialist's turn ended cut")
     assert outcome.count(str(tmp_path / "md.py")) == 1  # two edits, one file
@@ -1725,3 +1734,144 @@ def test_a_launch_that_cannot_start_records_the_attempt_with_its_error(
     assert "could not start the run" in answer or "no such" in answer.lower()
     launches = [e for e in _command_events(box.session) if e["kind"] == "launch"]
     assert launches and "error" in launches[-1] and "run_id" not in launches[-1]
+
+
+# -- dry runs and the failure record's shape note -----------------------------------
+
+DRY_RUN_SCRIPT = """\
+from foundation import check, task
+
+@task
+def probe(x):
+    return {"steps": x, "tables": [{"n_rows": 1}]}
+
+result = probe(4)
+print("probed", result["steps"])
+
+@check
+def held():
+    assert result["steps"] == 4
+"""
+
+
+def _dry_run_events(session: MasonSession) -> list[dict[str, object]]:
+    return session.recorded("dry_run")
+
+
+def test_a_dry_run_records_its_event_and_a_real_launch_without_one_warns(
+    tmp_path: Path,
+) -> None:
+    """The session knows which script texts were rehearsed: a dry run records
+    the text's digest and its verdict, a real launch of an unrehearsed text
+    carries the warning, and one after a passing dry run does not."""
+    import hashlib
+
+    session = _session(tmp_path)
+    box = build_toolbox(session)
+    script = tmp_path / "wf.py"
+    script.write_text(DRY_RUN_SCRIPT)
+    digest = hashlib.sha256(DRY_RUN_SCRIPT.encode()).hexdigest()
+
+    cold = box.dispatch(_call("launch_workflow", script="wf.py", intent="unrehearsed"))
+    assert cold.startswith("warning: no dry run of this script text in this session")
+    assert "\nrun " in cold and "status=completed" in cold
+
+    rehearsed = box.dispatch(_call("launch_workflow", script="wf.py", dry_run=True))
+    assert rehearsed.startswith("dry run of wf.py: the script reached its end")
+    assert "held passed" in rehearsed and "expected to fail in a dry run" in rehearsed
+    assert "script output:\nprobed 4" in rehearsed
+    assert "run 01" not in rehearsed  # no run id: nothing was recorded
+    (event,) = _dry_run_events(session)
+    assert event["script"] == str(script) and event["digest"] == digest and event["ok"] is True
+    launch_events = [e for e in _command_events(session) if e.get("kind") == "launch"]
+    assert launch_events[-1]["dry_run"] is True and "--dry-run" in str(launch_events[-1]["command"])
+    # The store holds only the real run; the dry run left nothing behind.
+    with Workspace(session.workspace_root) as ws:
+        assert len(ws.runs.list_runs()) == 1
+        assert not ws.runs.list_reservations()
+
+    warm = box.dispatch(_call("launch_workflow", script="wf.py", intent="rehearsed"))
+    assert warm.startswith("run ") and "warning" not in warm
+
+    # An edit changes the digest: the next real launch warns again.
+    script.write_text(DRY_RUN_SCRIPT.replace("probe(4)", "probe(5)"))
+    edited = box.dispatch(_call("launch_workflow", script="wf.py", intent="edited"))
+    assert edited.startswith("warning: no dry run")
+
+
+def test_a_failing_dry_run_records_a_failed_event_and_names_the_exception(
+    tmp_path: Path,
+) -> None:
+    session = _session(tmp_path)
+    box = build_toolbox(session)
+    (tmp_path / "boom.py").write_text("x = {}\nprint(x['missing'])\n")
+    answer = box.dispatch(_call("launch_workflow", script="boom.py", dry_run=True))
+    assert answer.startswith("dry run of boom.py: the script stopped at an exception")
+    assert "KeyError: 'missing'" in answer
+    (event,) = _dry_run_events(session)
+    assert event["ok"] is False
+    # A later real launch still warns: only a passing dry run counts.
+    real = box.dispatch(_call("launch_workflow", script="boom.py"))
+    assert real.startswith("warning: no dry run")
+
+
+def test_a_shape_mistake_after_run_lammps_gets_the_result_keys_as_a_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The campaign's KeyError after a 14-minute MD leg: the failure record now
+    names the keys the result holds, so the next script reads them."""
+    from test_lammps_script import _FAKE, _script
+
+    fake = _script(tmp_path / "fake-lmp", _FAKE)
+    session = _session(tmp_path)
+    box = build_toolbox(session)
+    (tmp_path / "md.py").write_text(
+        "from ase.build import bulk\n"
+        "from foundation.tasks import run_lammps\n"
+        "atoms = bulk('Ar', 'fcc', a=5.26, cubic=True)\n"
+        "script = 'units metal\\natom_style atomic\\nread_data structure.data\\n"
+        "pair_style lj/cut 8.5\\npair_coeff 1 1 0.0104 3.40\\nthermo 10\\n"
+        "fix avg all ave/time 1 1 10 c_thermo_temp file fs_probe.dat\\nrun 100\\n'\n"
+        f"result, info = run_lammps(script, atoms=atoms, label='ar', command={fake!r})\n"
+        "print(result['tables'][0]['rows'][0])\n"
+    )
+    answer = box.dispatch(_call("launch_workflow", script="md.py", intent="shape"))
+    assert "status=failed" in answer
+    run_id = _run_id(answer)
+    details = box.dispatch(_call("show_run", run_id=run_id))
+    shown = json.loads(details[details.index("{") :])
+    notes = shown["run"]["failure"]["notes"]
+    (note,) = [n for n in notes if n.startswith("run_lammps result keys:")]
+    # The recorded result comes back with its keys sorted.
+    assert "tables[1]{columns,first,last,loop,n_rows,tail}" in note
+    assert "averages{fs_probe.dat}" in note and "rate{atom_steps_per_s,steps_per_s}" in note
+    assert ", seconds, steps, " in note and "wall_time;" in note
+    assert note.endswith("the lammps-scripting skill section 2 has the shape")
+
+
+def test_remember_says_when_a_memory_describes_slab_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A memory about SLAB's own result shape is stamped against slab-stack
+    and the reply says the fact belongs in a skill fix, not in memory."""
+    import slab._ops
+
+    monkeypatch.setenv("SLAB_MEMORY_DIR", str(tmp_path / "memory"))
+    monkeypatch.setattr(slab._ops, "software_versions", lambda: {"slab-stack": "0.3.0"})
+    box = build_toolbox(_session(tmp_path))
+    answer = box.dispatch(
+        _call(
+            "remember",
+            name="run-lammps-shape",
+            description="run_lammps returns thermo as the last row only.",
+            body="Read the full rows through result['artifacts'].",
+        )
+    )
+    assert "stamped against slab-stack 0.3.0" in answer
+    assert "this describes SLAB itself, not the machine" in answer
+    assert "say so in your finish report so the skill gets fixed" in answer
+    plain = box.dispatch(
+        _call("remember", name="mpi-note", description="mpirun needs --bind-to none here.",
+              body="Otherwise ranks pile on one core.")
+    )
+    assert "describes SLAB itself" not in plain

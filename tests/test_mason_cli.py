@@ -484,6 +484,8 @@ def test_mason_read_renders_a_transcript_for_humans(tmp_path: Path) -> None:
          "setup": ["module load lammps"],
          "kokkos": {"enabled": True, "gpus": 1, "threads": None, "suffix": True,
                     "package": None}},
+        {"at": "2026-08-27T10:00:08+00:00", "type": "dry_run", "script": "/p/md.py",
+         "digest": "ab12cd34ef56" + "0" * 52, "ok": True},
         {"at": "2026-08-27T10:00:09+00:00", "type": "finish", "report": "done, run r1"},
         {"at": "2026-08-27T10:00:10+00:00", "type": "retire", "mode": "expire",
          "runs_promoted": 1, "runs_expired": 2, "runs_total": 3,
@@ -501,6 +503,7 @@ def test_mason_read_renders_a_transcript_for_humans(tmp_path: Path) -> None:
     assert "--full shows them" in result.output  # long reasoning clipped
     assert '-> shell {"command": "ls"}' in result.output
     assert "[10:00:06] shell command by pi: ls" in result.output
+    assert "[10:00:08] dry run of /p/md.py passed (script text ab12cd34ef56)" in result.output
     assert (
         "[10:00:08] engine command by md-expert (run 01abcdefgh, run_lammps, "
         "build gpu): mpirun -np 1 lmp -k on g 1 -sf kk"

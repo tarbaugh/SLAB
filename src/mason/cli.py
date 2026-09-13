@@ -841,6 +841,13 @@ def _render_event(event: dict[str, Any], full: bool) -> None:
         )
     elif kind == "edit":
         typer.secho(f"[{stamp}] {event.get('tool')} wrote {event.get('path')}", dim=True)
+    elif kind == "dry_run":
+        verdict = "passed" if event.get("ok") else "failed"
+        typer.secho(
+            f"[{stamp}] dry run of {event.get('script')} {verdict} "
+            f"(script text {str(event.get('digest', ''))[:12]})",
+            fg=typer.colors.GREEN if event.get("ok") else typer.colors.YELLOW,
+        )
     # usage events are accumulated by the caller, not printed per step.
 
 

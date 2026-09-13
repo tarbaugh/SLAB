@@ -421,8 +421,10 @@ integrates no step. The result keeps its real shape. Each table has one
 row, `steps == 0`, and `thermo` is the step-0 row, so the Python after
 the call is exercised. A physics check judges a state nothing has
 evolved, so expect it to fail, and the report says so. A `fix ave/time`
-file holds only its header lines, a `dump` file holds its step-0 frame,
-and `write_data` and `write_restart` files are complete.
+file holds only its header lines, so `series` on it is empty and an
+analysis that indexes its rows stops there; write it to survive an
+empty series. A `dump` file holds its step-0 frame, and `write_data`
+and `write_restart` files are complete.
 
 The command prints a JSON report after a `dry run:` line and exits 0
 when the script reached its end and every `run_lammps` set up cleanly,
@@ -455,7 +457,7 @@ write_data ar-final.data
 """
 result, info = run_lammps(script, atoms=atoms, label="ar")
 table = result["tables"][-1]
-print(f"{result['steps']} steps, {table['rows']} row(s), rewritten: {info['rewritten_lines']}")
+print(f"{result['steps']} steps, {table['n_rows']} row(s), rewritten: {info['rewritten_lines']}")
 print(f"tail mean T = {table['tail']['mean']['Temp']:.1f} K")
 
 
@@ -492,6 +494,7 @@ dry run:
     "ar.in",
     "ar.log",
     "ar-thermo.json",
+    "ar-averages.json",
     "ar-structure.data",
     "ar.screen",
     "ar-final.data",

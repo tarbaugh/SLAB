@@ -5,6 +5,17 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- Mason and the MCP server dry-run a script on request and say when a
+  launch skipped it. `launch_workflow` takes `dry_run`; the session
+  records a `dry_run` event with the script text's digest, and a real
+  launch of a text with no passing dry run in the session carries one
+  warning line. A `KeyError`, `TypeError`, `IndexError`, or
+  `AttributeError` after a completed `run_lammps` adds a note to the
+  failure record naming the result's keys. The md-expert card, the
+  lammps-scripting skill, and the planner's briefing say a new or
+  edited script is dry-run before it is launched. `remember` tells the
+  agent when a memory describes SLAB itself, stamps it against
+  slab-stack, and `slab memory list` marks it `[about slab]`.
 - The `run_lammps` result needs no memory. It carries `seconds`,
   `atoms`, and `rate` from the loop lines, `n_rows` where a count used
   to be called `rows`, `averages` with every `fix ave/time` file parsed

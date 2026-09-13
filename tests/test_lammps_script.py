@@ -781,7 +781,7 @@ def test_run_lammps_inside_a_dry_run_empties_the_loops_and_records_them(
     assert info["dry_run"] is True
     assert info["rewritten_lines"] == ["run 100"]
     assert result["steps"] == 0 and len(result["tables"]) == 1
-    assert result["tables"][0]["rows"] == 1
+    assert result["tables"][0]["n_rows"] == 1
     assert "run 0\n" in ws.artifacts.get(info["artifacts"]["cu.in"]).read_text()
     with ws.start_run(name="real") as real:
         assert real.dry_run is False
@@ -813,7 +813,9 @@ def test_dry_run_reports_each_run_lammps_call_and_the_python_after_it(
     assert report["output"] == "0\n"  # the table indexing before the KeyError ran
     assert "KeyError: 'msd'" in report["traceback"]
     assert report["lammps"] == [{"label": "cu", "outcome": "setup ok"}]
-    assert report["outputs"] == ["cu.in", "cu.log", "cu-thermo.json", "cu.screen"]
+    assert report["outputs"] == [
+        "cu.in", "cu.log", "cu-thermo.json", "cu-averages.json", "cu.screen",
+    ]
     assert not (tmp_path / "ws").exists()
     broken = tmp_path / "broken.py"
     broken.write_text(
@@ -911,7 +913,7 @@ def test_a_real_dry_run_finds_a_stage_three_error_before_any_run_is_paid_for(
         STAGED_SCRIPT.replace("unfix nosuch\n", "")
         + "table = result['tables'][-1]\n"
         "print('steps', result['steps'], 'tables', len(result['tables']), 'rows', "
-        "table['rows'], 'loop', table['loop']['steps'], 'rewritten', info['rewritten_lines'])\n"
+        "table['n_rows'], 'loop', table['loop']['steps'], 'rewritten', info['rewritten_lines'])\n"
         "from foundation import check\n"
         "@check\ndef held():\n    assert abs(table['tail']['mean']['Temp'] - 300.0) < 30.0\n"
     )

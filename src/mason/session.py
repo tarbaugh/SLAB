@@ -668,6 +668,22 @@ class MasonSession:
 
     # -- transcript -----------------------------------------------------------
 
+    def recorded(self, type_: str) -> list[dict[str, Any]]:
+        """The events of one type this session's transcript holds, in order."""
+        events: list[dict[str, Any]] = []
+        try:
+            with open(self.transcript_path, encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(event, dict) and event.get("type") == type_:
+                        events.append(event)
+        except OSError:
+            return []
+        return events
+
     def record(self, event: dict[str, Any]) -> None:
         """Append one event to the session transcript (JSONL, append-only)."""
         self.sessions_dir.mkdir(parents=True, exist_ok=True)

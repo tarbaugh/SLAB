@@ -84,6 +84,20 @@ result, info = run_lammps(SCRIPT, atoms=STRUCTURE, files=["W.eam.fs"], label="w-
   outer guard, and `timer timeout` inside the script (section 7) stops
   the run cleanly before either.
 
+Dry-run every new or edited script before its first real launch:
+`launch_workflow(script="md.py", dry_run=true)` (or `slab run --dry-run
+md.py`). The script runs to its end or its first exception in a
+throwaway workspace, every `run_lammps` call sets LAMMPS up and
+integrates no step, and the reply lists each LAMMPS error, the checks
+(expected to fail, because no step ran), and the outputs. It costs one
+LAMMPS start and catches a syntax error in the third stage and a wrong
+result key in the analysis before the MD leg is paid for. In a dry run
+each thermo table holds one row (step 0) and each `fix ave/time` file
+holds none, so write the analysis to survive an empty series (`if
+rows:`), or read the dry run as clean when every `run_lammps` line says
+`setup ok` and the exception sits in the analysis of a series. A real
+launch of a script text never dry-run in the session carries a warning.
+
 What comes back is `result`, printed here from the template run as it
 is (`pprint(result, sort_dicts=False)`), so nothing about its shape has
 to be remembered or guessed:

@@ -51,7 +51,7 @@ from __future__ import annotations
 import os
 import re
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -476,6 +476,56 @@ def _mentions(text: str, name: str) -> bool:
     words = (name, *SOFTWARE_ALIASES.get(name, ()))
     pattern = "|".join(re.escape(word) for word in words)
     return re.search(rf"(?<![A-Za-z0-9_])(?:{pattern})(?![A-Za-z0-9_])", text, re.I) is not None
+
+
+#: What a remember reply adds when the fact describes SLAB itself.
+ABOUT_SLAB_NOTE = (
+    "; this describes SLAB itself, not the machine: it is stamped against slab-stack "
+    "{version} and will be flagged stale on upgrade; if a skill is wrong, say so in "
+    "your finish report so the skill gets fixed"
+)
+
+#: Names of SLAB's own surfaces. A memory that names one describes SLAB
+#: itself, not the machine, and is worth flagging: it goes stale on an
+#: upgrade, and a wrong skill is fixed in the skill, not remembered around.
+SLAB_SURFACES: tuple[str, ...] = (
+    "slab-stack",
+    "slab_stack",
+    "run_lammps",
+    "launch_workflow",
+    "series",
+    "show_run",
+    "read_artifact",
+    "list_runs",
+    "wait_for_run",
+    "list_engines",
+    "free_resources",
+    "submit_job",
+)
+
+
+def about_slab(text: str, names: Iterable[str] = ()) -> bool:
+    """Whether *text* describes SLAB itself: a result shape, a tool, the package.
+
+    Matches ``result[`` or ``info[`` anywhere, and any of
+    :data:`SLAB_SURFACES` or *names* (a toolbox's tool names) as a whole
+    word.
+
+    Examples:
+        >>> about_slab("run_lammps returns thermo as the last row.")
+        True
+        >>> about_slab("The keys are result['tables'][0]['loop'].")
+        True
+        >>> about_slab("gracemaker needs TF_FORCE_GPU_ALLOW_GROWTH set.")
+        False
+        >>> about_slab("Call recall before shell.", names=("recall", "shell"))
+        True
+    """
+    if "result[" in text or "info[" in text:
+        return True
+    words = [*SLAB_SURFACES, *names]
+    pattern = "|".join(re.escape(word) for word in words)
+    return re.search(rf"(?<![A-Za-z0-9_])(?:{pattern})(?![A-Za-z0-9_])", text) is not None
 
 
 def stamp(text: str, live: Mapping[str, str]) -> dict[str, str]:

@@ -897,7 +897,16 @@ def _run_script_in(
                 # and read_artifact reads it: one real lead searched
                 # three filesystems for a script the run record held.
                 active.keep(script_path.name, script_path, role=ArtifactRole.INPUT)
-                _execute_script(script_path)
+                try:
+                    _execute_script(script_path)
+                except (KeyError, TypeError, IndexError, AttributeError) as e:
+                    # A shape mistake after a completed run_lammps: the
+                    # note names the keys the result holds, so the next
+                    # script reads them instead of remembering them.
+                    note = _result_shape_note(ws, active.id)
+                    if note:
+                        e.add_note(note)
+                    raise
     except NestedRunError:
         raise FoundationError(
             f"{script_path.name} manages its own runs (it calls start_run); "
@@ -925,6 +934,11 @@ _DRY_RUN_MARKER_LINE = re.compile(rf"^{re.escape(DRY_RUN_MARKER)}$", re.MULTILIN
 
 DRY_RUN_CHECKS_NOTE = (
     "physics checks are expected to fail in a dry run: LAMMPS integrated no steps"
+)
+#: Prepended to a real launch of a script text this session never dry-ran.
+NO_DRY_RUN_WARNING = (
+    "warning: no dry run of this script text in this session; a dry run costs one "
+    "LAMMPS start and catches script and post-processing errors before the MD leg"
 )
 WORKSPACE_ENV = "SLAB_WORKSPACE"
 
@@ -999,6 +1013,49 @@ def dry_run_script(
     if capture_output:
         report["output"] = buffer.getvalue()
     return report
+
+
+def _result_shape_note(ws: Workspace, run_id: str) -> str | None:
+    """One line naming the keys of the run's last completed ``run_lammps`` result."""
+    for record in reversed(ws.runs.list_tasks(run_id)):
+        if record.name != "run_lammps" or record.status is not ExecutionStatus.COMPLETED:
+            continue
+        digest = record.outputs.get("return[0]")
+        if digest is None:
+            return None
+        try:
+            result = loads(ws.artifacts.get(digest).read_bytes())
+        except Exception:
+            return None
+        if not isinstance(result, dict):
+            return None
+        return (
+            f"run_lammps result keys: {shape_line(result)}; the lammps-scripting "
+            f"skill section 2 has the shape"
+        )
+    return None
+
+
+def shape_line(value: dict[str, Any]) -> str:
+    """The keys of a dict one level deep, as a reader scans them.
+
+    Examples:
+        >>> shape_line({"thermo": {"Step": 1, "Temp": 2.0}, "tables": [{"columns": [],
+        ...             "n_rows": 1}, {}], "averages": {"fs.dat": {}}, "steps": 10,
+        ...             "wall_time": "0:00:01"})
+        'thermo{Step,Temp}, tables[2]{columns,n_rows}, averages{fs.dat}, steps, wall_time'
+    """
+    parts = []
+    for key, item in value.items():
+        if isinstance(item, dict):
+            parts.append(f"{key}{{{','.join(str(k) for k in item)}}}")
+        elif isinstance(item, list):
+            inner = item[0] if item and isinstance(item[0], dict) else None
+            keys = f"{{{','.join(str(k) for k in inner)}}}" if inner else ""
+            parts.append(f"{key}[{len(item)}]{keys}")
+        else:
+            parts.append(str(key))
+    return ", ".join(parts)
 
 
 def _dry_run_report(ws: Workspace, run_id: str, error: str | None) -> dict[str, Any]:

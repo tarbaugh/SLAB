@@ -791,3 +791,58 @@ def test_cancel_job_over_mcp_settles_the_workspace(
         assert ws.runs.get(run.id).status.value == "failed"
         assert ws.runs.get(claimed.id).status.value == "failed"
         assert ws.runs.list_reservations() == []
+
+
+def test_launch_workflow_dry_run_records_the_rehearsal_and_a_cold_launch_warns(
+    root: Path, tmp_path: Path
+) -> None:
+    script = tmp_path / "wf.py"
+    script.write_text(
+        "from foundation import check, task\n"
+        "@task\ndef triple(x):\n    return 3 * x\n"
+        "print('result:', triple(5))\n"
+        "@check\ndef ok():\n    return True\n"
+    )
+    server = build_server(root, session="chat-dry")
+    cold = _call(server, "launch_workflow", {"script_path": str(script), "intent": "cold"})
+    assert cold["warning"].startswith("warning: no dry run of this script text")
+    rehearsed = _call(server, "launch_workflow", {"script_path": str(script), "dry_run": True})
+    assert rehearsed["dry_run"] is True and rehearsed["reached_end"] is True
+    assert "result: 15" in rehearsed["output"] and "run_id" not in rehearsed
+    events = find_session_record(root, "chat-dry").events()
+    (event,) = [e for e in events if e.get("type") == "dry_run"]
+    assert event["ok"] is True and event["script"] == str(script)
+    launches = [e for e in events if e.get("type") == "command" and e["kind"] == "launch"]
+    assert launches[-1]["dry_run"] is True and "--dry-run" in launches[-1]["command"]
+    with Workspace(root) as ws:
+        assert len(ws.runs.list_runs()) == 1  # the dry run left nothing in the store
+        assert not ws.runs.list_reservations()
+    warm = _call(server, "launch_workflow", {"script_path": str(script), "intent": "warm"})
+    assert "warning" not in warm
+
+
+def test_remember_over_mcp_notes_a_memory_about_slab(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import slab._ops
+
+    monkeypatch.setenv("SLAB_MEMORY_DIR", str(tmp_path / "memory"))
+    monkeypatch.setattr(slab._ops, "software_versions", lambda: {"slab-stack": "0.3.0"})
+    server = build_server(root)
+    answer = _call(
+        server,
+        "remember",
+        {
+            "name": "show-run-shape",
+            "description": "show_run folds finished tasks unless full is set.",
+            "body": "Pass full=true to read every task.",
+        },
+    )
+    assert answer["against"] == {"slab-stack": "0.3.0"}
+    assert "describes SLAB itself" in answer["note"]
+    plain = _call(
+        server,
+        "remember",
+        {"name": "mpi-bind", "description": "mpirun needs --bind-to none.", "body": "Or else."},
+    )
+    assert "note" not in plain

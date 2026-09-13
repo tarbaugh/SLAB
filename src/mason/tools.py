@@ -26,6 +26,7 @@ Contracts the primitives enforce in code, not prompt text:
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -43,7 +44,9 @@ if TYPE_CHECKING:
 
 from foundation import _ops
 from foundation import memory as memory_store
+from foundation._ops import NO_DRY_RUN_WARNING
 from foundation.errors import FoundationError, MemoryStoreError
+from foundation.memory import ABOUT_SLAB_NOTE
 from foundation.models import Reservation
 from foundation.project import plan_write
 from foundation.runtime import describe_liveness
@@ -1299,6 +1302,40 @@ def record_edit(session: MasonSession, *, tool: str, path: Path) -> None:
     session.record({"type": "edit", "by": session.agent_name, "tool": tool, "path": str(path)})
 
 
+def _dry_run_passed(session: MasonSession, digest: str) -> bool:
+    """Whether this session recorded a passing dry run of the script text *digest*."""
+    return any(
+        event.get("digest") == digest and event.get("ok") for event in session.recorded("dry_run")
+    )
+
+
+def _dry_run_text(script: Path, result: dict[str, Any], held: str) -> str:
+    """The reply to a dry run: what reached, each LAMMPS setup, the checks, the outputs."""
+    reached = result.get("reached_end")
+    lines = [
+        f"dry run of {script.name}: "
+        + ("the script reached its end" if reached else "the script stopped at an exception")
+    ]
+    for entry in result.get("lammps") or []:
+        lines.append(f"run_lammps {entry.get('label')}: {entry.get('outcome')}")
+    if result.get("traceback"):
+        lines.append(str(result["traceback"]).rstrip())
+    checks = result.get("checks") or []
+    if checks:
+        lines.append("checks (" + str(result.get("checks_note", "")) + "):")
+        for check in checks:
+            verdict = "passed" if check.get("passed") else "failed"
+            message = f": {check['message']}" if check.get("message") else ""
+            lines.append(f"  {check.get('name')} {verdict}{message}")
+    outputs = result.get("outputs") or []
+    lines.append("outputs the script would keep: " + (", ".join(outputs) if outputs else "none"))
+    lines.append(f"resources held: {held}")
+    output = str(result.get("output") or "").rstrip()
+    if output:
+        lines.append(f"script output:\n{output}")
+    return "\n".join(lines)
+
+
 def record_command(session: MasonSession, **event: Any) -> None:
     """Record one ``command`` event: what ran, by which card, through which tool.
 
@@ -1642,6 +1679,7 @@ def _add_workflow_tools(
         intent: str | None,
         args: list[str],
         wait: bool,
+        dry_run: bool = False,
     ) -> dict[str, Any]:
         """Run the script as a child 'foundation run --reservation' process.
 
@@ -1660,6 +1698,7 @@ def _add_workflow_tools(
             session=session.session_id,
             argv=tuple(args),
             cwd=session.cwd,
+            dry_run=dry_run,
             # Block-buffered stdout reaches the log only at exit; a real
             # session polled an empty log eight times while the run was
             # labeling structures. launch_child asks for line by line.
@@ -1684,8 +1723,11 @@ def _add_workflow_tools(
         args = [str(a) for a in arguments.get("args") or []]
         name = str(arguments["name"]) if arguments.get("name") else None
         intent = str(arguments["intent"]) if arguments.get("intent") else None
-        background = bool(arguments.get("background"))
+        dry_run = bool(arguments.get("dry_run"))
+        # A dry run returns at once, so it never detaches.
+        background = bool(arguments.get("background")) and not dry_run
         sized = any(arguments.get(key) is not None for key in ("ntasks", "threads", "gpus"))
+        digest = hashlib.sha256(script_text.encode("utf-8")).hexdigest()
         reserved = _reserve_for(session, arguments)
         if isinstance(reserved, str):
             return reserved
@@ -1704,6 +1746,8 @@ def _add_workflow_tools(
         driver += ["--session", session.session_id, "-w", str(session.workspace_root)]
         if as_child:
             driver += ["--reservation", reservation.id]
+        if dry_run:
+            driver += ["--dry-run"]
         # The launch record carries the run id once the run has one: a
         # foreground launch records after it returns, a background launch
         # before it detaches (its run appears in the store once it starts).
@@ -1716,6 +1760,7 @@ def _add_workflow_tools(
             "cwd": str(session.cwd),
             "background": background,
             "sized": sized,
+            "dry_run": dry_run,
             "resources": reservation.slice,
             "reservation": reservation.id,
         }
@@ -1735,7 +1780,13 @@ def _add_workflow_tools(
                 )
             if sized:
                 result = _launch_child(
-                    script, reservation, name=name, intent=intent, args=args, wait=True
+                    script,
+                    reservation,
+                    name=name,
+                    intent=intent,
+                    args=args,
+                    wait=True,
+                    dry_run=dry_run,
                 )
             else:
                 result = launch_script(
@@ -1747,6 +1798,7 @@ def _add_workflow_tools(
                     argv=tuple(args),
                     capture_output=True,
                     reservation=reservation,
+                    dry_run=dry_run,
                 )
         except (FoundationError, SlabError, OSError) as e:
             record_command(session, **launch_event, error=str(e))
@@ -1757,13 +1809,28 @@ def _add_workflow_tools(
             # must say so, then the interrupt goes on up.
             record_command(session, **launch_event, error=type(e).__name__)
             raise
+        if dry_run:
+            # A dry run claims no reservation: the in-process path never
+            # touched it, and the child released it on its way out.
+            _release(reservation.id)
+            record_command(session, **launch_event)
+            ok = bool(result.get("reached_end")) and all(
+                entry.get("outcome") == "setup ok" for entry in result.get("lammps") or []
+            )
+            session.record(
+                {"type": "dry_run", "script": str(script), "digest": digest, "ok": ok}
+            )
+            return _dry_run_text(script, result, held)
         record_command(session, **launch_event, run_id=result.get("run_id"))
         _record_run_commands(result.get("run_id"), "launch_workflow")
-        lines = [
+        lines = []
+        if not _dry_run_passed(session, digest):
+            lines.append(NO_DRY_RUN_WARNING)
+        lines.append(
             f"run {result['run_id']}: state={result['state']} status={result['status']} "
             f"checks={result['checks_passed']}/{result['checks_total']} "
             f"tasks={result['tasks_recorded']}"
-        ]
+        )
         if result.get("failure"):
             if enabled(session.agent, "failure-records"):
                 lines.append("failure record:")
@@ -1794,7 +1861,13 @@ def _add_workflow_tools(
                 "and the gpus asked. "
                 "For work longer than a few minutes, pass background=true: the "
                 "run detaches from this process (no tool timeout can kill it) "
-                "and wait_for_run blocks until it finishes."
+                "and wait_for_run blocks until it finishes. Before the first real "
+                "launch of a new or edited script, pass dry_run=true: the script "
+                "runs to its end or its first exception in a throwaway workspace, "
+                "every run_lammps call sets LAMMPS up and integrates no step, and "
+                "the reply lists each LAMMPS error, the checks (expected to fail), "
+                "and the outputs; it costs one LAMMPS start and catches script and "
+                "post-processing errors before the MD leg."
             ),
             parameters=_schema(
                 {
@@ -1810,6 +1883,13 @@ def _add_workflow_tools(
                         "type": "boolean",
                         "description": (
                             "detach and return immediately; follow with wait_for_run"
+                        ),
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": (
+                            "rehearse the script in a throwaway workspace: LAMMPS "
+                            "sets up and integrates no step; nothing is recorded"
                         ),
                     },
                     "ntasks": {
@@ -2860,6 +2940,15 @@ def _add_machine_memory_tools(box: Toolbox, session: MasonSession) -> None:
         name = str(arguments["name"])
         description = str(arguments["description"])
         body = str(arguments["body"])
+        text = f"{name}\n{description}\n{body}"
+        versions = session.software_versions()
+        # Stamped with the software the text names, at today's versions,
+        # so a later session can tell whether it still holds. A memory
+        # about SLAB itself is stamped against slab-stack whatever it calls it.
+        against = memory_store.stamp(text, versions)
+        about_slab = memory_store.about_slab(text, TOOL_VOCABULARY)
+        if about_slab and "slab-stack" in versions:
+            against.setdefault("slab-stack", versions["slab-stack"])
         try:
             written = memory_store.write(
                 name,
@@ -2867,9 +2956,7 @@ def _add_machine_memory_tools(box: Toolbox, session: MasonSession) -> None:
                 body,
                 agent=session.agent_name,
                 model=session.agent.model,
-                # Stamped with the software the text names, at today's
-                # versions, so a later session can tell whether it still holds.
-                against=memory_store.stamp(f"{description}\n{body}", session.software_versions()),
+                against=against,
             )
         except MemoryStoreError as e:
             # A refusal is an observation the model can act on, not a crash:
@@ -2883,6 +2970,8 @@ def _add_machine_memory_tools(box: Toolbox, session: MasonSession) -> None:
         if written.against:
             stamped = ", ".join(f"{n} {v}" for n, v in written.against.items())
             answer += f" (stamped against {stamped})"
+        if about_slab:
+            answer += ABOUT_SLAB_NOTE.format(version=written.against.get("slab-stack", "?"))
         return answer
 
     box.add(

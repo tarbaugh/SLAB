@@ -427,7 +427,9 @@ def team_block(
             "",
             "Specialists you can hand a scoped task to with the delegate tool. "
             "Delegate work that is separable and would crowd your context; brief "
-            "them with the goal, the constraints, and what to return.",
+            "them with the goal, the constraints, and what to return, and say "
+            "that a new or edited workflow script is dry-run (launch_workflow "
+            "with dry_run) before it is launched.",
             "",
         ]
         lines.extend(f"- {card.name}: {card.description}" for card in others)
