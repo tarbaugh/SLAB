@@ -1091,8 +1091,8 @@ def _probe_lammps_help(command: str, identity: tuple[str | int, ...]) -> str | N
     consume a job step for a banner the bare binary prints identically).
     Every failure path returns None. ``identity`` exists to key the memo
     cache, exactly like the qe probe: one spawn per binary-set identity,
-    and a replaced binary — payload included — is re-probed. The version
-    banner and the ``-skiprun`` line are both read from this one capture.
+    and a replaced binary — payload included — is re-probed. The whole
+    capture is kept, so a later reader of ``-h`` costs no second spawn.
     """
     del identity
     probe = _probe_argv(command)
@@ -1117,7 +1117,6 @@ def _probe_lammps_help(command: str, identity: tuple[str | int, ...]) -> str | N
 
 
 _LAMMPS_BANNER = re.compile(r"Massively Parallel Simulator\s*-\s*(.+)")
-_LAMMPS_SKIPRUN = re.compile(r"^-skiprun\b", re.MULTILINE)
 
 
 def _lammps_banner_version(help_text: str | None) -> str | None:
@@ -1133,21 +1132,6 @@ def _lammps_banner_version(help_text: str | None) -> str | None:
         return None
     match = _LAMMPS_BANNER.search(help_text)
     return match.group(1).strip() if match else None
-
-
-def _lammps_skiprun(options: dict[str, Any]) -> bool:
-    """Whether the LAMMPS that ``engine="lammps"`` would run accepts ``-skiprun``.
-
-    Read from the same ``-h`` capture as the version: a build that lists
-    ``-skiprun`` (added in 2022) skips the loops of ``run`` and
-    ``minimize`` and still sets up every pair style, fix, and compute. A
-    build whose help cannot be read reports False.
-
-    Examples:
-        >>> _lammps_skiprun({"command": "definitely-not-installed-lmp"})
-        False
-    """
-    return _LAMMPS_SKIPRUN.search(_lammps_help(options) or "") is not None
 
 
 def _lammps_help(options: dict[str, Any]) -> str | None:

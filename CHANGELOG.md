@@ -20,18 +20,17 @@ All notable changes to SLAB, newest first. Dates are commit dates on
   `launch_child(dry_run=True)`) runs a workflow script to its end, or to
   its first exception, inside a throwaway workspace that is removed
   afterwards, so nothing lands in the real store or its cache and no
-  reservation is claimed. Every `run_lammps` call runs LAMMPS under
-  `-skiprun`: every style, fix, and compute is set up, every command
-  runs in order, and no step is integrated, so a stage-three error and
-  the Python after the dynamics both surface at once. `timer` lines are
-  dropped for the dry run and named in `info["dropped_lines"]`;
-  `info["skiprun"]` says the call was a rehearsal. The report after the
-  `dry run:` line lists each `run_lammps` call with `setup ok` or the
-  `ERROR` line, every check with its outcome (physics checks are
-  expected to fail), the files a real run would keep, and the traceback.
-  `describe_lammps(...)["skiprun"]` reports whether the build accepts the
-  flag, read from the same `-h` capture as the version, and a build
-  without it is refused with a message that names the flag.
+  reservation is claimed. Every `run_lammps` call runs with its loops
+  emptied: every `run` line becomes `run 0` and every `minimize` gets
+  zero iterations, so every style, fix, and compute is set up, every
+  command runs in order, each loop prints one thermo row and one loop
+  line, and no step is integrated. A stage-three error and the Python
+  after the dynamics both surface at once, and the result keeps its
+  real shape. `info["dry_run"]` says the call was a rehearsal and
+  `info["rewritten_lines"]` names the original loop lines. The report
+  after the `dry run:` line lists each `run_lammps` call with `setup
+  ok` or the `ERROR` line, every check with its outcome, the files a
+  real run would keep, and the traceback.
 - Close contacts are pushed apart before the real potential sees a
   cell. The md-expert card and the atomsk-structures, atomsk-defects,
   atomsk-interfaces, melt-quench, and lammps-scripting skills say to

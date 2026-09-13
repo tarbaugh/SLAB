@@ -46,8 +46,8 @@ class LammpsOutcome:
     argv: tuple[str, ...]
     log: str
     screen: str
-    skiprun: bool = False
-    dropped: tuple[str, ...] = ()
+    dry_run: bool = False
+    rewritten: tuple[str, ...] = ()
 
 
 def lammps_command(command: str | None = None) -> str:
@@ -99,25 +99,19 @@ def describe_lammps(
 
     The resolved command, the detected version, and the setup lines, from
     the engine's own probe, so a script and a force call agree on which
-    LAMMPS they name. ``skiprun`` says whether the build accepts the
-    ``-skiprun`` flag a dry run needs; it is read from the same ``-h``
-    capture as the version and is not part of the cache identity.
+    LAMMPS they name.
 
     Examples:
         >>> describe_lammps("definitely-not-installed-lmp")["engine"]
         'lammps'
-        >>> describe_lammps("definitely-not-installed-lmp")["skiprun"]
-        False
     """
-    from slab.backends import _lammps_skiprun, describe_engine
+    from slab.backends import describe_engine
 
     options: dict[str, Any] = {"command": command}
     if setup is not None:
         options["setup"] = setup
     described = describe_engine("lammps", options)
-    identity = {key: value for key, value in described.items() if key != "source"}
-    identity["skiprun"] = _lammps_skiprun(options)
-    return identity
+    return {key: value for key, value in described.items() if key != "source"}
 
 
 LAMMPS_FACTORY = "slab.backends.lammps_calculator"
@@ -257,7 +251,7 @@ def run_lammps_script(
     command: str | None = None,
     setup: str | tuple[str, ...] | list[str] | None = None,
     timeout_s: float = 86400.0,
-    skiprun: bool = False,
+    dry_run: bool = False,
 ) -> LammpsOutcome:
     """Run ``in.lammps`` in *cwd* whole and classify the outcome.
 
@@ -271,14 +265,12 @@ def run_lammps_script(
     or an ``ERROR`` line in the log or on the screen) raises
     :class:`~slab.errors.LammpsScriptError` carrying both.
 
-    With *skiprun* the script is a dry run: ``-skiprun`` is appended to
-    the argv, so LAMMPS sets up every style, fix, and compute, runs each
-    command in order, and integrates no step of any ``run`` or
-    ``minimize``. The flag works through a ``timer timeout 0`` that a
-    ``timer`` command in the script would override, so every ``timer``
-    line is dropped from the ``in.lammps`` LAMMPS reads (see
-    :func:`drop_timer_lines`) and the dropped lines ride on the outcome.
-    A build that does not list ``-skiprun`` in its ``-h`` is refused.
+    With *dry_run* the script is rehearsed: every ``run`` line becomes
+    ``run 0`` and every ``minimize`` line gets zero iterations (see
+    :func:`rewrite_loops`) in the ``in.lammps`` LAMMPS reads, so LAMMPS
+    sets up every style, fix, and compute, runs each command in order,
+    prints one thermo row and one loop line per loop, and integrates no
+    step. The original lines ride on the outcome as ``rewritten``.
     """
     from slab.backends import _launcher_guard, _payload_guard, _setup_guard
 
@@ -291,17 +283,12 @@ def run_lammps_script(
         _require_available(resolved)
         _launcher_guard(resolved, "lammps")
     directory = Path(cwd)
-    dropped: tuple[str, ...] = ()
-    if skiprun:
-        if not describe_lammps(command, setup)["skiprun"]:
-            raise LammpsScriptError(
-                f"this LAMMPS build ({resolved}) does not accept -skiprun (added in 2022); "
-                "a dry run needs it; upgrade the build or run for real"
-            )
+    rewritten: tuple[str, ...] = ()
+    if dry_run:
         script_path = directory / INPUT_NAME
-        kept, dropped = drop_timer_lines(script_path.read_text(encoding="utf-8"))
-        script_path.write_text(kept, encoding="utf-8")
-    run_argv = _run_argv(resolved, lines, skiprun=skiprun)
+        text, rewritten = rewrite_loops(script_path.read_text(encoding="utf-8"))
+        script_path.write_text(text, encoding="utf-8")
+    run_argv = _run_argv(resolved, lines)
     env = {**os.environ, "LANG": "C", "LC_ALL": "C"}
     try:
         process = subprocess.Popen(
@@ -340,40 +327,51 @@ def run_lammps_script(
         argv=tuple(run_argv),
         log=log,
         screen=screen,
-        skiprun=skiprun,
-        dropped=dropped,
+        dry_run=dry_run,
+        rewritten=rewritten,
     )
 
 
-def drop_timer_lines(script: str) -> tuple[str, tuple[str, ...]]:
-    r"""The script without its ``timer`` commands, and the lines that were dropped.
+def rewrite_loops(script: str) -> tuple[str, tuple[str, ...]]:
+    r"""The script with every loop emptied, and the original lines it rewrote.
 
-    ``-skiprun`` inserts ``timer timeout 0 every 1`` at the top of the
-    input, and a later ``timer`` command in the script overrides it, so
-    the run would integrate every step after all. A line is dropped when
-    its first token is ``timer``; comments and blank lines stay, and the
-    line ending is kept.
+    A line whose first token is ``run`` becomes ``run 0``, whatever its
+    count (a number, a variable) and whatever keywords follow (``upto``,
+    ``every``, ``pre``, ``post``). A line whose first token is
+    ``minimize`` keeps its two tolerances and gets zero iterations and
+    zero evaluations. LAMMPS then performs the full setup of each loop,
+    prints one thermo row and a ``Loop time`` line for zero steps, and
+    integrates nothing. Indentation, comments, and line endings are kept.
 
     Examples:
-        >>> kept, dropped = drop_timer_lines(
-        ...     "units metal\n  timer timeout 0:10:00 every 100\n# timer stays\nrun 10\n"
+        >>> text, lines = rewrite_loops(
+        ...     "thermo 10\n  run ${n} upto\nminimize 1e-6 1e-8 1000 10000 # relax\n"
         ... )
-        >>> kept
-        'units metal\n# timer stays\nrun 10\n'
-        >>> dropped
-        ('  timer timeout 0:10:00 every 100',)
-        >>> drop_timer_lines("run 10\n")
-        ('run 10\n', ())
+        >>> text
+        'thermo 10\n  run 0\nminimize 1e-6 1e-8 0 0\n'
+        >>> lines
+        ('  run ${n} upto', 'minimize 1e-6 1e-8 1000 10000 # relax')
+        >>> rewrite_loops("run 0\n")
+        ('run 0\n', ('run 0',))
+        >>> rewrite_loops("thermo 10\n")
+        ('thermo 10\n', ())
     """
-    kept: list[str] = []
-    dropped: list[str] = []
+    out: list[str] = []
+    rewritten: list[str] = []
     for line in script.splitlines(keepends=True):
-        tokens = line.split()
-        if tokens and tokens[0] == "timer":
-            dropped.append(line.rstrip("\r\n"))
+        body = line.rstrip("\r\n")
+        ending = line[len(body) :]
+        tokens = body.split()
+        indent = body[: len(body) - len(body.lstrip())]
+        if tokens and tokens[0] == "run":
+            out.append(f"{indent}run 0{ending}")
+            rewritten.append(body)
+        elif tokens and tokens[0] == "minimize" and len(tokens) >= 3:
+            out.append(f"{indent}minimize {tokens[1]} {tokens[2]} 0 0{ending}")
+            rewritten.append(body)
         else:
-            kept.append(line)
-    return "".join(kept), tuple(dropped)
+            out.append(line)
+    return "".join(out), tuple(rewritten)
 
 
 _KOKKOS_MODE = re.compile(r"^KOKKOS mode\b.*\bis enabled", re.MULTILINE)
@@ -581,13 +579,13 @@ def _has_error(text: str) -> bool:
     return any(line.strip().startswith("ERROR") for line in text.splitlines())
 
 
-def _run_argv(command: str, setup: tuple[str, ...], *, skiprun: bool = False) -> list[str]:
+def _run_argv(command: str, setup: tuple[str, ...]) -> list[str]:
     """The argv to execute: the command directly, or through a setup shell.
 
     With setup lines the invocation becomes a fail-fast login shell, so
     the ``module`` shell function exists and a failing load kills the run
     instead of exec'ing into the wrong environment, exactly the engine
-    wrapper's semantics. *skiprun* appends ``-skiprun`` after the log.
+    wrapper's semantics.
     """
     try:
         payload = shlex.split(command)
@@ -596,8 +594,6 @@ def _run_argv(command: str, setup: tuple[str, ...], *, skiprun: bool = False) ->
     if not payload:
         raise LammpsScriptError("the LAMMPS command is empty")
     args = [*payload, "-in", INPUT_NAME, "-log", LOG_NAME]
-    if skiprun:
-        args.append("-skiprun")
     if not setup:
         return args
     quoted = " ".join(shlex.quote(token) for token in args)
