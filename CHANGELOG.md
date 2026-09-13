@@ -5,6 +5,12 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- `slab mason read --live` follows a session as it works, like
+  `tail -f`. The viewer shows the transcript, then each event the
+  session appends, until Ctrl+C. It follows the transcripts of the
+  session's delegations too, and a line names the transcript whenever
+  the output moves between them. A line still being written waits for
+  its newline, so a half-written event is never marked invalid.
 - A run is live only while its job is. `run_liveness` adds two
   verdicts: `other-job`, a run stamped with a scheduler job that is not
   this process's, whose pid means nothing here because a sandbox job

@@ -916,6 +916,12 @@ under version control, readable by humans:
   the workspace the same way. It renders the events
   in the chat display's visual language (dimmed reasoning, cyan tool
   calls), clips long content unless you pass `--full`, and ends with the
+  token totals. To watch a session that is still working, add `--live`.
+  The viewer shows the transcript and then each new event as the
+  session writes it. It also follows the transcripts of the
+  delegations, and it names the transcript each time the output moves
+  to another one. A delegation that started before the viewer shows
+  only its new events. Press Ctrl+C to stop, and the viewer prints the
   token totals.
 * **`AGENTS.md`** is the cross-tool conventions standard, and if the project
   has one, it enters the system prompt every session.

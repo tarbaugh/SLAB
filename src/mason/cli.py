@@ -851,6 +851,134 @@ def _render_event(event: dict[str, Any], full: bool) -> None:
     # usage events are accumulated by the caller, not printed per step.
 
 
+# How often 'slab mason read --live' looks for new events, in seconds.
+_LIVE_POLL_S = 1.0
+
+
+class _TranscriptTail:
+    """The lines appended to a transcript since the last read.
+
+    A line is handed out only once its newline is written, so an event
+    the session is still writing is held back until it is whole. With
+    *final*, a last line without a newline is handed out as well: a
+    finished file may simply lack the trailing newline.
+    """
+
+    def __init__(self, path: Path, *, at_end: bool = False) -> None:
+        self.path = path
+        self.offset = path.stat().st_size if at_end else 0
+        self.number = 0
+        self._partial = b""
+
+    def read(self, *, final: bool = False) -> list[tuple[int, str]]:
+        try:
+            with open(self.path, "rb") as handle:
+                handle.seek(self.offset)
+                data = handle.read()
+        except FileNotFoundError:
+            return []
+        self.offset += len(data)
+        data = self._partial + data
+        whole, newline, self._partial = data.rpartition(b"\n")
+        chunks = whole.split(b"\n") if newline else []
+        if final and self._partial:
+            chunks.append(self._partial)
+            self._partial = b""
+        lines = []
+        for chunk in chunks:
+            self.number += 1
+            lines.append((self.number, chunk.decode("utf-8", errors="replace")))
+        return lines
+
+
+class _Usage:
+    """The token totals 'slab mason read' prints after the events."""
+
+    def __init__(self) -> None:
+        self.prompt = self.completion = self.cached = self.steps = 0
+
+    def add(self, event: dict[str, Any]) -> None:
+        self.prompt += int(event.get("prompt_tokens") or 0)
+        self.completion += int(event.get("completion_tokens") or 0)
+        self.cached += int(event.get("cached_prompt_tokens") or 0)
+        self.steps += 1
+
+    def echo(self) -> None:
+        cached = f" ({self.cached} cached)" if self.cached else ""
+        typer.secho(
+            f"\n[{self.steps} model call(s); tokens {self.prompt}+{self.completion}{cached}]",
+            dim=True,
+        )
+
+
+def _render_lines(lines: list[tuple[int, str]], full: bool, usage: _Usage | None) -> None:
+    """Render transcript lines; *usage* collects the token counts, or they are dropped."""
+    import json as _json
+
+    for number, line in lines:
+        if not line.strip():
+            continue
+        try:
+            event = _json.loads(line)
+        except _json.JSONDecodeError:
+            typer.secho(f"[line {number}: not valid JSON; skipped]", fg=typer.colors.YELLOW)
+            continue
+        if not isinstance(event, dict):
+            typer.secho(f"[line {number}: not an event; skipped]", fg=typer.colors.YELLOW)
+            continue
+        if event.get("type") == "usage":
+            if usage is not None:
+                usage.add(event)
+            continue
+        _render_event(event, full)
+
+
+def _follow(transcript: Path, full: bool, usage: _Usage) -> None:
+    """Render what the session appends to *transcript* until Ctrl+C.
+
+    The delegations the transcript's turns start write their own
+    transcripts beside it (``<stem>-<agent>-<n>.jsonl``), and those are
+    followed too: one that already exists from where it stands now, one
+    that appears later from its first line. A line names the transcript
+    whenever the output moves from one transcript to another. Only the
+    conversation's own token counts go into the totals, the same ones
+    'slab mason read' prints without --live.
+    """
+    import time
+
+    tails: dict[Path, _TranscriptTail] = {}
+
+    def delegations(*, at_end: bool) -> None:
+        for path in sorted(transcript.parent.glob(f"{transcript.stem}-*.jsonl")):
+            if path not in tails and path.is_file():
+                tails[path] = _TranscriptTail(path, at_end=at_end)
+
+    root = _TranscriptTail(transcript)
+    _render_lines(root.read(), full, usage)
+    delegations(at_end=True)
+    typer.secho(f"\n[following {transcript.name}; Ctrl+C stops]", dim=True)
+    shown = transcript
+    try:
+        while True:
+            time.sleep(_LIVE_POLL_S)
+            delegations(at_end=False)
+            for path, tail in [(transcript, root), *tails.items()]:
+                lines = tail.read()
+                if not lines:
+                    continue
+                if path != shown:
+                    who = (
+                        "conversation"
+                        if path == transcript
+                        else "delegation " + path.stem[len(transcript.stem) + 1 :]
+                    )
+                    typer.secho(f"\n--- {who} ({path.name})", fg=typer.colors.BLUE)
+                    shown = path
+                _render_lines(lines, full, usage if path == transcript else None)
+    except KeyboardInterrupt:
+        pass
+
+
 @app.command("read")
 def mason_read(
     transcript: Annotated[
@@ -863,6 +991,14 @@ def mason_read(
     full: Annotated[
         bool, typer.Option("--full", help="Show everything; no truncation.")
     ] = False,
+    live: Annotated[
+        bool,
+        typer.Option(
+            "--live",
+            help="Keep reading: show each new event as the session writes it, "
+            "its delegations' too, until Ctrl+C.",
+        ),
+    ] = False,
 ) -> None:
     """Render a session transcript for human reading.
 
@@ -874,35 +1010,20 @@ def mason_read(
     launched from and the time, and one is chosen by number; a workspace
     with one conversation shows it at once. The workspace is the one the
     current directory is inside when no --workspace is given, so 'cd' into
-    a workspace and 'slab mason read' reads from it.
+    a workspace and 'slab mason read' reads from it. With --live, the
+    transcript is shown and then followed like 'tail -f', and the token
+    totals print when Ctrl+C stops it.
     """
-    import json as _json
-
     if transcript is None:
         transcript = _choose_transcript(workspace)
     if not transcript.is_file():
         _fail(f"no transcript at {transcript}")
-    prompt_tokens = completion_tokens = cached_tokens = steps = 0
-    for number, line in enumerate(transcript.read_text(encoding="utf-8").splitlines(), 1):
-        if not line.strip():
-            continue
-        try:
-            event = _json.loads(line)
-        except _json.JSONDecodeError:
-            typer.secho(f"[line {number}: not valid JSON; skipped]", fg=typer.colors.YELLOW)
-            continue
-        if event.get("type") == "usage":
-            prompt_tokens += int(event.get("prompt_tokens") or 0)
-            completion_tokens += int(event.get("completion_tokens") or 0)
-            cached_tokens += int(event.get("cached_prompt_tokens") or 0)
-            steps += 1
-            continue
-        _render_event(event, full)
-    cached = f" ({cached_tokens} cached)" if cached_tokens else ""
-    typer.secho(
-        f"\n[{steps} model call(s); tokens {prompt_tokens}+{completion_tokens}{cached}]",
-        dim=True,
-    )
+    usage = _Usage()
+    if live:
+        _follow(transcript, full, usage)
+    else:
+        _render_lines(_TranscriptTail(transcript).read(final=True), full, usage)
+    usage.echo()
 
 
 def _transcript_root(workspace: Path | None) -> tuple[Path, bool]:

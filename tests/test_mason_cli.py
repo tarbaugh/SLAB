@@ -528,6 +528,70 @@ def test_mason_read_renders_a_transcript_for_humans(tmp_path: Path) -> None:
     assert missing.exit_code != 0
 
 
+def test_mason_read_live_follows_the_session_and_its_delegations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--live shows the transcript, then each event as it is appended, until Ctrl+C."""
+    import json
+    import time
+
+    def line(text: str, role: str = "user") -> str:
+        return json.dumps({"at": "2026-09-13T10:00:00+00:00", "type": "message",
+                           "message": {"role": role, "content": text}}) + "\n"
+
+    def usage(prompt: int) -> str:
+        return json.dumps({"type": "usage", "prompt_tokens": prompt,
+                           "completion_tokens": 1}) + "\n"
+
+    def append(path: Path, text: str) -> None:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(text)
+
+    root = tmp_path / "20260913-100000-1.jsonl"
+    root.write_text(line("measure a0") + usage(10))
+    earlier = tmp_path / "20260913-100000-1-dft-expert-1.jsonl"
+    earlier.write_text(line("an earlier delegation", "assistant"))
+    later = tmp_path / "20260913-100000-1-md-expert-2.jsonl"
+    other = tmp_path / "20260913-100000-12.jsonl"  # another conversation
+
+    half = line("written in two parts", "assistant")
+    steps = [
+        lambda: (append(root, line("relaxing", "assistant") + half[:20]),
+                 later.write_text(line("melting", "assistant") + usage(1000)),
+                 other.write_text(line("not this session"))),
+        lambda: (append(root, half[20:] + usage(5)),
+                 append(earlier, line("new in the earlier one", "assistant"))),
+    ]
+
+    def poll(seconds: float) -> None:
+        if not steps:
+            raise KeyboardInterrupt
+        steps.pop(0)()
+
+    monkeypatch.setattr(time, "sleep", poll)
+    result = runner.invoke(app, ["read", str(root), "--live"])
+    assert result.exit_code == 0, result.output
+    out = result.output
+    order = [
+        "measure a0",
+        "[following 20260913-100000-1.jsonl; Ctrl+C stops]",
+        "relaxing",
+        "--- delegation md-expert-2 (20260913-100000-1-md-expert-2.jsonl)",
+        "melting",
+        "--- conversation (20260913-100000-1.jsonl)",
+        "written in two parts",
+        "--- delegation dft-expert-1 (20260913-100000-1-dft-expert-1.jsonl)",
+        "new in the earlier one",
+        "[2 model call(s); tokens 15+2]",
+    ]
+    positions = [out.index(text) for text in order]
+    assert positions == sorted(positions), out
+    assert "an earlier delegation" not in out  # followed from where it stood
+    assert "not this session" not in out
+    assert out.count("written in two parts") == 1
+    assert "not valid JSON" not in out  # the half line waited for its newline
+
+
 def test_mason_read_without_a_path_offers_the_sessions_by_project_and_time(
     tmp_path: Path,
 ) -> None:
