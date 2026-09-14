@@ -16,6 +16,7 @@ import all three layers.
 
 from __future__ import annotations
 
+import re
 import shutil
 from collections.abc import Callable
 from pathlib import Path
@@ -31,7 +32,7 @@ from mason.errors import MasonError
 from mason.session import stale_locks, transcript_groups
 from slab._ops import engines_overview
 from slab.errors import SlabError
-from slab.lammps import describe_lammps, yaml_thermo_supported
+from slab.lammps import describe_lammps, links_cuda_runtime, yaml_thermo_supported
 from slab.resources import budget, device_status, gres_gpus
 from slab.scratch import leftovers, scratch_root
 
@@ -232,6 +233,61 @@ def _lammps_plain_row(slab_cfg: SlabConfig | None) -> tuple[str, str] | None:
             "one rank whatever it reserved",
         )
     return ("+", f"lammps plain build: {launcher} launches it; a CPU run takes its ranks")
+
+
+# ``-k on`` with a gpu count anywhere in its option list (``-k on t 4 g 1``).
+# The loader refuses ``-k on g`` itself; this finds what it lets through.
+_KOKKOS_GPU_ANYWHERE = re.compile(r"(?:^|\s)-k(?:okkos)?\s+on(?:\s+[^-\s]\S*)*?\s+g\s+\S+")
+
+
+def _lammps_gpu_need_rows(slab_cfg: SlabConfig | None) -> list[tuple[str, str]]:
+    """Say whether the plain LAMMPS build can run on a launch that holds no gpu.
+
+    The plain build runs whenever a launch holds no gpu, dry runs
+    included. Two configurations break that, and each gets a warning row.
+
+    * The plain command asks KOKKOS for a gpu (``-k on ... g N``).
+    * ``requires_gpu`` is unset and the binary links ``libcudart``
+      (:func:`slab.lammps.links_cuda_runtime`, an ``ldd`` check that runs
+      here only), so an unsized launch fails in the driver instead of
+      being refused with the advice to size it with ``gpus=1``.
+
+    A set ``requires_gpu = true`` is a fact row. No rows when
+    ``[engines.lammps]`` sets no command.
+    """
+    lammps = getattr(getattr(slab_cfg, "engines", None), "lammps", None)
+    command: str | None = getattr(lammps, "command", None)
+    if command is None:
+        return []
+    rows: list[tuple[str, str]] = []
+    if _KOKKOS_GPU_ANYWHERE.search(command):
+        rows.append(
+            (
+                "=",
+                "lammps plain build: its command asks KOKKOS for a gpu (-k on ... g N), but "
+                "the plain build runs when a launch holds no gpu; move that command to "
+                "[engines.lammps.gpu] command",
+            )
+        )
+    requires_gpu = getattr(lammps, "requires_gpu", None)
+    if requires_gpu:
+        rows.append(
+            (
+                "+",
+                "lammps plain build: needs a GPU (requires_gpu); a launch without gpus= "
+                "is refused before LAMMPS starts",
+            )
+        )
+    elif requires_gpu is None and links_cuda_runtime(command, getattr(lammps, "setup", None)):
+        rows.append(
+            (
+                "=",
+                "lammps plain build: the binary links libcudart, so it cannot run without "
+                "a GPU; set [engines.lammps] requires_gpu = true so a launch without "
+                "gpus= is refused before LAMMPS starts",
+            )
+        )
+    return rows
 
 
 def _lammps_yaml_row(slab_cfg: SlabConfig | None) -> tuple[str, str]:
@@ -638,6 +694,7 @@ def run(
     plain_row = _lammps_plain_row(slab_cfg)
     if plain_row is not None:
         rows.append(plain_row)
+        rows.extend(_lammps_gpu_need_rows(slab_cfg))
         rows.append(_lammps_yaml_row(slab_cfg))
     if agent is not None:
         window_row = _context_window_row(agent)

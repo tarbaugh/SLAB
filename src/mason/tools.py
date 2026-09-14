@@ -1419,9 +1419,10 @@ def _count_argument(arguments: dict[str, Any], key: str, *, minimum: int = 1) ->
 def _reserve_for(session: MasonSession, arguments: dict[str, Any]) -> Reservation | str:
     """Check out the slice a launch asks for, or the refusal text.
 
-    ``ntasks``, ``threads``, and ``gpus`` size the slice; with none of
-    them the whole free cpu budget is taken, so an unsized launch is
-    accounted for like any other. The session process is the holder
+    ``ntasks``, ``threads``, and ``gpus`` size the slice. With none of
+    them the launch is unsized and holds no gpu (see
+    :meth:`foundation.runtime.Workspace.reserve`), so it is accounted for
+    like any other. The session process is the holder
     until the run claims the reservation, and the dead are reaped first
     so a crashed launch never keeps a slice. A slice that does not fit
     comes back as text carrying the free amounts, never as an exception,
@@ -1744,7 +1745,7 @@ def _add_workflow_tools(
         if refused := _rank_overcommit(script_text, limit=len(reservation.cpus)):
             _release(reservation.id)
             return refused
-        as_child = sized or background
+        as_child = _ops.runs_as_child(reservation, sized=sized) or background
         driver = ["slab", "run", str(script), *args]
         if name:
             driver += ["--name", name]
@@ -1785,7 +1786,7 @@ def _add_workflow_tools(
                     f"the run appears in list_runs (session='this') once it starts; "
                     f"block on it with wait_for_run instead of polling in shell."
                 )
-            if sized:
+            if as_child:
                 result = _launch_child(
                     script,
                     reservation,
@@ -1862,17 +1863,21 @@ def _add_workflow_tools(
                 "takes it as an affinity mask plus CUDA_VISIBLE_DEVICES, and an "
                 "engine command with {ntasks}/{threads}/{gpus} placeholders fills "
                 "from it. A size that does not fit what is free is refused with the "
-                "free amounts (list_engines reports budget and free). A launch "
-                "without ntasks or threads takes every free cpu: unsized, it takes "
-                "every free cpu and no gpu; gpus without ntasks takes the gpus asked "
-                "and one MPI rank per gpu, with the free cpus as threads. Size a GPU "
-                "launch with gpus alone, or with ntasks equal to gpus; the gpu build "
-                "refuses more ranks than gpus, because an exclusive-mode device "
-                "serves one process. "
+                "free amounts (list_engines reports budget and free). gpus without "
+                "ntasks takes the gpus asked and one MPI rank per gpu, each with its "
+                "gpu's share of the free cpus as threads, so several one-gpu launches "
+                "run side by side. Size a GPU launch with gpus alone, or with ntasks "
+                "equal to gpus; the gpu build refuses more ranks than gpus, because "
+                "an exclusive-mode device serves one process. Unsized: one rank, the "
+                "plain build, no GPU (on a host without gpus it takes every free "
+                "cpu). Where list_engines shows the cpu build with requires_gpu, the "
+                "plain build cannot run without a GPU, so size every launch with "
+                "gpus=1, dry runs included. "
                 "For work longer than a few minutes, pass background=true: the "
                 "run detaches from this process (no tool timeout can kill it) "
                 "and wait_for_run blocks until it finishes. Before the first real "
-                "launch of a new or edited script, pass dry_run=true: the script "
+                "launch of a new or edited script, pass dry_run=true and size the "
+                "rehearsal like the launch: the script "
                 "runs to its end or its first exception in a throwaway workspace, "
                 "every run_lammps call sets LAMMPS up and integrates no step, and "
                 "the reply lists each LAMMPS error, the checks (expected to fail), "

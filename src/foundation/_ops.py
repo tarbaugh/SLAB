@@ -1192,6 +1192,31 @@ def parse_dry_run_report(text: str) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def runs_as_child(reservation: Reservation, *, sized: bool) -> bool:
+    """Whether a launch must run as a child process to hold only its slice.
+
+    A sized launch always does. An unsized one does when this process can
+    see a gpu the reservation does not hold. In this process the run would
+    read this process's envelope, see every gpu, and choose the gpu build
+    it never reserved. The child runs under the reservation's envelope,
+    with an empty ``CUDA_VISIBLE_DEVICES``, so it runs the plain build.
+
+    Examples:
+        >>> held = Reservation(host="n1", cpus=(0,), gpus=(), ntasks=1, threads=1, holder_pid=1)
+        >>> os.environ.update(SLAB_CPUS="0,1", SLAB_GPUS="0,1")
+        >>> runs_as_child(held, sized=False)
+        True
+        >>> os.environ["SLAB_GPUS"] = ""
+        >>> runs_as_child(held, sized=False), runs_as_child(held, sized=True)
+        (False, True)
+        >>> for name in ("SLAB_CPUS", "SLAB_GPUS"):
+        ...     del os.environ[name]
+    """
+    from slab.resources import envelope
+
+    return sized or bool(set(envelope().gpus) - set(reservation.gpus))
+
+
 def launch_child(
     root: Path,
     script: str | os.PathLike[str],

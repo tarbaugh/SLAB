@@ -71,6 +71,10 @@ schema_version = 1
 #                                      # your profile) loaded can't reach it
 #                                      # Keep this command plain (no '-k on g'):
 #                                      # it runs when a launch holds no gpu.
+# requires_gpu = true                  # the plain binary cannot run without a
+#                                      # GPU (it links the CUDA runtime); a
+#                                      # launch without gpus= is then refused
+#                                      # before LAMMPS starts
 
 # [engines.lammps.gpu]                 # the build a launch runs when its
 #                                      # reservation holds gpus; the agent sizes

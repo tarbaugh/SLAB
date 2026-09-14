@@ -1750,7 +1750,9 @@ def _sandbox_context(
         "- Mounted paths and their modes (nothing else exists in here):",
         *rows,
     ]
-    if engine_tasks is not None:
+    if gpu:
+        lines.append("- An unsized launch runs one rank of the plain build and holds no GPU.")
+    elif engine_tasks is not None:
         lines.append(f"- MPI engines launch with {engine_tasks} rank(s) when a launch is unsized.")
     lines.append(
         "- Size every launch: launch_workflow takes ntasks, threads, and gpus,"
@@ -1766,8 +1768,9 @@ def _sandbox_context(
         "- A GPU launch runs one MPI rank per GPU: size it with gpus alone (one"
     )
     lines.append(
-        "  rank per gpu, the free cpus as threads) or with ntasks equal to gpus."
+        "  rank per gpu, each with its gpu's share of the free cpus as threads)"
     )
+    lines.append("  or with ntasks equal to gpus.")
     lines.append(
         "  The gpu build refuses more ranks than gpus; an exclusive-mode device"
     )

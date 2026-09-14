@@ -256,7 +256,10 @@ def lammps_builds() -> dict[str, dict[str, Any]]:
     ``{ntasks}``, ``{threads}``, and ``{gpus}`` it asks for, which a launch
     fills. The switches are parsed from the command filled for this
     process's envelope, or from the template when it cannot be filled
-    here, because SLAB adds none. No binary is probed.
+    here, because SLAB adds none. The ``cpu`` build also carries
+    ``requires_gpu`` from ``[engines.lammps]``: true when the plain build
+    cannot run without a GPU, so every launch needs ``gpus=1``. No binary
+    is probed.
 
     Examples:
         >>> import os
@@ -265,6 +268,8 @@ def lammps_builds() -> dict[str, dict[str, Any]]:
         ['cpu']
         >>> lammps_builds()["cpu"]["placeholders"]
         []
+        >>> "requires_gpu" in lammps_builds()["cpu"]
+        True
     """
     from slab.backends import _engine_setup, _lammps_setting
     from slab.config import config_value
@@ -299,7 +304,61 @@ def lammps_builds() -> dict[str, dict[str, Any]]:
             "setup": setup,
             "kokkos": kokkos_switches(filled),
         }
+    builds["cpu"]["requires_gpu"] = bool(config_value("engines.lammps.requires_gpu"))
     return builds
+
+
+_LDD_TIMEOUT_S = 30
+
+
+def links_cuda_runtime(
+    command: str, setup: tuple[str, ...] | list[str] | None = None
+) -> bool | None:
+    """Whether the binary a LAMMPS command runs links ``libcudart``; None when unknown.
+
+    ``slab doctor`` asks this of the plain build, and nothing at launch
+    time does. A binary that links the CUDA runtime cannot start on a
+    host with no device, so its ``[engines.lammps]`` table wants
+    ``requires_gpu = true``. The binary is the command's payload, or the
+    program behind an MPI launcher, resolved after the setup lines run.
+    None when that binary cannot be named or found, or when ``ldd`` is
+    missing or fails, as it does on macOS.
+
+    Examples:
+        >>> links_cuda_runtime("definitely-not-installed-lmp") is None
+        True
+    """
+    import shutil
+
+    from slab.backends import _setup_probe_token, _which_payload
+
+    token = _setup_probe_token(command)
+    if token is None:
+        return None
+    lines = tuple(str(line) for line in setup) if setup else ()
+    if lines:
+        found = f"$(command -v {shlex.quote(token)})"
+        argv = ["/bin/bash", "-l", "-c", "\n".join(["set -e", *lines, f'ldd "{found}"'])]
+    else:
+        path = _which_payload(token, command)
+        ldd = shutil.which("ldd")
+        if path is None or ldd is None:
+            return None
+        argv = [ldd, path]
+    try:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=_LDD_TIMEOUT_S,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    return "libcudart" in completed.stdout
 
 
 def script_scratch_dir() -> Path:

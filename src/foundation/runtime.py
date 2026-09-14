@@ -752,11 +752,14 @@ class Workspace:
         :class:`ResourcesError` carrying the free ids.
 
         *ntasks* and *threads* size the slice (``ntasks * threads`` cpus)
-        and *gpus* counts the gpus. With neither count the whole free cpu
-        budget is taken, so an unsized launch is accounted for like any
-        other. With *gpus* and neither count the launch runs one rank per
-        gpu and the free cpus as threads, because a KOKKOS build gives
-        each MPI rank one device. *budget* is this process's
+        and *gpus* counts the gpus. With *gpus* and neither count the
+        launch runs one rank per gpu, because a KOKKOS build gives each MPI
+        rank one device, and each rank takes its gpu's share of the free
+        cpus as threads. With no count at all the launch is unsized and
+        holds no gpu. Where the budget holds gpus it is one rank of the
+        default thread count, which runs the plain build. Elsewhere it
+        takes the whole free cpu budget, so an unsized launch is accounted
+        for like any other. *budget* is this process's
         :func:`slab.resources.budget` unless given, and the rank and
         thread defaults of an unsized cpu slice are this process's
         :func:`slab.resources.envelope`.

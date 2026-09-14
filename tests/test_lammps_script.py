@@ -582,6 +582,39 @@ def test_run_lammps_follows_the_slice_to_the_gpu_build(
     assert over["kokkos"]["enabled"] is False
 
 
+def test_requires_gpu_refuses_the_plain_build_without_a_gpu_before_lammps_starts(
+    ws: Workspace, tmp_path: Path, fake_lmp: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plain build that needs a GPU is refused on a launch that holds none,
+    through run_lammps and through the ASE calculator's own resolution, and
+    runs as usual once the launch holds a gpu. A listing is never refused."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("SLAB_ENGINES", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "slab.toml").write_text(
+        f'[engines.lammps]\ncommand = "{fake_lmp}"\nrequires_gpu = true\n'
+    )
+    monkeypatch.setenv("SLAB_CPUS", "0")
+    monkeypatch.setenv("SLAB_GPUS", "")
+    monkeypatch.setenv("SLAB_NTASKS", "1")
+    from slab.backends import PLAIN_BUILD_NEEDS_GPU, _lammps_launch_command, _lammps_locator
+
+    assert _lammps_locator({"command": None}) == fake_lmp
+    assert lammps_builds()["cpu"]["requires_gpu"] is True
+    with pytest.raises(ResourcesError, match="the plain build on this machine needs a GPU"):
+        _lammps_launch_command({"command": None})
+    with (
+        pytest.raises(ResourcesError, match=PLAIN_BUILD_NEEDS_GPU.split(";")[0]),
+        ws.start_run(name="unsized") as run,
+    ):
+        run_lammps(SCRIPT, atoms=_argon(), label="unsized")
+    assert not [a for a in ws.runs.list_artifacts(run.id) if a.name.endswith(".log")]
+    monkeypatch.setenv("SLAB_GPUS", "0")
+    with ws.start_run(name="one-gpu"):
+        _, plain = run_lammps(SCRIPT, atoms=_argon(), label="plain")
+    assert plain["build"] == "cpu" and plain["command"] == fake_lmp
+
+
 def test_the_gpu_build_refuses_more_ranks_than_gpus_before_lammps_starts(
     ws: Workspace, tmp_path: Path, fake_lmp: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

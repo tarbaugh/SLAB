@@ -31,9 +31,10 @@ Speed is a rule, not luck. Any molecular dynamics, and any static
 calculation on more than a few hundred atoms, runs through `run_lammps`
 sized with `gpus=` when the machine declares a gpu build and the slice
 can hold a gpu. Size a GPU launch with `gpus=` alone, which gives one
-MPI rank per GPU and the free cpus as threads, or with `ntasks=` equal
-to `gpus=`; never more ranks than GPUs, because the gpu build refuses
-that and an exclusive-mode device serves one process. Threads through
+MPI rank per GPU with its GPU's share of the free cpus as threads, or
+with `ntasks=` equal to `gpus=`; never more ranks than GPUs, because
+the gpu build refuses that and an exclusive-mode device serves one
+process. Threads through
 the plain build are the fallback when no gpu can be held. The
 ASE-driven `lammps` engine and a served MLIP checkpoint id are for a
 small relaxation or single point that feeds another task; neither ever

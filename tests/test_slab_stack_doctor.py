@@ -373,6 +373,99 @@ def test_the_doctor_names_the_lammps_plain_build_launcher(project: Path) -> None
     assert "lammps plain build" not in result.output
 
 
+def test_the_doctor_says_when_the_plain_lammps_build_needs_a_gpu(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The plain build runs on every launch that holds no gpu, dry runs
+    included. A plain command that asks KOKKOS for a gpu, or a binary that
+    links libcudart with requires_gpu unset, gets a warning row."""
+    from slab_stack import doctor
+
+    base = '[agent]\nmodel = "m"\n[hpc]\ndefault_partition = "cpu"\n[hpc.partitions.cpu]\n'
+    links: dict[str, bool | None] = {"answer": True}
+    asked: list[str] = []
+
+    def fake_links(command: str, setup: object) -> bool | None:
+        asked.append(command)
+        return links["answer"]
+
+    monkeypatch.setattr(doctor, "links_cuda_runtime", fake_links)
+    monkeypatch.setattr(doctor, "describe_lammps", lambda command, setup: {"version": None})
+    (project / "slab.toml").write_text(base + '[engines.lammps]\ncommand = "lmp"\n')
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert result.exit_code == 0, result.output
+    assert (
+        "[=] lammps plain build: the binary links libcudart, so it cannot run without a GPU; "
+        "set [engines.lammps] requires_gpu = true" in result.output
+    )
+    assert asked == ["lmp"]
+    links["answer"] = None  # ldd missing, or the binary not found: no row
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert "libcudart" not in result.output
+    links["answer"] = True
+    (project / "slab.toml").write_text(
+        base + '[engines.lammps]\ncommand = "lmp"\nrequires_gpu = false\n'
+    )
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert "libcudart" not in result.output  # an explicit false is the operator's word
+    (project / "slab.toml").write_text(
+        base + '[engines.lammps]\ncommand = "lmp"\nrequires_gpu = true\n'
+    )
+    asked.clear()
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert (
+        "[+] lammps plain build: needs a GPU (requires_gpu); a launch without gpus= is refused "
+        "before LAMMPS starts" in result.output
+    )
+    assert asked == []  # no ldd once the operator said so
+    # The loader refuses '-k on g'; a gpu count later in the option list gets the row.
+    (project / "slab.toml").write_text(
+        base + '[engines.lammps]\ncommand = "mpirun -np 1 lmp -k on t 4 g 1 -sf kk"\n'
+        "requires_gpu = true\n"
+    )
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert result.exit_code == 0, result.output
+    assert "[=] lammps plain build: its command asks KOKKOS for a gpu (-k on ... g N)" in (
+        result.output
+    )
+    (project / "slab.toml").write_text(
+        base + '[engines.lammps]\ncommand = "lmp -k on t 4 -sf kk -pk kokkos neigh half"\n'
+        "requires_gpu = true\n"
+    )
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert "asks KOKKOS for a gpu" not in result.output
+
+
+def test_links_cuda_runtime_reads_ldd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The check names the binary behind a launcher and asks ldd about it."""
+    import stat
+
+    from slab.lammps import links_cuda_runtime
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, body in (
+        ("lmp", "#!/bin/sh\nexit 0\n"),
+        ("lmp_serial", "#!/bin/sh\nexit 0\n"),
+        (
+            "ldd",
+            '#!/bin/sh\ncase "$1" in\n'
+            '  */lmp) echo "libcudart.so.12 => /opt/cuda/lib64/libcudart.so.12" ;;\n'
+            '  *) echo "libc.so.6 => /lib/libc.so.6" ;;\nesac\n',
+        ),
+    ):
+        path = bin_dir / name
+        path.write_text(body)
+        path.chmod(path.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    assert links_cuda_runtime("mpirun -np {ntasks} lmp -sf kk") is True
+    assert links_cuda_runtime("lmp_serial") is False
+    assert links_cuda_runtime("no-such-lmp") is None
+    assert links_cuda_runtime("mpirun --bind-to core lmp") is None  # payload unknowable
+    (bin_dir / "ldd").unlink()
+    assert links_cuda_runtime("lmp") is None
+
+
 def test_the_doctor_names_the_context_window_the_loop_assumes(project: Path) -> None:
     """An openai endpoint with no context_window silently compacts against
     65536; the row says so. A set window, or a provider whose window the

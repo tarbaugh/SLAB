@@ -69,10 +69,13 @@ result, info = run_lammps(SCRIPT, atoms=STRUCTURE, files=["W.eam.fs"], label="w-
 - `engine="lammps"` is all you pass. The build follows the slice: a
   launch sized with `gpus=` runs the gpu build under
   `[engines.lammps.gpu]`, and an unsized launch runs the plain build
-  under `[engines.lammps]`. Never name a build. The `lammps` entry of
-  `list_engines` lists every build with its command and the switches
-  parsed from it. Run smoke tests and small cells unsized, and size
-  production MD on the GPU partition with `gpus=`. A build whose
+  under `[engines.lammps]` on one rank with no GPU. Never name a build.
+  The `lammps` entry of `list_engines` lists every build with its
+  command and the switches parsed from it. Run smoke tests and small
+  cells unsized, and size production MD on the GPU partition with
+  `gpus=`. Where the `cpu` build shows `requires_gpu: true`, the plain
+  build cannot start without a GPU, so size every launch with `gpus=1`,
+  dry runs included. A build whose
   command holds `{ntasks}`, `{threads}`, or `{gpus}` is filled from the
   launch's size (the `placeholders` field names them). Nothing adds a
   switch a build lacks: a run whose `kokkos.enabled` is false is a host
@@ -86,9 +89,11 @@ result, info = run_lammps(SCRIPT, atoms=STRUCTURE, files=["W.eam.fs"], label="w-
 
 Dry-run every new or edited script before its first real launch:
 `launch_workflow(script="md.py", dry_run=true)` (or `slab run --dry-run
-md.py`). The script runs to its end or its first exception in a
-throwaway workspace, every `run_lammps` call sets LAMMPS up and
-integrates no step, and the reply lists each LAMMPS error, the checks
+md.py`). Size the rehearsal like the launch, because the size chooses
+the build the rehearsal sets up: a launch with `gpus=1` rehearses with
+`dry_run=true, gpus=1`. The script runs to its end or its first
+exception in a throwaway workspace, every `run_lammps` call sets LAMMPS
+up and integrates no step, and the reply lists each LAMMPS error, the checks
 (expected to fail, because no step ran), and the outputs. It costs one
 LAMMPS start and catches a syntax error in the third stage and a wrong
 result key in the analysis before the MD leg is paid for. In a dry run
@@ -469,9 +474,10 @@ with `gpus=` alone:
 launch_workflow(script="md.py", gpus=2)
 ```
 
-That gives one MPI rank per GPU and the free cpus as threads across the
-ranks; `ntasks=` equal to `gpus=` says the same. Never ask for more
-ranks than GPUs. The gpu build refuses such a launch before LAMMPS
+That gives one MPI rank per GPU, and each rank takes its GPU's share of
+the free cpus as threads; `ntasks=` equal to `gpus=` says the same. So
+four `gpus=1` launches run side by side on a node with four GPUs. Never
+ask for more ranks than GPUs. The gpu build refuses such a launch before LAMMPS
 starts, because every rank past the first on a device fails on an
 exclusive-mode device with `cudaErrorDevicesUnavailable`. The call
 reserves the GPUs and the cpus before the run starts and is refused

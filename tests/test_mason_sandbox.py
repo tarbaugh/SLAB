@@ -120,7 +120,9 @@ def test_the_cage_description_notices_the_gpu(tmp_path: Path) -> None:
     )
     assert "the job holds 1 GPU(s) (gres gpu:1)" in context
     assert "CUDA_VISIBLE_DEVICES" in context  # where the ids come from
-    assert "MPI engines launch with 4 rank(s) when a launch is unsized." in context
+    # Inside a GPU job an unsized launch is one plain rank, never the job's rank count.
+    assert "An unsized launch runs one rank of the plain build and holds no GPU." in context
+    assert "MPI engines launch with 4 rank(s)" not in context
     assert "launch_workflow takes ntasks, threads, and gpus" in context
 
 

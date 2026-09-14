@@ -896,6 +896,62 @@ def test_an_unsized_foreground_launch_reserves_the_whole_free_budget_in_process(
         assert ws.runs.list_reservations() == []
 
 
+@pytest.fixture()
+def four_gpus(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "SLAB_CPUS", "SLAB_GPUS", "SLAB_NTASKS", "SLAB_THREADS", "SLURM_NTASKS",
+        "SLURM_CPUS_PER_TASK",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3")
+
+
+def test_an_unsized_launch_in_a_gpu_budget_runs_as_a_child_without_a_gpu(
+    box: Toolbox, tmp_path: Path, four_gpus: None
+) -> None:
+    """In this process the run would see every gpu and pick the gpu build it
+    never reserved; as a child it holds one plain rank and sees no gpu."""
+    from foundation import Workspace
+
+    (tmp_path / "wf.py").write_text(SIZED_WORKFLOW)
+    answer = box.dispatch(_call("launch_workflow", script="wf.py"))
+    assert "resources held: 1 cpu(s) 0, no gpu; 1 rank(s) x 1 thread(s)" in answer
+    assert "env 1 1 ''" in answer
+    with Workspace(box.session.workspace_root) as ws:
+        assert ws.runs.get(_run_id(answer)).pid != os.getpid()
+        assert ws.runs.list_reservations() == []
+    (launch,) = [e for e in _command_events(box.session) if e["kind"] == "launch"]
+    assert "--reservation" in launch["command"] and launch["sized"] is False
+
+
+def test_two_one_gpu_launches_run_side_by_side(
+    box: Toolbox, tmp_path: Path, four_gpus: None
+) -> None:
+    """gpus=1 alone once took every free cpu as threads, so the second launch
+    of a wave was refused. Each now takes its gpu's share of the cpus."""
+    from foundation import Workspace
+
+    if _budget_cpus() < 4:
+        pytest.skip("four one-gpu shares need four cpus")
+    (tmp_path / "slow.py").write_text("import time\ntime.sleep(1.5)\n")
+    first = box.dispatch(
+        _call("launch_workflow", script="slow.py", name="one", background=True, gpus=1)
+    )
+    second = box.dispatch(
+        _call("launch_workflow", script="slow.py", name="two", background=True, gpus=1)
+    )
+    assert "launched in the background" in first and "launched in the background" in second
+    one, two = [e for e in _command_events(box.session) if e["kind"] == "launch"]
+    share = _budget_cpus() // 4
+    assert (one["resources"]["gpus"], two["resources"]["gpus"]) == (["0"], ["1"])
+    assert len(one["resources"]["cpus"]) == share == one["resources"]["threads"]
+    assert not set(one["resources"]["cpus"]) & set(two["resources"]["cpus"])
+    box.dispatch(_call("wait_for_run", timeout_s=60))
+    with Workspace(box.session.workspace_root) as ws:
+        assert {run.name for run in ws.runs.list_runs()} == {"one", "two"}
+        assert ws.runs.list_reservations() == []
+
+
 def test_a_hand_written_mpirun_is_judged_against_the_launches_own_slice(
     box: Toolbox, tmp_path: Path, no_gpus: None
 ) -> None:

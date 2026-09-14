@@ -5,6 +5,28 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- GPU launch sizing leaves room for the next launch, and an unsized
+  launch holds what it says. A reservation sized with `gpus=` and no
+  rank or thread count gives each rank its gpu's share of the free cpus
+  (the free cpus divided by the free gpus), where it took every free cpu
+  before. So four `gpus=1` launches fit side by side on a 36-cpu, 4-gpu
+  job with 9 threads each. A launch that names `threads` keeps them.
+  Where the budget holds gpus, an unsized launch holds one rank of the
+  default thread count and no gpu. Mason and the MCP server run it as a
+  child (`foundation._ops.runs_as_child`), so it sees no gpu and runs
+  the plain build instead of a gpu build sized to every rank of the job.
+  A budget without gpus keeps the old unsized rule. `[engines.lammps]
+  requires_gpu = true` declares a plain build that cannot start without
+  a GPU. A launch that holds no gpu is then refused before LAMMPS starts,
+  dry runs included, with the advice to size it with `gpus=1`.
+  `list_engines` and `slab engines list` show the flag. `slab doctor`
+  warns when the plain command asks KOKKOS for a gpu later in its option
+  list (`-k on t 4 g 1`), and when the flag is unset and `ldd` finds
+  `libcudart` in the plain binary (`slab.lammps.links_cuda_runtime`).
+  The launch tool text, the environment block, the sandbox context, the
+  lammps-scripting and lammps-potentials skills, the md-expert card, and
+  the LAMMPS note state the rule, and the dry-run text says to size the
+  rehearsal like the launch.
 - `slab mason read --live` follows a session as it works, like
   `tail -f`. The viewer shows the transcript, then each event the
   session appends, until Ctrl+C. It follows the transcripts of the

@@ -97,7 +97,7 @@ from slab.engines import (
     load_registry,
     registry_engine_names,
 )
-from slab.errors import EngineNotAvailableError
+from slab.errors import EngineNotAvailableError, ResourcesError
 from slab.resources import envelope, fill, one_rank_per_gpu
 
 
@@ -1010,7 +1010,10 @@ def _lammps_launch_command(options: dict[str, Any], *, build: str | None = None)
 
     When the command comes from the gpu build, the launch must run one
     MPI rank per GPU (:func:`slab.resources.one_rank_per_gpu`), and a
-    launch shaped otherwise is refused before anything starts. *build*
+    launch shaped otherwise is refused before anything starts. When it
+    comes from the plain build and ``[engines.lammps] requires_gpu`` is
+    set, a launch that holds no gpu is refused the same way
+    (:func:`_plain_build_guard`). *build*
     names the build a caller resolved the command from (``run_lammps``
     does); unset, the build is the slice's choice when ``command`` is
     absent, and a per-call ``command`` is the caller's own shape, filled
@@ -1022,7 +1025,31 @@ def _lammps_launch_command(options: dict[str, Any], *, build: str | None = None)
         build = _lammps_build_name()
     if build == "gpu":
         one_rank_per_gpu(envelope(), build="gpu")
+    elif build == "cpu" and options.get("command") is None:
+        _plain_build_guard()
     return _lammps_locator(options)
+
+
+#: The refusal of a launch that holds no gpu when the plain build needs one.
+PLAIN_BUILD_NEEDS_GPU = (
+    "the plain build on this machine needs a GPU; size the launch with gpus=1, "
+    "dry runs included ([engines.lammps] requires_gpu = true)"
+)
+
+
+def _plain_build_guard() -> None:
+    """Refuse the plain build under an envelope with no gpu when it needs one.
+
+    ``[engines.lammps] requires_gpu`` says the plain binary cannot start
+    without a device, as one linked against the CUDA runtime cannot. The
+    refusal comes before the subprocess, so an unsized launch or dry run
+    hears what to change instead of reading a driver error.
+    """
+    from slab.config import config_value
+
+    if envelope().gpus or not config_value("engines.lammps.requires_gpu"):
+        return
+    raise ResourcesError(PLAIN_BUILD_NEEDS_GPU)
 
 
 def _lammps_template(options: dict[str, Any]) -> str:

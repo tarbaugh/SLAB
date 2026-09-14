@@ -473,6 +473,8 @@ def resources_line(session: MasonSession) -> str:
 
     from foundation.errors import FoundationError
     from foundation.runtime import Workspace
+    from slab.config import config_value
+    from slab.errors import SlabError
     from slab.resources import budget, envelope
 
     found = budget().counts
@@ -488,10 +490,27 @@ def resources_line(session: MasonSession) -> str:
         if free is not None
         else ""
     )
+    if found["gpus"]:
+        unsized = (
+            "an unsized launch runs one rank of the plain build and holds no gpu; "
+            "gpus= alone gives one rank per gpu with its share of the free cpus"
+        )
+        try:
+            needs_gpu = bool(config_value("engines.lammps.requires_gpu"))
+        except (SlabError, ValueError, OSError):
+            needs_gpu = False  # a broken config is reported by the tools that read it
+        if needs_gpu:
+            unsized += (
+                "; the plain build on this machine needs a GPU, so size every "
+                "launch with gpus=1, dry runs included"
+            )
+    else:
+        unsized = (
+            f"an unsized launch runs with {envelope().ntasks} rank(s) and takes every free cpu"
+        )
     return (
         f"cpus: {found['cpus']} usable in this session, gpus: {found['gpus']}; "
-        f"{free_text}an unsized launch runs with {envelope().ntasks} rank(s) and "
-        f"takes every free cpu. Size a launch with ntasks, threads, and gpus; a "
+        f"{free_text}{unsized}. Size a launch with ntasks, threads, and gpus; a "
         f"launch that does not fit what is free is refused with the free amounts, "
         f"and so is a shell command or script that spells out more ranks. The free "
         f"amounts above were read when this prompt was built; call `free_resources` "

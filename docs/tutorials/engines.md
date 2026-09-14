@@ -174,6 +174,14 @@ command = "mpirun -np {ntasks} lmp -k on g {gpus} -sf kk -pk kokkos newton on ne
 setup = ["module load lammps/2025.07-kokkos"]
 ```
 
+| Table | Key | Meaning |
+|---|---|---|
+| `[engines.lammps]` | `command` | The plain build. It runs when a launch holds no gpu. |
+| `[engines.lammps]` | `setup` | The lines the plain build's subprocess runs first. |
+| `[engines.lammps]` | `requires_gpu` | True when the plain binary cannot start without a GPU. Default false. |
+| `[engines.lammps.gpu]` | `command` | The gpu build. It runs when a launch holds gpus. |
+| `[engines.lammps.gpu]` | `setup` | The lines the gpu build's subprocess runs first. |
+
 The build follows the slice. A launch whose reservation holds gpus runs
 the gpu build, and a launch without runs the plain build. The agent
 never names a build, and `engine="lammps"` is all it passes. Without a
@@ -252,6 +260,15 @@ The details that keep runs honest and directories clean:
   templates and setup lines differ.
   [Mason](mason.md#compute-budget-sizing-the-physics-to-the-machine)
   says how a launch gets its size.
+- **A plain build that needs a GPU says so.** On some sites the plain
+  binary is linked against the CUDA runtime, and it cannot start on a
+  launch that holds no gpu. Set `requires_gpu = true` under
+  `[engines.lammps]` for such a binary. SLAB then refuses a launch that
+  holds no gpu before LAMMPS starts, and a dry run gets the same
+  refusal. The message tells the agent to size the launch with
+  `gpus=1`. `list_engines` shows the flag on the `cpu` build, and
+  `slab doctor` warns when the flag is unset and `ldd` finds `libcudart`
+  in the binary.
 - **Nothing adds a switch the command lacks.** The command runs as
   written. `-k on` is what enables the KOKKOS package, so a KOKKOS build
   under a plain `lmp` runs its plain styles on the host, and it does so

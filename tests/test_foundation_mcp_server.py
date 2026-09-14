@@ -613,6 +613,26 @@ def test_unsized_launch_reserves_the_whole_free_budget_in_process(
         assert ws.runs.list_reservations() == []
 
 
+def test_an_unsized_launch_in_a_gpu_budget_runs_as_a_child_without_a_gpu(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The server process sees every gpu, so an unsized launch runs as a child
+    under its own slice: one plain rank, no gpu, CUDA_VISIBLE_DEVICES empty."""
+    for name in ("SLAB_CPUS", "SLAB_GPUS", "SLAB_NTASKS", "SLAB_THREADS", "SLURM_NTASKS",
+                 "SLURM_CPUS_PER_TASK"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    script = tmp_path / "wf.py"
+    script.write_text("import os\nprint('cuda', repr(os.environ['CUDA_VISIBLE_DEVICES']))\n")
+    server = build_server(root, project=tmp_path)
+    result = _call(server, "launch_workflow", {"script_path": str(script), "intent": "x"})
+    assert result["resources"]["gpus"] == [] and result["resources"]["ntasks"] == 1
+    assert "cuda ''" in result["output"]
+    with Workspace(root) as ws:
+        assert ws.runs.get(result["run_id"]).pid != os.getpid()
+        assert ws.runs.list_reservations() == []
+
+
 def test_a_launch_that_does_not_fit_is_refused_with_the_free_amounts(
     root: Path, tmp_path: Path, no_gpus: None
 ) -> None:

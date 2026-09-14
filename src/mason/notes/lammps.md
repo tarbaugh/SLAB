@@ -35,7 +35,9 @@ which path the run took (`yaml`, `text`, or `mixed`).
 
 The build follows the slice. A launch sized with `gpus=` runs the gpu
 build from `[engines.lammps.gpu]`, and an unsized launch runs the plain
-build from `[engines.lammps]`. Never name a build; `engine="lammps"` is
+build from `[engines.lammps]` on one rank with no GPU. Where the `cpu`
+build in `list_engines` shows `requires_gpu: true`, size every launch
+with `gpus=1`, dry runs included. Never name a build; `engine="lammps"` is
 all you pass. Read the `lammps` entry of `list_engines` before a GPU
 run, and `info["kokkos"]` after it, because SLAB adds no switch a build
 lacks.
