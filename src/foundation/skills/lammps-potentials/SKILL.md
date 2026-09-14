@@ -156,6 +156,18 @@ machine fact.
   already `newton on neigh half`.
 - One MPI task per GPU. More tasks per GPU than one need CUDA MPS for
   acceptable performance.
+- The reservation chooses the devices. Do not set
+  `CUDA_VISIBLE_DEVICES` in `command=` or in a setup line, not even to
+  route around a broken device. SLAB refuses the command, because the
+  run record, `free_resources`, and the other launches trust the ids the
+  reservation holds. The budget excludes a broken device instead. A
+  one-GPU launch that fails with `cudaErrorDevicesUnavailable` within a
+  minute of LAMMPS starting excludes its device for the rest of the job,
+  and `free_resources` lists it as excluded. Launch again, sized as
+  before. When the failed launch held several GPUs, the error does not
+  say which one refused, so a `gpus=1` launch finds it. A device that
+  stays broken belongs in the machine's `exclude_gpus`, which is the
+  operator's config, so report it as a machine fact.
 - A segmentation fault with several ranks means the MPI library is not
   GPU-aware: add `gpu/aware off` to the `-pk kokkos` options.
 - `suffix kk` and `package kokkos ...` can also be lines in the input,
@@ -215,9 +227,10 @@ each form is produced and how its extrapolation grade is built.
   triggers. The chunk, parallel, and `/kk` variants always have stress.
 - Large cells under TensorFlow use the chunk variants
   (`grace/1layer/chunk chunksize 2048`). Several GPUs with a 1L model
-  need one MPI rank per GPU with `CUDA_VISIBLE_DEVICES` set per rank; a
-  2L model on several GPUs uses `grace/2layer/chunk` or
-  `grace/2layer/parallel`.
+  need one MPI rank per GPU. Size the launch with `gpus=` and leave
+  `CUDA_VISIBLE_DEVICES` to the reservation (section 4); the `/kk`
+  styles give each rank its own device. A 2L model on several GPUs
+  uses `grace/2layer/chunk` or `grace/2layer/parallel`.
 - The `/kk` styles read the weights that `grace_utils export_kokkos`
   or `grace_models download NAME --kokkos` writes, and run without
   TensorFlow. Run them with the switches of section 4; `newton on` is

@@ -1460,3 +1460,79 @@ def test_a_reservation_of_another_job_holds_none_of_this_budget(store: SQLiteRun
     assert [r.id for r in store.release_dead("n1", "7")] == [stray.id]
     assert {r.id for r in store.list_reservations()} == {held_mine.id, held_theirs.id, bare.id}
     assert [r.id for r in store.release_dead("n1", "8")] == []
+
+
+def test_migrates_v8_database_in_place(db_path: Path) -> None:
+    """A workspace from before gpu exclusions (schema v8) opens cleanly and
+    records one."""
+    with SQLiteRunStore(db_path):
+        pass
+    conn = sqlite3.connect(db_path)
+    conn.execute("DROP TABLE excluded_gpus")
+    conn.execute("PRAGMA user_version = 8")
+    conn.close()
+    with SQLiteRunStore(db_path) as s2:
+        assert s2.list_excluded_gpus() == []
+        s2.exclude_gpu("0", host="n1", job_id="7", reason="refused")
+        assert [row.gpu for row in s2.excluded_gpus("n1", "7")] == ["0"]
+        conn = sqlite3.connect(db_path)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        conn.close()
+
+
+def test_reserve_skips_a_gpu_excluded_under_this_job(store: SQLiteRunStore) -> None:
+    """An excluded gpu is never handed out on its host under its job, and a
+    refusal that runs short of gpus names it. Another job, or another host,
+    is not affected."""
+    import os
+
+    from foundation.errors import ResourcesError
+
+    store.exclude_gpu("0", host="n1", job_id="7", reason="refused", run_id="r1")
+    budget = {"budget_cpus": range(8), "budget_gpus": ("0", "1", "2", "3")}
+    held = [
+        store.reserve(host="n1", holder_pid=os.getpid(), job_id="7", ntasks=1, gpus=1, **budget)
+        for _ in range(3)
+    ]
+    assert [r.gpus for r in held] == [("1",), ("2",), ("3",)]
+    with pytest.raises(ResourcesError, match=r"gpu\(s\) 0 excluded after a refusal") as refused:
+        store.reserve(host="n1", holder_pid=os.getpid(), job_id="7", ntasks=1, gpus=1, **budget)
+    assert refused.value.free["gpus"] == []
+    other_job = store.reserve(
+        host="n1", holder_pid=os.getpid(), job_id="8", ntasks=1, gpus=1, **budget
+    )
+    other_host = store.reserve(
+        host="n2", holder_pid=os.getpid(), job_id="7", ntasks=1, gpus=1, **budget
+    )
+    assert other_job.gpus == other_host.gpus == ("0",)
+    # Cleared by hand, the device is free again for this job.
+    assert [r.gpu for r in store.clear_excluded_gpu("0", host="n1", job_id="7")] == ["0"]
+    back = store.reserve(host="n1", holder_pid=os.getpid(), job_id="7", ntasks=1, gpus=1, **budget)
+    assert back.gpus == ("0",)
+
+
+def test_an_exclusion_expires_with_its_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sweep that fails an ended job's runs removes the job's exclusions,
+    even when no run of the job is still running. A job the scheduler still
+    holds keeps its rows."""
+    from foundation import Workspace, runtime
+    from slab.hpc import JobState, JobStatus
+
+    states = {"7": "completed", "8": "running"}
+    monkeypatch.setattr(
+        runtime,
+        "job_state",
+        lambda job_id: JobStatus(
+            job_id=job_id, state=JobState(states[job_id]), raw=states[job_id].upper()
+        ),
+    )
+    with Workspace(tmp_path / "ws") as ws:
+        ws.runs.exclude_gpu("0", host="n1", job_id="7", reason="refused")
+        ws.runs.exclude_gpu("0", host="n1", job_id="8", reason="refused")
+        ws.runs.exclude_gpu("1", host="n1", job_id="9", reason="refused")
+        ws.settle_ended_jobs(caller="t", dry_run=True, ended=["9"])
+        assert len(ws.runs.list_excluded_gpus()) == 3  # a dry run changes nothing
+        ws.settle_ended_jobs(caller="t", ended=["9"])
+        assert [(r.gpu, r.job_id) for r in ws.runs.list_excluded_gpus()] == [("0", "8")]

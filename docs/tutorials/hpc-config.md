@@ -396,6 +396,66 @@ rows read:
 [=] gpus: nvidia-smi not found
 ```
 
+### Exclude a broken GPU
+
+A device can be broken while `nvidia-smi` reports it idle. Every CUDA
+context on it then fails within seconds with
+`cudaErrorDevicesUnavailable`. SLAB hands out gpus by count, so it would
+give that device to a launch again and again. Name it in the
+partition's `exclude_gpus`:
+
+```toml
+[hpc.partitions.gpu]
+gres = "gpu:4"
+time_limit = "04:00:00"
+exclude_gpus = ["0"]
+```
+
+The ids are in the numbering the job's budget uses. That is the
+numbering of `CUDA_VISIBLE_DEVICES`, or of the renumbered SLURM ids when
+the job sees its devices from zero. Write one id per entry. A job
+rendered for the partition exports the list after the partition's
+setup lines:
+
+```text
+$ slab hpc render "slab run md.py" --name md
+#!/bin/bash -l
+#SBATCH --job-name=md
+#SBATCH --partition=gpu
+#SBATCH --output=md-%j.out
+#SBATCH --time=04:00:00
+#SBATCH --gres=gpu:4
+
+set -euo pipefail
+
+export SLAB_GPU_EXCLUDE=0
+slab run md.py
+```
+
+The budget of every process in the job leaves the ids in
+`SLAB_GPU_EXCLUDE` out, so no reservation holds them, and `gpu_source`
+says how many went. The sandbox render passes the variable into the
+container and tells the agent in its context. On a laptop with the
+variable set by hand, the doctor row reads:
+
+```text
+[+] gpu budget: 3 gpu(s), ids 1,2,3 (source: cuda_visible_devices, 1 excluded)
+```
+
+A workstation outside a scheduler uses `[workspace] exclude_gpus`
+instead. `slab run`, `slab mcp`, and the Mason session export it as
+`SLAB_GPU_EXCLUDE` when the variable is not already set, and every
+launch they start inherits it. A value already in the environment wins,
+an empty one included.
+
+A partition's list applies on every node of the partition, so a device
+excluded for one faulty node is lost on the healthy nodes too. Both
+lists are facts about one machine. Keep them in the site file or in
+the machine's own config file, and never in a project file that travels
+to another machine. A device that refuses a launch while nobody has
+listed it yet is excluded for the rest of that job by the refusal
+itself. See [A GPU that refuses every launch](debugging-failures.md#a-gpu-that-refuses-every-launch).
+
 ## A cluster maintainer's checklist
 
 1. Install SLAB into a shared environment.

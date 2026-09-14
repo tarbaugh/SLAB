@@ -863,6 +863,48 @@ def test_runs_reservations_and_reap(root: Path) -> None:
     assert "no reservations" in empty.output
 
 
+def test_runs_gpus_lists_and_clears_an_exclusion(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """'slab runs gpus' lists the gpus excluded after a refusal, says which
+    apply to this host and job, prints the static list, and --clear removes
+    one exclusion of this host and job."""
+    from foundation.cli import runs_app
+    from foundation.runtime import this_host
+
+    monkeypatch.setenv("SLURM_JOB_ID", "812")
+    monkeypatch.setenv("SLAB_GPU_EXCLUDE", "3")
+    with Workspace(root) as ws:
+        ws.runs.exclude_gpu("0", host=this_host(), job_id="812", reason="refused", run_id="r1")
+        ws.runs.exclude_gpu("1", host="another-node", job_id="700", reason="refused")
+    listed = runner.invoke(runs_app, ["gpus", "-w", str(root)])
+    assert listed.exit_code == 0, listed.output
+    assert "SLAB_GPU_EXCLUDE: 3 (left out of the budget by config)" in listed.output
+    lines = listed.output.splitlines()
+    assert any(
+        line.startswith("gpu 0: excluded (refused at ") and ", job 812)" in line
+        and "applies here" in line and "run r1" in line
+        for line in lines
+    ), listed.output
+    assert any("gpu 1: excluded" in line and "not here" in line for line in lines)
+    missing = runner.invoke(runs_app, ["gpus", "--clear", "1", "-w", str(root)])
+    assert missing.exit_code == 1
+    assert "no exclusion of gpu 1 on" in missing.output
+    cleared = runner.invoke(runs_app, ["gpus", "--clear", "0", "-w", str(root)])
+    assert cleared.exit_code == 0, cleared.output
+    assert "cleared gpu 0 on" in cleared.output and "under job 812" in cleared.output
+    other = runner.invoke(
+        runs_app, ["gpus", "--clear", "1", "--host", "another-node", "--job", "700",
+                   "-w", str(root)],
+    )
+    assert other.exit_code == 0, other.output
+    with Workspace(root) as ws:
+        assert ws.runs.list_excluded_gpus() == []
+    monkeypatch.delenv("SLAB_GPU_EXCLUDE")
+    empty = runner.invoke(runs_app, ["gpus", "-w", str(root)])
+    assert "no gpu excluded after a refusal" in empty.output
+
+
 def test_show_names_the_job_a_run_started_under(root: Path) -> None:
     """A run stamped with a scheduler job id shows it, in every status; a
     run started outside a job shows no job line."""

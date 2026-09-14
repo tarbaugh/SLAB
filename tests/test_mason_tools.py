@@ -775,6 +775,32 @@ def test_free_resources_lists_each_budget_gpu_with_its_memory_in_use(
     assert listed["budget"]["gpu_source"] == "slurm_job_gpus"
 
 
+def test_free_resources_lists_a_gpu_excluded_after_a_refusal(
+    box: Toolbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A gpu that refused a launch under this job shows as excluded, and it
+    is not counted free; a gpu excluded under another job is not this
+    budget's business."""
+    import re
+
+    from foundation import Workspace
+    from foundation.runtime import this_host
+
+    for name in ("SLAB_CPUS", "SLAB_GPUS", "SLAB_NTASKS", "SLAB_THREADS", "SLAB_GPU_EXCLUDE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    monkeypatch.setenv("SLURM_JOB_ID", "812")
+    monkeypatch.setattr("foundation.runtime.job_states_for", lambda runs: {})
+    monkeypatch.setattr("slab.resources.device_status", lambda: None)
+    with Workspace(box.session.workspace_root) as ws:
+        ws.runs.exclude_gpu("0", host=this_host(), job_id="812", reason="refused")
+        ws.runs.exclude_gpu("1", host=this_host(), job_id="700", reason="refused")
+    answer = box.dispatch(_call("free_resources"))
+    assert re.search(r"^  gpu 0: excluded \(refused at \d\d:\d\d, job 812\)$", answer, re.M)
+    assert "gpu 1: excluded" not in answer
+    assert f"free now: {_budget_cpus()} cpu(s), 1 gpu(s)" in answer
+
+
 def test_free_resources_names_an_unclaimed_holder(box: Toolbox, no_gpus: None) -> None:
     from foundation import Workspace
 

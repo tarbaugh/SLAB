@@ -40,7 +40,7 @@ Twenty-six tools, each a thin wrapper over the operations layer, and three more 
 | `expire_runs` | Expire unpromoted runs past their TTL. `older_than="0d"` means everything, now. |
 | `gc` | Drop artifact bytes no retention rule demands. `dry_run=True` only reports. |
 | `list_engines` | Built-in engines, the cluster registry's declarations, rootstock checkpoint ids, QE protocols, installed pseudo families, the configured builders, each partition's declared fields, and this host's `budget` with what is `free` right now. |
-| `free_resources` | What is free on this host right now: the budget and free cpu and gpu ids, the live reservation ids, and one line per live reservation with its slice, its run or holder, and its age. Call it before a concurrent launch. |
+| `free_resources` | What is free on this host right now: the budget and free cpu and gpu ids, the live reservation ids, one line per live reservation with its slice, its run or holder, and its age, and the gpus excluded after a refusal in this job (`excluded`). Call it before a concurrent launch. |
 | `list_tasks` | The traced tasks a workflow script may call: name, signature, and a one-line summary each. |
 | `describe_task` | One task's full signature and docstring. |
 | `search_materials` | Filtered search over the offline Materials Project snapshot (`[builders.mp]`): elements, ranges, ordering, a row cap. |

@@ -796,6 +796,57 @@ def test_lammps_env_wrapped_command_builds(tmp_path: Path) -> None:
         close_calculator(calc)
 
 
+_PIN_REFUSAL = (
+    "the reservation chooses the device; exclude a bad device with SLAB_GPU_EXCLUDE, "
+    "[workspace] exclude_gpus, or the partition's exclude_gpus"
+)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "CUDA_VISIBLE_DEVICES=1 /bin/echo -k on g 1 -sf kk",
+        "env CUDA_VISIBLE_DEVICES=1 /bin/echo -k on g 1 -sf kk",
+        "env OMP_NUM_THREADS=2 CUDA_VISIBLE_DEVICES=1 /bin/echo",
+        "mpirun -x CUDA_VISIBLE_DEVICES=1 -np 1 /bin/echo",
+        "env -u CUDA_VISIBLE_DEVICES /bin/echo",
+    ],
+)
+def test_a_command_that_pins_the_device_is_refused(command: str) -> None:
+    """The reservation exports the device a launch holds; a command that
+    sets CUDA_VISIBLE_DEVICES itself, bare or under env, is refused with
+    the way to exclude a bad device instead."""
+    with pytest.raises(EngineNotAvailableError) as refused:
+        get_calculator("lammps", command=command, **POTENTIAL)
+    assert _PIN_REFUSAL in str(refused.value)
+    assert "sets CUDA_VISIBLE_DEVICES" in str(refused.value)
+
+
+def test_a_script_launch_that_pins_the_device_is_refused_before_launch(
+    tmp_path: Path,
+) -> None:
+    """run_lammps_script refuses the pin before LAMMPS starts: the binary
+    never runs, and a setup line that exports the variable is refused the
+    same way. Reading the variable is allowed."""
+    from slab.lammps import run_lammps_script
+
+    marker = tmp_path / "ran"
+    lmp = tmp_path / "lmp"
+    lmp.write_text(f"#!/bin/sh\ntouch {marker}\n")
+    lmp.chmod(0o755)
+    (tmp_path / "in.lammps").write_text("units metal\n")
+    with pytest.raises(EngineNotAvailableError, match=re.escape(_PIN_REFUSAL)):
+        run_lammps_script(cwd=tmp_path, command=f"env CUDA_VISIBLE_DEVICES=1 {lmp}")
+    with pytest.raises(EngineNotAvailableError, match="setup line 'export CUDA_VISIBLE"):
+        run_lammps_script(
+            cwd=tmp_path, command=str(lmp), setup=("export CUDA_VISIBLE_DEVICES=1",)
+        )
+    assert not marker.exists()
+    from slab.backends import _device_pin_guard
+
+    _device_pin_guard('echo "gpus: $CUDA_VISIBLE_DEVICES ${CUDA_VISIBLE_DEVICES}"', "lammps")
+
+
 def test_ambient_potential_resolution_is_stamped_into_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

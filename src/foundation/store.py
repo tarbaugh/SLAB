@@ -16,7 +16,7 @@ import json
 import os
 import sqlite3
 import threading
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from datetime import datetime
 from pathlib import Path
@@ -48,6 +48,7 @@ from foundation.models import (
     ArtifactRef,
     ArtifactRole,
     CheckResult,
+    GpuExclusion,
     Reservation,
     Run,
     SessionSummary,
@@ -57,7 +58,7 @@ from foundation.models import (
 )
 from slab.scratch import process_alive
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -153,6 +154,16 @@ CREATE TABLE IF NOT EXISTS reservations (
     job_id      TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_reservations_host ON reservations(host);
+CREATE TABLE IF NOT EXISTS excluded_gpus (
+    seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+    gpu         TEXT NOT NULL,
+    host        TEXT NOT NULL,
+    job_id      TEXT,
+    reason      TEXT NOT NULL,
+    at          TEXT NOT NULL,
+    run_id      TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_excluded_gpus_host ON excluded_gpus(host);
 """
 
 # Statements upgrading an existing database from (version - 1) to version.
@@ -195,6 +206,18 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
     8: (  # verification passes on one run, and the evidence of a failed check
         "ALTER TABLE checks ADD COLUMN pass_no INTEGER NOT NULL DEFAULT 1",
         "ALTER TABLE checks ADD COLUMN evidence TEXT",
+    ),
+    9: (  # the gpus that refused a launch, out of reservations until their job ends
+        """CREATE TABLE IF NOT EXISTS excluded_gpus (
+            seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+            gpu         TEXT NOT NULL,
+            host        TEXT NOT NULL,
+            job_id      TEXT,
+            reason      TEXT NOT NULL,
+            at          TEXT NOT NULL,
+            run_id      TEXT
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_excluded_gpus_host ON excluded_gpus(host)",
     ),
 }
 
@@ -508,6 +531,36 @@ class RunStore(Protocol):
 
     def run_for_reservation(self, reservation_id: str) -> Run | None:
         """The run that claimed a reservation, or None."""
+        ...
+
+    def exclude_gpu(
+        self,
+        gpu: str,
+        *,
+        host: str,
+        job_id: str | None,
+        reason: str,
+        run_id: str | None = None,
+    ) -> GpuExclusion:
+        """Keep *gpu* out of reservations on *host* under *job_id*; return the row."""
+        ...
+
+    def list_excluded_gpus(self, *, host: str | None = None) -> list[GpuExclusion]:
+        """Every excluded gpu row, oldest first, optionally on one host."""
+        ...
+
+    def excluded_gpus(self, host: str, job_id: str | None) -> list[GpuExclusion]:
+        """The rows that keep gpus out of reservations on *host* under *job_id*."""
+        ...
+
+    def clear_excluded_gpu(
+        self, gpu: str, *, host: str, job_id: str | None
+    ) -> list[GpuExclusion]:
+        """Delete the rows excluding *gpu* on *host* under *job_id*; return them."""
+        ...
+
+    def expire_excluded_gpus(self, job_ids: Iterable[str]) -> list[GpuExclusion]:
+        """Delete every excluded gpu row of the jobs in *job_ids*; return them."""
         ...
 
     def close(self) -> None:
@@ -1460,8 +1513,9 @@ class SQLiteRunStore:
         gpus its rank and thread counts come from the defaults, shrunk to
         fit. With gpus it takes one rank per gpu and the free cpus as
         threads across them, because a KOKKOS build gives each MPI rank
-        one device and a rank past the first on a device fails. The
-        refusal carries the free ids. A count below one is a
+        one device and a rank past the first on a device fails. A gpu with
+        an :meth:`exclude_gpu` row on the host under *job_id* is not free,
+        whatever the budget says. The refusal carries the free ids. A count below one is a
         :class:`ValueError`: ``None`` means unsized, and a zero-rank launch
         is a mistake the caller should hear about, not a launch of one.
 
@@ -1488,6 +1542,19 @@ class SQLiteRunStore:
             >>> (gpu.ntasks, gpu.threads, gpu.cpus, gpu.gpus)
             (2, 4, (0, 1, 2, 3, 4, 5, 6, 7), ('0', '1'))
             >>> store.close()
+
+        A gpu excluded on the host under this job is never handed out
+        (:meth:`exclude_gpu`), and a refusal names it.
+
+            >>> store = SQLiteRunStore(":memory:")
+            >>> _ = store.exclude_gpu("0", host="n1", job_id="7", reason="refused")
+            >>> store.reserve(host="n1", holder_pid=os.getpid(), job_id="7",
+            ...     budget_cpus=range(4), budget_gpus=("0", "1"), gpus=1).gpus
+            ('1',)
+            >>> store.reserve(host="n1", holder_pid=os.getpid(), job_id="8",
+            ...     budget_cpus=range(4), budget_gpus=("0", "1"), ntasks=1, gpus=1).gpus
+            ('0',)
+            >>> store.close()
         """
         for key, value in (("ntasks", ntasks), ("threads", threads)):
             if value is not None and value < 1:
@@ -1498,10 +1565,18 @@ class SQLiteRunStore:
             live = self._live_reservations(conn, host, job_id)
             used_cpus = {cpu for row in live for cpu in row.cpus}
             used_gpus = {gpu for row in live for gpu in row.gpus}
+            refused = [
+                row.gpu for row in self._excluded_gpus(conn, host, job_id)
+                if row.gpu in budget_gpus
+            ]
             free_cpus = [cpu for cpu in budget_cpus if cpu not in used_cpus]
-            free_gpus = [gpu for gpu in budget_gpus if gpu not in used_gpus]
+            free_gpus = [
+                gpu for gpu in budget_gpus if gpu not in used_gpus and gpu not in refused
+            ]
             free: dict[str, list[object]] = {"cpus": list(free_cpus), "gpus": list(free_gpus)}
             held = f"{len(live)} live reservation(s)" if live else "no live reservation"
+            if refused:
+                held += f", gpu(s) {','.join(refused)} excluded after a refusal"
             if ntasks is None and threads is None:
                 if not free_cpus:
                     raise ResourcesError(
@@ -1751,6 +1826,133 @@ class SQLiteRunStore:
             ).fetchone()
         return None if row is None else _row_to_run(row)
 
+    # -- excluded gpus ----------------------------------------------------------------
+
+    def exclude_gpu(
+        self,
+        gpu: str,
+        *,
+        host: str,
+        job_id: str | None,
+        reason: str,
+        run_id: str | None = None,
+    ) -> GpuExclusion:
+        """Keep *gpu* out of every reservation on *host* under *job_id*.
+
+        One row per gpu, host, and job: a second refusal of the same
+        device returns the first row unchanged, so the time a listing
+        shows is when the device first refused. The row stays until
+        :meth:`expire_excluded_gpus` removes the job's rows or
+        :meth:`clear_excluded_gpu` removes it by hand.
+
+        Examples:
+            >>> store = SQLiteRunStore(":memory:")
+            >>> first = store.exclude_gpu("0", host="n1", job_id="7", reason="refused")
+            >>> again = store.exclude_gpu("0", host="n1", job_id="7", reason="again")
+            >>> (again.reason, len(store.list_excluded_gpus()))
+            ('refused', 1)
+            >>> store.close()
+        """
+        with self._txn() as conn:
+            row = conn.execute(
+                "SELECT * FROM excluded_gpus WHERE gpu = ? AND host = ? AND job_id IS ?",
+                (gpu, host, job_id),
+            ).fetchone()
+            if row is not None:
+                return _row_to_exclusion(row)
+            excluded = GpuExclusion(
+                gpu=gpu, host=host, job_id=job_id, reason=reason, run_id=run_id
+            )
+            conn.execute(
+                "INSERT INTO excluded_gpus (gpu, host, job_id, reason, at, run_id)"
+                " VALUES (?,?,?,?,?,?)",
+                (gpu, host, job_id, reason, excluded.at.isoformat(), run_id),
+            )
+        return excluded
+
+    def list_excluded_gpus(self, *, host: str | None = None) -> list[GpuExclusion]:
+        """Every excluded gpu row, oldest first, optionally on one host."""
+        sql = "SELECT * FROM excluded_gpus"
+        params: list[object] = []
+        if host is not None:
+            sql += " WHERE host = ?"
+            params.append(host)
+        sql += " ORDER BY at, seq"
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [_row_to_exclusion(row) for row in rows]
+
+    def excluded_gpus(self, host: str, job_id: str | None) -> list[GpuExclusion]:
+        """The rows that keep gpus out of reservations on *host* under *job_id*.
+
+        A row of another job is not this budget's, as for reservations,
+        and two None job ids (no scheduler) match each other.
+        """
+        with self._lock:
+            return self._excluded_gpus(self._conn, host, job_id)
+
+    def clear_excluded_gpu(
+        self, gpu: str, *, host: str, job_id: str | None
+    ) -> list[GpuExclusion]:
+        """Delete the rows excluding *gpu* on *host* under *job_id*; return them.
+
+        Examples:
+            >>> store = SQLiteRunStore(":memory:")
+            >>> _ = store.exclude_gpu("0", host="n1", job_id=None, reason="refused")
+            >>> [row.gpu for row in store.clear_excluded_gpu("0", host="n1", job_id=None)]
+            ['0']
+            >>> store.list_excluded_gpus()
+            []
+            >>> store.close()
+        """
+        with self._txn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM excluded_gpus WHERE gpu = ? AND host = ? AND job_id IS ?",
+                (gpu, host, job_id),
+            ).fetchall()
+            conn.execute(
+                "DELETE FROM excluded_gpus WHERE gpu = ? AND host = ? AND job_id IS ?",
+                (gpu, host, job_id),
+            )
+        return [_row_to_exclusion(row) for row in rows]
+
+    def expire_excluded_gpus(self, job_ids: Iterable[str]) -> list[GpuExclusion]:
+        """Delete every excluded gpu row of the jobs in *job_ids*; return them.
+
+        An exclusion lives as long as the job it was recorded under, so
+        whatever settles an ended job's runs removes its rows too.
+
+        Examples:
+            >>> store = SQLiteRunStore(":memory:")
+            >>> _ = store.exclude_gpu("0", host="n1", job_id="7", reason="refused")
+            >>> _ = store.exclude_gpu("1", host="n1", job_id="8", reason="refused")
+            >>> [row.job_id for row in store.expire_excluded_gpus(["7"])]
+            ['7']
+            >>> [row.job_id for row in store.list_excluded_gpus()]
+            ['8']
+            >>> store.close()
+        """
+        jobs = sorted({str(job) for job in job_ids})
+        if not jobs:
+            return []
+        marks = ",".join("?" for _ in jobs)
+        with self._txn() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM excluded_gpus WHERE job_id IN ({marks}) ORDER BY at, seq",
+                jobs,
+            ).fetchall()
+            conn.execute(f"DELETE FROM excluded_gpus WHERE job_id IN ({marks})", jobs)
+        return [_row_to_exclusion(row) for row in rows]
+
+    def _excluded_gpus(
+        self, conn: sqlite3.Connection, host: str, job_id: str | None
+    ) -> list[GpuExclusion]:
+        rows = conn.execute(
+            "SELECT * FROM excluded_gpus WHERE host = ? AND job_id IS ? ORDER BY at, seq",
+            (host, job_id),
+        ).fetchall()
+        return [_row_to_exclusion(row) for row in rows]
+
     def _reservation_rows(self, conn: sqlite3.Connection, host: str) -> list[sqlite3.Row]:
         """Every reservation on *host* joined with its run's status, pid, and job."""
         return conn.execute(
@@ -1918,6 +2120,17 @@ def _claimable(row: sqlite3.Row | None, reservation_id: str, host: str) -> Reser
             f"not {host!r}; a slice of one host cannot be claimed from another"
         )
     return reservation
+
+
+def _row_to_exclusion(row: sqlite3.Row) -> GpuExclusion:
+    return GpuExclusion(
+        gpu=row["gpu"],
+        host=row["host"],
+        job_id=row["job_id"],
+        reason=row["reason"],
+        at=datetime.fromisoformat(row["at"]),
+        run_id=row["run_id"],
+    )
 
 
 def _row_to_task(row: sqlite3.Row) -> TaskRecord:

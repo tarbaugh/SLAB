@@ -378,3 +378,31 @@ class Reservation(BaseModel):
     def envelope(self) -> Envelope:
         """The :class:`slab.resources.Envelope` a process runs under with this slice."""
         return Envelope(cpus=self.cpus, gpus=self.gpus, ntasks=self.ntasks, threads=self.threads)
+
+
+class GpuExclusion(BaseModel):
+    """A gpu that refused a launch, kept out of reservations for the rest of its job.
+
+    A device that answers ``cudaErrorDevicesUnavailable`` within seconds
+    of a launch is recorded here (see
+    :func:`foundation._ops.exclude_refused_gpus`). While the row exists,
+    :meth:`~foundation.store.SQLiteRunStore.reserve` does not hand the id
+    out on *host* under *job_id*, and ``free_resources`` lists it as
+    excluded. The row goes when the job ends. ``gpu`` is in the budget's
+    numbering, the id the reservation held. ``run_id`` names the run whose
+    launch was refused.
+
+    Examples:
+        >>> row = GpuExclusion(gpu="0", host="n1", job_id="7", reason="refused")
+        >>> (row.gpu, row.job_id, row.run_id)
+        ('0', '7', None)
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    gpu: str
+    host: str
+    job_id: str | None = None
+    reason: str
+    at: datetime = Field(default_factory=utcnow)
+    run_id: str | None = None

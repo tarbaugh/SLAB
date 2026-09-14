@@ -41,6 +41,12 @@ _NVIDIA_SMI_TIMEOUT_S = 10
 #: Where a budget's gpu ids came from, in the order :func:`budget` tries them.
 GPU_SOURCES = ("cuda_visible_devices", "slurm_job_gpus", "slurm_count", "probed", "none")
 
+#: Gpu ids to leave out of the budget: a comma list in the budget's own
+#: numbering. A per-machine fact, set by the sandbox render from
+#: ``[hpc.partitions.<name>] exclude_gpus`` or from ``[workspace]
+#: exclude_gpus`` by the processes that reserve.
+GPU_EXCLUDE_ENV = "SLAB_GPU_EXCLUDE"
+
 
 @dataclass(frozen=True)
 class Budget:
@@ -114,6 +120,12 @@ def budget() -> Budget:
        ``SLURM_JOB_ID`` set (``probed``). Inside a job that names no gpu
        variable the budget holds no gpu (``none``), because a probe would
        list every device on the node, held by other jobs included.
+
+    Then ``SLAB_GPU_EXCLUDE`` (:data:`GPU_EXCLUDE_ENV`) removes the ids it
+    names, in the numbering the steps above produced, and ``gpu_source``
+    says how many went: ``cuda_visible_devices, 1 excluded``. A device
+    that is known to be broken never enters the budget, so no launch can
+    hold it.
 
     Examples:
         >>> import os
@@ -546,8 +558,31 @@ def _gpu_budget() -> tuple[tuple[str, ...], str]:
         (('1',), 'cuda_visible_devices')
         >>> for name in ("CUDA_VISIBLE_DEVICES", "SLAB_GPU_SOURCE"):
         ...     del os.environ[name]
+
+        ``SLAB_GPU_EXCLUDE`` removes ids from whatever answered, and the
+        source says how many.
+
+        >>> os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
+        >>> os.environ["SLAB_GPU_EXCLUDE"] = "0"
+        >>> _gpu_budget()
+        (('1', '2', '3'), 'cuda_visible_devices, 1 excluded')
+        >>> os.environ["SLAB_GPU_EXCLUDE"] = "7"
+        >>> _gpu_budget()
+        (('0', '1', '2', '3'), 'cuda_visible_devices')
+        >>> for name in ("CUDA_VISIBLE_DEVICES", "SLAB_GPU_EXCLUDE"):
+        ...     del os.environ[name]
         >>> resources._probed_gpus = probe
     """
+    ids, source = _allocated_gpus()
+    excluded = set(_id_list(os.environ.get(GPU_EXCLUDE_ENV, "")))
+    kept = tuple(gpu for gpu in ids if gpu not in excluded)
+    if len(kept) < len(ids):
+        source = f"{source}, {len(ids) - len(kept)} excluded"
+    return kept, source
+
+
+def _allocated_gpus() -> tuple[tuple[str, ...], str]:
+    """The gpu ids of the allocation and their source, before any exclusion."""
     visible = os.environ.get("CUDA_VISIBLE_DEVICES")
     if visible is not None:
         told = os.environ.get("SLAB_GPU_SOURCE")
@@ -679,6 +714,7 @@ def _positive_int(text: str | None) -> int | None:
 
 
 __all__ = [
+    "GPU_EXCLUDE_ENV",
     "GPU_SOURCES",
     "PLACEHOLDERS",
     "Budget",

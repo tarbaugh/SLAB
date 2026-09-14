@@ -1641,7 +1641,13 @@ def _setup_probe_token(command: str) -> str | None:
 
 
 def _setup_guard(command: str, setup: tuple[str, ...], engine: str) -> None:
-    """The PATH half of the factory guards, run inside the setup shell."""
+    """The PATH half of the factory guards, run inside the setup shell.
+
+    A setup line that sets ``CUDA_VISIBLE_DEVICES`` is refused first, for
+    the reason :func:`_device_pin_guard` gives.
+    """
+    for line in setup:
+        _device_pin_guard(line, engine, where="setup line")
     token = _setup_probe_token(command)
     if token is not None:
         resolved, detail = _setup_which(setup, token)
@@ -1665,6 +1671,40 @@ def _refuse_srun_outside_allocation(command: str, engine: str) -> None:
         )
 
 
+#: A name of the device variable that is not a read of it (``$VAR``, ``${VAR}``).
+_DEVICE_PIN = re.compile(r"(?<![$\w{])CUDA_VISIBLE_DEVICES\b")
+DEVICE_PIN_REFUSAL = (
+    "the reservation chooses the device; exclude a bad device with "
+    "SLAB_GPU_EXCLUDE, [workspace] exclude_gpus, or the partition's exclude_gpus"
+)
+
+
+def _device_pin_guard(text: str, engine: str, *, where: str = "command") -> None:
+    """Refuse a command that sets ``CUDA_VISIBLE_DEVICES`` itself.
+
+    The launch's reservation exports the gpu ids it holds, and the run
+    record, ``free_resources``, and every other reservation trust that
+    export. A command that pins its own device (``env
+    CUDA_VISIBLE_DEVICES=1 lmp``, ``mpirun -x CUDA_VISIBLE_DEVICES=1``, an
+    ``export`` in a setup line) runs on a device the record does not name,
+    and two runs can meet on it. Reading the variable (``$CUDA_VISIBLE_DEVICES``)
+    is allowed.
+
+    Examples:
+        >>> _device_pin_guard("env OMP_NUM_THREADS=2 lmp", "lammps")
+        >>> _device_pin_guard("echo $CUDA_VISIBLE_DEVICES", "lammps", where="setup line")
+        >>> _device_pin_guard("env CUDA_VISIBLE_DEVICES=1 lmp -k on g 1 -sf kk", "lammps")
+        Traceback (most recent call last):
+        ...
+        slab.errors.EngineNotAvailableError: engine 'lammps': ... sets CUDA_VISIBLE_DEVICES: ...
+    """
+    if _DEVICE_PIN.search(text):
+        raise EngineNotAvailableError(
+            f"engine {engine!r}: {where} {text!r} sets CUDA_VISIBLE_DEVICES: "
+            f"{DEVICE_PIN_REFUSAL}"
+        )
+
+
 def _payload_guard(command: str, engine: str) -> None:
     """Refuse commands whose payload is a shell idiom or nothing at all.
 
@@ -1674,7 +1714,12 @@ def _payload_guard(command: str, engine: str) -> None:
     missing binary rather than what it is. The fix is spelled out because it
     is one word: the ``env`` wrapper form, which scopes the variables to
     this engine's subprocess alone.
+
+    A command that sets ``CUDA_VISIBLE_DEVICES``, bare or under ``env``,
+    is refused before either check (:func:`_device_pin_guard`), because
+    the reservation chooses the device.
     """
+    _device_pin_guard(command, engine)
     try:
         argv = shlex.split(command)
     except ValueError as e:

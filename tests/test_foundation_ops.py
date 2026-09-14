@@ -1297,3 +1297,126 @@ def test_a_dry_run_reads_each_check_honestly(root: Path, tmp_path: Path) -> None
     report["checks"] = [failed]
     assert dry_run_clean(report) is True
 
+
+# -- a gpu that refuses a launch -----------------------------------------------
+
+_REFUSING_LMP = """#!{python}
+import sys
+if "-h" in sys.argv:
+    print("Large-scale Atomic/Molecular Massively Parallel Simulator - 22 Jul 2025 - Update 4")
+    sys.exit(0)
+with open("log.lammps", "w") as handle:
+    handle.write("LAMMPS (22 Jul 2025 - Update 4)\\n")
+print("terminate called after throwing an instance of 'std::runtime_error'")
+print("  what():  cudaSetDevice(cuda_device_id) error( cudaErrorDevicesUnavailable): "
+      "CUDA-capable device(s) is/are busy or unavailable")
+sys.exit(134)
+"""
+
+_GPU_WORKFLOW = """\
+from foundation.tasks import run_lammps
+run_lammps("units metal\\natom_style atomic\\nrun 0\\n", label="md", command={command!r})
+"""
+
+
+def _gpu_env(monkeypatch: pytest.MonkeyPatch, *, held: str, job: str | None = "812") -> None:
+    """A job on a four-gpu node whose launch holds *held*, one rank on it."""
+    for name in ("SLAB_GPU_EXCLUDE", "SLAB_GPU_SOURCE", "SLAB_CPUS", "SLAB_THREADS"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3")
+    monkeypatch.setenv("SLAB_GPUS", held)
+    monkeypatch.setenv("SLAB_NTASKS", "1")
+    if job is None:
+        monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+    else:
+        monkeypatch.setenv("SLURM_JOB_ID", job)
+    # No scheduler in the suite: a job's liveness is not asked for here.
+    monkeypatch.setattr("foundation.runtime.job_states_for", lambda runs: {})
+
+
+def test_a_device_that_refuses_within_a_minute_is_excluded_for_the_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The campaign case: gpu 0 answers cudaErrorDevicesUnavailable at once.
+    The launch records the exclusion without a config change, the failure
+    says so, free_resources lists the device as excluded, and no later
+    reservation of the job holds it."""
+    from foundation._ops import free_resources
+
+    lmp = tmp_path / "lmp"
+    lmp.write_text(_REFUSING_LMP.format(python=__import__("sys").executable))
+    lmp.chmod(0o755)
+    workflow = tmp_path / "md.py"
+    workflow.write_text(_GPU_WORKFLOW.format(command=f"{lmp} -k on g 1 -sf kk"))
+    _gpu_env(monkeypatch, held="0")
+    result = launch_script(tmp_path / "ws", workflow, name="md", capture_output=True)
+    assert result["status"] == "failed"
+    assert (
+        "gpu 0 excluded: reservations skip it for the rest of job 812; "
+        "'slab runs gpus' lists it"
+    ) in result["failure"]["notes"]
+    monkeypatch.delenv("SLAB_GPUS")
+    with Workspace(tmp_path / "ws") as ws:
+        [row] = ws.runs.list_excluded_gpus()
+        assert (row.gpu, row.job_id, row.run_id) == ("0", "812", result["run_id"])
+        assert row.reason.startswith("cudaErrorDevicesUnavailable on gpu 0 ")
+        answer = free_resources(ws)
+        assert answer["free"]["gpus"] == ["1", "2", "3"]
+        assert [entry["gpu"] for entry in answer["excluded"]] == ["0"]
+        [line] = answer["excluded_lines"]
+        assert re.fullmatch(r"gpu 0: excluded \(refused at \d\d:\d\d, job 812\)", line)
+        held = [ws.reserve(ntasks=1, gpus=1).gpus for _ in range(3)]
+        assert held == [("1",), ("2",), ("3",)]
+    # A later job on the same host starts clean.
+    monkeypatch.setenv("SLURM_JOB_ID", "813")
+    with Workspace(tmp_path / "ws") as ws:
+        assert ws.reserve(ntasks=1, gpus=1).gpus == ("0",)
+
+
+def test_a_refusal_that_cannot_convict_one_device_excludes_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """KOKKOS does not print which ordinal refused, so a launch holding two
+    gpus cannot name the bad one: nothing is excluded, and the note says how
+    to find it. A late refusal, and more ranks than gpus, convict nothing."""
+    from foundation._ops import refused_gpu
+
+    lmp = tmp_path / "lmp"
+    lmp.write_text(_REFUSING_LMP.format(python=__import__("sys").executable))
+    lmp.chmod(0o755)
+    workflow = tmp_path / "md.py"
+    workflow.write_text(_GPU_WORKFLOW.format(command=f"{lmp} -k on g 2 -sf kk"))
+    _gpu_env(monkeypatch, held="0,1")
+    result = launch_script(tmp_path / "ws", workflow, name="md", capture_output=True)
+    assert any(
+        note.startswith("the error does not say which of gpu(s) 0,1 refused")
+        for note in result["failure"]["notes"]
+    )
+    with Workspace(tmp_path / "ws") as ws:
+        assert ws.runs.list_excluded_gpus() == []
+    line = "what():  cudaSetDevice(cuda_device_id) error( cudaErrorDevicesUnavailable): busy"
+    assert refused_gpu(line, ("0",), ranks=1, elapsed_s=61.0)[0] is None
+    assert refused_gpu(line, ("0",), ranks=4, elapsed_s=1.0)[0] is None
+    assert refused_gpu(line, ("0",), ranks=None, elapsed_s=1.0)[0] is None
+    assert refused_gpu("what(): cudaErrorNoDevice", ("0",), ranks=1, elapsed_s=1.0)[0] is None
+    assert refused_gpu(line, ("0",), ranks=1, elapsed_s=59.0)[0] == "0"
+
+
+def test_a_static_exclusion_keeps_the_device_out_of_every_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """exclude_gpus = ["0"] as SLAB_GPU_EXCLUDE: a gpus=1 launch never holds
+    gpu 0, and free_resources reports three gpus."""
+    from foundation._ops import free_resources
+
+    _gpu_env(monkeypatch, held="", job=None)
+    monkeypatch.delenv("SLAB_GPUS")
+    monkeypatch.delenv("SLAB_NTASKS")
+    monkeypatch.setenv("SLAB_GPU_EXCLUDE", "0")
+    with Workspace(tmp_path / "ws") as ws:
+        answer = free_resources(ws)
+        assert answer["budget"]["gpus"] == ["1", "2", "3"]
+        assert answer["budget"]["gpu_source"] == "cuda_visible_devices, 1 excluded"
+        assert len(answer["free"]["gpus"]) == 3
+        held = [ws.reserve(ntasks=1, gpus=1).gpus for _ in range(3)]
+        assert held == [("1",), ("2",), ("3",)]
