@@ -169,6 +169,8 @@ class ActiveRun:
     without integrating anything (``run_lammps`` with its loops emptied) reads it.
     ``replay`` is set inside a run opened with ``replay=``: the tracer then
     answers every ``@task`` call from another run's results (see :class:`Replay`).
+    ``source`` is the workspace whose runs a ``run:<id>/<name>`` reference
+    names; see :attr:`lookup`.
     """
 
     def __init__(
@@ -179,12 +181,14 @@ class ActiveRun:
         *,
         dry_run: bool = False,
         replay: Replay | None = None,
+        source: Workspace | None = None,
     ) -> None:
         self.runs = runs
         self.artifacts = artifacts
         self.id = run_id
         self.dry_run = dry_run
         self.replay = replay
+        self.source = source
         self._checks: list[tuple[str, _CheckFn]] = []
 
     def __repr__(self) -> str:
@@ -194,6 +198,18 @@ class ActiveRun:
     def run(self) -> Run:
         """A fresh snapshot of the run's current state."""
         return self.runs.get(self.id)
+
+    @property
+    def lookup(self) -> tuple[SQLiteRunStore, ArtifactStore]:
+        """The run store and artifact store a ``run:`` reference reads.
+
+        A run's own stores, except in a dry run given a ``source``: the
+        rehearsal's throwaway store holds no earlier run, so its references
+        read the real workspace.
+        """
+        if self.source is not None:
+            return self.source.runs, self.source.artifacts
+        return self.runs, self.artifacts
 
     @overload
     def check(self, fn: _CheckFn) -> _CheckFn: ...
@@ -888,6 +904,7 @@ class Workspace:
         reservation: Reservation | str | None = None,
         dry_run: bool = False,
         replay: Replay | None = None,
+        source: Workspace | None = None,
     ) -> Iterator[ActiveRun]:
         """Open a traced run; yield its :class:`ActiveRun` handle.
 
@@ -921,7 +938,9 @@ class Workspace:
         *dry_run* marks the run as a rehearsal: the handle's ``dry_run``
         is True, and a task that can rehearse its engine (``run_lammps``
         with its loops emptied) integrates nothing. The run record itself is
-        an ordinary run; open it in a throwaway workspace.
+        an ordinary run; open it in a throwaway workspace. *source* is then
+        the real workspace, which a ``run:<id>/<name>`` reference in a
+        task's ``files=`` reads from.
 
         *replay* answers every ``@task`` call inside the run from another
         run's results (see :class:`Replay`). Open it in a throwaway
@@ -974,7 +993,7 @@ class Workspace:
                 created.id, ExecutionStatus.RUNNING, pid=os.getpid(), host=host
             )
         active = ActiveRun(
-            self.runs, self.artifacts, created.id, dry_run=dry_run, replay=replay
+            self.runs, self.artifacts, created.id, dry_run=dry_run, replay=replay, source=source
         )
         token = _CURRENT.set(active)
         # Every scratch directory a calculation makes inside the run is

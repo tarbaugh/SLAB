@@ -726,6 +726,9 @@ def _compact_details(details: dict[str, Any]) -> dict[str, Any]:
             folded.append(task)
             continue
         line = {key: task.get(key) for key in ("seq", "name", "status", "cache_hit", "duration_s")}
+        if task.get("artifacts_on"):
+            # A cache hit keeps no files; they are on the run that executed it.
+            line["artifacts_on"] = task["artifacts_on"]
         recipe = task.get("recipe")
         params = recipe.get("params") if isinstance(recipe, dict) else None
         label = params.get("label") if isinstance(params, dict) else None
@@ -1691,45 +1694,41 @@ def _add_workflow_tools(
         return wanted, f"{wanted} ({len(raw)} bytes, dry-run record {record_id})", raw
 
     def read_artifact(arguments: dict[str, Any]) -> str:
-        from foundation._ops import run_details
+        from foundation.errors import ArtifactNotFoundError
 
-        wanted = str(arguments["name"])
         offset = max(int(arguments.get("offset", 1)), 1)
         limit = int(arguments.get("limit", _MAX_READ_LINES))
-        requested = str(arguments["run_id"])
+        wanted = str(arguments["name"]) if arguments.get("name") else ""
+        requested = str(arguments["run_id"]) if arguments.get("run_id") else ""
         if requested.startswith(_ops.DRY_RUN_PREFIX):
             found_file = _read_dry_run_file(requested, wanted)
             if isinstance(found_file, str):
                 return found_file
             name, head, raw = found_file
+            if b"\x00" in raw[:8192]:
+                return f"{head}\nlooks binary; read_artifact only reads text"
+            text = raw.decode("utf-8", errors="replace")
         else:
             with _open_workspace(session) as ws:
-                run_id, note = _resolve_run(ws, requested)
-                artifacts = run_details(ws, run_id)["artifacts"]
-                found = [
-                    a for a in artifacts if a["name"] == wanted or a["hash"].startswith(wanted)
-                ]
-                if not found:
-                    names = ", ".join(a["name"] for a in artifacts) or "none"
-                    return (
-                        f"{note}no artifact named {wanted!r} on run {run_id[:10]}; "
-                        f"it has: {names}"
+                try:
+                    read = _ops.read_artifact(
+                        ws,
+                        run_id=requested or None,
+                        name=wanted or None,
+                        digest=str(arguments["hash"]) if arguments.get("hash") else None,
+                        session=session.session_id,
                     )
-                artifact = found[0]
-                if not ws.artifacts.has(artifact["hash"]):
-                    return (
-                        f"{note}the bytes of {wanted!r} are no longer stored (retention "
-                        f"reclaimed them); the record keeps its hash {artifact['hash'][:12]}"
-                    )
-                raw = ws.artifacts.get(artifact["hash"]).read_bytes()
-            name = artifact["name"]
-            head = (
-                f"{note}{artifact['name']} ({artifact['size_bytes']} bytes, "
-                f"sha256 {artifact['hash'][:12]})"
-            )
-        if b"\x00" in raw[:8192]:
-            return f"{head}\nlooks binary; read_artifact only reads text"
-        text = raw.decode("utf-8", errors="replace")
+                except ArtifactNotFoundError as e:
+                    note = ""
+                    if requested and not arguments.get("hash"):
+                        with contextlib.suppress(FoundationError):
+                            note = _resolve_run(ws, requested)[1]
+                    return f"{note}{e}"
+            head = "\n".join(read.head)
+            if read.text is None:
+                return f"{head}\n{read.reason}"
+            text = read.text
+            name = read.name
         lines = text.splitlines()
         if digested := _digest_unless_raw(arguments, name, text, len(lines)):
             return f"{head}\n{digested}"
@@ -1781,9 +1780,15 @@ def _add_workflow_tools(
             description=(
                 "Read one of a run's artifacts. name is the artifact's name from show_run "
                 "(or a hash prefix); run_id as for show_run, or the dry-<stamp> id a "
-                "failed dry run names for its LAMMPS files. This is how to read an "
+                "failed dry run names for its LAMMPS files. A run whose task was a "
+                "that executed the task and says so on the first line. Or pass hash= "
+                "(a sha256 prefix of 6+ characters) alone for any bytes the workspace "
+                "holds, a task's input or output included; the answer names the runs "
+                "that reference it. This is how to read an "
                 "engine's output file (a .pwo, a LAMMPS log) after the run: the store "
-                "is content-addressed, so do not go looking for the path by hand. A "
+                "is content-addressed, so do not go looking for the path by hand. To "
+                "hand a run's file to run_lammps, pass files=['run:<id>/<name>'] "
+                "instead of copying it. A "
                 "recognised engine output comes back as a digest first: system, "
                 "convergence trace, final numbers, warnings, and whether the job "
                 "finished. Pass raw=true, or offset/limit, for the line-numbered text "
@@ -1793,6 +1798,10 @@ def _add_workflow_tools(
                 {
                     "run_id": {"type": "string"},
                     "name": {"type": "string"},
+                    "hash": {
+                        "type": "string",
+                        "description": "a sha256 prefix; read by hash instead of run_id and name",
+                    },
                     "offset": {"type": "integer", "description": "first line, 1-based"},
                     "limit": {"type": "integer", "description": "lines to show (default 400)"},
                     "raw": {
@@ -1800,7 +1809,7 @@ def _add_workflow_tools(
                         "description": "the text itself, not the digest of an engine output",
                     },
                 },
-                ["run_id", "name"],
+                [],
             ),
             handler=read_artifact,
         )

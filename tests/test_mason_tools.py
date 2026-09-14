@@ -1417,6 +1417,62 @@ def test_read_artifact_reads_a_runs_file_by_name_windowed(box: Toolbox, tmp_path
     assert missing.startswith("no artifact named 'nope.pwo'") and name in missing
 
 
+def _cache_hit_pair(root: Path) -> tuple[str, str, str]:
+    """A run that kept md-final.data, then a relaunch served from the cache:
+    (producer, hit, the file's hash)."""
+    from foundation import task
+
+    # No closure cells: a function that closes over a module is uncacheable.
+    @task(name="md_leg")
+    def md_leg(text: str) -> str:
+        import tempfile
+
+        from foundation.runtime import current_run
+
+        path = Path(tempfile.mkdtemp()) / "final.data"
+        path.write_text(text)
+        active = current_run()
+        assert active is not None
+        active.keep("md-final.data", path, role="intermediate")
+        return text
+
+    with Workspace(root) as ws:
+        with ws.start_run(name="md") as first:
+            md_leg("Cu data v1\n")
+        with ws.start_run(name="md-relaunch") as again:
+            md_leg("Cu data v1\n")
+        return first.id, again.id, ws.runs.get_artifact(first.id, "md-final.data").hash
+
+
+def test_read_artifact_follows_a_cache_hit_and_reads_by_hash(
+    box: Toolbox, tmp_path: Path
+) -> None:
+    """A relaunch whose MD leg was a cache hit kept no files; the brief named
+    it, and read_artifact answered 'no artifact named'. It follows the hit."""
+    producer, hit, digest = _cache_hit_pair(tmp_path / ".slab")
+
+    def read(**arguments: object) -> str:
+        call = ToolCall(id="ra", name="read_artifact", arguments=arguments, arguments_raw="{}")
+        return box.dispatch(call)
+
+    followed = read(run_id=hit, name="md-final.data")
+    first, second, third = followed.splitlines()[:3]
+    assert first.startswith(f"md-final.data is read from run {producer[:10]}: task ")
+    assert first.endswith(f"md_leg on run {hit[:10]} was a cache hit of that run")
+    assert second.startswith("md-final.data (") and third == "     1\tCu data v1"
+    shown = json.loads(box.dispatch(_call("show_run", run_id=hit)))
+    assert shown["tasks"][0]["artifacts_on"] == producer
+    by_hash = read(hash=digest[:8])
+    assert by_hash.splitlines()[:2] == [
+        f"sha256 {digest[:12]} (11 bytes)",
+        f"referenced by: run {producer[:10]} artifact md-final.data (intermediate)",
+    ]
+    missing = read(run_id=hit, name="md.dump")
+    assert missing.startswith(f"no artifact named 'md.dump' on run {hit[:10]}; it has: none")
+    assert f"its cache hits reused run {producer[:10]}" in missing
+    assert "ValueError: read_artifact needs run_id and name, or hash" in read(run_id=hit)
+
+
 def test_run_tools_resolve_a_run_by_the_name_the_model_remembers(
     box: Toolbox, tmp_path: Path
 ) -> None:

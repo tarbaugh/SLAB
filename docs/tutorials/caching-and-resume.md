@@ -20,6 +20,11 @@ result:
 - the task's `cache_extra` contribution;
 - the input hashes.
 
+A task can declare a `canonical=` hook that replaces an argument before it
+is hashed. `run_lammps` uses it for a `run:<id>/<name>` entry in `files=`,
+so the artifact's bytes enter the key and the run id does not. See
+[Artifacts](artifacts.md).
+
 If a completed task with the same key exists from any earlier run in the
 workspace, and its output bytes are still present, the stored outputs are
 returned without executing.

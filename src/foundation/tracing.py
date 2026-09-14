@@ -74,6 +74,7 @@ def task(
     engines: str | Sequence[str] = (),
     cache_extra: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     on_return: Callable[[Any], Any] | None = None,
+    canonical: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
 def task(
     fn: Callable[P, R] | None = None,
@@ -82,6 +83,7 @@ def task(
     engines: str | Sequence[str] = (),
     cache_extra: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     on_return: Callable[[Any], Any] | None = None,
+    canonical: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> Callable[P, R] | Callable[[Callable[P, R]], Callable[P, R]]:
     """Make a plain function a traced task, without changing how it is called.
 
@@ -104,6 +106,14 @@ def task(
             computed or restored from the cache, and never to the stored
             bytes. Use it to hand back a view of the result, such as a
             mapping that refuses a key a reader might expect.
+        canonical: Callable receiving the bound arguments (as a dict) at
+            call time, returning replacement values for some of them. The
+            tracer serializes, stores, and hashes the replacements in place
+            of the values given, and the function still receives the values
+            given. Use it for an argument that names bytes by where they
+            live, so that the bytes and not the address enter the cache
+            key: ``run_lammps`` turns a ``run:<id>/<name>`` entry into the
+            artifact's hash.
 
     Examples:
         >>> @task
@@ -139,6 +149,7 @@ def task(
                     bytecode_hash,
                     engine_names,
                     cache_extra,
+                    canonical,
                     args,
                     kwargs,
                 )
@@ -158,6 +169,7 @@ def _traced_call(
     bytecode_hash: str,
     engine_names: tuple[str, ...],
     cache_extra: Callable[[dict[str, Any]], dict[str, Any]] | None,
+    canonical: Callable[[dict[str, Any]], dict[str, Any]] | None,
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
 ) -> R:
@@ -168,9 +180,13 @@ def _traced_call(
     # store: serialization of every argument, the engine probes, and the
     # task's cache_extra (an unknown pseudo family, an unreadable dataset).
     # A refusal after a put would leave input bytes no row ever names.
+    arguments = dict(bound.arguments)
+    if canonical is not None:
+        replacements = canonical(dict(bound.arguments))
+        arguments.update({key: value for key, value in replacements.items() if key in arguments})
     payloads = {
         name: dumps(value)  # SerializationError here names a real problem: fix the input
-        for name, value in bound.arguments.items()
+        for name, value in arguments.items()
     }
     engine_versions = {engine: _dist_version(engine) for engine in engine_names}
     extra = dict(cache_extra(dict(bound.arguments))) if cache_extra is not None else {}
@@ -183,7 +199,7 @@ def _traced_call(
         "engines": engine_versions,
         "python": platform.python_version(),
         "slab-stack": __version__,
-        "params": _params_lite(bound.arguments, input_hashes),
+        "params": _params_lite(arguments, input_hashes),
     }
     if extra:
         recipe["extra"] = extra

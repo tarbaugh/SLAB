@@ -17,12 +17,14 @@ import re
 import runpy
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import traceback
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout, suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import EllipsisType
@@ -30,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 
 from foundation.artifacts import ReadThroughStore
 from foundation.errors import (
+    ArtifactNotFoundError,
     FoundationError,
     IllegalStatusChangeError,
     IllegalTransitionError,
@@ -42,7 +45,16 @@ from foundation.errors import (
     StorageError,
 )
 from foundation.lifecycle import ExecutionStatus, LifecycleState
-from foundation.models import ArtifactRole, CheckResult, GpuExclusion, Reservation, Run, utcnow
+from foundation.models import (
+    ArtifactRole,
+    CheckResult,
+    GpuExclusion,
+    Reservation,
+    Run,
+    TaskRecord,
+    utcnow,
+)
+from foundation.references import find_artifact, hash_holders
 from foundation.retention import DEFAULT_POLICY, RetentionPolicy, _reachable_hashes, sweep_scratch
 from foundation.runtime import Replay, Workspace, describe_liveness, this_host, this_job
 from foundation.serialize import loads
@@ -537,13 +549,38 @@ def run_details(ws: Workspace, run_id: str) -> dict[str, Any]:
     verification pass, and ``earlier_passes`` tallies the passes before
     it (see :func:`reverify_run`). Artifact entries carry ``bytes_available``
     — whether the content is still in the artifact store or has been
-    hash-and-discarded.
+    hash-and-discarded. A cache-hit task carries ``artifacts_on``: the run
+    where the task executed, which holds the files it keeps (None when
+    that run is gone). :func:`read_artifact` follows the same edge.
     """
     run = ws.runs.get(run_id)
     checks = ws.runs.list_check_results(run.id)
     tasks = ws.runs.list_tasks(run.id)
     artifacts = ws.runs.list_artifacts(run.id)
     history = ws.runs.history(run.id)
+
+    def task_entry(t: TaskRecord) -> dict[str, Any]:
+        entry: dict[str, Any] = {
+            "seq": t.seq,
+            "name": t.name,
+            "status": t.status.value,
+            "cache_hit": t.cache_hit,
+        }
+        if t.cache_hit:
+            producer = ws.runs.producing_task(t)
+            entry["artifacts_on"] = None if producer is None else producer.run_id
+        return entry | {
+            "error": t.error,
+            "failure": t.failure,
+            "duration_s": (
+                None
+                if t.finished_at is None
+                else round((t.finished_at - t.started_at).total_seconds(), 3)
+            ),
+            "recipe": t.recipe,
+            "inputs": t.inputs,
+            "outputs": t.outputs,
+        }
     return {
         "run": run_summary(run)
         | {
@@ -556,25 +593,7 @@ def run_details(ws: Workspace, run_id: str) -> dict[str, Any]:
         },
         "checks": [check_entry(c) for c in checks],
         "earlier_passes": pass_tallies(ws.runs.list_check_results(run.id, all_passes=True))[:-1],
-        "tasks": [
-            {
-                "seq": t.seq,
-                "name": t.name,
-                "status": t.status.value,
-                "cache_hit": t.cache_hit,
-                "error": t.error,
-                "failure": t.failure,
-                "duration_s": (
-                    None
-                    if t.finished_at is None
-                    else round((t.finished_at - t.started_at).total_seconds(), 3)
-                ),
-                "recipe": t.recipe,
-                "inputs": t.inputs,
-                "outputs": t.outputs,
-            }
-            for t in tasks
-        ],
+        "tasks": [task_entry(t) for t in tasks],
         "artifacts": [
             {
                 "name": a.name,
@@ -597,6 +616,124 @@ def run_details(ws: Workspace, run_id: str) -> dict[str, Any]:
             for t in history
         ],
     }
+
+
+@dataclass(frozen=True)
+class ArtifactRead:
+    """What :func:`read_artifact` found: where it came from, and its text.
+
+    *head* is the lines to show before the content, and the first says
+    where the bytes came from. *name* is the artifact's name, which picks
+    an engine-output digest ('' for a hash no run names). *text* is None
+    when the bytes look binary, and *reason* then says so.
+    """
+
+    head: list[str]
+    name: str
+    digest: str
+    size_bytes: int
+    run_id: str | None
+    text: str | None
+    reason: str | None = None
+
+
+def read_artifact(
+    ws: Workspace,
+    *,
+    run_id: str | None = None,
+    name: str | None = None,
+    digest: str | None = None,
+    session: str | None = None,
+) -> ArtifactRead:
+    """Read an artifact by run and name, or by hash: ``read_artifact``.
+
+    By run and name: *run_id* resolves as for :func:`resolve_run`, and
+    *name* is the artifact's name or a hash prefix. When the run holds no
+    such artifact, each of its cache-hit tasks is followed to the run
+    where the task executed (:func:`foundation.references.find_artifact`),
+    and the first line of *head* says so.
+
+    By hash: *digest* is a SHA-256 or a unique prefix of 6+ characters of
+    any bytes the workspace holds, a run's file or a task's input or
+    output value. *head* lists the runs and tasks that reference it. A
+    task value comes back decoded: JSON as indented text, anything else
+    as its ``repr``.
+
+    Raises:
+        ValueError: Neither a hash nor a run and a name, or both.
+        RunNotFoundError: No run matches *run_id*.
+        ArtifactNotFoundError: Nothing matches, or retention discarded
+            the bytes; the message says which.
+    """
+    if digest:
+        if run_id or name:
+            raise ValueError("read by hash, or by run_id and name, not both")
+        return _read_by_hash(ws, digest)
+    if not (run_id and name):
+        raise ValueError("read_artifact needs run_id and name, or hash")
+    rid, note = resolve_run(ws, run_id, session=session)
+    found = find_artifact(ws.runs, rid, name)
+    ref = found.ref
+    if not ws.artifacts.has(ref.hash):
+        raise ArtifactNotFoundError(
+            f"the bytes of {ref.name!r} are no longer stored (retention reclaimed "
+            f"them); the record keeps its hash {ref.hash[:12]}",
+            digest=ref.hash,
+            run_id=ref.run_id,
+            name=ref.name,
+        )
+    head = [line for line in (found.note(), note.rstrip("\n")) if line]
+    head.append(f"{ref.name} ({ref.size_bytes} bytes, sha256 {ref.hash[:12]})")
+    raw = ws.artifacts.get(ref.hash).read_bytes()
+    text, reason = _artifact_text(raw, value=False)
+    return ArtifactRead(head, ref.name, ref.hash, ref.size_bytes, ref.run_id, text, reason)
+
+
+def _read_by_hash(ws: Workspace, digest: str) -> ArtifactRead:
+    """The bytes a hash names, headed by what references them."""
+    holders = hash_holders(ws.runs, ws.artifacts, digest)
+    size = holders.path.stat().st_size
+    head = [f"sha256 {holders.digest[:12]} ({size} bytes)"]
+    lines = holders.lines()
+    if lines:
+        head.append("referenced by: " + "; ".join(lines))
+    else:
+        head.append("referenced by no run: the bytes are stored and no record names them")
+    raw = holders.path.read_bytes()
+    text, reason = _artifact_text(raw, value=bool(holders.tasks) and not holders.artifacts)
+    name = holders.artifacts[0].name if holders.artifacts else ""
+    run_id = holders.artifacts[0].run_id if holders.artifacts else None
+    return ArtifactRead(head, name, holders.digest, size, run_id, text, reason)
+
+
+def _artifact_text(raw: bytes, *, value: bool) -> tuple[str | None, str | None]:
+    """The text to show for stored bytes, or None and the reason.
+
+    A *value* is a traced task's serialized input or output: JSON comes
+    back indented, and anything pickled comes back as its ``repr``.
+
+    Examples:
+        >>> from foundation.serialize import dumps
+        >>> _artifact_text(dumps({"a0": 3.16}), value=True)
+        ('{\\n "a0": 3.16\\n}', None)
+        >>> _artifact_text(dumps((1, 2)), value=True)
+        ('(1, 2)', None)
+        >>> _artifact_text(b"\\x00\\x01", value=False)
+        (None, 'looks binary; read_artifact only reads text')
+    """
+    if value:
+        try:
+            decoded = loads(raw)
+        except Exception:  # not a tagged value after all: show the bytes
+            decoded = raw
+        if not isinstance(decoded, bytes):
+            if raw[:2] == b"J\n":
+                return json.dumps(decoded, indent=1, ensure_ascii=False), None
+            return repr(decoded), None
+        raw = decoded
+    if b"\x00" in raw[:8192]:
+        return None, "looks binary; read_artifact only reads text"
+    return raw.decode("utf-8", errors="replace"), None
 
 
 PERMANENT_STATES = (LifecycleState.PROMOTED, LifecycleState.ARCHIVED)
@@ -1047,10 +1184,10 @@ def launch_script(
 
     With *dry_run* the script rehearses: see :func:`dry_run_script`, which
     this calls and whose report it returns. *reservation* is not used
-    then, because a rehearsal touches no store, and *root* only receives
-    the dry-run record of a failed ``run_lammps``. *from_run* (with
-    *dry_run* only) rehearses against that run's cached task results in
-    *root*.
+    then, because a rehearsal writes no store, and *root* is only read,
+    apart from the dry-run record of a failed ``run_lammps``. *from_run*
+    (with *dry_run* only) rehearses against that run's cached task
+    results in *root*.
     """
     script_path = Path(script).resolve()
     if not script_path.exists():
@@ -1118,6 +1255,7 @@ def _run_script_in(
     reservation: Reservation | str | None = None,
     dry_run: bool = False,
     replay: Replay | None = None,
+    source: Workspace | None = None,
 ) -> tuple[str, str | None, io.StringIO]:
     """Run *script_path* inside a fresh run of *ws*; return its id, the raw
     traceback of a failure the run never saw, and the captured output.
@@ -1150,6 +1288,7 @@ def _run_script_in(
                 reservation=reservation,
                 dry_run=dry_run,
                 replay=replay,
+                source=source,
             ) as active:
                 run_id = active.id
                 # The script is the run's recompute root and its own
@@ -1261,7 +1400,10 @@ def dry_run_script(
     loop line, and no step is integrated. The result keeps its real
     shape, so the Python after the call is exercised. While the script
     runs, ``$SLAB_WORKSPACE`` names the throwaway
-    workspace, so a child the script starts lands there too.
+    workspace, so a child the script starts lands there too. *source* is
+    the real workspace, and a ``run:<id>/<name>`` entry in ``files=``
+    reads the artifact from it, because the throwaway store holds no
+    earlier run.
 
     With *from_run* (a run id in the workspace at *root*) no engine
     starts: every task call takes that run's cached result instead (see
@@ -1300,13 +1442,13 @@ def dry_run_script(
     if not script_path.exists():
         raise FileNotFoundError(f"no such workflow script: {script_path}")
     with ExitStack() as stack:
-        source: Workspace | None = None
-        if from_run is not None:
-            if root is None:
-                raise FoundationError("from_run needs the workspace that holds the run")
-            source = stack.enter_context(Workspace(root))
+        real = _existing_workspace(root)
+        if real is not None:
+            stack.enter_context(real)
+        if from_run is not None and real is None:
+            raise FoundationError("from_run needs the workspace that holds the run")
         ws = stack.enter_context(_throwaway_workspace())
-        replay = None if source is None else _replaying(ws, source, str(from_run))
+        replay = None if from_run is None else _replaying(ws, real, str(from_run))
         run_id, error, buffer = _run_script_in(
             ws,
             script_path,
@@ -1317,6 +1459,7 @@ def dry_run_script(
             capture_output=capture_output,
             dry_run=True,
             replay=replay,
+            source=real,
         )
         report = _dry_run_report(
             ws, run_id, error, from_run=None if replay is None else replay.run_id
@@ -1329,6 +1472,20 @@ def dry_run_script(
     if capture_output:
         report["output"] = buffer.getvalue()
     return report
+
+
+def _existing_workspace(root: str | os.PathLike[str] | None) -> Workspace | None:
+    """The workspace at *root* when it already holds a run store, else None.
+
+    A dry run reads earlier runs from it and must not create one where
+    none was.
+    """
+    if root is None or not (Path(root).expanduser() / "runs.db").is_file():
+        return None
+    try:
+        return Workspace(root)
+    except (FoundationError, sqlite3.Error, OSError):
+        return None
 
 
 def _result_shape_note(ws: Workspace, run_id: str) -> str | None:

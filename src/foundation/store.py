@@ -451,6 +451,18 @@ class RunStore(Protocol):
         """Return the most recent completed task with this cache key, if any."""
         ...
 
+    def producing_task(self, record: TaskRecord) -> TaskRecord | None:
+        """Return the executed task a cache hit served its outputs from, if any."""
+        ...
+
+    def tasks_with_hash(self, digest: str) -> list[TaskRecord]:
+        """List the tasks whose inputs or outputs name this full hash."""
+        ...
+
+    def artifacts_with_hash(self, digest: str) -> list[ArtifactRef]:
+        """List the artifact references whose hash is or starts with *digest*."""
+        ...
+
     def add_check_results(self, run_id: str, results: Sequence[CheckResult]) -> list[CheckResult]:
         """Record verification results on a run."""
         ...
@@ -1151,6 +1163,92 @@ class SQLiteRunStore:
                 (cache_key, ExecutionStatus.COMPLETED.value),
             ).fetchone()
         return None if row is None else _row_to_task(row)
+
+    def producing_task(self, record: TaskRecord) -> TaskRecord | None:
+        """Return the executed task a cache hit served its outputs from, if any.
+
+        A cache hit executes nothing, so the artifacts its function would
+        have kept live on the run where the function ran. That run holds
+        the newest completed, executed task recorded before the hit under
+        the same cache key, preferring one whose outputs are the hit's
+        outputs. None for a task that is not a cache hit, and None when the
+        producing run has been purged.
+
+        Examples:
+            >>> store = SQLiteRunStore(":memory:")
+            >>> first, second = store.create(Run()), store.create(Run())
+            >>> def rec(run_id, hit):
+            ...     return TaskRecord(run_id=run_id, name="md", status="completed",
+            ...                       cache_hit=hit, cache_key="ab" * 32,
+            ...                       outputs={"return": "cd" * 32}, started_at=utcnow())
+            >>> ran = store.add_task(rec(first.id, False))
+            >>> hit = store.add_task(rec(second.id, True))
+            >>> store.producing_task(hit).run_id == first.id
+            True
+            >>> store.producing_task(ran) is None
+            True
+            >>> store.close()
+        """
+        if not record.cache_hit:
+            return None
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM tasks WHERE cache_key = ? AND status = ? AND cache_hit = 0"
+                " AND seq < ? ORDER BY seq DESC",
+                (record.cache_key, ExecutionStatus.COMPLETED.value, record.seq),
+            ).fetchall()
+        candidates = [_row_to_task(row) for row in rows]
+        for candidate in candidates:
+            if candidate.outputs == record.outputs:
+                return candidate
+        return candidates[0] if candidates else None
+
+    def tasks_with_hash(self, digest: str) -> list[TaskRecord]:
+        """List the tasks whose inputs or outputs name the full hash *digest*.
+
+        Examples:
+            >>> store = SQLiteRunStore(":memory:")
+            >>> r = store.create(Run())
+            >>> _ = store.add_task(TaskRecord(run_id=r.id, name="md", status="completed",
+            ...     cache_key="ab" * 32, outputs={"return": "cd" * 32}, started_at=utcnow()))
+            >>> [t.name for t in store.tasks_with_hash("cd" * 32)]
+            ['md']
+            >>> store.tasks_with_hash("ef" * 32)
+            []
+            >>> store.close()
+        """
+        needle = f'%"{digest}"%'
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM tasks WHERE inputs LIKE ? OR outputs LIKE ? ORDER BY seq",
+                (needle, needle),
+            ).fetchall()
+        tasks = [_row_to_task(row) for row in rows]
+        return [
+            t for t in tasks if digest in t.inputs.values() or digest in t.outputs.values()
+        ]
+
+    def artifacts_with_hash(self, digest: str) -> list[ArtifactRef]:
+        """List the artifact references whose hash is or starts with *digest*.
+
+        A prefix finds references whose bytes retention has discarded,
+        which the artifact store itself can no longer resolve.
+
+        Examples:
+            >>> store = SQLiteRunStore(":memory:")
+            >>> r = store.create(Run())
+            >>> _ = store.add_artifact(r.id, name="out.data", role="terminal",
+            ...                        hash="cd" * 32, size_bytes=10)
+            >>> [a.name for a in store.artifacts_with_hash("cdcdcd")]
+            ['out.data']
+            >>> store.close()
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM artifacts WHERE hash LIKE ? ORDER BY seq",
+                (digest.lower() + "%",),
+            ).fetchall()
+        return [_row_to_artifact(row) for row in rows]
 
     def list_check_results(self, run_id: str, *, all_passes: bool = False) -> list[CheckResult]:
         """List a run's verification results, oldest first.

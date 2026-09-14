@@ -18,6 +18,7 @@ EXPECTED_TOOLS = {
     "list_runs",
     "list_sessions",
     "show_run",
+    "read_artifact",
     "promote_run",
     "promote_session",
     "retire_session",
@@ -96,6 +97,45 @@ def test_list_and_show(root: Path) -> None:
     assert details["run"]["id"] == run_id
     assert details["checks"][0]["passed"] is True
     assert details["artifacts"][0]["bytes_available"] is True
+
+
+def test_read_artifact_follows_a_cache_hit_and_reads_by_hash(root: Path) -> None:
+    from foundation import task
+
+    # No closure cells: a function that closes over a module is uncacheable.
+    @task(name="md_leg")
+    def md_leg(text: str) -> str:
+        import tempfile
+
+        from foundation.runtime import current_run
+
+        path = Path(tempfile.mkdtemp()) / "final.data"
+        path.write_text(text)
+        active = current_run()
+        assert active is not None
+        active.keep("md-final.data", path, role="intermediate")
+        return text
+
+    with Workspace(root) as ws:
+        with ws.start_run(name="md") as first:
+            md_leg("Cu data v1\nline two\n")
+        with ws.start_run(name="md-relaunch") as again:
+            md_leg("Cu data v1\nline two\n")
+        digest = ws.runs.get_artifact(first.id, "md-final.data").hash
+    server = build_server(root)
+    followed = _call(server, "read_artifact", {"run_id": again.id, "name": "md-final.data"})
+    assert followed["head"].splitlines()[0].startswith(
+        f"md-final.data is read from run {first.id[:10]}: task "
+    )
+    assert followed["run_id"] == first.id and followed["hash"] == digest
+    assert followed["text"] == "Cu data v1\nline two" and followed["lines"] == 2
+    windowed = _call(server, "read_artifact", {"hash": digest[:8], "offset": 2, "limit": 1})
+    assert windowed["text"] == "line two" and windowed["name"] == "md-final.data"
+    assert f"run {first.id[:10]} artifact md-final.data" in windowed["head"]
+    shown = _call(server, "show_run", {"run_id": again.id})
+    assert shown["tasks"][0]["artifacts_on"] == first.id
+    with pytest.raises(Exception, match="needs run_id and name, or hash"):
+        _call(server, "read_artifact", {"run_id": again.id})
 
 
 def test_promote_expire_gc_flow(root: Path) -> None:
