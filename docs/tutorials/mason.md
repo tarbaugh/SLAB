@@ -859,9 +859,9 @@ the run's recipes: one event per distinct command, with the engine, the
 detected version, the setup lines, and for LAMMPS the KOKKOS switches
 the command asks for. A wait records only the runs that finished during
 that wait, and a run already in the transcript is never recorded again.
-A setup block is recorded once per transcript. A later command with the
-same setup carries `setup_recorded`, the line count, and `--full` shows
-`setup: the N line(s) recorded earlier`. Each event carries `by`, the
+A setup block is recorded once per conversation. A later command with
+the same setup carries `setup_digest` and the line count, and `--full`
+expands the block from the event that carries it. Each event carries `by`, the
 agent card that ran it, and `at`. `slab mason read` prints one line per command, and
 `--full` adds the details. The session below was driven by hand through
 the tools, with no model, against a LAMMPS build without the KOKKOS
@@ -973,6 +973,11 @@ layers, cheapest first.
 1. **Output caps.** One tool result may occupy `max_tool_output_chars`
    (default 12,000, about 3k tokens). Longer output is middle-truncated
    with a marker, and the file tools window by `offset` and `limit`.
+   `read_artifact` reads a JSON table, such as the `-thermo.json` of
+   `run_lammps`, as rows. `columns=` picks the columns and `every=` keeps
+   every n-th row, so one call samples a 3,000-row series, and the result
+   states how many rows it left out. `every=` thins the lines of a text
+   artifact the same way.
 2. **Tool-result clearing.** Once the prompt passes
    `clear_tool_results_at` × `context_window` (default 25%), tool results
    older than the newest `keep_tool_results` (default 6) are replaced by
@@ -983,7 +988,11 @@ layers, cheapest first.
    an older one is replaced by a one-line marker as soon as a newer one
    arrives, because three copies of a growing plan rode every prompt of
    one campaign. A clearing rewrites the cached prompt prefix, so it
-   waits until at least 6,000 characters can go at once. Set
+   waits until at least 6,000 characters can go at once. A result that
+   no complete reply has read yet is never cleared. That covers the
+   results of the step in flight, and the results before a reply cut at
+   the ceiling. One delegation compacted thirteen times, lost results it
+   had not read, and read one script six times. Set
    `clear_tool_results = false` to turn it off. One re-fetch of cleared
    content is the design. A second identical fetch whose first copy is
    still in context returns a one-line pointer to that copy instead of
@@ -1002,8 +1011,30 @@ layers, cheapest first.
    misreading as a failure made the next pass argue with it for six
    compactions. The system
    context is rebuilt fresh so the current plan and notebook re-enter
-   updated. A context-overflow answer from the server forces the same
-   compaction immediately.
+   updated. The fold never takes a result that no complete reply has
+   read. A context-overflow answer from the server forces the same
+   compaction immediately, and only then, with nothing else left to
+   fold, may it take unread results.
+
+The tools also keep the site's environment out of their results. A
+LAMMPS build's setup block (its module loads and exports) was 45 lines,
+about 7 KB, in one campaign. It rode in `list_engines`, in every
+`show_run` of a task, and in every engine command record. Now each
+surface names the block by its line count and a sha256 prefix:
+
+| Surface | Shows | The lines in full |
+|---|---|---|
+| `list_engines` | Each build's whole command and one setup line | `slab engines show lammps --setup` |
+| `show_run` | One setup line per task record | `show_run task=<n> setup=true` |
+| Engine command records | The lines once per conversation, then the digest | `slab mason read --full` |
+
+When `list_engines` still passes the output cap, the rootstock
+checkpoint ids fold to counts first, and the registry entries and the
+partitions to their names next. The builds lead the listing and are
+never folded. `wait_for_run` does not list the session. A run still
+running gets one line, and at most five are named. A finished wait
+names the run that finished and counts the session's other runs, so the
+result stays under 2 KB.
 
 Failures are deliberately carried through every layer, because evidence
 of what went wrong is what keeps a model from repeating it. The order

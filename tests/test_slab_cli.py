@@ -88,6 +88,37 @@ def test_engines_list_shows_every_lammps_build_and_its_kokkos_switches(
     assert "lammps routes" not in result.output and "route" not in block
 
 
+def test_engines_show_prints_a_builds_setup_block_on_request(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The agent's tools name a setup block by its count and digest and
+    point here for the lines."""
+    from slab._ops import setup_digest
+
+    setup = [f"export SITE_VAR_{i}=/opt/{i}" for i in range(45)]
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("SLAB_GPUS", "")
+    monkeypatch.delenv("SLAB_ENGINES", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "slab.toml").write_text(
+        '[engines.lammps]\ncommand = "lmp"\n'
+        f'[engines.lammps.gpu]\ncommand = "lmp -k on g 1 -sf kk"\nsetup = {json.dumps(setup)}\n'
+    )
+    brief = runner.invoke(app, ["engines", "show", "lammps"])
+    assert brief.exit_code == 0, brief.output
+    assert "cpu (builtin): lmp\n" in brief.output and "  setup: none\n" in brief.output
+    assert "gpu (builtin): lmp -k on g 1 -sf kk\n" in brief.output
+    assert f"  setup: 45 lines, sha256 {setup_digest(setup)}\n" in brief.output
+    assert "export" not in brief.output
+    whole = runner.invoke(app, ["engines", "show", "gpu", "--setup"])
+    assert whole.exit_code == 0, whole.output
+    assert "cpu (builtin)" not in whole.output
+    assert whole.output.count("\n    export SITE_VAR_") == 45
+    missing = runner.invoke(app, ["engines", "show", "tpu"])
+    assert missing.exit_code == 1
+    assert "no LAMMPS build 'tpu'; the builds are: cpu, gpu" in missing.output
+
+
 def test_engines_list_shows_no_gpu_build_when_none_is_declared(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

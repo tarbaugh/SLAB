@@ -5,6 +5,24 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- Tool results stop carrying environment dumps and session-wide
+  listings. `list_engines` shows each LAMMPS build's setup block as one
+  line with its line count and sha256 prefix, and keeps every build's
+  command whole. When the listing passes the output cap, the rootstock
+  checkpoint ids fold to counts first. `slab engines show lammps
+  --setup` prints the lines. `show_run` folds the same blocks in a task
+  record, and `show_run task=<n> setup=true` prints them. The first
+  engine command event of a conversation keeps a setup block with its
+  digest (`setup_digest`, `setup_lines`), later events name the digest
+  only, and `slab mason read --full` expands them. The MCP `list_engines`
+  and `show_run` fold alike (`setup=True` returns the lines), and its
+  session record keeps each block once. `wait_for_run` names the run
+  that finished and counts the session's others, and a still-running
+  answer names at most five runs and stays under 2 KB. Clearing and
+  compaction never take a tool result that no complete reply has read.
+  `read_artifact` reads a JSON table as rows, with `columns=`, `every=`,
+  and `table=`, and `every=` thins a text artifact's lines.
+
 - Artifacts follow the cache, and a run's artifact can feed the next
   task. `read_artifact` on a run whose task was a cache hit reads the
   file from the run where the task executed, and the first line of the
@@ -157,7 +175,7 @@ All notable changes to SLAB, newest first. Dates are commit dates on
   step-back hint. A wait records the engine commands of the runs that
   finished during it only, a resumed session skips runs its transcript
   holds, and a setup block is recorded once per transcript
-  (`setup_recorded` on a later command). The MCP `wait_for_run` has
+  (`setup_digest` on a later command). The MCP `wait_for_run` has
   the same cap, the same first-finish rule, and the same fields.
 - `slab mason read --live` follows a session as it works, like
   `tail -f`. The viewer shows the transcript, then each event the

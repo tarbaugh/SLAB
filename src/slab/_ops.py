@@ -9,10 +9,71 @@ so the two cannot drift.
 
 from __future__ import annotations
 
+import hashlib
 import os
+from collections.abc import Sequence
 from typing import Any
 
 from slab.errors import SlabError
+
+#: Where the setup lines of a folded LAMMPS build are printed in full.
+SETUP_SHOWN_BY = "slab engines show lammps --setup prints them"
+
+
+def setup_digest(lines: Sequence[str]) -> str:
+    """The name of one list of setup lines: a sha256 prefix of the lines joined.
+
+    A build's setup is a site's environment block (module loads and
+    exports), often forty lines or more. A tool result or a transcript
+    names it by this digest after the first full copy.
+
+    Examples:
+        >>> setup_digest(["module load lammps"])
+        '9cce24613aca'
+        >>> setup_digest([]) == setup_digest(())
+        True
+    """
+    joined = "\n".join(str(line) for line in lines)
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:12]
+
+
+def folded_setup(lines: Sequence[str], shown_by: str = SETUP_SHOWN_BY) -> str:
+    """One line in place of a build's setup block: the count, the digest, and where to read it.
+
+    Examples:
+        >>> print(folded_setup(["module load lammps", "export OMP_PROC_BIND=spread"]))
+        ... # doctest: +ELLIPSIS
+        2 lines (module loads and exports), sha256 e45fa900eced; slab engines show lammps ...
+        >>> folded_setup(["a"], "show_run setup=true prints them")[-22:]
+        'setup=true prints them'
+    """
+    return (
+        f"{len(lines)} lines (module loads and exports), sha256 {setup_digest(lines)}; "
+        f"{shown_by}"
+    )
+
+
+def fold_build_setups(
+    builds: dict[str, dict[str, Any]], shown_by: str = SETUP_SHOWN_BY
+) -> dict[str, dict[str, Any]]:
+    """*builds* with every non-empty setup list replaced by :func:`folded_setup`.
+
+    The command stays whole: it is what the agent sizes a launch by.
+
+    Examples:
+        >>> folded = fold_build_setups({"gpu": {"command": "lmp -k on", "setup": ["a", "b"]},
+        ...                             "cpu": {"command": "lmp", "setup": []}})
+        >>> folded["gpu"]["command"], folded["gpu"]["setup"][:9], folded["cpu"]["setup"]
+        ('lmp -k on', '2 lines (', [])
+    """
+    folded: dict[str, dict[str, Any]] = {}
+    for name, build in builds.items():
+        entry = dict(build)
+        setup = entry.get("setup")
+        if isinstance(setup, list) and setup:
+            entry["setup"] = folded_setup(setup, shown_by)
+        folded[name] = entry
+    return folded
 
 
 def engines_overview(registry_path: str | os.PathLike[str] | None = None) -> dict[str, Any]:

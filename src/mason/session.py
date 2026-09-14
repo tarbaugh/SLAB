@@ -362,6 +362,11 @@ class MasonSession:
         # environment, withdrawn from os.environ once read so nothing the
         # model drives can print them back. Shared with a parent session.
         self.api_keys: dict[str, str] = {}
+        # The setup digests whose lines a command event of this conversation
+        # already carries in full: a later event names the digest only, so
+        # a campaign's transcripts hold each build's setup block once.
+        # Shared with the delegations, like the key store.
+        self.recorded_setups: set[str] = set()
         self.observer: Observer | None = observer
         # Which agent card this session runs as; the loop sets it from the
         # spec it resolves. Delegated child sessions carry the specialist's
@@ -554,6 +559,7 @@ class MasonSession:
         child.agent_name = agent_name
         child._parent = self
         child.api_keys = self.api_keys  # one key store per conversation
+        child.recorded_setups = self.recorded_setups  # one full copy per conversation
         child._software_versions = self._software_versions  # probed once, if at all
         # A flag outranks config for everyone: the child's loop re-asserts
         # these over its own [agent.roster] table exactly as the parent did.

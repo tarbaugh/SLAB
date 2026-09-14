@@ -177,6 +177,13 @@ _WAIT_GRACE_S = 10.0
 #: The line every still_running answer carries. The loop reads it: a wait
 #: that is still running never counts as a repeated call.
 WAIT_STILL_RUNNING = _ops.STILL_RUNNING_LINE
+#: A still-running wait names at most this many runs; the rest are a count.
+_WAIT_RUNS_SHOWN = 5
+#: A still-running wait result stays under this: it is read once per wait,
+#: and a long campaign waits dozens of times.
+_WAIT_RESULT_CHARS = 2_000
+#: Where a folded setup block is printed in full, per surface.
+_SETUP_SHOWN_BY_SHOW_RUN = "show_run task=<n> setup=true prints them"
 
 Handler = Callable[[dict[str, Any]], str]
 
@@ -1547,15 +1554,21 @@ def _add_workflow_tools(
     # record a run twice or repeat a setup block.
     earlier = [e for e in session.recorded("command") if e.get("kind") == "engine"]
     recorded_runs: set[str] = {str(e["run_id"]) for e in earlier if e.get("run_id")}
-    recorded_setups: set[tuple[str, ...]] = {
-        tuple(str(line) for line in e["setup"]) for e in earlier if e.get("setup")
-    }
+    # A resumed session already carries some setup blocks in full; an older
+    # transcript names a block by its lines, a newer one by its digest.
+    from slab._ops import setup_digest
+
+    session.recorded_setups.update(
+        str(e["setup_digest"]) if e.get("setup_digest") else setup_digest(e["setup"])
+        for e in earlier
+        if e.get("setup")
+    )
 
     def _record_run_commands(run_id: str | None, tool: str) -> None:
         """Record the engine commands a finished run resolved, once per run.
 
-        A setup block is recorded once per transcript. The next command
-        that shares it carries ``setup_recorded`` and the line count
+        A setup block is recorded once per conversation. The next command
+        that shares it carries ``setup_digest`` and the line count
         instead, because the same module lines repeated under every wait
         buried the commands that differed.
         """
@@ -1568,12 +1581,9 @@ def _add_workflow_tools(
         except (FoundationError, SlabError, sqlite3.Error, OSError) as e:
             record_command(session, kind="engine", tool=tool, run_id=run_id, error=str(e))
             return
-        for entry in entries:
-            setup = tuple(entry.get("setup") or ())
-            if setup and setup in recorded_setups:
-                entry = {**entry, "setup": [], "setup_recorded": len(setup)}
-            elif setup:
-                recorded_setups.add(setup)
+        # The first event to carry a setup block keeps it; later ones, in
+        # this transcript or a delegation's, name its digest.
+        for entry in _ops.name_setups_once(entries, session.recorded_setups):
             record_command(session, kind="engine", tool=tool, **entry)
 
     def _run_line(run: Any) -> str:
@@ -1678,6 +1688,8 @@ def _add_workflow_tools(
             details = _compact_details(details)
         if not enabled(session.agent, "failure-records"):
             details = _without_failure_records(details)
+        if not arguments.get("setup"):
+            details = _ops.fold_setups(details, _SETUP_SHOWN_BY_SHOW_RUN)
         return note + json.dumps(details, indent=1, ensure_ascii=False)
 
     def _read_dry_run_file(record_id: str, wanted: str) -> tuple[str, str, bytes] | str:
@@ -1729,18 +1741,42 @@ def _add_workflow_tools(
                 return f"{head}\n{read.reason}"
             text = read.text
             name = read.name
+        try:
+            every = _count_argument(arguments, "every") or 1
+        except ValueError as e:
+            return f"{head}\nrefused: {e}"
+        tables = None if arguments.get("raw") else _json_tables(text)
+        if tables is not None:
+            return f"{head}\n" + _table_window(
+                tables, arguments, offset=offset, limit=limit, every=every
+            )
+        if arguments.get("columns") is not None:
+            return (
+                f"{head}\ncolumns= reads a JSON table (the -thermo.json or -averages.json "
+                f"of a run_lammps task); this artifact is not one. Use offset, limit, and "
+                f"every for its lines."
+            )
         lines = text.splitlines()
-        if digested := _digest_unless_raw(arguments, name, text, len(lines)):
+        if every == 1 and (
+            digested := _digest_unless_raw(arguments, name, text, len(lines))
+        ):
             return f"{head}\n{digested}"
-        window = lines[offset - 1 : offset - 1 + limit]
+        numbers = range(offset, len(lines) + 1, every)
+        window = list(numbers[:limit])
         numbered = []
-        for i, line in enumerate(window, start=offset):
+        for i in window:
+            line = lines[i - 1]
             if len(line) > _MAX_LINE_CHARS:
                 line = line[:_MAX_LINE_CHARS] + " [line truncated]"
             numbered.append(f"{i:6d}\t{line}")
         shown = "\n".join(numbered) if numbered else "(no lines in this window)"
         tail = ""
-        if len(lines) > offset - 1 + len(window):
+        if every > 1:
+            tail = (
+                f"\n[artifact has {len(lines)} lines; every {every}th from line {offset}: "
+                f"{len(window)} shown, {len(lines) - len(window)} omitted]"
+            )
+        elif len(lines) > offset - 1 + len(window):
             last = offset + len(window) - 1
             tail = f"\n[artifact has {len(lines)} lines; showing {offset}-{last}]"
         return f"{head}\n{shown}{tail}"
@@ -1753,7 +1789,9 @@ def _add_workflow_tools(
                 "the task tally with finished tasks folded to one line each, failed "
                 "tasks and failure records in full, artifacts, and history. Pass "
                 "task=<label or seq> for one task's recipe, inputs, and outputs, or "
-                "full=true for every task's. run_id takes an id, a unique prefix, or "
+                "full=true for every task's. An engine's setup block (module loads "
+                "and exports) is named by its line count and digest; setup=true "
+                "prints it. run_id takes an id, a unique prefix, or "
                 "the name of a run this session created. Read this before "
                 "correcting a failed run; read_artifact reads its files."
             ),
@@ -1767,6 +1805,10 @@ def _add_workflow_tools(
                     "full": {
                         "type": "boolean",
                         "description": "include every task's recipe, inputs, and outputs",
+                    },
+                    "setup": {
+                        "type": "boolean",
+                        "description": "print each engine setup block in full",
                     },
                 },
                 ["run_id"],
@@ -1792,7 +1834,11 @@ def _add_workflow_tools(
                 "recognised engine output comes back as a digest first: system, "
                 "convergence trace, final numbers, warnings, and whether the job "
                 "finished. Pass raw=true, or offset/limit, for the line-numbered text "
-                "itself, windowed like read_file."
+                "itself, windowed like read_file. A JSON table (the -thermo.json or "
+                "-averages.json of run_lammps) comes back as rows: columns= picks "
+                "columns, every=<n> keeps every n-th row, and offset/limit window "
+                "the rows, so a 3,000-row series samples in one call. every= thins "
+                "the lines of a text artifact the same way."
             ),
             parameters=_schema(
                 {
@@ -1807,6 +1853,18 @@ def _add_workflow_tools(
                     "raw": {
                         "type": "boolean",
                         "description": "the text itself, not the digest of an engine output",
+                    },
+                    "columns": {
+                        "type": "string",
+                        "description": "JSON table: the columns to show, comma-separated",
+                    },
+                    "every": {
+                        "type": "integer",
+                        "description": "keep every n-th row (or line); default 1",
+                    },
+                    "table": {
+                        "type": "string",
+                        "description": "JSON table: one table by index or name; default all",
                     },
                 },
                 [],
@@ -2246,7 +2304,7 @@ def _add_workflow_tools(
             return (
                 f"{note}run {run.id} ({run.name}): state={_state_text(run)} "
                 f"status={run.status.value}; {waited['progress']}; "
-                f"read it with show_run{rest}"
+                f"read it with show_run{rest}\n{_others_line({run.id})}"
                 + (f"\n{hint}" if hint else "")
             )
         if outcome == "no_runs":
@@ -2255,8 +2313,14 @@ def _add_workflow_tools(
                 "(a fresh background launch needs a few seconds to register)"
             )
         if outcome == "none_running":
-            finished = "\n".join(_run_line(r) for r in waited["runs"])
-            return f"no run of this session is running; the record:\n{finished}"
+            # The newest run is the one a wait without run_id was waiting
+            # for; the rest are a count. Every wait re-listed the whole
+            # session record, and a campaign waits dozens of times.
+            newest = waited["runs"][0]
+            return (
+                f"no run of this session is running; the newest:\n{_run_line(newest)}\n"
+                f"{_others_line({newest.id})}"
+            )
         # The tally answers "is it moving?" without a show_run of the whole
         # record: a real session queried the database by hand for this count.
         waited_s = waited["timeout_s"]
@@ -2266,11 +2330,38 @@ def _add_workflow_tools(
         if not waited["running"]:
             # A timeout shorter than the grace: the launch has not registered.
             return f"{note}{head}:\n(none registered yet; a launch takes a few seconds)"
+        running = waited["running"]
+        shown = [
+            f"{r.id[:10]}  {str(r.name or '')[:40]}  running; {progress}; {liveness}; {advance}"
+            for r, progress, liveness, advance in running[:_WAIT_RUNS_SHOWN]
+        ]
+        if len(running) > _WAIT_RUNS_SHOWN:
+            shown.append(
+                f"and {len(running) - _WAIT_RUNS_SHOWN} more running; "
+                f"pass run_id to wait on one"
+            )
         lines = "\n".join(
-            f"{r.id[:10]}  {r.name}  running; {progress}; {liveness}; {advance}"
-            for r, progress, liveness, advance in waited["running"]
+            shown
         )
-        return f"{note}{head}:\n{lines}\n{WAIT_STILL_RUNNING}"
+        # Read once per wait, dozens of times per campaign: the middle goes
+        # before the head or the still-running line.
+        return _truncate_middle(f"{note}{head}:\n{lines}\n{WAIT_STILL_RUNNING}", _WAIT_RESULT_CHARS)
+
+    def _others_line(excluded: set[str]) -> str:
+        """The count of this session's other runs, with how many still run."""
+        try:
+            with _open_workspace(session) as ws:
+                runs = ws.runs.list_runs(session=session.session_id, limit=500)
+        except (RunStoreUnavailable, FoundationError, sqlite3.Error):
+            return "the session's other runs could not be counted"
+        others = [r for r in runs if r.id not in excluded]
+        if not others:
+            return "no other run in this session"
+        running = sum(1 for r in others if r.status.value == "running")
+        return (
+            f"{len(others)} other run(s) in this session, {running} running; "
+            f"list_runs session='this' lists them"
+        )
 
     box.add(
         Tool(
@@ -2320,6 +2411,85 @@ def _add_workflow_tools(
 # -- engines (slab) -----------------------------------------------------------
 
 
+def _listing_cap(session: MasonSession) -> int | None:
+    """The result cap a listing must fit, or None when the cap is off."""
+    agent = session.agent
+    return agent.max_tool_output_chars if enabled(agent, "context-hygiene") else None
+
+
+#: The keys of the engine overview that lead the listing: the builds and
+#: the budget are what a launch is sized by, and the head of a capped
+#: result is the part the cap keeps.
+_LISTING_LEADS = ("builtin", "lammps", "budget", "free", "resources_note")
+
+
+def _engines_listing(overview: dict[str, Any], cap: int | None) -> str:
+    """The list_engines answer: setup blocks folded, the LAMMPS builds whole.
+
+    A campaign's gpu build carried a 45-line environment block into this
+    listing, and the listing reached the result cap and was cut inside
+    the gpu build's command line. Each setup block is now one line with
+    its count and digest. When the listing still passes *cap*, the
+    rootstock checkpoint ids fold to counts first, then the registry
+    entries and the partitions to their names. The builds are never
+    folded, and they lead the listing.
+
+    Examples:
+        >>> gpu = {"command": "lmp -k on g {gpus}", "setup": [f"export X={i}" for i in range(45)]}
+        >>> overview = {"rootstock": {"checkpoints": {"mace": [f"m-{i}" for i in range(400)]}},
+        ...             "lammps": {"builds": {"gpu": gpu}}, "builtin": ["lammps"]}
+        >>> listed = json.loads(_engines_listing(overview, 2_000))
+        >>> list(listed)[:2], listed["lammps"]["builds"]["gpu"]["command"]
+        (['builtin', 'lammps'], 'lmp -k on g {gpus}')
+        >>> listed["lammps"]["builds"]["gpu"]["setup"][:10], listed["rootstock"]["checkpoints"]
+        ('45 lines (', {'mace': '400 ids'})
+        >>> json.loads(_engines_listing(overview, None))["rootstock"]["checkpoints"]["mace"][0]
+        'm-0'
+    """
+    from slab._ops import fold_build_setups
+
+    listing = dict(overview)
+    lammps = listing.get("lammps")
+    if isinstance(lammps, dict) and isinstance(lammps.get("builds"), dict):
+        listing["lammps"] = {**lammps, "builds": fold_build_setups(lammps["builds"])}
+    listing = {key: listing[key] for key in _LISTING_LEADS if key in listing} | {
+        key: value for key, value in listing.items() if key not in _LISTING_LEADS
+    }
+    text = json.dumps(listing, indent=1, ensure_ascii=False)
+    for fold in (_fold_checkpoints, _fold_registry, _fold_partitions):
+        if cap is None or len(text) <= cap:
+            break
+        listing = fold(listing)
+        text = json.dumps(listing, indent=1, ensure_ascii=False)
+    return text
+
+
+def _fold_checkpoints(listing: dict[str, Any]) -> dict[str, Any]:
+    """The listing with each rootstock environment's ids replaced by their count."""
+    rootstock = listing.get("rootstock")
+    if not isinstance(rootstock, dict) or not rootstock.get("checkpoints"):
+        return listing
+    counts = {env: f"{len(ids)} ids" for env, ids in rootstock["checkpoints"].items()}
+    note = "checkpoint ids folded to fit the result cap; slab engines list prints every id"
+    return {**listing, "rootstock": {**rootstock, "checkpoints": counts, "note": note}}
+
+
+def _fold_registry(listing: dict[str, Any]) -> dict[str, Any]:
+    """The listing with the registry's engines reduced to their names."""
+    registry = listing.get("registry")
+    if not isinstance(registry, dict) or not isinstance(registry.get("engines"), dict):
+        return listing
+    return {**listing, "registry": {**registry, "engines": sorted(registry["engines"])}}
+
+
+def _fold_partitions(listing: dict[str, Any]) -> dict[str, Any]:
+    """The listing with the HPC partitions reduced to their names."""
+    hpc = listing.get("hpc")
+    if not isinstance(hpc, dict) or not isinstance(hpc.get("partitions"), dict):
+        return listing
+    return {**listing, "hpc": {**hpc, "partitions": sorted(hpc["partitions"])}}
+
+
 def _add_engine_tools(box: Toolbox, session: MasonSession) -> None:
     def list_engines(arguments: dict[str, Any]) -> str:
         from slab._ops import engines_overview
@@ -2337,11 +2507,11 @@ def _add_engine_tools(box: Toolbox, session: MasonSession) -> None:
             overview["budget"] = _ops.budget_counts(found.cpus, found.gpus, found.gpu_source)
             overview["free"] = None
             overview["resources_note"] = f"run store unavailable: {e}"
-            return json.dumps(overview, indent=1, ensure_ascii=False)
+            return _engines_listing(overview, _listing_cap(session))
         held = resources["budget"]
         overview["budget"] = _ops.budget_counts(held["cpus"], held["gpus"], held["gpu_source"])
         overview["free"] = {key: len(ids) for key, ids in resources["free"].items()}
-        return json.dumps(overview, indent=1, ensure_ascii=False)
+        return _engines_listing(overview, _listing_cap(session))
 
     def free_resources(arguments: dict[str, Any]) -> str:
         with _open_workspace(session) as ws:
@@ -2391,7 +2561,9 @@ def _add_engine_tools(box: Toolbox, session: MasonSession) -> None:
                 "launch_workflow within it). Call this BEFORE choosing an engine — "
                 "there is no in-process MLIP fallback, so the available checkpoint "
                 "ids are the entire runnable-MLIP surface on this machine "
-                "(training a new one is the train_potential task, not an engine)."
+                "(training a new one is the train_potential task, not an engine). "
+                "Each LAMMPS build shows its whole command; its setup block is "
+                "one line with the line count and digest."
             ),
             parameters=_schema({}, []),
             handler=list_engines,
@@ -2737,6 +2909,121 @@ def _run_child(
             steps=child.steps_taken,
         )
     return result, child_session
+
+
+def _json_tables(text: str) -> dict[str, dict[str, Any]] | None:
+    """The tables a JSON artifact holds, by name, or None when it holds none.
+
+    A table is an object with a ``columns`` list and a ``rows`` list, the
+    shape ``run_lammps`` keeps: ``-thermo.json`` is a list of them, named
+    here by index, and ``-averages.json`` an object of them by file name.
+
+    Examples:
+        >>> table = {"columns": ["Step", "Temp"], "rows": [[0, 300.0]]}
+        >>> list(_json_tables(json.dumps([table, table])))
+        ['0', '1']
+        >>> list(_json_tables(json.dumps({"msd.dat": table})))
+        ['msd.dat']
+        >>> _json_tables('{"a": 1}') is None, _json_tables("not json") is None
+        (True, True)
+    """
+    stripped = text.lstrip()
+    if not stripped.startswith(("[", "{")):
+        return None
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return None
+
+    def is_table(item: Any) -> bool:
+        return (
+            isinstance(item, dict)
+            and isinstance(item.get("columns"), list)
+            and isinstance(item.get("rows"), list)
+        )
+
+    if is_table(value):
+        return {"0": value}
+    if isinstance(value, list) and value and all(is_table(item) for item in value):
+        return {str(index): item for index, item in enumerate(value)}
+    if isinstance(value, dict) and value and all(is_table(item) for item in value.values()):
+        return {str(key): item for key, item in value.items()}
+    return None
+
+
+def _table_window(
+    tables: dict[str, dict[str, Any]],
+    arguments: dict[str, Any],
+    *,
+    offset: int,
+    limit: int,
+    every: int,
+) -> str:
+    """Rows of JSON tables: chosen columns, every n-th row, and what was left out.
+
+    Examples:
+        >>> rows = [[step, 300.0 + step] for step in range(0, 3000)]
+        >>> tables = {"0": {"columns": ["Step", "Temp", "Press"],
+        ...                 "rows": [row + [1.0] for row in rows]}}
+        >>> shown = _table_window(tables, {"columns": "Step,Temp"}, offset=1, limit=400,
+        ...                       every=1000).splitlines()
+        >>> shown[0]
+        'table 0: 3000 rows; columns Step, Temp of Step, Temp, Press'
+        >>> shown[1:4]
+        ['   row\\tStep\\tTemp', '     1\\t0\\t300.0', '  1001\\t1000\\t1300.0']
+        >>> shown[-1]
+        '[rows 1-3000, every 1000th: 3 shown, 2997 omitted]'
+        >>> _table_window(tables, {"columns": "Tmp"}, offset=1, limit=9, every=1)
+        "no column 'Tmp' in table 0; its columns: Step, Temp, Press"
+    """
+    wanted_table = arguments.get("table")
+    if wanted_table is not None:
+        key = str(wanted_table)
+        if key not in tables:
+            return f"no table {key!r}; the tables: {', '.join(tables)}"
+        tables = {key: tables[key]}
+    raw_columns = arguments.get("columns")
+    if isinstance(raw_columns, str):
+        wanted = [name.strip() for name in raw_columns.split(",") if name.strip()]
+    elif isinstance(raw_columns, list):
+        wanted = [str(name) for name in raw_columns]
+    else:
+        wanted = []
+    parts: list[str] = []
+    for name, table in tables.items():
+        columns = [str(column) for column in table["columns"]]
+        rows = table["rows"]
+        chosen = wanted or columns
+        missing = [column for column in chosen if column not in columns]
+        if missing:
+            parts.append(
+                f"no column {missing[0]!r} in table {name}; its columns: {', '.join(columns)}"
+            )
+            continue
+        picks = [columns.index(column) for column in chosen]
+        numbers = list(range(offset, len(rows) + 1, every)[:limit])
+        head = f"table {name}: {len(rows)} rows; columns {', '.join(chosen)}"
+        if chosen != columns:
+            head += f" of {', '.join(columns)}"
+        lines = [head, "   row\t" + "\t".join(chosen)]
+        for number in numbers:
+            row = rows[number - 1]
+            cells = [
+                repr(row[pick]) if isinstance(row[pick], float) else str(row[pick])
+                for pick in picks
+                if isinstance(row, list) and pick < len(row)
+            ]
+            lines.append(f"{number:6d}\t" + "\t".join(cells))
+        # The span the window sampled: to the last row shown, and on to
+        # the row before the next sample would have been.
+        end = min(len(rows), numbers[-1] + every - 1) if numbers else offset
+        step = f", every {every}th" if every > 1 else ""
+        lines.append(
+            f"[rows {offset}-{end}{step}: {len(numbers)} shown, "
+            f"{len(rows) - len(numbers)} omitted]"
+        )
+        parts.append("\n".join(lines))
+    return "\n".join(parts)
 
 
 def _digest_unless_raw(arguments: dict[str, Any], name: str, text: str, n_lines: int) -> str | None:

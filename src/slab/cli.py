@@ -155,6 +155,48 @@ def engines_list(registry_path: _RegistryOpt = None) -> None:
         )
 
 
+@engines_app.command("show")
+def engines_show(
+    name: Annotated[
+        str,
+        typer.Argument(help="'lammps' for every LAMMPS build, or one build: cpu, gpu, an alias."),
+    ],
+    setup: Annotated[
+        bool, typer.Option("--setup", help="Print each build's setup lines in full.")
+    ] = False,
+) -> None:
+    """Show the LAMMPS builds: command, KOKKOS switches, and the setup digest.
+
+    The agent's tools name a build's setup block by its line count and
+    digest. --setup prints the lines themselves.
+    """
+    from slab._ops import setup_digest
+    from slab.lammps import lammps_builds
+
+    try:
+        builds = lammps_builds()
+    except (SlabError, OSError, ValueError) as e:
+        _fail(str(e))
+    if name != "lammps":
+        if name not in builds:
+            _fail(
+                f"no LAMMPS build {name!r}; the builds are: {', '.join(builds)} "
+                f"('lammps' shows them all)"
+            )
+        builds = {name: builds[name]}
+    for build_name, build in builds.items():
+        typer.echo(f"{build_name} ({build['source']}): {build['command']}")
+        typer.echo(f"  {_kokkos_text(build['kokkos'])}")
+        lines = build.get("setup") or []
+        if not lines:
+            typer.echo("  setup: none")
+            continue
+        typer.echo(f"  setup: {len(lines)} lines, sha256 {setup_digest(lines)}")
+        if setup:
+            for line in lines:
+                typer.echo(f"    {line}")
+
+
 @engines_app.command("verify")
 def engines_verify(registry_path: _RegistryOpt = None) -> None:
     """Run every registry engine's probe; exit nonzero if any engine fails."""

@@ -613,6 +613,10 @@ class Mason:
         self._seen_results: dict[tuple[str, str], tuple[str, int, int | None, int]] = {}
         # Consecutive steps whose calls were all looking tools.
         self._looking_streak = 0
+        # The index of the first message no complete reply has read yet:
+        # the results of the step in flight, and of the step before when
+        # the reply to them was cut. Clearing and compaction spare these.
+        self._unread_from = len(self.messages)
         self._effort_override: str | None = None
         if depth == 0:
             # The transcript says which model answered it, so a later reader
@@ -652,6 +656,7 @@ class Mason:
             self.session.record({"type": "resume", "messages": len(resume_from)})
             for message in resume_from:
                 self._append(message)
+            self._unread_from = len(self.messages)
 
     def _apply_roster_override(self) -> None:
         """``[agent.roster.<name>]`` under the flags: config per agent, flags on top.
@@ -715,6 +720,10 @@ class Mason:
             )
             reply = self._call_model(hint=hint or None)
             cut = reply.finish_reason == "max_tokens"
+            if not cut:
+                # A complete reply read everything before it. A cut one read
+                # nothing the model can act on, so its results stay unread.
+                self._unread_from = len(self.messages)
             cut_call = self._cut_call_name(reply) if cut else None
             if cut_call is not None and continue_cut and not cut_nudged:
                 # Case 3: the cut fell inside a tool call's arguments. The
@@ -1146,7 +1155,7 @@ class Mason:
             # The server knows the window better than our estimate: compact
             # once and retry. If there was nothing left to fold, retrying
             # would just repeat the overflow — say so instead.
-            if not self._compact():
+            if not self._compact() and not self._compact(spare_unread=False):
                 raise ContextOverflowError(
                     f"{e} — and there is nothing left to compact: the system prompt, "
                     f"plan, notebook tail, and current goal already exceed the model's "
@@ -1156,7 +1165,23 @@ class Mason:
             if hint is not None:
                 messages = [*messages, {"role": "user", "content": hint}]
             options["max_tokens"] = self._reply_budget()
-            reply = self.client.chat(messages, tools, **options)
+            try:
+                reply = self.client.chat(messages, tools, **options)
+            except ContextOverflowError as again:
+                # The fold that spared the unread results was not enough:
+                # fold them too, once, before giving up.
+                if not self._compact(spare_unread=False):
+                    raise ContextOverflowError(
+                        f"{again} — and there is nothing left to compact: the system "
+                        f"prompt, plan, notebook tail, and current goal already exceed "
+                        f"the model's window. Shorten PLAN.md/AGENTS.md, or serve a "
+                        f"larger context."
+                    ) from again
+                messages = self.messages
+                if hint is not None:
+                    messages = [*messages, {"role": "user", "content": hint}]
+                options["max_tokens"] = self._reply_budget()
+                reply = self.client.chat(messages, tools, **options)
         self.session.count_usage(
             reply.prompt_tokens, reply.completion_tokens, reply.cached_prompt_tokens
         )
@@ -1322,7 +1347,14 @@ class Mason:
                 continue
             clearable.append((index, name))
         protected = set(results[-agent.keep_tool_results :])
-        chosen = [(index, name) for index, name in clearable if index not in protected]
+        # A result no complete reply has read is never cleared, however many
+        # results its step produced: one delegation compacted thirteen times
+        # and read one script six times because its fresh results went.
+        chosen = [
+            (index, name)
+            for index, name in clearable
+            if index not in protected and index < self._unread_from
+        ]
         freed = sum(len(str(self.messages[index]["content"])) for index, _ in chosen)
         if not chosen or freed < _CLEAR_AT_LEAST_CHARS:
             return
@@ -1380,8 +1412,13 @@ class Mason:
             return
         self._compact()
 
-    def _compact(self) -> bool:
+    def _compact(self, *, spare_unread: bool = True) -> bool:
         """Fold the middle of the conversation into a structured summary.
+
+        The fold never takes a message no complete reply has read, with
+        *spare_unread*: the tail starts at the reply that called the
+        unread results at the latest. Only a server's overflow answer,
+        with nothing else left to fold, compacts without that exemption.
 
         Returns False when there was nothing foldable (the caller decides
         whether that is fine or fatal).
@@ -1390,6 +1427,8 @@ class Mason:
         if len(self.messages) <= 1 + keep + 2:  # nothing worth folding
             return False
         boundary = len(self.messages) - keep
+        if spare_unread and any(_is_tool_result(m) for m in self.messages[self._unread_from :]):
+            boundary = min(boundary, self._unread_from)
         # A tool message must keep the assistant message that called it.
         while boundary > 1 and self.messages[boundary].get("role") == "tool":
             boundary -= 1
@@ -1447,6 +1486,8 @@ class Mason:
             },
             *tail,
         ]
+        # The unread messages are in the tail, which kept its order.
+        self._unread_from = len(rebuilt) + 1 + max(0, self._unread_from - boundary)
         self._last_prompt_tokens = None
         self._messages_at_last_compaction = len(self.messages)
         # The messages were rebuilt: no earlier result copy is where it was.
@@ -1476,6 +1517,27 @@ def _join_cut(prefix: str, rest: str) -> str:
     if prefix.endswith("\n"):
         return prefix + rest
     return prefix[: prefix.rfind("\n") + 1] + rest
+
+
+def _is_tool_result(message: dict[str, Any]) -> bool:
+    """A tool result, native or in the text protocol's labeled user form.
+
+    Examples:
+        >>> _is_tool_result({"role": "tool", "content": "x"})
+        True
+        >>> _is_tool_result({"role": "user", "content": "[tool result: shell]\\nexit 0"})
+        True
+        >>> _is_tool_result({"role": "user", "content": "go"})
+        False
+    """
+    if message.get("role") == "tool":
+        return True
+    content = message.get("content")
+    return (
+        message.get("role") == "user"
+        and isinstance(content, str)
+        and content.startswith(_TEXT_RESULT_PREFIX)
+    )
 
 
 def _is_error_result(name: str, content: str) -> bool:
