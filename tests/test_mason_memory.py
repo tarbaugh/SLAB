@@ -52,6 +52,7 @@ def test_the_prompt_carries_the_catalog_when_memories_exist(
         "vLLM refuses hybrid-Mamba models at the default batch size.",
         "Lower max-num-seqs.",
         directory=memory_root,
+        evidence="checked by hand",
     )
     (content,) = [m["content"] for m in system_messages(_session(tmp_path))]
     assert "# Memory" in content
@@ -73,7 +74,9 @@ def test_empty_store_still_shows_the_memory_surface(tmp_path: Path, memory_root:
 def test_memory_false_removes_the_block_and_the_tools(
     tmp_path: Path, memory_root: Path
 ) -> None:
-    memory_store.write("a-fact", "A fact.", "Body.", directory=memory_root)
+    memory_store.write(
+        "a-fact", "A fact.", "Body.", directory=memory_root, evidence="checked by hand"
+    )
     session = _session(tmp_path, AgentConfig(memory=False))
     (content,) = [m["content"] for m in system_messages(session)]
     assert "# Memory" not in content
@@ -101,6 +104,7 @@ def test_recall_returns_the_fact_and_who_recorded_it(
         agent="md-expert",
         model="qwen3-30b",
         directory=memory_root,
+        evidence="checked by hand",
     )
     box = build_toolbox(_session(tmp_path))
     answer = box.dispatch(_call("recall", name="srun-in-sandbox"))
@@ -112,7 +116,9 @@ def test_recall_returns_the_fact_and_who_recorded_it(
 def test_recall_of_an_unknown_name_lists_what_exists(
     tmp_path: Path, memory_root: Path
 ) -> None:
-    memory_store.write("a-fact", "A fact.", "Body.", directory=memory_root)
+    memory_store.write(
+        "a-fact", "A fact.", "Body.", directory=memory_root, evidence="checked by hand"
+    )
     box = build_toolbox(_session(tmp_path))
     answer = box.dispatch(_call("recall", name="no-such-fact"))
     assert "no memory named 'no-such-fact'" in answer
@@ -142,6 +148,7 @@ def test_remember_writes_the_fact_with_its_attribution(
             name="lammps-potentials",
             description="The lammps engine needs an absolute potential path here.",
             body="Relative pair_coeff paths resolve against the run's scratch, not the project.",
+            evidence="a relative path failed and the absolute one ran",
         )
     )
     assert "recorded as memory 'lammps-potentials'" in answer
@@ -183,7 +190,7 @@ def test_remember_asks_before_it_writes(tmp_path: Path, memory_root: Path) -> No
 def test_a_refused_memory_teaches_the_rule(tmp_path: Path, memory_root: Path) -> None:
     box = build_toolbox(_session(tmp_path, auto_approve=True))
     answer = box.dispatch(
-        _call("remember", name="Not A Name", description="d", body="The fact.")
+        _call("remember", name="Not A Name", description="d", body="The fact.", evidence="e")
     )
     assert answer.startswith("not recorded: ")
     assert "lowercase alphanumerics" in answer
@@ -195,7 +202,9 @@ def test_remember_then_recall_round_trips_through_the_transcript(
 ) -> None:
     session = _session(tmp_path, auto_approve=True)
     box = build_toolbox(session)
-    box.dispatch(_call("remember", name="a-fact", description="A fact.", body="The fact."))
+    box.dispatch(
+        _call("remember", name="a-fact", description="A fact.", body="The fact.", evidence="e")
+    )
     box.dispatch(_call("recall", name="a-fact"))
     events = [
         json.loads(line)
@@ -236,13 +245,16 @@ def test_remember_stamps_the_software_the_fact_names(
             name="grace-gpu-growth",
             description="gracemaker needs TF_FORCE_GPU_ALLOW_GROWTH on the GPU nodes.",
             body="Without it the second fit on a node fails to allocate.",
+            evidence="the second fit failed without it and ran with it",
         )
     )
     assert answer.endswith("(stamped against gracemaker 0.6.0)")
     memory = memory_store.discover(memory_root)["grace-gpu-growth"]
     assert memory.against == {"gracemaker": "0.6.0"}
     # A second write in the same session reuses the probe.
-    box.dispatch(_call("remember", name="b", description="An atomsk fact.", body="Body."))
+    box.dispatch(
+        _call("remember", name="b", description="An atomsk fact.", body="Body.", evidence="e")
+    )
     assert memory_store.discover(memory_root)["b"].against == {"atomsk": "0.13.1"}
     assert calls == [1]
 
@@ -253,8 +265,12 @@ def test_the_prompt_flags_a_memory_whose_software_changed(
     memory_store.write(
         "grace-gpu-growth", "gracemaker needs X.", "Body.", against={"gracemaker": "0.5.2"},
         directory=memory_root,
+        evidence="checked by hand",
     )
-    memory_store.write("vllm-cache", "vLLM refuses a big batch.", "Body.", directory=memory_root)
+    memory_store.write(
+        "vllm-cache", "vLLM refuses a big batch.", "Body.", directory=memory_root,
+        evidence="checked by hand",
+    )
     _versions(monkeypatch, {"gracemaker": "0.6.0"})
     (content,) = [m["content"] for m in system_messages(_session(tmp_path))]
     assert (
@@ -267,7 +283,10 @@ def test_the_prompt_flags_a_memory_whose_software_changed(
 def test_unstamped_memories_cost_no_probe(
     tmp_path: Path, memory_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    memory_store.write("vllm-cache", "vLLM refuses a big batch.", "Body.", directory=memory_root)
+    memory_store.write(
+        "vllm-cache", "vLLM refuses a big batch.", "Body.", directory=memory_root,
+        evidence="checked by hand",
+    )
     _versions(monkeypatch, None)
     (content,) = [m["content"] for m in system_messages(_session(tmp_path))]
     assert "- vllm-cache: vLLM refuses a big batch." in content
@@ -281,11 +300,13 @@ def test_recall_says_what_changed_since(
     memory_store.write(
         "grace-gpu-growth", "gracemaker needs X.", "The whole fact.",
         agent="pi", against={"gracemaker": "0.5.2"}, directory=memory_root,
+        evidence="checked by hand",
     )
     _versions(monkeypatch, {"gracemaker": "0.6.0"})
     box = build_toolbox(_session(tmp_path))
     answer = box.dispatch(_call("recall", name="grace-gpu-growth"))
-    assert "[recorded by pi on " in answer and "against gracemaker 0.5.2]" in answer
+    assert "[recorded by pi on " in answer
+    assert "against gracemaker 0.5.2, evidence: checked by hand]" in answer
     assert "[changed since: gracemaker was 0.5.2, now 0.6.0. Confirm the fact" in answer
 
 

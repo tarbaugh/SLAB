@@ -414,6 +414,11 @@ class MasonSession:
         self.transcript_path = self.sessions_dir / f"{stamp}-{os.getpid()}.jsonl"
         self._lock_handle: Any | None = None
         self._software_versions: dict[str, str] | None = None
+        # The machine memories this session and its delegates wrote, in
+        # order: name, description, evidence, unverified, agent, and the
+        # kept version the first write replaced. A delegate's list is what
+        # its lead reads back; the root's scopes what forget may undo.
+        self.memories_written: list[dict[str, Any]] = []
 
     @staticmethod
     def _count_budget() -> dict[str, int]:
@@ -434,6 +439,29 @@ class MasonSession:
 
             self._software_versions = software_versions()
         return self._software_versions
+
+    def note_memory(self, entry: dict[str, Any]) -> None:
+        """Record a memory write here and in every session above this one.
+
+        The lead of a delegation reads the child's list after it returns,
+        so a memory a grandchild wrote reaches every lead on the way up.
+        """
+        session: MasonSession | None = self
+        while session is not None:
+            session.memories_written.append(entry)
+            session = session._parent
+
+    def written_memory(self, name: str) -> dict[str, Any] | None:
+        """The first write of *name* in this session tree, or None.
+
+        The first write matters because it holds the version that existed
+        before the session touched the memory, which is what forget puts
+        back.
+        """
+        root = self
+        while root._parent is not None:
+            root = root._parent
+        return next((e for e in root.memories_written if e["name"] == name), None)
 
     # -- one running session per workspace ------------------------------------
 

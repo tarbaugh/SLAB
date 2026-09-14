@@ -354,10 +354,12 @@ def memories(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         agent="pi",
         model="qwen3-30b",
         directory=root,
+        evidence="checked by hand",
     )
     memory_store.write(
         "srun-in-sandbox", "srun cannot reach the controller here.", "Use mpirun.",
         agent="md-expert", directory=root,
+        evidence="checked by hand",
     )
     return root
 
@@ -424,6 +426,112 @@ def test_memory_forget_yes_skips_the_prompt(memories: Path) -> None:
     result = runner.invoke(app, ["memory", "forget", "vllm-mamba-cache", "--yes"])
     assert result.exit_code == 0, result.output
     assert not (memories / "vllm-mamba-cache.md").exists()
+
+
+@pytest.fixture()
+def _live(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The machine reports one piece of software, without probing any."""
+    import slab._ops
+
+    monkeypatch.setattr(slab._ops, "software_versions", lambda: {"lammps": "22Jul2025"})
+
+
+@pytest.mark.usefixtures("_live")
+def test_memory_add_wants_evidence_or_says_unverified(memories: Path) -> None:
+    from foundation import memory as memory_store
+
+    refused = runner.invoke(
+        app, ["memory", "add", "fix-nph", "fix nph takes no temp.", "Seen once."]
+    )
+    assert refused.exit_code == 1
+    assert "a memory needs evidence" in refused.output
+    assert "fix-nph" not in memory_store.discover()
+
+    claim = runner.invoke(
+        app, ["memory", "add", "fix-nph", "fix nph takes no temp.", "Seen once.", "--unverified"]
+    )
+    assert claim.exit_code == 0, claim.output
+    assert "recorded fix-nph (unverified)" in claim.output
+
+    checked = runner.invoke(
+        app,
+        ["memory", "add", "fix-nph", "lammps fix nph takes a pressure keyword.", "-",
+         "--evidence", "the lammps manual and one completed run"],
+        input="Both iso and aniso ran.\n",
+    )
+    assert checked.exit_code == 0, checked.output
+    assert checked.output.startswith("replaced fix-nph in ")
+    memory = memory_store.discover()["fix-nph"]
+    assert memory.unverified is False and memory.agent == "cli"
+    assert memory.body() == "Both iso and aniso ran.\n"
+    assert memory.against == {"lammps": "22Jul2025"}
+    assert [v.body for v in memory_store.versions("fix-nph")] == ["Seen once."]
+
+    listed = runner.invoke(app, ["memory", "list"])
+    assert "[unverified]" not in listed.output
+
+
+@pytest.mark.usefixtures("_live")
+def test_memory_review_lists_what_a_person_should_check(memories: Path) -> None:
+    from foundation import memory as memory_store
+
+    clean = runner.invoke(app, ["memory", "review"])
+    assert clean.exit_code == 0, clean.output
+    assert "nothing to review (2 memory(s), all verified and current)" in clean.output
+
+    memory_store.write(
+        "gpu-build-works", "The gpu build's command works.", "It started.",
+        agent="md-expert", unverified=True, directory=memories,
+    )
+    memory_store.write(
+        "lammps-kokkos", "lammps kokkos wants one rank per gpu.", "Seen.",
+        against={"lammps": "2Aug2023"}, evidence="run 01k2x7abcd", directory=memories,
+    )
+    result = runner.invoke(app, ["memory", "review"])
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert lines[0].startswith("gpu-build-works") and lines[0].endswith("[unverified]")
+    assert lines[1].startswith("lammps-kokkos")
+    assert lines[1].endswith("[lammps was 2Aug2023, now 22Jul2025]")
+    assert "2 of 4 memory(s) to review" in lines[-1]
+    assert "vllm-mamba-cache" not in result.output
+
+    rows = json.loads(runner.invoke(app, ["memory", "review", "--json"]).output)
+    assert [(row["name"], row["reasons"]) for row in rows] == [
+        ("gpu-build-works", ["unverified"]),
+        ("lammps-kokkos", ["lammps was 2Aug2023, now 22Jul2025"]),
+    ]
+    assert rows[0]["agent"] == "md-expert"
+
+    listed = runner.invoke(app, ["memory", "list"])
+    assert "The gpu build's command works. [unverified]" in listed.output
+
+
+@pytest.mark.usefixtures("_live")
+def test_memory_confirm_records_the_evidence_and_restamps(memories: Path) -> None:
+    from foundation import memory as memory_store
+
+    memory_store.write(
+        "lammps-kokkos", "lammps kokkos wants one rank per gpu.", "Seen.",
+        agent="md-expert", against={"lammps": "2Aug2023"}, unverified=True,
+        directory=memories,
+    )
+    missing = runner.invoke(app, ["memory", "confirm", "lammps-kokkos"])
+    assert missing.exit_code != 0
+
+    result = runner.invoke(
+        app, ["memory", "confirm", "lammps-kokkos", "--evidence", "run 01k2x7abcd, 4 gpus"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "confirmed lammps-kokkos: evidence run 01k2x7abcd, 4 gpus" in result.output
+    memory = memory_store.discover()["lammps-kokkos"]
+    assert memory.unverified is False
+    assert memory.against == {"lammps": "22Jul2025"}
+    assert memory.agent == "md-expert" and memory.body() == "Seen.\n"
+    assert "nothing to review" in runner.invoke(app, ["memory", "review"]).output
+
+    ghost = runner.invoke(app, ["memory", "confirm", "ghost", "--evidence", "e"])
+    assert ghost.exit_code == 1 and "no memory named 'ghost'" in ghost.output
 
 
 def test_memory_purge_matches_globs_and_confirms(memories: Path) -> None:
@@ -519,6 +627,7 @@ def test_memory_list_flags_what_changed_since(
     memory_store.write(
         "grace-gpu-growth", "gracemaker needs X.", "Body.", agent="pi",
         against={"gracemaker": "0.5.2"}, directory=memories,
+        evidence="checked by hand",
     )
     monkeypatch.setattr(slab._ops, "software_versions", lambda: {"gracemaker": "0.6.0"})
     result = runner.invoke(app, ["memory", "list"])
@@ -691,6 +800,7 @@ def test_memory_list_marks_a_memory_about_slab(memories: Path) -> None:
     memory_store.write(
         "run-lammps-keys", "run_lammps result has n_rows, not rows.", "A count.",
         agent="pi", directory=memories,
+        evidence="checked by hand",
     )
     result = runner.invoke(app, ["memory", "list"])
     assert result.exit_code == 0, result.output

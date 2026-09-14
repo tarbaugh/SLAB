@@ -31,6 +31,7 @@ need::
     updated: 2026-08-28
     agent: pi
     model: qwen3-30b
+    evidence: run 01k2x7... completed with the flag set
     against:
       gracemaker: 0.6.0
     ---
@@ -41,6 +42,16 @@ versions present when it was written. A later session compares the stamp
 with the machine it runs on and flags the memories whose software changed,
 so the agent re-checks those and trusts the rest without probing.
 
+``evidence`` is what confirmed the fact: a run id, a dry run, or a failure
+record. A write without it is refused unless the writer says the fact is
+unverified, which stamps ``unverified: true``. A memory with no evidence
+reads as unverified whatever its frontmatter says, so a file written before
+this rule, or by hand, is flagged for review rather than trusted.
+
+Replacing a memory keeps the replaced file under ``.history/<name>/``, so a
+contradiction is visible: recall shows the previous body beside the new
+one when they differ, and a wrong replacement can be undone.
+
 There is no index file. The catalog is a directory scan, which stays cheap at
 the enforced cap and, unlike an index, never becomes a write-contention point
 between concurrent jobs.
@@ -50,9 +61,11 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import tempfile
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from contextlib import suppress
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -72,6 +85,25 @@ MAX_BODY_CHARS = 4_000
 #: prompt, so it is a context budget before it is a storage budget; an agent
 #: that hits the cap is told to consolidate.
 MAX_MEMORIES = 100
+
+#: What a piece of evidence may hold: a run id with a line of context, or a
+#: failure record's first lines. Longer evidence belongs in the run it cites.
+MAX_EVIDENCE_CHARS = 500
+
+#: How many replaced versions one memory keeps under ``.history/<name>/``.
+#: The oldest goes first; the cap bounds an agent that rewrites in a loop.
+MAX_VERSIONS = 10
+
+#: The directory under the memory root that holds replaced versions. It
+#: starts with a dot, so the catalog scan never reads it as a memory.
+HISTORY_DIR = ".history"
+
+#: What a refused write says: the rule and the two ways past it.
+EVIDENCE_REQUIRED = (
+    "a memory needs evidence: the run id, the dry run, or the failure record that "
+    "confirmed the fact. Pass evidence, or pass unverified=true to record it as an "
+    "unverified claim that recall flags and 'slab memory review' lists"
+)
 
 _NAME = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
@@ -104,6 +136,14 @@ class Memory:
     #: The version stamp: software the memory names, at the versions present
     #: when it was written. Empty for a memory nobody stamped.
     against: dict[str, str] = field(default_factory=dict)
+    #: What confirmed the fact, as the writer gave it. None when nobody said.
+    evidence: str | None = None
+    #: Whether the fact is an unconfirmed claim: the writer said so, or no
+    #: evidence was recorded.
+    unverified: bool = True
+    #: Set by :func:`write` only: the history file holding the version this
+    #: write replaced, or None when the write created the memory.
+    replaced: Path | None = None
 
     def body(self) -> str:
         """The fact itself: everything in the file after the frontmatter."""
@@ -111,14 +151,14 @@ class Memory:
         return text
 
     def provenance(self) -> str:
-        """One line naming who recorded this memory and when.
+        """One line naming who recorded this memory, when, and on what evidence.
 
         Examples:
             >>> m = Memory("x", "d", Path("x.md"), created="2026-08-28", agent="pi")
             >>> m.provenance()
-            'recorded by pi on 2026-08-28'
-            >>> Memory("x", "d", Path("x.md")).provenance()
-            'no provenance recorded'
+            'recorded by pi on 2026-08-28, no evidence recorded'
+            >>> Memory("x", "d", Path("x.md"), evidence="run 01abc", unverified=False).provenance()
+            'evidence: run 01abc'
         """
         parts = []
         if self.agent and self.created:
@@ -134,7 +174,8 @@ class Memory:
         if self.against:
             stamped = ", ".join(f"{name} {version}" for name, version in self.against.items())
             parts.append(f"against {stamped}")
-        return ", ".join(parts) if parts else "no provenance recorded"
+        parts.append(f"evidence: {self.evidence}" if self.evidence else "no evidence recorded")
+        return ", ".join(parts)
 
     def drift(self, live: Mapping[str, str]) -> list[str]:
         """What changed since the stamp: one phrase per software that differs.
@@ -295,6 +336,10 @@ def parse_memory(path: Path) -> Memory:
             )
         if not body.strip():
             raise MemoryStoreError("the body is empty; a memory must state the fact it holds")
+        flagged = meta.get("unverified", False)
+        if not isinstance(flagged, bool):
+            raise MemoryStoreError("frontmatter 'unverified' must be true or false")
+        evidence = _provenance(meta, "evidence")
         return Memory(
             name=name,
             description=" ".join(description.split()),
@@ -304,6 +349,8 @@ def parse_memory(path: Path) -> Memory:
             agent=_provenance(meta, "agent"),
             model=_provenance(meta, "model"),
             against=_against(meta),
+            evidence=evidence,
+            unverified=flagged or evidence is None,
         )
     except MemoryStoreError as e:
         raise MemoryStoreError(f"{path}: {e}") from None
@@ -342,7 +389,8 @@ def written_since(when: datetime, directory: Path | None = None) -> list[Memory]
         >>> from datetime import timedelta
         >>> root = Path(tempfile.mkdtemp())
         >>> before = datetime.now(UTC)
-        >>> _ = write("qe-on-gpu", "pw.x needs -nk 1 here", "One pool.", directory=root)
+        >>> _ = write("qe-on-gpu", "pw.x needs -nk 1 here", "One pool.", unverified=True,
+        ...           directory=root)
         >>> [m.name for m in written_since(before, root)]
         ['qe-on-gpu']
         >>> written_since(datetime.now(UTC) + timedelta(seconds=1), root)
@@ -364,21 +412,37 @@ def write(
     agent: str | None = None,
     model: str | None = None,
     against: Mapping[str, str] | None = None,
+    evidence: str | None = None,
+    unverified: bool = False,
     directory: Path | None = None,
 ) -> Memory:
     """Record a fact, creating the memory or replacing it whole.
 
+    *evidence* is what confirmed the fact: a run id, a dry run, a failure
+    record. Without it the write is refused unless *unverified* is true,
+    which records the fact as a claim that recall flags and review lists.
+
     Replacing is how an agent consolidates: the ``created`` date survives,
     ``updated`` moves to today, and the writer's attribution is refreshed.
+    The replaced file is kept under ``.history/<name>/`` (see
+    :func:`versions`), and the returned memory names it in ``replaced``.
     *against* is the version stamp (see :func:`stamp`); it is written as
     given, so a replacement carries the stamp of its own writing and not
     the one it replaced.
     The write is atomic (a temporary file in the same directory, then
     ``os.replace``), so a concurrent reader sees either the old file or the
     new one, never a half-written one. Two writers racing on one name is
-    last-writer-wins.
+    last-writer-wins, and both versions stay in the history.
     """
     root = directory if directory is not None else memory_dir()
+    cited = " ".join((evidence or "").split())
+    if not cited and not unverified:
+        raise MemoryStoreError(EVIDENCE_REQUIRED)
+    if len(cited) > MAX_EVIDENCE_CHARS:
+        raise MemoryStoreError(
+            f"the evidence is {len(cited)} characters, over the {MAX_EVIDENCE_CHARS}-"
+            f"character limit; cite the run id and one line, not the output itself"
+        )
     if not valid_name(name):
         raise MemoryStoreError(
             f"{name!r} is not a valid memory name: use lowercase alphanumerics and "
@@ -425,6 +489,10 @@ def write(
         frontmatter["agent"] = agent
     if model:
         frontmatter["model"] = model
+    if cited:
+        frontmatter["evidence"] = cited
+    if unverified:
+        frontmatter["unverified"] = True
     if against:
         # Versions are written as strings whatever they look like, so a
         # stamp of "1.10" survives the round trip as text.
@@ -434,7 +502,22 @@ def write(
     )
     text = f"---\n{rendered}---\n{body.strip()}\n"
     root.mkdir(parents=True, exist_ok=True)
-    descriptor, staged = tempfile.mkstemp(dir=root, prefix=f".{name}.", suffix=".tmp")
+    replaced = _archive(root, name) if previous is not None else None
+    try:
+        _put(path, text)
+    except MemoryStoreError:
+        # The replacement never landed, so the kept copy duplicates the
+        # file that is still current.
+        if replaced is not None:
+            replaced.unlink(missing_ok=True)
+        raise
+    _prune(root, name)
+    return replace(parse_memory(path), replaced=replaced)
+
+
+def _put(path: Path, text: str) -> None:
+    """Write *text* to *path* atomically: a staged file, then ``os.replace``."""
+    descriptor, staged = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp")
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(text)
@@ -442,15 +525,125 @@ def write(
     except OSError as e:
         Path(staged).unlink(missing_ok=True)
         raise MemoryStoreError(f"cannot write {path}: {e}") from e
-    return parse_memory(path)
+
+
+def _history(root: Path, name: str) -> Path:
+    return root / HISTORY_DIR / name
+
+
+def _archive(root: Path, name: str) -> Path:
+    """Copy the current file of *name* into its history, pruning past the cap.
+
+    The copy is made before the replacement lands, so a reader never finds
+    the memory missing. The file name is the UTC time to the microsecond,
+    which sorts in write order.
+    """
+    current = root / f"{name}.md"
+    history = _history(root, name)
+    history.mkdir(parents=True, exist_ok=True)
+    kept = history / f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%S%fZ')}.md"
+    try:
+        _put(kept, current.read_text(encoding="utf-8"))
+    except (OSError, MemoryStoreError) as e:
+        for empty in (history, history.parent):
+            with suppress(OSError):
+                empty.rmdir()
+        raise MemoryStoreError(f"cannot keep the replaced version of {name!r}: {e}") from e
+    return kept
+
+
+def _prune(root: Path, name: str) -> None:
+    """Drop the oldest kept versions of *name* past the cap, once a write landed."""
+    for old in sorted(_history(root, name).glob("*.md"))[:-MAX_VERSIONS]:
+        old.unlink(missing_ok=True)
+
+
+@dataclass(frozen=True)
+class Version:
+    """One replaced version of a memory, as its history file holds it."""
+
+    path: Path
+    description: str
+    body: str
+    updated: str | None
+    evidence: str | None
+    unverified: bool
+
+
+def versions(name: str, directory: Path | None = None) -> list[Version]:
+    """The replaced versions of *name*, newest first. Empty when never replaced.
+
+    A history file that no longer parses is skipped: the history is a
+    record for a reader, and one bad file must not hide the rest.
+
+    Examples:
+        >>> import tempfile
+        >>> root = Path(tempfile.mkdtemp())
+        >>> _ = write("qe-pools", "Use -nk 2.", "Two pools.", unverified=True, directory=root)
+        >>> _ = write("qe-pools", "Use -nk 1.", "One pool.", evidence="run 01abc", directory=root)
+        >>> [v.body for v in versions("qe-pools", root)]
+        ['Two pools.']
+    """
+    root = directory if directory is not None else memory_dir()
+    if not valid_name(name):
+        return []
+    found = []
+    for path in sorted(_history(root, name).glob("*.md"), reverse=True):
+        try:
+            meta, body = split_frontmatter(path.read_text(encoding="utf-8"))
+            evidence = _provenance(meta, "evidence")
+            found.append(
+                Version(
+                    path=path,
+                    description=" ".join(str(meta.get("description", "")).split()),
+                    body=body.strip(),
+                    updated=_provenance(meta, "updated"),
+                    evidence=evidence,
+                    unverified=meta.get("unverified") is True or evidence is None,
+                )
+            )
+        except (OSError, MemoryStoreError):
+            continue
+    return found
+
+
+def restore(name: str, version: Path, directory: Path | None = None) -> Memory:
+    """Put an earlier version of *name* back, keeping the one it displaces.
+
+    This undoes a replacement: *version* is a file from :func:`versions`
+    (or a write's ``replaced``). The current file goes into the history
+    first, so nothing is lost, and the restored text lands atomically.
+    """
+    root = directory if directory is not None else memory_dir()
+    if version.parent.resolve() != _history(root, name).resolve() or not version.is_file():
+        raise MemoryStoreError(f"{version} is not a kept version of the memory {name!r}")
+    return restore_text(name, version.read_text(encoding="utf-8"), root)
+
+
+def restore_text(name: str, text: str, directory: Path | None = None) -> Memory:
+    """Put *text*, a memory file's whole content, back as the current *name*.
+
+    The undo for a session that rewrote a memory more times than the
+    history keeps: the version from before the session is gone from the
+    history, but the session kept its text. The current file goes into
+    the history first.
+    """
+    root = directory if directory is not None else memory_dir()
+    if not valid_name(name):
+        raise MemoryStoreError(f"{name!r} is not a memory name")
+    if (root / f"{name}.md").is_file():
+        _archive(root, name)
+    _put(root / f"{name}.md", text)
+    _prune(root, name)
+    return parse_memory(root / f"{name}.md")
 
 
 def delete(name: str, directory: Path | None = None) -> Path:
-    """Forget one memory, returning the file that was removed.
+    """Forget one memory and its kept versions, returning the file removed.
 
-    The only deletion surface, and it belongs to the human: agents
-    consolidate by rewriting, so nothing an agent does can erase a fact a
-    person still wants.
+    The deletion surface for a person. An agent may only undo a write its
+    own session made (``forget`` in Mason), so nothing an agent does can
+    erase a fact a person still wants.
     """
     root = directory if directory is not None else memory_dir()
     path = root / f"{name}.md"
@@ -458,7 +651,58 @@ def delete(name: str, directory: Path | None = None) -> Path:
         known = ", ".join(discover(root)) or "none"
         raise MemoryStoreError(f"no memory named {name!r} (memories here: {known})")
     path.unlink()
+    shutil.rmtree(_history(root, name), ignore_errors=True)
     return path
+
+
+#: A run id, whole or as a prefix of at least eight characters: Crockford
+#: base32, lowercase, and starting with the ULID's leading zero.
+_RUN_ID = re.compile(r"(?<![A-Za-z0-9_])0[0-9a-hjkmnp-tv-z]{7,25}(?![A-Za-z0-9_])")
+
+
+def run_ids(evidence: str | None) -> list[str]:
+    """The run ids (or id prefixes) an evidence line cites, in order, once each.
+
+    A token counts when it looks like a run id and holds a letter, so a
+    number such as a step count is not mistaken for one.
+
+    Examples:
+        >>> run_ids("run 01k2x7abcd failed, then 01k2x7abcd again; 20000000 steps")
+        ['01k2x7abcd']
+        >>> run_ids(None)
+        []
+    """
+    found: list[str] = []
+    for token in _RUN_ID.findall(evidence or ""):
+        if any(c.isalpha() for c in token) and token not in found:
+            found.append(token)
+    return found
+
+
+def needs_review(
+    memories: Mapping[str, Memory], live: Mapping[str, str]
+) -> list[tuple[Memory, list[str]]]:
+    """The memories a person should confirm or forget, each with its reasons.
+
+    A memory needs review when it is unverified or when software it is
+    stamped against has changed since it was written. *live* is the
+    software present now. Name order.
+
+    Examples:
+        >>> checked = Memory("a", "d", Path("a.md"), evidence="run 01abc", unverified=False)
+        >>> claim = Memory("b", "d", Path("b.md"))
+        >>> old = Memory("c", "d", Path("c.md"), evidence="run 01def", unverified=False,
+        ...              against={"lammps": "2Aug2023"})
+        >>> [(m.name, why) for m, why in needs_review(
+        ...     {"a": checked, "b": claim, "c": old}, {"lammps": "22Jul2025"})]
+        [('b', ['unverified']), ('c', ['lammps was 2Aug2023, now 22Jul2025'])]
+    """
+    listed = []
+    for _, memory in sorted(memories.items()):
+        reasons = (["unverified"] if memory.unverified else []) + memory.drift(live)
+        if reasons:
+            listed.append((memory, reasons))
+    return listed
 
 
 #: Other names a memory may use for stamped software. The key is the name
@@ -569,11 +813,12 @@ def catalog_block(memories: dict[str, Memory], live: Mapping[str, str] | None = 
         >>> block.splitlines()[0]
         '# Memory'
         >>> block.splitlines()[-1]
-        '- vllm-cache: vLLM refuses a big batch.'
+        '- vllm-cache: vLLM refuses a big batch. [unverified]'
         >>> catalog_block({}).splitlines()[0]
         '# Memory'
         >>> stamped = Memory(
-        ...     "grace-gpu", "gracemaker needs X.", Path("y"), against={"gracemaker": "0.5.2"}
+        ...     "grace-gpu", "gracemaker needs X.", Path("y"), against={"gracemaker": "0.5.2"},
+        ...     evidence="run 01abc", unverified=False,
         ... )
         >>> catalog_block({"grace-gpu": stamped}, live={"gracemaker": "0.6.0"}).splitlines()[-1]
         '- grace-gpu: gracemaker needs X. [changed since: gracemaker was 0.5.2, now 0.6.0]'
@@ -587,9 +832,10 @@ def catalog_block(memories: dict[str, Memory], live: Mapping[str, str] | None = 
                 "No machine facts recorded on this machine yet. When you find a "
                 "quirk of this machine or its software worth keeping — a package "
                 "flag, a workaround, a path that surprised you — call the "
-                "remember tool with a name, a one-line description, and the "
-                "detail. Machine facts only: results belong in runs, project "
-                "decisions in the notebook, and credentials nowhere.",
+                "remember tool with a name, a one-line description, the "
+                "detail, and the evidence that confirmed it (a run id, a dry "
+                "run, a failure record). Machine facts only: results belong in "
+                "runs, project decisions in the notebook, and credentials nowhere.",
             ]
         )
     lines = [
@@ -602,14 +848,17 @@ def catalog_block(memories: dict[str, Memory], live: Mapping[str, str] | None = 
         "line that reports a change since, a newer version or a tool not "
         "found now, is a memory you must confirm before you build on it. A "
         "line that reports none names software that is unchanged, so rely "
-        "on that memory without probing. When you find a quirk of this "
-        "machine or its software worth keeping, record it with remember once "
-        "you have confirmed it. Machine facts only: results belong in runs, "
-        "project decisions in the notebook, and credentials nowhere.",
+        "on that memory without probing. A line marked [unverified] is a "
+        "claim no run confirmed; test it before you rely on it. When you find "
+        "a quirk of this machine or its software worth keeping, record it "
+        "with remember once a run has confirmed it, and cite that run as the "
+        "evidence. Machine facts only: results belong in runs, project "
+        "decisions in the notebook, and credentials nowhere.",
         "",
     ]
     for m in listed:
         changed = m.drift(live) if live is not None else []
-        note = f" [changed since: {'; '.join(changed)}]" if changed else ""
+        note = " [unverified]" if m.unverified else ""
+        note += f" [changed since: {'; '.join(changed)}]" if changed else ""
         lines.append(f"- {m.name}: {m.description}{note}")
     return "\n".join(lines)

@@ -6,7 +6,7 @@ description: The planner. Writes the plan, hands every step to the team,
 tools: read_file read_artifact list_dir search list_runs show_run wait_for_run
   list_engines list_tasks describe_task search_materials get_material
   query_materials job_status notebook plan skill recall remember delegate
-  review finish
+  forget review finish
 skills: all
 delegates: true
 review_first: true
@@ -87,6 +87,14 @@ evidence yourself: read_artifact on a run's averages table or log settles
 most checks in one or two calls, and a read is never a step to delegate. When a step
 fails, read the failure record, change the brief to address it, and
 never resend a failed brief unchanged.
+
+A report that ends with a memories-written list names the machine
+memories the agent recorded. Read each one against its evidence before
+you brief the next step. Forget a memory whose evidence is missing, names
+a failed run, or does not show the fact, because every later session on
+this machine reads it. A memory that restates documented input syntax,
+or that rests on a hand-written probe file, is not a fact about this
+machine. Forget it too.
 
 # Reporting
 

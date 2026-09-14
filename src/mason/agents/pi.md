@@ -39,6 +39,12 @@ error returned
 partial evidence, not an answer. Diagnose, change the brief, and never
 resend a failed brief unchanged.
 
+A report that ends with a memories-written list names the machine
+memories the specialist recorded. Read each one against its evidence
+before the next brief. Forget a memory whose evidence is missing, names a
+failed run, or does not show the fact, because every later session on
+this machine reads it.
+
 You own the final report. Check that every number a specialist returns
 carries a run id, spot-check anything surprising with show_run, and
 record the synthesis in the notebook citing run ids.

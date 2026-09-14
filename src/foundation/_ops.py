@@ -2818,6 +2818,40 @@ def cancel_job(job_id: str, *, workspace: str | os.PathLike[str] | None = None) 
     return summary
 
 
+def evidence_run_lines(ws: Workspace, evidence: str | None) -> list[str]:
+    """What each run a memory's evidence cites looks like now, one line per id.
+
+    A reader of a memory judges its evidence by the run, not the claim: a
+    run that failed, or one this workspace never held, is a reason to
+    doubt the memory. The status read is the current one, so a run that
+    was still going when the memory was written shows how it ended.
+
+    Examples:
+        >>> import tempfile
+        >>> with Workspace(tempfile.mkdtemp()) as ws:
+        ...     evidence_run_lines(ws, "run 01k2x7abcdefgh")
+        ['01k2x7abcdefgh: no such run in this workspace']
+    """
+    from foundation import memory as memory_store
+    from foundation.errors import AmbiguousRunIdError, RunNotFoundError
+
+    lines = []
+    for token in memory_store.run_ids(evidence):
+        try:
+            run = ws.runs.get(token)
+        except RunNotFoundError:
+            lines.append(f"{token}: no such run in this workspace")
+            continue
+        except AmbiguousRunIdError:
+            lines.append(f"{token}: matches more than one run; cite the whole id")
+            continue
+        line = f"{run.id}: {run.name}, {run.status.value}, {run.state.value}"
+        if run.error:
+            line += f", error: {run.error[:200]}"
+        lines.append(line)
+    return lines
+
+
 def cancel_lines(summary: dict[str, Any]) -> list[str]:
     """The lines every surface prints for a :func:`cancel_job` summary.
 

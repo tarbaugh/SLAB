@@ -403,9 +403,9 @@ more than model choice.
 | `search_materials`, `get_material`, `query_materials` | the offline Materials Project snapshot, present only when `[builders.mp]` names one: filtered search, one record with its CIF path, and one read-only row-capped SELECT; the structure itself arrives traced via `fetch_structure` in a workflow |
 | `submit_job`, `job_status`, `cancel_job` | SLURM plumbing, present only when the config declares partitions. `submit_job` takes `nodes`, `ntasks_per_node`, `cpus_per_task`, `gpus_per_node`, and `mem`; the size replaces the partition's directives and must fit the node the partition declares. `cancel_job` also marks the job's running runs failed, releases their reservations, and lists the memories written since the job started |
 | `notebook`, `plan` | the memory instruments (below). `plan` refuses a plan whose Goal names a quantity the notebook already reports, until it has a line `prior result: ...`, and it checks each `run:<id>/<name>` reference against the run store. A reference to a cache-hit run is rewritten to the run that produced the file |
-| `recall`, `remember` | the machine's memory across sessions, described in [Memory](memory.md) |
+| `recall`, `remember`, `forget` | the machine's memory across sessions, described in [Memory](memory.md); `remember` takes the evidence that confirmed the fact, and `forget` undoes only a memory written in this session |
 | `skill` | load a skill: its instructions, root path, and bundled files; the catalog is per-agent |
-| `delegate` | hand one scoped task to a specialist's own loop; the PI only, one level deep, sequential |
+| `delegate` | hand one scoped task to a specialist's own loop; the PI only, one level deep, sequential; the result lists every machine memory the specialist wrote, with its evidence |
 | `review` | hand the plan or a file to the read-only critic before compute is spent; the leads only; the findings persist as a review record |
 | `finish` | end the task with a report citing run ids; honored only as the sole call of its reply, and only with a report. When the caller named the expected result keys (`slab mason run --expect t_melt:K`, or a benchmark question), a finish whose `results` names differ is not honored either. The tool result names the keys and units the goal asks for, and the agent calls finish again. The cited runs are the keep decision: the harness promotes the verified ones and expires the session's other runs, so the agent cites every run a number rests on, anchors from earlier sessions included |
 
@@ -445,7 +445,7 @@ auto-approve at word boundaries, but a command that contains shell control
 operators (`;`, `|`, `&`, redirection, and so on) never auto-approves.
 
 Plan the gate before an interactive session. `write_file`, `edit_file`,
-`shell`, `launch_workflow`, `submit_job`, `cancel_job`, and `remember` ask,
+`shell`, `launch_workflow`, `submit_job`, `cancel_job`, `remember`, and `forget` ask,
 and everything else (reads, `list_engines`, `job_status`, the notebook and
 the plan) never does. A multi-step goal therefore prompts several times, every shell probe
 included, because the default allowlist is empty. At the prompt, **Enter

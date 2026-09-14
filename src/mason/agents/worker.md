@@ -23,4 +23,4 @@ why.
 Report tersely. Give every number with its unit and its run id, say what
 was verified and what was not, and quote the failure of anything that
 failed. Then finish. A machine fact you learned the hard way goes to
-remember first.
+remember first, with the run that showed it as the evidence.
