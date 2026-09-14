@@ -40,6 +40,32 @@ velocity; the crossing fit lives in the kinetic-fits skill.
   barostat acts only along the interface normal, the lateral cell is
   fixed at a(T). An isotropic barostat strains the crystal as the liquid
   fraction changes and shifts T_m.
+- Take a(T) at each rung's own temperature, from a crystal-only NPT run
+  there. A lateral cell set at another temperature strains the crystal
+  and shifts the velocity at that rung.
+- Write the barostat as `fix baro mobile nph z P P Pdamp dilate mobile`.
+  `fix nph` integrates its group, so the layer thermostats must not
+  integrate again. Use `fix langevin` or `fix temp/csvr` per layer,
+  never `fix nvt`. During the melt `mobile` is the liquid half, so the
+  frozen crystal is neither integrated nor remapped. Add `fix_modify
+  baro temp tmove`, with `tmove` from the lammps-scripting skill,
+  section 5, so the kinetic part of the pressure counts the moving
+  atoms only. Give `Pdamp` in the time unit of the unit system. Under
+  `units metal` 1 ps is `1.0`, not `1000`. A `Pdamp` of 1000 there is
+  1000 ps, longer than the run, so a starting pressure of twenty
+  kilobar never relaxes.
+- Keep the barostat on during the melt and during the equilibration.
+  The melt expands, so a cell held at the crystal's volume compresses
+  the liquid half to tens of kilobar.
+- Give each stage (melt, equilibration, production) its own `fix halt`,
+  and `unfix` it before the next stage starts. A guard written for one
+  stage fires in another, because the melt and the equilibration pass
+  through states the production never sees. Set each threshold relative
+  to the calibrated baselines of section 3, never as an absolute
+  fraction.
+- Give each stage its own `fix ave/time` file name. A second fix that
+  writes the same name truncates the first file, and the earlier
+  stage's series is lost.
 - Thermostat in layers. The moving interface releases latent heat, and
   a single global thermostat lets the interface run hotter than the set
   point, which changes the kinetic coefficient by up to a factor of two.
@@ -66,9 +92,41 @@ and `fix frac all ave/time 10 10 100 c_nfcc file fraction.dat` writes
 the series. The file comes back parsed as
 `result["averages"]["fraction.dat"]`, and `series(result,
 "fraction.dat")` from `foundation.tasks` gives its rows for the slope
-fit, keyed by column. Never parse the `.dat` file yourself. The
-trajectory route is the alternative when the classification needs the
-bond-order parameter:
+fit, keyed by column. Never parse the `.dat` file yourself.
+
+Set the CNA cutoff for the run temperature, not for 0 K. The cutoff is
+the midpoint of a(T)/sqrt(2) and a(T), with a(T) from the crystal-only
+NPT run at that temperature, and you restate it at every rung of the
+ladder. Even at the right cutoff, a hot perfect crystal under
+instantaneous CNA reads well below 1, because thermal displacements
+break the neighbour signature. A cutoff left at the 0 K lattice
+constant makes this worse, and one campaign read a perfect hot crystal
+as 0.08 to 0.2 fcc. Two cures exist:
+
+- Classify time-averaged positions. Average the unwrapped positions
+  over 10 to 20 steps (`compute u all property/atom xu yu zu` and `fix
+  pos all ave/atom 1 20 20 c_u[1] c_u[2] c_u[3]`), dump them with
+  `dump avg all custom 20 avg.dump id type f_pos[1] f_pos[2] f_pos[3]`,
+  and run `compute cna/atom` on the dump with `rerun ... dump x y z box yes
+  label x f_pos[1] label y f_pos[2] label z f_pos[3] wrapped no`.
+  Averaging the per-atom CNA label instead does not remove the deficit.
+- Use `compute ptm/atom`, which tolerates thermal noise. It needs the
+  PTM package, so check the build's package list first.
+
+Calibrate before you set any gate. Run the crystal-only cell and
+the liquid-only cell at the rung's temperature through the same
+classification, and record the two fractions as the crystal baseline
+and the liquid baseline. The calibration runs are short, and they come
+first.
+
+Report the whole-cell fraction against the calibrated baselines. The
+crystal length along the axis is the cell length times (f − f_liquid) /
+(f_crystal − f_liquid), where f is the measured fraction. The velocity
+is the slope of that length, so it follows the phase length and not the
+raw count.
+
+The trajectory route is the alternative when the classification needs
+the bond-order parameter:
 
     python <skill root>/scripts/interface_velocity.py coex-1300K-r1.traj coex-1300K-r2.traj --dt-fs 100
 
@@ -80,7 +138,10 @@ fits the slope over the steady window, divides by `--interfaces`, and
 prints the velocity in A/ps and m/s, growth positive, with the fit's
 standard error or the spread over replicas. `--json` gives the table of
 crystalline fraction against time as well. Record the threshold and the
-cutoff with the velocity, because the fraction depends on them.
+cutoff with the velocity, because the fraction depends on them. The
+script uses the raw fraction, so its velocity is the calibrated one
+divided by (f_crystal − f_liquid) measured under the same threshold and
+cutoff. State which of the two you report.
 
 ## 4. Fit and report
 

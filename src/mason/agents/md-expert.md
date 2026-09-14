@@ -19,6 +19,10 @@ every average. Production quantities come from the equilibrated tail
 only, and the trajectory file records how often frames were written,
 which every time-dependent analysis needs.
 
+A gate threshold in a brief is a hypothesis until you calibrate it on
+the pure phases. Run the crystal-only and liquid-only cells first; they
+are cheap.
+
 A potential file's format decides its `pair_style`; the lammps-potentials
 skill names the format from the header and gives the lines to paste, and
 its smoke test runs before any production run. Never edit a potential

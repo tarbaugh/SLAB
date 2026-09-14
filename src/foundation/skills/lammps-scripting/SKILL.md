@@ -272,7 +272,7 @@ write_data w-nvt-final.data
 | --- | --- | --- |
 | NVE | `fix integrate all nve` | none; the energy conservation is the check |
 | NVT, Nose-Hoover | `fix integrate all nvt temp T T Tdamp` | `Tdamp` about 100 timesteps (0.1 ps at 1 fs) |
-| NPT, Nose-Hoover | `fix integrate all npt temp T T Tdamp iso P P Pdamp` | `Pdamp` about 1000 timesteps; `aniso` lets the cell lengths move separately, `tri` adds the tilts |
+| NPT, Nose-Hoover | `fix integrate all npt temp T T Tdamp iso P P Pdamp` | `Pdamp` about 1000 timesteps (1.0 ps at 1 fs; the value is a time, never a step count); `aniso` lets the cell lengths move separately, `tri` adds the tilts |
 | Langevin | `fix thermostat all langevin T T damp seed` and `fix integrate all nve` | `damp` in ps, 0.1 to 1; needs `nve` with it |
 | Berendsen | `fix thermostat all temp/berendsen T T Tdamp` with `nve` | reaches a target fast, samples no ensemble; equilibration only |
 
@@ -303,6 +303,12 @@ write_data w-nvt-final.data
   `thermo_style` line resets the setting, so a script with two
   `thermo_style` lines needs the yaml line twice. `info["thermo_format"]`
   reports `yaml` when the run took this path.
+- The `temp` keyword in `thermo_style` is the temperature of all atoms.
+  When a group is frozen or not integrated, that reading is low, and one
+  campaign read 935 K from a cell with a frozen half.
+  Define a temperature on the moving group, here `mobile`, with
+  `compute tmove mobile temp`, and print `c_tmove` or set
+  `thermo_modify temp tmove`.
 - `dump ID all custom N file.dump id type x y z vx vy vz` writes frames
   ASE reads back with `format="lammps-dump-text"`, and the analysis
   skills (msd-diffusion, radial-distribution) read those frames.
@@ -339,6 +345,12 @@ positions; leave it out to relax positions only. The log's `Stopping
 criterion` line says why it stopped, and the task's log digest reports
 it. Minimize before MD when the structure came from a builder, so the
 first steps do not blow up.
+
+A `minimize` followed by a `run` gives two thermo tables, and the
+minimize is the first. `result["steps"]` sums every loop, so it counts
+the minimize iterations with the MD steps. Read the MD rows through
+`series(result, "production")`. The length of the MD is
+`result["tables"][-1]["loop"]["steps"]`, never `result["steps"]`.
 
 ### Close contacts and the push-off
 
@@ -389,11 +401,17 @@ begins after the minimization under the real potential.
   skin was too small or the rebuild too rare.
 - `timer timeout 1:50:00 every 100`: stop cleanly before a two-hour job
   limit, so the log ends with its loop line and the restart is written.
-- `fix halt N v_name > value error soft`, with `variable name equal
-  ...`, stops the run on a condition: a temperature above a limit, a
-  volume that doubled, an extrapolation grade above a threshold
-  (lammps-potentials skill, section 5). `error soft` finishes the
-  script after the stop.
+- `fix guard all halt N v_name > value error continue`, with `variable
+  name equal ...`, stops the run on a condition: a temperature above a
+  limit, a volume that doubled, an extrapolation grade above a
+  threshold (lammps-potentials skill, section 5). The condition comes
+  first and the keyword-value pairs after it. The reverse order fails
+  with `Unknown fix halt keyword error`, which is a syntax error and not
+  a quirk of the build. `error continue` ends the current `run` and
+  keeps the script going, so the `write_data` and any later stage after
+  it still execute. `error soft` ends the current `run` and skips every
+  later `run` command, but still executes the other commands. `error
+  hard` stops LAMMPS with an error at once.
 - `run N upto` runs to an absolute step count, and `label loop` with
   `jump SELF loop` repeats a block; both make a restartable protocol.
 
@@ -402,9 +420,22 @@ begins after the minimization under the real potential.
 Gate the run with `@check` functions on `result`, the way the template
 does: the run finished every step and lost no atoms (the loop line's
 atom count equals the structure's), the tail mean of the temperature
-sits within a stated tolerance of the target, the tail of the total
-energy in NVE does not drift, and the pressure under NPT averages to
-the target. State the tolerances before the run.
+sits within a stated tolerance of the target, the conserved energy does
+not drift, and the pressure under NPT averages to the target. State the
+tolerances before the run.
+
+A smoke test's energy check needs a conserved quantity. Under NVE that
+is `etotal`. Under a thermostat, `etotal` is not conserved, so print
+`econserve` instead, which is `etotal` plus `ecouple`, the energy the
+thermostat and the barostat exchanged. LAMMPS refuses `fix_modify ...
+energy yes` on `fix nvt` with `does not support fix_modify energy
+command`, and `econserve` replaces it. Add `econserve` to the
+`thermo_style` line of any thermostatted run you will gate; the anatomy
+in section 3 and the template print `etotal` only. Never gate on
+`etotal` under NVT. Give the tolerance in meV/atom on
+tail means over 1000 steps or more, for example the mean over the
+first 1000 steps against the mean over the last 1000, and never on two
+single rows.
 
 A slope, a fit, or any number that needs more than the ends and the
 tail reads the rows through `series(result, -1)` for the last thermo
@@ -446,6 +477,7 @@ and the run id. A number without a run id is a rumor.
 | `Neighbor list overflow, boost neigh_modify one` | too many neighbors per atom for the page | `neigh_modify one 10000 page 100000` |
 | `Illegal ... command` | syntax | read the context line the failure record carries; it is the command that died |
 | `WARNING: One or more atoms are time integrated more than once` | two integrators on one group | keep one |
+| `Unknown fix halt keyword error` | the keyword came before the condition | `fix ID group halt N v_name > value error continue`, section 7 |
 | `KeyError: 0` or `KeyError: 'rows'` on `result["tables"][i]` in your own script | `n_rows` is a count; the summary holds no rows | `series(result, i)` for the rows |
 | `TypeError: unsupported operand ... 'str'` on `result["wall_time"]` in your own script | `wall_time` is LAMMPS's text | `result["seconds"]` or `result["rate"]` for arithmetic |
 
