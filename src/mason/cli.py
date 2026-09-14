@@ -919,6 +919,16 @@ def _render_event(event: dict[str, Any], full: bool) -> None:
 _LIVE_POLL_S = 1.0
 
 
+def _line_boundary(path: Path) -> int:
+    """The offset just after the last complete line of *path*, so a tail that
+    starts at the end never begins inside a line the session is writing."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return 0
+    return data.rfind(b"\n") + 1
+
+
 class _TranscriptTail:
     """The lines appended to a transcript since the last read.
 
@@ -930,7 +940,7 @@ class _TranscriptTail:
 
     def __init__(self, path: Path, *, at_end: bool = False) -> None:
         self.path = path
-        self.offset = path.stat().st_size if at_end else 0
+        self.offset = _line_boundary(path) if at_end else 0
         self.number = 0
         self._partial = b""
 
@@ -939,7 +949,8 @@ class _TranscriptTail:
             with open(self.path, "rb") as handle:
                 handle.seek(self.offset)
                 data = handle.read()
-        except FileNotFoundError:
+        except OSError:
+            # Not there yet, or a network filesystem hiccup: the next poll reads.
             return []
         self.offset += len(data)
         data = self._partial + data
@@ -1018,11 +1029,11 @@ def _follow(transcript: Path, full: bool, usage: _Usage) -> None:
                 tails[path] = _TranscriptTail(path, at_end=at_end)
 
     root = _TranscriptTail(transcript)
-    _render_lines(root.read(), full, usage)
-    delegations(at_end=True)
-    typer.secho(f"\n[following {transcript.name}; Ctrl+C stops]", dim=True)
     shown = transcript
     try:
+        _render_lines(root.read(), full, usage)
+        delegations(at_end=True)
+        typer.secho(f"\n[following {transcript.name}; Ctrl+C stops]", dim=True)
         while True:
             time.sleep(_LIVE_POLL_S)
             delegations(at_end=False)

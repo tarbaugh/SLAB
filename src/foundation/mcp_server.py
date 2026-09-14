@@ -371,7 +371,10 @@ def build_server(
         id), every task call takes that run's cached result instead, so the
         checks run on real data and no engine starts. A real
         launch of a script text this session never dry-ran carries a
-        'warning' field. Size the launch with ntasks (MPI ranks), threads (per rank),
+        'warning' field. A run_lammps setup= (a list, or one string with a
+        line per newline) runs after the build's own setup lines, which
+        stay; setup_mode='replace' runs the per-call lines alone, without
+        the build's module environment. Size the launch with ntasks (MPI ranks), threads (per rank),
         and gpus: the server reserves that slice of this host before the
         run starts, the run takes it as an affinity mask plus
         CUDA_VISIBLE_DEVICES, and a slice that does not fit is refused with
