@@ -928,8 +928,9 @@ under version control, readable by humans:
 
 The environment block shows the last 3000 characters of the notebook
 under "Lab notebook (latest entries)". A card that writes the plan also
-sees "Prior findings (notebook)": the last six earlier entries that the
-tail leaves out, each with its dated heading and up to 600 characters.
+sees "Prior findings (notebook)". That block holds the last six earlier
+entries that the tail leaves out, each with its dated heading and up to
+600 characters.
 When a heading in the notebook names the project directory, only the
 entries whose heading names it are shown, because the others belong to
 another campaign in the same directory. A finding from an earlier

@@ -50,7 +50,7 @@ from mason.client import (
 from mason.config import AgentConfig, override_agent, roster_agent_config
 from mason.errors import MasonError
 from mason.mechanisms import effective, enabled
-from mason.prompts import COMPACTION_PROMPT, free_line, system_messages, team_block
+from mason.prompts import COMPACTION_PROMPT, free_hint, system_messages, team_block
 from mason.reviews import plan_is_approved
 from mason.roster import (
     AgentSpec,
@@ -716,7 +716,7 @@ class Mason:
                 step_back=enabled(self.session.agent, "looking-hint"),
             )
             if self._sizes_briefs:
-                hint = " ".join(part for part in (hint, free_line(self.session)) if part)
+                hint = " ".join(part for part in (hint, free_hint(self.session)) if part)
             reply = self._call_model(hint=hint or None)
             cut = reply.finish_reason == "max_tokens"
             cut_call = self._cut_call_name(reply) if cut else None

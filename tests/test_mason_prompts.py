@@ -12,7 +12,7 @@ from foundation.project import notebook_append
 from mason.client import ChatReply, ToolCall
 from mason.config import MasonConfig
 from mason.loop import Mason
-from mason.prompts import WAVE_RULE, environment_block, free_line
+from mason.prompts import WAVE_RULE, environment_block, free_hint
 from mason.roster import discover_roster
 from mason.session import MasonSession
 
@@ -52,14 +52,14 @@ def _text(text: str) -> ChatReply:
 
 def test_the_free_line_reads_the_store_now(tmp_path: Path, no_gpus: None) -> None:
     session = _session(tmp_path)
-    line = free_line(session)
+    line = free_hint(session)
     cpus = int(line.split("free right now: ")[1].split()[0])
     assert line.startswith("[harness: free right now: ")
     assert f"of {cpus} cpu(s), 0 of 0 gpu(s)" in line
     assert WAVE_RULE in line
     with Workspace(session.workspace_root) as ws:
         ws.reserve(ntasks=1, holder_pid=os.getpid())
-    assert f"free right now: {cpus - 1} of {cpus} cpu(s)" in free_line(session)
+    assert f"free right now: {cpus - 1} of {cpus} cpu(s)" in free_hint(session)
 
 
 def test_the_resource_paragraph_states_the_wave_rule(tmp_path: Path, no_gpus: None) -> None:

@@ -116,7 +116,11 @@ def prior_findings_block(project: Path, tail_chars: int, count: int = PRIOR_ENTR
 # -- the prior-result check -----------------------------------------------------
 
 #: The marker a plan uses to state what the notebook already reports.
-PRIOR_RESULT_LINE = re.compile(r"^\s*(?:[-*]\s*)?(?:\*\*)?prior result(?:\*\*)?\s*:", re.I | re.M)
+#: A ``prior result:`` line, with room for a qualifier before the colon, so
+#: ``Prior result (run 01abc): 1180 K`` counts as the marker too.
+PRIOR_RESULT_LINE = re.compile(
+    r"^\s*(?:[-*]\s*)?(?:\*\*)?prior result(?:\*\*)?[^:\n]{0,60}:", re.I | re.M
+)
 
 #: A number with a physical unit: the mark of a line that reports a quantity.
 _MEASURED = re.compile(

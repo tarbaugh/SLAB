@@ -65,6 +65,7 @@ Size a wave to the free budget: as many concurrent launches as free GPUs
 first finishes. Each request you receive ends with the free amounts at
 that step; size every brief from them, not from a plan or an intent
 written before.
+
 A brief for a dynamics step names `run_lammps`, the potential file or
 pair style, and the slice; it never asks for a Python dynamics loop, and
 a served checkpoint id in a brief is for a relaxation or a single point

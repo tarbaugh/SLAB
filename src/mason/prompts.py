@@ -495,7 +495,7 @@ def _free_counts(session: MasonSession, *, reap: bool) -> dict[str, int] | None:
         return None
 
 
-def free_line(session: MasonSession) -> str:
+def free_hint(session: MasonSession) -> str:
     """The free resources right now, for a lead that sizes briefs it cannot launch.
 
     The environment block reads them once, when the prompt is built. A
