@@ -25,7 +25,7 @@ The workspace is resolved exactly as for the CLI: `-w/--workspace` flag > `$SLAB
 
 ## The toolbox
 
-Twenty-five tools, each a thin wrapper over the operations layer, and three more on a cluster:
+Twenty-six tools, each a thin wrapper over the operations layer, and three more on a cluster:
 
 | Tool | What it does |
 | --- | --- |

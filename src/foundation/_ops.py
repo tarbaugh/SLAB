@@ -1394,8 +1394,13 @@ def reverify_run(
         raise FoundationError(
             f"{script_path.name} registers no @check, so there is nothing to re-verify"
         )
-    earlier = pass_tallies(ws.runs.list_check_results(run.id, all_passes=True))
-    pass_no = (earlier[-1]["pass_no"] if earlier else 0) + 1
+    every = ws.runs.list_check_results(run.id, all_passes=True)
+    earlier = pass_tallies(every)
+    last_no = earlier[-1]["pass_no"] if earlier else 0
+    pass_no = last_no + 1
+    # A script that dropped a failing check is not a fix: the run stays
+    # quarantined, and the answer names what the pass no longer covers.
+    dropped = sorted({r.name for r in every if r.pass_no == last_no} - {r.name for r in results})
     stored = ws.runs.add_check_results(
         run.id, [result.model_copy(update={"pass_no": pass_no}) for result in results]
     )
@@ -1409,7 +1414,7 @@ def reverify_run(
         size_bytes=ws.artifacts.size(digest),
     )
     passed = sum(1 for result in stored if result.passed)
-    if passed == len(stored):
+    if passed == len(stored) and not dropped:
         # suppress: someone moved the run meanwhile; the state read below says where
         with suppress(IllegalTransitionError):
             ws.runs.transition(
@@ -1427,6 +1432,7 @@ def reverify_run(
         "checks_total": len(stored),
         "checks": [check_entry(result) for result in stored],
         "earlier_passes": earlier,
+        "dropped": dropped,
         "tasks_replayed": len(replay.taken),
         "script": kept,
     }
@@ -1446,6 +1452,15 @@ def reverify_lines(answer: dict[str, Any]) -> list[str]:
         run ab12: pass 2 verified, 1/1 checks passed, 3 task result(s) replayed
         earlier: pass 1 0/1
           drift passed: returned True
+        >>> print("\n".join(reverify_lines({"run_id": "ab12", "pass_no": 2,
+        ...     "state": "quarantined", "checks_passed": 1, "checks_total": 1,
+        ...     "tasks_replayed": 3, "earlier_passes": [{"pass_no": 1, "passed": 0, "total": 2}],
+        ...     "dropped": ["melted"], "checks": [{"name": "drift", "passed": True,
+        ...     "message": "returned True"}]})))
+        run ab12: pass 2 quarantined, 1/1 checks passed, 3 task result(s) replayed
+        earlier: pass 1 0/2
+        dropped since pass 1: melted; the run stays quarantined until a pass covers it
+          drift passed: returned True
     """
     lines = [
         f"run {answer['run_id']}: pass {answer['pass_no']} {answer['state']}, "
@@ -1458,6 +1473,12 @@ def reverify_lines(answer: dict[str, Any]) -> list[str]:
             + ", ".join(
                 f"pass {p['pass_no']} {p['passed']}/{p['total']}" for p in answer["earlier_passes"]
             )
+        )
+    if answer.get("dropped"):
+        last = answer["earlier_passes"][-1]["pass_no"] if answer.get("earlier_passes") else 0
+        lines.append(
+            f"dropped since pass {last}: {', '.join(answer['dropped'])}; the run stays "
+            f"quarantined until a pass covers it"
         )
     for check in answer["checks"]:
         verdict = "passed" if check["passed"] else "failed"

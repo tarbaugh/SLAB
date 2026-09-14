@@ -614,7 +614,7 @@ class Replay:
             what = f"its input {', '.join(changed)} changed"
         else:
             mine, theirs = _replay_identity(recipe), _replay_identity(source.recipe)
-            parts = ("code", "engine versions", "engine command")
+            parts = ("code", "cache identity")
             what = ", ".join(
                 f"its {part} changed" for part, a, b in zip(parts, mine, theirs, strict=True)
                 if a != b
@@ -622,10 +622,33 @@ class Replay:
         return f"{where} differs from run {self.run_id}'s: {what}; {remedy}"
 
 
-def _replay_identity(recipe: Mapping[str, Any]) -> tuple[object, object, object]:
-    """The parts of a recipe that decide a task's answer, apart from its inputs."""
-    extra = {k: v for k, v in (recipe.get("extra") or {}).items() if k != "provenance"}
-    return recipe.get("code_sha256"), recipe.get("engines") or {}, extra
+#: Recipe keys that name the engine a task resolved in the process that ran
+#: it. A replay starts no engine, and the reverifying process may hold a
+#: different slice (no gpu, so the plain build) or probe a different version,
+#: so these never decide whether a stored result answers a replayed call.
+_ENGINE_IDENTITY_KEYS = frozenset(
+    {"build", "command", "version", "engine_version", "setup", "setup_mode", "provenance"}
+)
+
+
+def _replay_identity(recipe: Mapping[str, Any]) -> tuple[object, object]:
+    """The parts of a recipe that decide a task's answer, apart from its inputs.
+
+    Examples:
+        >>> gpu = {"code_sha256": "c", "engines": {"lammps": "2"}, "extra": {"build": "gpu",
+        ...        "command": "mpirun -n 1 lmp -k on g 1", "version": "2 Aug 2023",
+        ...        "files_sha256": {"a": "1"}}}
+        >>> cpu = {**gpu, "engines": {"lammps": "3"}, "extra": {**gpu["extra"], "build": "cpu",
+        ...        "command": "lmp", "version": "29 Aug 2024"}}
+        >>> _replay_identity(gpu) == _replay_identity(cpu)
+        True
+        >>> _replay_identity({**cpu, "code_sha256": "d"}) == _replay_identity(cpu)
+        False
+    """
+    extra = {
+        k: v for k, v in (recipe.get("extra") or {}).items() if k not in _ENGINE_IDENTITY_KEYS
+    }
+    return recipe.get("code_sha256"), extra
 
 
 def _replay_label(recipe: Mapping[str, Any]) -> str:
