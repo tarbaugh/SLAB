@@ -146,12 +146,21 @@ def build_server(
     record = SessionRecord(root, session_id, client="mcp")
     hpc = load_slab_config(project_dir).hpc
     versions: dict[str, dict[str, str]] = {}
-    recorded_runs: set[str] = set()
+    # What the record already holds, so a restarted server with the same
+    # session id does not record a run twice or repeat a setup block.
+    earlier = [
+        e for e in record.events() if e.get("type") == "command" and e.get("kind") == "engine"
+    ]
+    recorded_runs: set[str] = {str(e["run_id"]) for e in earlier if e.get("run_id")}
+    recorded_setups: set[tuple[str, ...]] = {
+        tuple(str(line) for line in e["setup"]) for e in earlier if e.get("setup")
+    }
 
     def _record_run_commands(run_id: str | None, tool: str) -> None:
         # The session record says what a run ran, the way a Mason
         # transcript does: one command event per distinct engine command
-        # the run's tasks resolved, recorded once per run.
+        # the run's tasks resolved, recorded once per run, and each setup
+        # block once per record (a repeat carries setup_recorded instead).
         if not run_id or run_id in recorded_runs:
             return
         recorded_runs.add(run_id)
@@ -170,6 +179,11 @@ def build_server(
             )
             return
         for entry in entries:
+            setup = tuple(entry.get("setup") or ())
+            if setup and setup in recorded_setups:
+                entry = {**entry, "setup": [], "setup_recorded": len(setup)}
+            elif setup:
+                recorded_setups.add(setup)
             record.record({"type": "command", "kind": "engine", "tool": tool, **entry})
 
     def software_versions() -> dict[str, str]:
@@ -416,34 +430,56 @@ def build_server(
 
     @server.tool()
     @_surfaced
-    def wait_for_run(run_id: str | None = None, timeout_s: float = 900.0) -> dict[str, Any]:
+    def wait_for_run(
+        run_id: str | None = None, timeout_s: float = _ops.DEFAULT_WAIT_S, all: bool = False
+    ) -> dict[str, Any]:
         """Block until a run finishes or the timeout passes, then report
         where it stands. run_id takes an id, a unique prefix, or the name of
-        a run this session created; without it, waits for every running run
-        this session created. 'outcome' is finished (with the run and its
-        task tally), process_gone (this call found the run's recorded process
-        dead on this host and marked the run failed; nothing to wait for),
-        still_running (call again to keep waiting; each entry says whether
-        its process is alive here or runs on another host), none_running
-        (the session's finished runs), or no_runs."""
+        a run this session created. Without it, the call returns as soon as
+        the first running run of this session finishes, names it in 'run',
+        and lists the rest under 'running'; all=true waits until none is
+        running. timeout_s defaults to 900 and is capped at 21600 (6 hours),
+        so one call covers a 3-hour run; 'capped' says when the cap applied.
+        The wait costs nothing while it blocks. 'outcome' is finished (with
+        the run and its task tally), process_gone (this call found the run's
+        recorded process dead on this host and marked the run failed;
+        nothing to wait for), still_running ('note_running' says waiting
+        again is the right call; each entry says whether its process is
+        alive here or runs on another host, the time since it started, and
+        the LAMMPS step against the run's end when a run_lammps task is
+        running), none_running (the session's finished runs), or no_runs."""
         waited = _ops.wait_for_run(
-            root, run_id=run_id, session=session_id, timeout_s=min(timeout_s, 1800.0)
+            root,
+            run_id=run_id,
+            session=session_id,
+            timeout_s=min(timeout_s, _ops.MAX_WAIT_S),
+            all_runs=all,
         )
+        # Only the runs that finished during this wait are recorded.
         if waited["outcome"] in ("finished", "process_gone"):
-            _record_run_commands(waited["run"].id, "wait_for_run")
-        elif waited["outcome"] == "none_running":
-            for finished in waited["runs"]:
+            for finished in [waited["run"], *waited.get("also_finished", [])]:
                 _record_run_commands(finished.id, "wait_for_run")
         answer: dict[str, Any] = {"outcome": waited["outcome"], "note": waited["note"]}
         if "run" in waited:
             answer["run"] = _ops.run_summary(waited["run"]) | {"progress": waited["progress"]}
+        if waited.get("also_finished"):
+            answer["also_finished"] = [_ops.run_summary(r) for r in waited["also_finished"]]
         if "runs" in waited:
             answer["runs"] = [_ops.run_summary(r) for r in waited["runs"]]
         if "running" in waited:
             answer["running"] = [
-                _ops.run_summary(r) | {"progress": progress, "liveness": liveness}
-                for r, progress, liveness in waited["running"]
+                _ops.run_summary(r)
+                | {"progress": progress, "liveness": liveness, "advance": advance}
+                for r, progress, liveness, advance in waited["running"]
             ]
+        if waited["outcome"] == "still_running":
+            answer["waited_s"] = waited["timeout_s"]
+            if timeout_s > waited["timeout_s"]:
+                answer["capped"] = (
+                    f"waited {waited['timeout_s']:.0f} s, capped from the {timeout_s:.0f} s asked"
+                )
+            if waited["running"]:
+                answer["note_running"] = _ops.STILL_RUNNING_LINE
         return answer
 
     @server.tool()

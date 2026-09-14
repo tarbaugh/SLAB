@@ -678,12 +678,114 @@ def test_wait_for_run_names_a_run_on_another_host_instead_of_guessing(
         ws.runs.set_status(run.id, "running", pid=1, host="another-node")
     waited = wait_for_run(root, run_id=run.id, timeout_s=0.2, poll_s=0.1)
     assert waited["outcome"] == "still_running"
-    (listed, progress, liveness) = waited["running"][0]
+    (listed, progress, liveness, advance) = waited["running"][0]
     assert listed.id == run.id and progress.startswith("tasks:")
     assert liveness.startswith("process 1 on another-node, not this host")
     assert "not checked from here" in liveness
+    assert advance.startswith("started ") and advance.endswith(" ago")
     with Workspace(root) as ws:
         assert ws.runs.get(run.id).status.value == "running"
+
+
+def test_wait_for_run_caps_the_wait_and_says_what_was_asked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cap is six hours; the result carries the wait applied and the wait asked."""
+    from foundation import _ops
+    from foundation.models import Run
+    from foundation.runtime import Workspace
+
+    assert _ops.MAX_WAIT_S == 6 * 3600
+    monkeypatch.setattr(_ops, "MAX_WAIT_S", 0.2)
+    root = tmp_path / "ws"
+    with Workspace(root) as ws:
+        run = ws.runs.create(Run(name="remote"))
+        ws.runs.set_status(run.id, "running", pid=1, host="another-node")
+    waited = _ops.wait_for_run(root, run_id=run.id, timeout_s=10_800, poll_s=0.1)
+    assert waited["outcome"] == "still_running"
+    assert (waited["timeout_s"], waited["asked_s"]) == (0.2, 10_800)
+
+
+def _remote_running(ws: Workspace, name: str, session: str) -> Run:
+    run = ws.runs.create(Run(name=name, session=session))
+    ws.runs.set_status(run.id, "running", pid=1, host="another-node")
+    return run
+
+
+def test_an_id_less_wait_returns_on_the_first_finish(tmp_path: Path) -> None:
+    """Two runs of a session are running; the wait returns when the first of
+    them finishes, names it, and lists the other as still running."""
+    import threading
+
+    from foundation._ops import wait_for_run
+    from foundation.runtime import Workspace
+
+    root = tmp_path / "ws"
+    with Workspace(root) as ws:
+        short = _remote_running(ws, "short", "s1")
+        long = _remote_running(ws, "long", "s1")
+
+    def finish() -> None:
+        with Workspace(root) as ws:
+            ws.runs.set_status(short.id, "completed")
+
+    timer = threading.Timer(0.5, finish)
+    timer.start()
+    try:
+        waited = wait_for_run(root, session="s1", timeout_s=20, poll_s=0.2)
+    finally:
+        timer.cancel()
+    assert waited["outcome"] == "finished"
+    assert waited["run"].id == short.id and waited["also_finished"] == []
+    assert [entry[0].id for entry in waited["running"]] == [long.id]
+
+
+def test_an_id_less_wait_with_all_runs_waits_for_every_run(tmp_path: Path) -> None:
+    import threading
+
+    from foundation._ops import wait_for_run
+    from foundation.runtime import Workspace
+
+    root = tmp_path / "ws"
+    with Workspace(root) as ws:
+        short = _remote_running(ws, "short", "s1")
+        long = _remote_running(ws, "long", "s1")
+
+    def finish(run_id: str) -> None:
+        with Workspace(root) as ws:
+            ws.runs.set_status(run_id, "completed")
+
+    timers = [threading.Timer(0.3, finish, (short.id,)), threading.Timer(0.9, finish, (long.id,))]
+    for timer in timers:
+        timer.start()
+    waited = wait_for_run(root, session="s1", timeout_s=20, poll_s=0.2, all_runs=True)
+    assert waited["outcome"] == "none_running"
+    assert {r.id for r in waited["runs"]} == {short.id, long.id}
+
+
+def test_run_advance_reads_the_live_lammps_log_of_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run_lammps scratch the run owns holds the log LAMMPS is writing; the
+    advance phrase reads its last step against the run's end."""
+    from foundation import _ops
+    from foundation.models import Run
+    from slab.scratch import mark_owner
+
+    monkeypatch.setattr(_ops, "scratch_root", lambda: tmp_path)
+    run = Run(name="md", status="running")
+    scratch = tmp_path / "slab-lammps-script-abc"
+    scratch.mkdir()
+    monkeypatch.setenv("SLAB_RUN_ID", run.id)
+    mark_owner(scratch, prefix="slab-lammps-script-")
+    assert "LAMMPS" not in _ops.run_advance(run)  # no log written yet
+    (scratch / "log.lammps").write_text(
+        "variable n equal 50000\nrun ${n}\nrun 50000\n---\n"
+        "keywords: ['Step', 'Temp', ]\ndata:\n  - [0, 300, ]\n  - [12000, 301.5, ]\n"
+    )
+    assert _ops.run_advance(run).endswith("; LAMMPS at step 12000 of 50000")
+    other = Run(name="other", status="running")
+    assert "LAMMPS" not in _ops.run_advance(other)
 
 
 def test_run_commands_collects_the_engine_commands_a_run_resolved(tmp_path: Path) -> None:

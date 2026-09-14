@@ -62,7 +62,13 @@ from mason.roster import (
 )
 from mason.session import MasonSession
 from mason.skills import Skill, discover_skills
-from mason.tools import LOOKING_TOOLS, TOOL_VOCABULARY, Toolbox, build_toolbox
+from mason.tools import (
+    LOOKING_TOOLS,
+    TOOL_VOCABULARY,
+    WAIT_STILL_RUNNING,
+    Toolbox,
+    build_toolbox,
+)
 from slab._version import __version__
 
 _ERROR_STREAK_LIMIT = 5
@@ -788,6 +794,9 @@ class Mason:
             # A reply that went on to act was not the answer the cut half
             # started; the half is not joined onto whatever comes later.
             cut_prefix = None
+            # A step that waited on a run still running holds the looking
+            # streak: waiting on a long run is not reading around.
+            waited_on_run = False
             for position, call in enumerate(calls):
                 if call.name == "finish" and call.arguments_error is None:
                     if len(calls) > 1:
@@ -866,6 +875,8 @@ class Mason:
                     # protocol-invalid history, and --resume would replay it.
                     self._answer_unrun(calls[position:], from_text=from_text)
                     raise
+                if call.name == "wait_for_run" and WAIT_STILL_RUNNING in result:
+                    waited_on_run = True
                 if enabled(self.session.agent, "identical-result-annotation"):
                     result = self._note_repetition(call, result)
                 self._append_tool_result(call, result, as_text=from_text)
@@ -887,8 +898,9 @@ class Mason:
                         stop_reason="error_streak",
                         steps=step,
                     )
-            looked = all(call.name in LOOKING_TOOLS for call in calls)
-            self._looking_streak = self._looking_streak + 1 if looked else 0
+            if not waited_on_run:
+                looked = all(call.name in LOOKING_TOOLS for call in calls)
+                self._looking_streak = self._looking_streak + 1 if looked else 0
         if cut_prefix is not None:
             # The budget ended before the continuation: the kept half is
             # usable text, returned as such and marked.
@@ -923,7 +935,16 @@ class Mason:
         a placeholder, and a model that needs the content again fetches it
         again, which is the design; a model that fetches the same content a
         third time is not reading it into the notebook, and is told so.
+
+        A ``wait_for_run`` that is still running is exempt. Waiting on a
+        long run returns the same answer until the run ends, and that is
+        the right call. A real planner read the repeat note as a stall,
+        spent calls dodging it, and a delegate stopped with work unlaunched.
         """
+        if call.name == "wait_for_run" and WAIT_STILL_RUNNING in result:
+            self._last_identical = None
+            self._repeat_streak = 0
+            return result
         key = (call.name, call.arguments_raw, result)
         if key == self._last_identical:
             self._repeat_streak += 1

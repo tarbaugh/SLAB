@@ -1484,46 +1484,147 @@ def resolve_run(ws: Workspace, value: str, *, session: str | None = None) -> tup
         )
 
 
+#: The longest one wait_for_run call blocks. A 3-hour run needs one call;
+#: a longer one needs a second, and the reply says the cap applied.
+MAX_WAIT_S = 6 * 3600.0
+#: The default wait when the caller names none.
+DEFAULT_WAIT_S = 900.0
+#: The longest gap between two reads of the run store while a wait blocks.
+#: The first reads come sooner (1 s, doubling), so a short run is collected
+#: at once and a long one costs one read every half minute.
+WAIT_POLL_S = 30.0
+#: Said with every still_running answer: waiting again is the right call.
+STILL_RUNNING_LINE = "the run is alive and progressing; waiting again is the right call"
+_LAMMPS_SCRATCH_PREFIX = "slab-lammps-script-"
+
+
+def span_text(seconds: float) -> str:
+    """A duration in the largest two units that fit.
+
+    Examples:
+        >>> span_text(42), span_text(190), span_text(4380), span_text(93_600)
+        ('42s', '3m 10s', '1h 13m', '26h 0m')
+    """
+    total = max(0, int(seconds))
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        return f"{total // 60}m {total % 60}s"
+    return f"{total // 3600}h {total % 3600 // 60}m"
+
+
+def lammps_live_log(run_id: str) -> Path | None:
+    """The log of the LAMMPS script a running run is executing now, or None.
+
+    ``run_lammps`` runs its script in a scratch directory whose owner
+    marker names the run (:mod:`slab.scratch`). This looks under the
+    ``[paths] scratch`` root and the platform temp directory, where a
+    scratch made without that setting lands, and returns the newest
+    ``log.lammps`` of a directory that the run owns.
+    """
+    from slab.scratch import read_owner
+
+    roots = [root for root in (scratch_root(), Path(tempfile.gettempdir())) if root is not None]
+    newest: tuple[float, Path] | None = None
+    for root in dict.fromkeys(roots):
+        with suppress(OSError):
+            for directory in root.glob(f"{_LAMMPS_SCRATCH_PREFIX}*"):
+                owner = read_owner(directory)
+                if owner is None or owner.run_id != run_id:
+                    continue
+                log = directory / "log.lammps"
+                with suppress(OSError):
+                    mtime = log.stat().st_mtime
+                    if newest is None or mtime > newest[0]:
+                        newest = (mtime, log)
+    return None if newest is None else newest[1]
+
+
+def run_advance(run: Run, *, now: datetime | None = None) -> str:
+    """How far a running run has got: the time since it started, and its MD step.
+
+    The step comes from the live LAMMPS log of a ``run_lammps`` task
+    (:func:`lammps_live_log`), read against the step the current ``run``
+    command stops at. A run with no LAMMPS log gives the time alone.
+    """
+    from slab.outputs import lammps_run_progress
+
+    began = run.started_at or run.created_at
+    moment = now or utcnow()
+    text = f"started {span_text((moment - began).total_seconds())} ago"
+    log = lammps_live_log(run.id)
+    if log is None:
+        return text
+    try:
+        progress = lammps_run_progress(log.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return text
+    if progress is None:
+        # LAMMPS writes its log in blocks, so a young run shows no row yet.
+        return f"{text}; the LAMMPS log holds no thermo row yet"
+    step, target = progress["step"], progress["target"]
+    if target is None:
+        return f"{text}; LAMMPS at step {step}"
+    return f"{text}; LAMMPS at step {step} of {target}"
+
+
 def wait_for_run(
     root: Path,
     *,
     run_id: str | None = None,
     session: str | None = None,
-    timeout_s: float = 900.0,
-    poll_s: float = 5.0,
+    timeout_s: float = DEFAULT_WAIT_S,
+    poll_s: float = WAIT_POLL_S,
     grace_s: float = 10.0,
+    all_runs: bool = False,
 ) -> dict[str, Any]:
     """Block until a run finishes or the timeout passes; report where it stands.
 
     With *run_id* (an id, a unique prefix, or a run name the session
-    created), waits for that run; without it, waits for every running run
-    the *session* created, or every running run when there is no session.
-    A background launch takes a moment to register its run, so an empty
-    record gets *grace_s* before "nothing is running" counts as an answer.
+    created), waits for that run. Without it, waits on the running runs
+    the *session* created (every running run when there is no session)
+    and returns as soon as the first of them finishes, so a free slice
+    is never left idle behind a longer run; *all_runs* waits until none
+    is running instead. A background launch takes a moment to register
+    its run, so an empty record gets *grace_s* before "nothing is
+    running" counts as an answer.
 
-    Every poll first reaps the dead: a running run whose recorded process
-    on this host is gone is marked failed (:meth:`Workspace.reap_dead`),
-    so a wait never blocks on a hard-killed record.
+    The wait is capped at :data:`MAX_WAIT_S`; ``timeout_s`` in the
+    result is the wait applied and ``asked_s`` the wait asked. The store
+    is read after 1 s, then at doubling gaps up to *poll_s*, and nothing
+    else happens between reads. Every read first reaps the dead: a
+    running run whose recorded process on this host is gone is marked
+    failed (:meth:`Workspace.reap_dead`), so a wait never blocks on a
+    hard-killed record.
 
     The result's ``outcome`` is one of ``finished`` (``run`` holds the
-    :class:`Run` and ``progress`` its tally), ``process_gone`` (the same
+    :class:`Run` and ``progress`` its tally; an id-less wait adds
+    ``also_finished``, the other runs that finished in the same interval,
+    and ``running``, the ones still running), ``process_gone`` (the same
     keys; this call found the run's process dead and marked it failed),
-    ``still_running`` (``running`` holds ``(Run, progress, liveness)``
-    triples, the liveness phrase from :func:`describe_liveness`),
-    ``none_running`` (``runs`` holds the session's finished runs), or
-    ``no_runs``. ``note`` says when a name was resolved to a run id.
-    Callers format the text; the MCP server converts the runs with
-    :func:`run_summary`.
+    ``still_running`` (``running`` holds ``(Run, progress, liveness,
+    advance)`` tuples: the liveness phrase from :func:`describe_liveness`
+    and the advance phrase from :func:`run_advance`), ``none_running``
+    (``runs`` holds the session's finished runs), or ``no_runs``.
+    ``note`` says when a name was resolved to a run id. Callers format
+    the text; the MCP server converts the runs with :func:`run_summary`.
     """
     import time
 
     from foundation.errors import SessionNotFoundError
 
-    timeout = max(0.0, float(timeout_s))
+    asked = max(0.0, float(timeout_s))
+    timeout = min(asked, MAX_WAIT_S)
     deadline = time.monotonic() + timeout
     grace_until = time.monotonic() + min(grace_s, timeout)
     resolved: str | None = None
     note = ""
+    watched: set[str] = set()  # the runs an id-less wait has seen running
+    gap = min(1.0, poll_s)
+
+    def still(ws: Workspace, runs: list[Run]) -> list[tuple[Run, str, str, str]]:
+        return [(r, run_progress(ws, r.id), describe_liveness(r), run_advance(r)) for r in runs]
+
     while True:
         with Workspace(root) as ws:
             reaped = {r.id for r in ws.reap_dead(caller="wait_for_run")}
@@ -1545,20 +1646,34 @@ def wait_for_run(
                 except SessionNotFoundError:
                     runs = []
                 running = [r for r in runs if r.status.value == "running"]
-                if not running and time.monotonic() >= grace_until:
+                ended = [r for r in runs if r.id in watched and r.status.value != "running"]
+                if ended and not all_runs:
+                    first = next((r for r in ended if r.id in reaped), ended[0])
+                    return {
+                        "outcome": "process_gone" if first.id in reaped else "finished",
+                        "note": note,
+                        "run": first,
+                        "progress": run_progress(ws, first.id),
+                        "also_finished": [r for r in ended if r.id != first.id],
+                        "running": still(ws, running),
+                    }
+                # The grace covers a launch that has not registered yet; once
+                # a watched run has finished, nothing more is on its way.
+                if not running and (watched or time.monotonic() >= grace_until):
                     if not runs:
                         return {"outcome": "no_runs", "note": note, "runs": []}
                     return {"outcome": "none_running", "note": note, "runs": runs[:10]}
+                watched.update(r.id for r in running)
             if time.monotonic() >= deadline:
                 return {
                     "outcome": "still_running",
                     "note": note,
                     "timeout_s": timeout,
-                    "running": [
-                        (r, run_progress(ws, r.id), describe_liveness(r)) for r in running
-                    ],
+                    "asked_s": asked,
+                    "running": still(ws, running),
                 }
-        time.sleep(min(poll_s, max(0.05, deadline - time.monotonic())))
+        time.sleep(min(gap, max(0.05, deadline - time.monotonic())))
+        gap = min(gap * 2, poll_s)
 
 
 # -- the scheduler ------------------------------------------------------------

@@ -423,6 +423,53 @@ def test_launched_runs_carry_the_server_session_and_wait_reports_them(
     assert empty["outcome"] == "no_runs"
 
 
+def _running_elsewhere(root: Path, name: str, session: str) -> str:
+    """A run whose process runs on another host, so no reap ends it."""
+    from foundation.models import Run
+
+    with Workspace(root) as ws:
+        run = ws.runs.create(Run(name=name, session=session))
+        ws.runs.set_status(run.id, "running", pid=1, host="another-node")
+    return run.id
+
+
+def test_wait_for_run_over_mcp_caps_and_answers_like_mason(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same six-hour cap, the same capped line, the same still-running
+    note, and the same first-finish rule as Mason's wait_for_run."""
+    import threading
+
+    assert _ops.MAX_WAIT_S == 6 * 3600
+    server = build_server(root, project=tmp_path, session="mcp-wait")
+    monkeypatch.setattr(_ops, "MAX_WAIT_S", 0.3)
+    melt = _running_elsewhere(root, "melt", "mcp-wait")
+    waited = _call(server, "wait_for_run", {"run_id": "melt", "timeout_s": 10800})
+    assert waited["outcome"] == "still_running" and waited["waited_s"] == 0.3
+    assert waited["capped"] == "waited 0 s, capped from the 10800 s asked"
+    assert waited["note_running"] == (
+        "the run is alive and progressing; waiting again is the right call"
+    )
+    (entry,) = waited["running"]
+    assert entry["id"] == melt and entry["advance"].startswith("started ")
+    monkeypatch.setattr(_ops, "MAX_WAIT_S", 6 * 3600.0)
+    quench = _running_elsewhere(root, "quench", "mcp-wait")
+
+    def finish() -> None:
+        with Workspace(root) as ws:
+            ws.runs.set_status(quench, "completed")
+
+    timer = threading.Timer(0.5, finish)
+    timer.start()
+    try:
+        first = _call(server, "wait_for_run", {"timeout_s": 30})
+    finally:
+        timer.cancel()
+    assert first["outcome"] == "finished" and first["run"]["id"] == quench
+    assert [r["id"] for r in first["running"]] == [melt]
+    assert "capped" not in first and "note_running" not in first
+
+
 def test_notebook_and_plan_are_the_project_files(root: Path, tmp_path: Path) -> None:
     server = build_server(root, project=tmp_path)
     assert _call(server, "plan")["text"] == ""

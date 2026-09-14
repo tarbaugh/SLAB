@@ -35,6 +35,7 @@ __all__ = [
     "digest",
     "extxyz_digest",
     "lammps_log_digest",
+    "lammps_run_progress",
     "lammps_thermo",
     "lammps_thermo_format",
     "lammps_yaml_thermo",
@@ -309,6 +310,7 @@ _LMP_UNITS = re.compile(r"^units\s+(\S+)")
 _LMP_ATOMS = re.compile(r"^\s*(?:Created\s+)?(\d+)\s+atoms\s*$")
 _LMP_PAIR = re.compile(r"^pair_style\s+(.+)")
 _LMP_THERMO_HEAD = re.compile(r"^\s*Step\s+\S")
+_LMP_RUN = re.compile(r"^run\s+(\d+)(\s+upto)?(?:\s|$)")
 _LMP_LOOP = re.compile(r"^Loop time of (\S+) on (\d+) procs for (\d+) steps with (\d+) atoms")
 _LMP_STOP = re.compile(r"^\s*Stopping criterion\s*=\s*(.+)")
 _LMP_WALL = re.compile(r"^Total wall time:\s*(\S+)")
@@ -505,6 +507,63 @@ def lammps_thermo_format(text: str) -> str | None:
     """
     scanned = _scan_thermo(text)
     return _thermo_format(scanned) if scanned else None
+
+
+def lammps_run_progress(text: str) -> dict[str, int | None] | None:
+    """How far the last thermo table of a log has got: its step and the run's end.
+
+    Reads a log that may still be written, so a table without its
+    ``Loop time`` line counts. A last line without its newline is a row
+    LAMMPS is still writing, and it is left out. ``step`` is the last
+    row's step and ``start`` the first row's. ``target`` is the step the
+    ``run`` command in force when the table opened will stop at: the
+    start plus N for ``run N``, and N for ``run N upto``. LAMMPS echoes a command
+    with variables to the log twice, once as written and once
+    substituted, so the substituted count is the one read. A table that
+    a ``minimize`` opened, or one no ``run`` preceded, has no target.
+    None when no table with a ``Step`` column has a row yet.
+
+    Examples:
+        >>> log = (
+        ...     "run ${n}\\nrun 200\\n---\\nkeywords: ['Step', 'Temp', ]\\ndata:\\n"
+        ...     "  - [0, 1.44, ]\\n  - [100, 0.79, ]\\n...\\n"
+        ...     "Loop time of 0.01 on 1 procs for 200 steps with 256 atoms\\n"
+        ...     "run 300 upto\\nStep Temp\\n200 0.76\\n250 0.74\\n"
+        ... )
+        >>> lammps_run_progress(log)
+        {'step': 250, 'start': 200, 'target': 300}
+        >>> lammps_run_progress("minimize 1e-6 1e-8 100 1000\\nStep PotEng\\n0 -3.5\\n5 -3.6\\n")
+        {'step': 5, 'start': 0, 'target': None}
+        >>> lammps_run_progress(log + "300 0.7")["step"]
+        250
+        >>> lammps_run_progress("run 1000\\n") is None
+        True
+    """
+    if not text.endswith("\n"):
+        text = text[: text.rfind("\n") + 1]
+    tables = lammps_thermo(text)
+    if not tables or "Step" not in tables[-1]["columns"] or not tables[-1]["rows"]:
+        return None
+    column = tables[-1]["columns"].index("Step")
+    rows = [row for row in tables[-1]["rows"] if len(row) > column]
+    if not rows:
+        return None
+    start, step = int(rows[0][column]), int(rows[-1][column])
+    # The run in force at each table's opening; only the last one is read.
+    pending: tuple[int, bool] | None = None
+    opened: tuple[int, bool] | None = None
+    for line in text.splitlines():
+        if match := _LMP_RUN.match(line):
+            pending = (int(match.group(1)), match.group(2) is not None)
+        elif line.startswith("minimize"):
+            pending = None
+        elif line == _LMP_YAML_OPEN or _LMP_THERMO_HEAD.match(line):
+            opened, pending = pending, None
+    target: int | None = None
+    if opened is not None:
+        count, upto = opened
+        target = count if upto else start + count
+    return {"step": step, "start": start, "target": target}
 
 
 def _thermo_format(scanned: list[_ThermoScan]) -> str:

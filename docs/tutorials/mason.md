@@ -382,7 +382,7 @@ more than model choice.
 | `list_dir`, `search` | listing and recursive regex search, output-capped |
 | `shell` | one command, merged output + exit code, timeout-capped; the timeout kills the whole process group, so nothing backgrounded survives it; **not** for long calculations |
 | `launch_workflow` | run a workflow script as a traced, check-gated run; this is how physics happens. `args` reach the script as argv; `background=true` detaches a long run so no tool timeout can touch it. `ntasks`, `threads`, and `gpus` size the run. The slice is reserved before the run starts, the run takes it as an affinity mask plus `CUDA_VISIBLE_DEVICES`, and a slice that does not fit what is free is refused with the free amounts. `dry_run=true` rehearses the script in a throwaway workspace, with LAMMPS set up and no step integrated, and records a `dry_run` event; a real launch of a script text never dry-run in the session carries a warning line |
-| `wait_for_run` | block until a run (or every running run of this session) finishes, then report its state and task tally; the timeout answer says how far each run has got and whether its process is alive here or on another host; a run whose recorded process is gone is marked failed and answered at once; `run_id` takes an id, a prefix, or a run name from this session |
+| `wait_for_run` | block until a run finishes, then report its state and task tally; `run_id` takes an id, a prefix, or a run name from this session. Without `run_id` it returns when the first running run of this session finishes, and `all=true` waits for all of them. The timeout is 900 s by default and 6 hours at most. The timeout answer says how far each run has got, whether its process is alive here or on another host, and the time since it started; a run whose recorded process is gone is marked failed and answered at once |
 | `list_runs`, `show_run`, `list_engines` | the workspace's evidence surface: runs, checks with observed/expected values, failure records, capabilities; `list_runs` takes `session="this"` and `status="running"`, and first marks failed every running run whose recorded process on this host is gone; `show_run` folds finished tasks to one line each, `task=<label or seq>` returns one task's recipe, inputs, and outputs, and `full=true` returns them all; `list_engines` also reports this host's `budget` and what is `free` right now, and each partition's declared fields, which are the caps a sized job is checked against |
 | `free_resources` | what is free on this host right now: the budget, the free cpu and gpu counts, and one line per live reservation with its slice, its run or holder, and its age; the environment block's free amounts were read when the prompt was built, so call this before a concurrent launch; `list_runs` ends with the same free counts |
 | `read_artifact` | one of a run's artifacts, by name or hash prefix; the way to read an engine's output file after the run. Digested first like `read_file`; `raw=true`, or `offset`/`limit`, gives the line-numbered text. The workflow script is kept as the run's `input` artifact under its own name |
@@ -400,12 +400,31 @@ more than model choice.
 group of agent cards with per-specialist skills, described in
 [The roster and skills](roster-and-skills.md).
 
+`wait_for_run` is the way to wait on a run, however long the run is. One
+call blocks for up to 6 hours, so a 3-hour run needs one call. A longer
+timeout is cut to the cap, and the answer says so: `waited 21600 s, capped
+from the 43200 s asked`. The tool sleeps between reads of the run store
+and makes no model call while it blocks. It reads the store after one
+second, then at doubling gaps up to 30 s, so a short run is collected at
+once. Without `run_id`, the call returns as soon as the first running run
+of the session finishes, names it, and lists the rest as still running.
+A second call collects the next one, so a free slice does not wait behind
+a longer run. Pass `all=true` to wait until no run of the session is
+running. An answer that the run is still running adds the time since the
+run started and, while a `run_lammps` task runs, the step LAMMPS has
+reached and the step the current `run` command stops at. The answer ends
+with the line `the run is alive and progressing; waiting again is the
+right call`.
+
 Every tool failure is returned as the tool result, as evidence the model
 reads, and never as an exception that kills the loop. A call that is
 identical to the previous one and returns a byte-identical result gets an
 escalating note appended, because the model cannot see sameness across
 steps and the harness can. Every call still executes, so polling a queue
-works, and a changed result resets the note silently. Mutating tools pass
+works, and a changed result resets the note silently. A `wait_for_run`
+whose run is still running never gets the note, because waiting again is
+the right call. A planner that read the note as a stall spent calls
+avoiding it, and a delegate stopped with three temperatures not launched. Mutating tools pass
 through an approval gate. Interactively, Mason asks, while `--auto` (or
 `[agent] approval = "auto"`) trusts them. `shell_allowlist` prefixes
 auto-approve at word boundaries, but a command that contains shell control
@@ -823,8 +842,12 @@ When a run finishes, whether under `launch_workflow` or under
 `wait_for_run`, the engine commands its tasks resolved are recorded from
 the run's recipes: one event per distinct command, with the engine, the
 detected version, the setup lines, and for LAMMPS the KOKKOS switches
-the command asks for. Each event carries `by`, the agent card that ran
-it, and `at`. `slab mason read` prints one line per command, and
+the command asks for. A wait records only the runs that finished during
+that wait, and a run already in the transcript is never recorded again.
+A setup block is recorded once per transcript. A later command with the
+same setup carries `setup_recorded`, the line count, and `--full` shows
+`setup: the N line(s) recorded earlier`. Each event carries `by`, the
+agent card that ran it, and `at`. `slab mason read` prints one line per command, and
 `--full` adds the details. The session below was driven by hand through
 the tools, with no model, against a LAMMPS build without the KOKKOS
 package:
@@ -987,7 +1010,8 @@ And after
 fifteen consecutive steps made only of reading and listing tools, with
 nothing launched, planned, noted, briefed, or finished, the per-step
 budget line tells the model to step back, and says so again every five
-steps. One campaign spent 72 minutes in such a run with nothing to
+steps. A step that waited on a run that is still running does not count
+toward the fifteen. One campaign spent 72 minutes in such a run with nothing to
 interrupt it.
 
 The system prompt and the tool list are stable across a session, and the
