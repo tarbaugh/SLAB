@@ -38,6 +38,8 @@ SCREEN_NAME = "screen.lammps"
 
 _EVIDENCE_LIMIT = 30
 _ERROR_LINES_SHOWN = 3
+_TAIL_LINE_CHARS = 169
+_TAIL_CHARS = 1600
 
 
 @dataclass(frozen=True)
@@ -498,9 +500,9 @@ def run_lammps_script(
     the caller to keep. The subprocess runs in its own process group; on
     timeout the whole group is killed, so MPI ranks die with the launcher.
     Success returns the log and the screen text; failure (a nonzero exit,
-    or an ``ERROR`` line in the log or on the screen) raises
-    :class:`~slab.errors.LammpsScriptError` carrying both, the command,
-    and the seconds LAMMPS ran.
+    or an error line in the log or on the screen, see :func:`error_lines`)
+    raises :class:`~slab.errors.LammpsScriptError` carrying both, the
+    command, and the seconds LAMMPS ran.
 
     With *dry_run* the script is rehearsed: every ``run`` line becomes
     ``run 0`` and every ``minimize`` line gets zero iterations (see
@@ -561,8 +563,8 @@ def run_lammps_script(
     screen = screen or ""
     _write_screen(directory, screen)
     log = _read_log(directory)
-    if process.returncode != 0 or _has_error(log) or _has_error(screen):
-        evidence = "\n  ".join(failure_evidence(log, screen))
+    if process.returncode != 0 or _has_error_line(log) or _has_error_line(screen):
+        evidence = "\n  ".join(failure_evidence(log, screen, exit_code=process.returncode))
         raise LammpsScriptError(
             f"LAMMPS failed (exit {process.returncode}):\n  {evidence}",
             log=log,
@@ -792,15 +794,21 @@ def kokkos_report(log: str) -> dict[str, Any]:
     }
 
 
-def failure_evidence(log: str, screen: str, limit: int = _EVIDENCE_LIMIT) -> list[str]:
+def failure_evidence(
+    log: str, screen: str, limit: int = _EVIDENCE_LIMIT, *, exit_code: int | None = None
+) -> list[str]:
     """The lines worth reading after a failure, from the log or the screen.
 
     The log's error lines when the log holds one; else the screen's error
-    lines when the screen holds one; else the log's tail when the log has
-    text, and the screen's tail otherwise. A GPU build that dies in
+    lines when the screen holds one; else, when *exit_code* is nonzero
+    and the screen has text, the screen's last lines under a ``screen
+    tail:`` label (:func:`screen_tail`); else the log's tail when the log
+    has text, and the screen's tail otherwise. A GPU build that dies in
     ``Kokkos::initialize`` writes the LAMMPS banner to the log and the
     CUDA error to the screen alone, so the screen is read before either
-    tail is.
+    tail is. A process that dies without an error line (a signal, a
+    library that prints its own words) leaves its last words on the
+    screen, so the screen tail is the evidence then.
 
     Examples:
         >>> log = "LAMMPS (22 Jul 2025 - Update 4)\\nKOKKOS mode with Kokkos version 4.6.1"
@@ -809,18 +817,47 @@ def failure_evidence(log: str, screen: str, limit: int = _EVIDENCE_LIMIT) -> lis
         ...     "\\n  what():  cudaSetDevice(1) error( cudaErrorDevicesUnavailable): busy")
         >>> for line in failure_evidence(log, screen):
         ...     print(line)
-        context: terminate called after throwing an instance of 'std::runtime_error'
+        context: KOKKOS mode with Kokkos version 4.6.1
+        terminate called after throwing an instance of 'std::runtime_error'
         what():  cudaSetDevice(1) error( cudaErrorDevicesUnavailable): busy
         >>> failure_evidence("pair_style x\\nERROR: Unrecognized pair style", screen)
         ['context: pair_style x', 'ERROR: Unrecognized pair style']
         >>> failure_evidence("", "")
         ['LAMMPS wrote nothing: the process died before the script started']
+        >>> failure_evidence("LAMMPS (22 Jul 2025)", "LAMMPS (22 Jul 2025)\\nKilled", exit_code=137)
+        ['screen tail:', 'LAMMPS (22 Jul 2025)', 'Killed']
     """
     if _has_error_line(log):
         return error_lines(log, limit)
     if _has_error_line(screen):
         return error_lines(screen, limit)
+    if exit_code and screen.strip():
+        return ["screen tail:", *screen_tail(screen, limit)]
     return error_lines(log if log.strip() else screen, limit)
+
+
+def screen_tail(screen: str, limit: int = _EVIDENCE_LIMIT) -> list[str]:
+    """The last *limit* non-empty lines of the screen, cut to fit a failure record.
+
+    A failure record keeps the first 2000 characters of its message, so
+    the tail is budgeted to fit under the lines before it. Each line is cut at
+    :data:`_TAIL_LINE_CHARS`, and the oldest lines are dropped until the
+    tail fits in :data:`_TAIL_CHARS`, so the last line always survives.
+
+    Examples:
+        >>> screen_tail("banner\\n\\nstep 1\\nkilled", limit=2)
+        ['step 1', 'killed']
+        >>> [len(line) for line in screen_tail("x" * 500)]
+        [175]
+    """
+    lines = [line.strip() for line in screen.splitlines() if line.strip()][-limit:]
+    cut = [
+        line if len(line) <= _TAIL_LINE_CHARS else line[:_TAIL_LINE_CHARS] + " [cut]"
+        for line in lines
+    ]
+    while len(cut) > 1 and sum(len(line) + 3 for line in cut) > _TAIL_CHARS:
+        cut.pop(0)
+    return cut
 
 
 def error_lines(log: str, limit: int = _EVIDENCE_LIMIT) -> list[str]:
@@ -828,8 +865,11 @@ def error_lines(log: str, limit: int = _EVIDENCE_LIMIT) -> list[str]:
 
     The ``ERROR`` lines are the evidence, with the line before the first
     one: the echoed command that died, or the last thermo row before the
-    blow-up. A Kokkos abort (a line starting ``Kokkos::``) and a CUDA
-    error (``cudaError``, ``CUDA error``) are error lines too. A log
+    blow-up. A Kokkos abort (a line starting ``Kokkos::`` or ``Kokkos
+    ERROR``), a C++ abort (``terminate called``, ``what():``), a CUDA
+    error (``cudaError``, ``CUDA error``), a dynamic-loader failure
+    (``error while loading shared libraries``), a ``Segmentation fault``,
+    and an ``MPI_ABORT`` are error lines too. A log
     without one contributes its last non-empty lines, and an empty log
     says so, because a process that wrote nothing died before LAMMPS
     started (a missing library, a wrong binary, a scheduler kill).
@@ -845,7 +885,7 @@ def error_lines(log: str, limit: int = _EVIDENCE_LIMIT) -> list[str]:
     stripped = [line.strip() for line in log.splitlines() if line.strip()]
     if not stripped:
         return ["LAMMPS wrote nothing: the process died before the script started"]
-    errors = [index for index, line in enumerate(stripped) if _is_error_line(line)]
+    errors = [index for index, line in enumerate(stripped) if is_error_line(line)]
     if errors:
         first = errors[0]
         out = [f"context: {stripped[first - 1]}"] if first > 0 else []
@@ -933,22 +973,55 @@ def launch_ranks(command: str) -> int | None:
     return 1
 
 
-def _is_error_line(line: str) -> bool:
-    return (
-        line.startswith("ERROR")
-        or line.startswith("Last command:")
-        or line.startswith("Kokkos::")
-        or "cudaError" in line
-        or "CUDA error" in line
-    )
+_ERROR_PREFIXES = (
+    "ERROR",
+    "Last command:",
+    "Kokkos::",
+    "Kokkos ERROR",
+    "terminate called",
+    "what():",
+)
+_ERROR_FRAGMENTS = (
+    "cudaError",
+    "CUDA error",
+    "error while loading shared libraries",
+    "Segmentation fault",
+    "MPI_ABORT",
+)
+#: Noise that names no cause: libevent's epoll complaint under some MPI launchers.
+_NOISE_PREFIXES = ("[warn] Epoll",)
+
+
+def is_error_line(line: str) -> bool:
+    """Whether one stripped line names a failure's cause (see :func:`error_lines`).
+
+    Examples:
+        >>> is_error_line("Kokkos ERROR: Cuda execution space is being constructed before ...")
+        True
+        >>> is_error_line("lmp: error while loading shared libraries: libcudart.so.12")
+        True
+        >>> is_error_line("[warn] Epoll MOD(1) on fd 14 failed. Old events were 6; ERROR")
+        False
+        >>> is_error_line("Kokkos::OpenMP::initialize WARNING: OMP_PROC_BIND environment variable not set")
+        False
+        >>> is_error_line("# neigh_modify one 4000 avoids a Segmentation fault")
+        False
+        >>> is_error_line("Step Temp PotEng")
+        False
+    """
+    if line.startswith(_NOISE_PREFIXES):
+        return False
+    if line.startswith("#"):
+        # LAMMPS echoes the input to the log, comments included.
+        return False
+    if line.startswith("Kokkos::") and "WARNING" in line:
+        # Kokkos::OpenMP::initialize WARNING: OMP_PROC_BIND ... is advice.
+        return False
+    return line.startswith(_ERROR_PREFIXES) or any(part in line for part in _ERROR_FRAGMENTS)
 
 
 def _has_error_line(text: str) -> bool:
-    return any(_is_error_line(line.strip()) for line in text.splitlines())
-
-
-def _has_error(text: str) -> bool:
-    return any(line.strip().startswith("ERROR") for line in text.splitlines())
+    return any(is_error_line(line.strip()) for line in text.splitlines())
 
 
 def _run_argv(command: str, setup: tuple[str, ...]) -> list[str]:

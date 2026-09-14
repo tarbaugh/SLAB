@@ -1093,6 +1093,106 @@ def test_parse_dry_run_report_takes_the_last_marker() -> None:
     assert parse_dry_run_report(f"{DRY_RUN_MARKER}\nnot json") is None
 
 
+_DYING_LMP = """\
+#!{python}
+import sys
+args = sys.argv[1:]
+if "-h" in args:
+    print("Large-scale Atomic/Molecular Massively Parallel Simulator - 22 Jul 2025")
+    sys.exit(0)
+with open(args[args.index("-log") + 1], "w") as log:
+    log.write("LAMMPS (22 Jul 2025)\\npair_style nonsense\\n")
+    log.write("ERROR: Unrecognized pair style 'nonsense' (src/force.cpp:275)\\n")
+print("LAMMPS (22 Jul 2025)")
+print("ERROR: Unrecognized pair style 'nonsense' (src/force.cpp:275)")
+sys.exit(1)
+"""
+
+
+def _failing_dry_run(root: Path, tmp_path: Path, session: str | None = None) -> dict:
+    """Rehearse a script whose one run_lammps fails; return the report."""
+    import sys
+
+    lmp = tmp_path / "dying-lmp"
+    lmp.write_text(_DYING_LMP.format(python=sys.executable))
+    lmp.chmod(0o755)
+    script = _write(
+        tmp_path,
+        "dying.py",
+        "from foundation.tasks import run_lammps\n"
+        f"run_lammps('units metal\\npair_style nonsense\\n', label='md', command={str(lmp)!r})\n",
+    )
+    return launch_script(root, script, dry_run=True, session=session)
+
+
+def test_a_failed_dry_run_leaves_a_record_in_the_real_workspace(
+    root: Path, tmp_path: Path
+) -> None:
+    """The throwaway workspace is gone, and the failed LAMMPS files are not:
+    the report names a dry-<stamp> record under the real workspace, and its
+    log is the log LAMMPS wrote. The real store is still never opened."""
+    from foundation._ops import dry_run_record
+
+    report = _failing_dry_run(root, tmp_path, session="20260914-101500-4242")
+    assert report["lammps"][0]["outcome"].startswith("ERROR: Unrecognized pair style")
+    record = report["record"]
+    assert record["id"].startswith("dry-")
+    assert record["files"] == ["md-failed.in", "md-failed.log", "md-failed.screen"]
+    directory, row = dry_run_record(root, record["id"])
+    assert str(directory) == record["path"] and directory.parent == root / "dry-runs"
+    assert row["kind"] == "dry_run" and row["stamp"] == record["id"].removeprefix("dry-")
+    assert row["session"] == "20260914-101500-4242"
+    assert "ERROR: Unrecognized pair style" in (directory / "md-failed.log").read_text()
+    assert not (root / "runs.db").exists()
+    with pytest.raises(FoundationError, match="no dry-run record dry-nope"):
+        dry_run_record(root, "dry-nope")
+
+
+def test_a_clean_dry_run_keeps_no_record(root: Path, tmp_path: Path) -> None:
+    report = launch_script(root, _write(tmp_path, "clean.py", DRY_RUN_SCRIPT), dry_run=True)
+    assert report["record"] is None
+    assert not root.exists()
+
+
+def test_purge_removes_the_dry_run_records_but_the_newest_conversations(
+    root: Path, tmp_path: Path
+) -> None:
+    """A record is readable for the rest of its session: purge keeps the
+    newest conversation's records, like its transcript, and removes the rest;
+    --all-sessions removes them all."""
+    from foundation._ops import dry_run_records
+    from slab_stack._ops import purge_inventory
+
+    current = "20260914-101500-4242"
+    old = _failing_dry_run(root, tmp_path, session="20260913-090000-1111")["record"]
+    mine = _failing_dry_run(root, tmp_path, session=current)["record"]
+    sessions = root / "mason" / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / f"{current}.jsonl").write_text("{}\n")
+
+    def purge(*, dry_run: bool, all_sessions: bool = False):
+        return purge_inventory(
+            root,
+            all_sessions=all_sessions,
+            active=frozenset(),
+            job_id_of=lambda name: None,
+            dry_run=dry_run,
+        )
+
+    inventory = purge(dry_run=True)
+    (category,) = [c for c in inventory.categories if c.name == "dry-run records"]
+    assert category.items == [f"dry-runs/{old['id'].removeprefix('dry-')}"]
+    assert category.bytes > 0
+    assert [k.reason for k in inventory.kept if k.kind == "dry-run record"] == [
+        "the newest conversation (--all-sessions removes it too)"
+    ]
+    assert len(dry_run_records(root)) == 2  # a dry run deletes nothing
+    purge(dry_run=False)
+    assert [row["id"] for _, row in dry_run_records(root)] == [mine["id"]]
+    purge(dry_run=False, all_sessions=True)
+    assert dry_run_records(root) == []
+
+
 def test_launch_child_dry_run_returns_the_report_and_releases_the_reservation(
     root: Path, tmp_path: Path
 ) -> None:

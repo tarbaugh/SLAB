@@ -178,7 +178,7 @@ def test_purge_json_prints_the_inventory(tmp_path: Path) -> None:
     by_name = {c["name"]: c for c in inventory["categories"]}
     assert list(by_name) == [
         "stale locks", "transcripts", "sidecars", "unrecognised", "harness records",
-        "job files", "expired runs", "blobs", "scratch",
+        "job files", "dry-run records", "expired runs", "blobs", "scratch",
     ]
     assert by_name["blobs"]["bytes"] == 7
     assert by_name["job files"]["items"] == [

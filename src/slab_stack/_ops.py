@@ -4,8 +4,8 @@ Purge deletes what it knows of, and this module is where it learns of
 everything: the expired runs and the blobs only they reach, the session
 transcripts with their sidecars, the files under ``mason/sessions`` that
 no transcript claims, the harness session records, the stale session
-locks, the finished jobs' files, and the scratch directories no live
-calculation owns. One function lists them all with counts and bytes, so
+locks, the finished jobs' files, the dry-run records, and the scratch
+directories no live calculation owns. One function lists them all with counts and bytes, so
 the dry run, the confirmation, and the deletion describe the same set.
 Before it deletes anything, purge settles the running runs whose
 scheduler job has ended: it marks them failed, so their records, slices,
@@ -18,11 +18,13 @@ layout and the locks from ``mason``, the scratch marker from ``slab``.
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
+from foundation._ops import dry_run_records
 from foundation.retention import sweep_scratch
 from foundation.runtime import Workspace
 from foundation.session_record import stale_records
@@ -33,6 +35,7 @@ from mason.session import (
     transcript_groups,
     unrecognised_session_files,
 )
+from slab.scratch import directory_size
 
 CATEGORIES = (
     "stale locks",
@@ -41,6 +44,7 @@ CATEGORIES = (
     "unrecognised",
     "harness records",
     "job files",
+    "dry-run records",
     "expired runs",
     "blobs",
     "scratch",
@@ -226,10 +230,12 @@ def purge_inventory(
     root = Path(root)
     groups = transcript_groups(root, include_orphans=True)
     kept: list[Kept] = []
+    current: str | None = None
     if groups and not all_sessions:
         newest = transcript_groups(root)
         if newest:
             conversation, siblings = newest[-1]
+            current = conversation.stem
             groups = [g for g in groups if g[0] != conversation]
             for path in (conversation, *siblings):
                 kept.append(
@@ -266,6 +272,18 @@ def purge_inventory(
         kept.append(
             Kept(kind="job file", item=_relative(root, path), reason="its job is in the queue")
         )
+    dry_runs: list[Path] = []
+    for path, row in dry_run_records(root):
+        if current is not None and row.get("session") == current:
+            kept.append(
+                Kept(
+                    kind="dry-run record",
+                    item=_relative(root, path),
+                    reason="the newest conversation (--all-sessions removes it too)",
+                )
+            )
+        else:
+            dry_runs.append(path)
 
     def files(name: str, paths: list[Path]) -> Category:
         # Sized before anything is unlinked, so the deleted inventory
@@ -292,10 +310,17 @@ def purge_inventory(
             files("unrecognised", unrecognised),
             files("harness records", records),
             files("job files", gone_jobs),
+            Category(
+                name="dry-run records",
+                items=[_relative(root, path) for path in dry_runs],
+                bytes=sum(directory_size(path) for path in dry_runs),
+            ),
         ]
         if not dry_run:
             for path in [*locks, *transcripts, *sidecars, *unrecognised, *records, *gone_jobs]:
                 path.unlink(missing_ok=True)
+            for path in dry_runs:
+                shutil.rmtree(path, ignore_errors=True)
         report = ws.purge_expired(dry_run=dry_run)
         scratch = sweep_scratch(ws, dry_run=dry_run)
     for entry in scratch.kept:
