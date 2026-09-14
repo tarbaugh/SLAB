@@ -1420,3 +1420,101 @@ def test_a_static_exclusion_keeps_the_device_out_of_every_launch(
         assert len(answer["free"]["gpus"]) == 3
         held = [ws.reserve(ntasks=1, gpus=1).gpus for _ in range(3)]
         assert held == [("1",), ("2",), ("3",)]
+
+# -- an unsized launch inside a GPU envelope -------------------------------------------
+
+ENVELOPE_SCRIPT = """\
+from slab.lammps import lammps_build
+from slab.resources import envelope
+
+env = envelope()
+print("seen", env.ntasks, ",".join(env.gpus) or "none", lammps_build()["build"])
+"""
+
+PLAIN_LAMMPS_SCRIPT = """\
+from ase.build import bulk
+from foundation.tasks import run_lammps
+
+run_lammps(
+    "units metal\\natom_style atomic\\nread_data structure.data\\n"
+    "pair_style lj/cut 5.0\\npair_coeff 1 1 0.0104 3.4\\nrun 10\\n",
+    atoms=bulk("Ar", "fcc", a=5.26, cubic=True),
+    label="md",
+)
+"""
+
+
+def _gpu_node(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, requires_gpu: bool) -> None:
+    """A slab.toml with a plain and a gpu LAMMPS build, and a 4-cpu, 2-gpu envelope."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "home" / ".config"))
+    for name in ("SLAB_ENGINES", "SLAB_CONFIG", "SLAB_SITE_CONFIG", "SLAB_NTASKS",
+                 "SLAB_THREADS", "SLURM_CPUS_PER_TASK"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "slab.toml").write_text(
+        '[engines.lammps]\ncommand = "lmp"\n'
+        + ("requires_gpu = true\n" if requires_gpu else "")
+        + '[engines.lammps.gpu]\ncommand = "lmp -k on g {gpus} -sf kk"\n'
+    )
+    monkeypatch.setenv("SLAB_CPUS", "0,1,2,3")
+    monkeypatch.setenv("SLAB_GPUS", "0,1")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    monkeypatch.setenv("SLURM_NTASKS", "4")
+
+
+def test_an_unsized_launch_in_a_gpu_envelope_holds_no_gpu_and_runs_plain(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Inside a GPU sandbox an unsized launch chose the gpu build sized to every
+    rank of the job, and the rank guard refused it. It now holds one plain rank
+    and no gpu, and runs as a child that cannot see the gpus it did not hold."""
+    from foundation._ops import launch_child, runs_as_child
+    from slab.lammps import lammps_build
+    from slab.resources import Budget
+
+    _gpu_node(tmp_path, monkeypatch, requires_gpu=False)
+    with Workspace(root) as ws:
+        held = ws.reserve(budget=Budget(cpus=(0, 1, 2, 3), gpus=("0", "1")))
+    assert (held.ntasks, held.threads, held.cpus, held.gpus) == (1, 1, (0,), ())
+    # In this process the same script would choose the gpu build it never held.
+    assert lammps_build()["build"] == "gpu"
+    assert runs_as_child(held, sized=False) is True
+    script = _write(tmp_path, "which.py", ENVELOPE_SCRIPT)
+    result = launch_child(root, script, reservation=held, cwd=tmp_path, wait=True)
+    assert result["exit_code"] == 0, result["output"]
+    assert "seen 1 none cpu" in result["output"]
+    with Workspace(root) as ws:
+        assert ws.runs.get(result["run_id"]).resources["gpus"] == []
+        assert ws.runs.list_reservations() == []
+
+
+def test_requires_gpu_refuses_an_unsized_launch_and_its_dry_run(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Where the plain build links the CUDA runtime it cannot run on a launch
+    that holds no gpu. requires_gpu refuses that launch before LAMMPS starts,
+    and a dry run hears the same refusal; a launch that holds a gpu passes."""
+    from slab.backends import PLAIN_BUILD_NEEDS_GPU
+
+    _gpu_node(tmp_path, monkeypatch, requires_gpu=True)
+    (tmp_path / "slab.toml").write_text('[engines.lammps]\ncommand = "lmp"\nrequires_gpu = true\n')
+    monkeypatch.setenv("SLAB_CPUS", "0")
+    monkeypatch.setenv("SLAB_GPUS", "")  # an unsized launch: no gpu in its envelope
+    script = _write(tmp_path, "md.py", PLAIN_LAMMPS_SCRIPT)
+    result = launch_script(root, script)
+    assert result["status"] == "failed"
+    assert "the plain build on this machine needs a GPU; size the launch with gpus=1" in (
+        result["failure"]["message"]
+    )
+    report = launch_script(root, script, dry_run=True)
+    assert report["reached_end"] is False
+    assert [entry["label"] for entry in report["lammps"]] == ["md"]
+    assert PLAIN_BUILD_NEEDS_GPU in report["lammps"][0]["outcome"]
+    # Sized with gpus=1 the guard passes, and the next check is the binary itself.
+    monkeypatch.setenv("SLAB_GPUS", "0")
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
+    sized = launch_script(root, script)
+    assert sized["status"] == "failed"
+    assert "needs a GPU" not in sized["failure"]["message"]
+    assert "not on PATH" in sized["failure"]["message"]

@@ -217,6 +217,12 @@ class LammpsEngineConfig(BaseModel):
     The agent never names a build; the slice chooses. So the plain command
     may not carry ``-k on g``, and the gpu command must ask for a gpu.
 
+    ``requires_gpu`` says the plain build cannot run without a GPU, as a
+    binary linked against the CUDA runtime cannot. A launch that holds no
+    gpu is then refused before LAMMPS starts, with the advice to size it
+    with ``gpus=1``. Unset reads as false, and ``slab doctor`` warns when
+    the binary links ``libcudart``.
+
     Examples:
         >>> LammpsEngineConfig.model_validate(
         ...     {"command": "lmp", "gpu": {"command": "lmp -k on g {gpus} -sf kk"}}).gpu.command
@@ -231,6 +237,7 @@ class LammpsEngineConfig(BaseModel):
 
     command: str | None = None
     setup: tuple[str, ...] = ()
+    requires_gpu: bool | None = None
     gpu: LammpsBuild | None = None
 
     @field_validator("command")
@@ -921,6 +928,10 @@ schema_version = 1
 #                                      # your profile) loaded can't reach it
 #                                      # Keep this command plain (no '-k on g'):
 #                                      # it runs when a launch holds no gpu.
+# requires_gpu = true                  # the plain binary cannot run without a
+#                                      # GPU (it links the CUDA runtime); a
+#                                      # launch without gpus= is then refused
+#                                      # before LAMMPS starts
 
 # [engines.lammps.gpu]                 # the build a launch runs when its
 #                                      # reservation holds gpus; the agent sizes

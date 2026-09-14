@@ -617,6 +617,30 @@ def test_lammps_gpu_build_table_validates(tmp_path: Path) -> None:
     assert LammpsBuild(command="lmp -k on g {gpus}").setup == ()
 
 
+def test_lammps_requires_gpu_loads_and_the_listing_shows_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """requires_gpu says the plain build cannot start without a device. Unset
+    reads as false in the listing; the doctor tells unset from false."""
+    from slab.lammps import lammps_builds
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("SLAB_ENGINES", raising=False)
+    assert LammpsEngineConfig().requires_gpu is None
+    (tmp_path / "slab.toml").write_text('[engines.lammps]\ncommand = "lmp"\n')
+    assert load_config(tmp_path).engines.lammps.requires_gpu is None
+    assert lammps_builds()["cpu"]["requires_gpu"] is False
+    (tmp_path / "slab.toml").write_text('[engines.lammps]\ncommand = "lmp"\nrequires_gpu = true\n')
+    assert load_config(tmp_path).engines.lammps.requires_gpu is True
+    assert lammps_builds()["cpu"]["requires_gpu"] is True
+    result = runner.invoke(app, ["engines", "list"])
+    assert result.exit_code == 0, result.output
+    assert "needs a GPU (requires_gpu), size with gpus=1" in result.output
+    (tmp_path / "slab.toml").write_text('[engines.lammps]\nrequires_gpu = "sometimes"\n')
+    with pytest.raises(ConfigError, match=r"engines\.lammps\.requires_gpu"):
+        load_config(tmp_path)
+
+
 @pytest.mark.parametrize(
     "command",
     ["lmp -k on g 2 -sf kk", "srun lmp -kokkos on g {gpus}", "mpirun -np 4 lmp -k on g 1 t 4"],

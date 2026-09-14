@@ -1143,6 +1143,7 @@ def test_lammps_builds_lists_cpu_then_gpu_then_aliases(
         "kokkos": {
             "enabled": False, "gpus": None, "threads": None, "suffix": False, "package": None,
         },
+        "requires_gpu": False,
     }
     gpu = builds["gpu"]
     assert gpu["source"] == "builtin" and gpu["command"] == GPU_TEMPLATE

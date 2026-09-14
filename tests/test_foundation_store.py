@@ -1262,8 +1262,8 @@ def test_reserve_refuses_a_count_below_one(store: SQLiteRunStore) -> None:
 
 
 def test_the_unsized_refusal_names_the_free_gpus(store: SQLiteRunStore) -> None:
-    """gpus= without ntasks takes every free cpu, so the refusal of an unsized
-    request must say what is free of both kinds."""
+    """An unsized request that finds no free cpu is refused, and the refusal
+    must say what is free of both kinds."""
     import os
 
     from foundation.errors import ResourcesError
@@ -1271,7 +1271,7 @@ def test_the_unsized_refusal_names_the_free_gpus(store: SQLiteRunStore) -> None:
     budget = {
         "host": "n1", "holder_pid": os.getpid(), "budget_cpus": range(2), "budget_gpus": ("0", "1"),
     }
-    whole = store.reserve(gpus=1, **budget)
+    whole = store.reserve(ntasks=2, gpus=1, **budget)
     assert whole.cpus == (0, 1) and whole.gpus == ("0",)
     with pytest.raises(ResourcesError, match=r"no cpu is free on n1.*free gpus: 1 of 2") as e:
         store.reserve(**budget)
@@ -1279,9 +1279,10 @@ def test_the_unsized_refusal_names_the_free_gpus(store: SQLiteRunStore) -> None:
 
 
 def test_an_unsized_gpu_launch_takes_one_rank_per_gpu(store: SQLiteRunStore) -> None:
-    """gpus= without ntasks or threads runs one MPI rank per gpu and spreads the
-    free cpus as threads, whatever the job's rank count: a KOKKOS build gives
-    each rank one device. Without gpus the defaults still size the launch."""
+    """gpus= without ntasks or threads runs one MPI rank per gpu, whatever the
+    job's rank count: a KOKKOS build gives each rank one device. Each rank
+    takes its gpu's share of the free cpus as threads. Without gpus and
+    without a gpu in the budget, the defaults still size the launch."""
     import os
 
     from foundation.errors import ResourcesError
@@ -1297,14 +1298,82 @@ def test_an_unsized_gpu_launch_takes_one_rank_per_gpu(store: SQLiteRunStore) -> 
     assert (two.ntasks, two.threads, two.cpus, two.gpus) == (2, 4, tuple(range(8)), ("0", "1"))
     store.release_reservation(two.id)
     odd = store.reserve(budget_cpus=range(7), budget_gpus=("0", "1"), gpus=2, **who)
-    assert (odd.ntasks, odd.threads, odd.cpus) == (2, 3, tuple(range(7)))
+    assert (odd.ntasks, odd.threads, odd.cpus) == (2, 3, tuple(range(6)))
     store.release_reservation(odd.id)
-    plain = store.reserve(budget_cpus=range(8), budget_gpus=("0", "1"), default_ntasks=8, **who)
-    assert (plain.ntasks, plain.threads, plain.gpus) == (8, 1, ())
+    plain = store.reserve(budget_cpus=range(8), budget_gpus=(), default_ntasks=8, **who)
+    assert (plain.ntasks, plain.threads, plain.gpus, plain.cpus) == (8, 1, (), tuple(range(8)))
     store.release_reservation(plain.id)
     with pytest.raises(ResourcesError, match=r"4 gpu\(s\) asked, one rank per gpu, but only") as e:
         store.reserve(budget_cpus=range(2), budget_gpus=("0", "1", "2", "3"), gpus=4, **who)
     assert e.value.free == {"cpus": [0, 1], "gpus": ["0", "1", "2", "3"]}
+
+
+def test_four_one_gpu_launches_fit_side_by_side(store: SQLiteRunStore) -> None:
+    """A five-run wave on a 36-cpu, 4-gpu job ran one at a time, because the
+    first gpus=1 launch took all 36 cpus as threads. Each launch now takes
+    its gpu's share: the free cpus divided by the free gpus."""
+    import os
+
+    from foundation.errors import ResourcesError
+
+    node = {
+        "host": "n1", "holder_pid": os.getpid(),
+        "budget_cpus": range(36), "budget_gpus": ("0", "1", "2", "3"), "default_ntasks": 36,
+    }
+    wave = [store.reserve(gpus=1, **node) for _ in range(4)]
+    assert [(r.ntasks, r.threads, r.gpus) for r in wave] == [
+        (1, 9, ("0",)), (1, 9, ("1",)), (1, 9, ("2",)), (1, 9, ("3",)),
+    ]
+    assert [r.cpus for r in wave] == [tuple(range(9 * i, 9 * i + 9)) for i in range(4)]
+    with pytest.raises(ResourcesError, match=r"no cpu is free on n1.*free gpus: 0 of 4"):
+        store.reserve(gpus=1, **node)
+    for held in wave:
+        store.release_reservation(held.id)
+    # A wider launch takes the same share per gpu, so the rest still fit.
+    pair = store.reserve(gpus=2, **node)
+    assert (pair.ntasks, pair.threads, len(pair.cpus)) == (2, 9, 18)
+    rest = [store.reserve(gpus=1, **node) for _ in range(2)]
+    assert [(r.threads, len(r.cpus)) for r in rest] == [(9, 9), (9, 9)]
+    # A launch that names threads keeps them.
+    for held in (pair, *rest):
+        store.release_reservation(held.id)
+    named = store.reserve(gpus=1, threads=4, **node)
+    assert (named.ntasks, named.threads, len(named.cpus)) == (1, 4, 4)
+
+
+def test_an_unsized_launch_in_a_gpu_budget_holds_one_plain_rank(store: SQLiteRunStore) -> None:
+    """Inside a GPU job an unsized launch runs the plain build: one rank of the
+    default thread count and no gpu. It leaves the node to the GPU launches."""
+    import os
+
+    node = {
+        "host": "n1", "holder_pid": os.getpid(),
+        "budget_cpus": range(36), "budget_gpus": ("0", "1", "2", "3"), "default_ntasks": 36,
+    }
+    plain = store.reserve(**node)
+    assert (plain.ntasks, plain.threads, plain.cpus, plain.gpus) == (1, 1, (0,), ())
+    threaded = store.reserve(default_threads=4, **node)
+    assert (threaded.ntasks, threaded.threads, threaded.cpus) == (1, 4, (1, 2, 3, 4))
+    # 31 cpus and 4 gpus are left: two one-gpu launches still run side by side.
+    first, second = store.reserve(gpus=1, **node), store.reserve(gpus=1, **node)
+    assert (first.threads, first.gpus, second.threads, second.gpus) == (7, ("0",), 8, ("1",))
+
+
+def test_an_unsized_launch_never_takes_more_than_one_gpu_share(store: SQLiteRunStore) -> None:
+    """A job with cpus-per-task equal to the node's cpus makes the default
+    thread count the whole node; an unsized launch still leaves the GPU
+    launches their shares."""
+    import os
+
+    node = {
+        "host": "n1", "holder_pid": os.getpid(),
+        "budget_cpus": range(36), "budget_gpus": ("0", "1", "2", "3"),
+        "default_ntasks": 1, "default_threads": 36,
+    }
+    wide = store.reserve(**node)
+    assert (wide.ntasks, wide.threads, wide.gpus) == (1, 9, ())
+    sized = store.reserve(gpus=1, **node)
+    assert (sized.threads, sized.gpus) == (6, ("0",))
 
 
 # -- the job a run started under ---------------------------------------------------

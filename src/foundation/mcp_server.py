@@ -330,11 +330,16 @@ def build_server(
         run starts, the run takes it as an affinity mask plus
         CUDA_VISIBLE_DEVICES, and a slice that does not fit is refused with
         the free amounts (list_engines reports 'budget' and 'free'). A
-        sized launch runs as a child process; an unsized one runs here and
-        reserves every free cpu, and gpus without ntasks takes the gpus
-        asked and one MPI rank per gpu, with the free cpus as threads.
-        Size a GPU launch with gpus alone, or with ntasks equal to gpus;
-        the gpu build refuses more ranks than gpus. The result includes the run id, final
+        sized launch runs as a child process. gpus without ntasks takes
+        the gpus asked and one MPI rank per gpu, each with its gpu's share
+        of the free cpus as threads, so several one-gpu launches run side
+        by side. Size a GPU launch with gpus alone, or with ntasks equal to
+        gpus; the gpu build refuses more ranks than gpus. Unsized: one
+        rank, the plain build, no GPU (on a host without gpus it takes
+        every free cpu). Where list_engines shows the cpu build with
+        requires_gpu, the plain build cannot run without a GPU, so size
+        every launch with gpus=1, dry runs included. Size a dry run like
+        the launch it rehearses. The result includes the run id, final
         state (verified if all checks passed), the 'resources' it held, and
         captured output; on failure it includes the structured 'failure'
         record (traceback and diagnostic notes). If recording the failure
@@ -393,7 +398,8 @@ def build_server(
         if intent:
             driver += ["--intent", intent]
         driver += ["--session", session_id, "-w", str(root)]
-        if sized:
+        as_child = _ops.runs_as_child(reservation, sized=sized)
+        if as_child:
             driver += ["--reservation", reservation.id]
         if dry_run:
             driver += ["--dry-run"]
@@ -414,7 +420,7 @@ def build_server(
             }
         )
         try:
-            if sized:
+            if as_child:
                 result = _ops.launch_child(
                     root,
                     script_path,

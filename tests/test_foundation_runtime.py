@@ -482,22 +482,24 @@ def test_a_reservation_that_does_not_fit_is_refused_with_the_free_amounts(ws: Wo
 def test_an_unsized_reservation_takes_the_whole_free_budget(
     ws: Workspace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Without a gpu in the budget an unsized launch takes every free cpu.
+    With one it holds one plain rank (see the store's tests)."""
     for name in ("SLAB_CPUS", "SLAB_GPUS", "SLAB_NTASKS", "SLAB_THREADS", "SLURM_CPUS_PER_TASK"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("SLURM_NTASKS", "2")
-    first = ws.reserve(ntasks=1, budget=_budget())
-    whole = ws.reserve(budget=_budget())
+    first = ws.reserve(ntasks=1, budget=_budget(gpus=0))
+    whole = ws.reserve(budget=_budget(gpus=0))
     assert whole.cpus == (1, 2, 3) and whole.gpus == () and whole.ntasks == 2
     assert whole.threads == 1
     from foundation.errors import ResourcesError
 
     with pytest.raises(ResourcesError, match="no cpu is free"):
-        ws.reserve(budget=_budget())
+        ws.reserve(budget=_budget(gpus=0))
     ws.runs.release_reservation(first.id)
     ws.runs.release_reservation(whole.id)
     monkeypatch.setenv("SLURM_NTASKS", "8")
     monkeypatch.setenv("SLURM_CPUS_PER_TASK", "4")
-    shrunk = ws.reserve(budget=_budget())
+    shrunk = ws.reserve(budget=_budget(gpus=0))
     assert (shrunk.ntasks, shrunk.threads, shrunk.cpus) == (4, 1, (0, 1, 2, 3))
 
 

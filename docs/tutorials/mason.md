@@ -259,12 +259,12 @@ cutoffs and k-mesh rather than a profile name.
 
 The parallelism budget is stated and enforced separately. The environment
 block tells the agent the budget of this session, the cpus and gpus its
-process may use, and what is free of it right now. It also says how many
-ranks an unsized launch runs with, and that a launch names `ntasks`,
-`threads`, and `gpus`. The cpus line reads, for one session:
+process may use, and what is free of it right now. It also says what an
+unsized launch holds, and that a launch names `ntasks`, `threads`, and
+`gpus`. The cpus line reads, for one session with two gpus:
 
 ```text
-cpus: 16 usable in this session, gpus: 2; free right now: 16 cpu(s), 2 gpu(s); an unsized launch runs with 1 rank(s) and takes every free cpu. Size a launch with ntasks, threads, and gpus; a launch that does not fit what is free is refused with the free amounts, and so is a shell command or script that spells out more ranks. The free amounts above were read when this prompt was built; call `free_resources` before a concurrent launch.
+cpus: 16 usable in this session, gpus: 2; free right now: 16 cpu(s), 2 gpu(s); an unsized launch runs one rank of the plain build and holds no gpu; gpus= alone gives one rank per gpu with its share of the free cpus. Size a launch with ntasks, threads, and gpus; a launch that does not fit what is free is refused with the free amounts, and so is a shell command or script that spells out more ranks. The free amounts above were read when this prompt was built; call `free_resources` before a concurrent launch.
 ```
 
 A sized launch holds a slice. Before the run starts, the session reserves
@@ -293,12 +293,24 @@ against what the first two hold and not against a stale line. Every
 reservations` shows the same rows from the shell. The tool adds
 information and no mechanism, so it has no switch in the ledger.
 
-An unsized launch is accounted for like any other. It reserves every free
-cpu and no gpu, and it runs in the session's own process as before. A
-launch that names `gpus` but no `ntasks` takes the gpus asked and one
-MPI rank per gpu, and it takes every free cpu as threads across those
-ranks. A `background=true` launch is always the child, sized or
-not, so no tool timeout can reach it.
+An unsized launch is accounted for like any other, and it never holds a
+gpu. What it reserves depends on the budget.
+
+| Budget | An unsized launch holds | It runs |
+|---|---|---|
+| No gpu | Every free cpu, with the default rank and thread counts | In the session's own process |
+| One or more gpus | One rank of the default thread count, and no gpu | As a child that sees no gpu, so it runs the plain build |
+
+In a GPU budget the session process can see every gpu. A run in that
+process would choose the gpu build it never reserved, so the unsized
+launch runs as a child with an empty `CUDA_VISIBLE_DEVICES`. A launch
+that names `gpus` but no `ntasks` takes the gpus asked and one MPI rank
+per gpu. Each rank takes its gpu's share of the free cpus as threads,
+which is the free cpus divided by the free gpus. So four `gpus=1`
+launches on a 36-cpu, 4-gpu job each hold 9 cpus, and they run side by
+side. A launch that names `threads` keeps them. A `background=true`
+launch is always the child, sized or not, so no tool timeout can reach
+it.
 
 A GPU launch runs one MPI rank per GPU. The KOKKOS package gives each
 rank one device, so a second rank on the same device opens a device

@@ -1509,13 +1509,21 @@ class SQLiteRunStore:
         free cpu ids and gpu ids, and inserts the row, so two reservers on
         one store serialize and the second sees the first. A sized request
         (``ntasks`` or ``threads`` given) takes ``ntasks * threads`` cpus
-        and ``gpus`` gpus. An unsized one takes every free cpu. Without
-        gpus its rank and thread counts come from the defaults, shrunk to
-        fit. With gpus it takes one rank per gpu and the free cpus as
-        threads across them, because a KOKKOS build gives each MPI rank
-        one device and a rank past the first on a device fails. A gpu with
-        an :meth:`exclude_gpu` row on the host under *job_id* is not free,
-        whatever the budget says. The refusal carries the free ids. A count below one is a
+        and ``gpus`` gpus. An unsized one depends on the budget.
+
+        * Gpus asked: one rank per gpu, because a KOKKOS build gives each
+          MPI rank one device and a rank past the first on a device fails.
+          Each rank takes its gpu's share of the free cpus as threads (the
+          free cpus divided by the free gpus), so four one-gpu launches fit
+          side by side on four gpus.
+        * No gpu asked, and the budget holds gpus: one rank of the default
+          thread count and no gpu, because such a launch runs the plain
+          build and must leave the node to the GPU launches.
+        * No gpu asked, and the budget holds none: every free cpu, with the
+          rank and thread counts from the defaults, shrunk to fit.
+
+        A gpu with an :meth:`exclude_gpu` row on the host under *job_id*
+        is not free, whatever the budget says. The refusal carries the free ids. A count below one is a
         :class:`ValueError`: ``None`` means unsized, and a zero-rank launch
         is a mistake the caller should hear about, not a launch of one.
 
@@ -1528,19 +1536,23 @@ class SQLiteRunStore:
             >>> second = store.reserve(host="n1", holder_pid=os.getpid(),
             ...     budget_cpus=range(4), budget_gpus=("0", "1"))
             >>> (second.cpus, second.gpus, second.ntasks)
-            ((2, 3), (), 1)
+            ((2,), (), 1)
             >>> try:
             ...     store.reserve(host="n1", holder_pid=os.getpid(),
-            ...         budget_cpus=range(4), budget_gpus=("0", "1"), ntasks=1)
+            ...         budget_cpus=range(4), budget_gpus=("0", "1"), ntasks=2)
             ... except ResourcesError as e:
             ...     print(e.free)
-            {'cpus': [], 'gpus': ['1']}
+            {'cpus': [3], 'gpus': ['1']}
             >>> store.close()
             >>> store = SQLiteRunStore(":memory:")
-            >>> gpu = store.reserve(host="n1", holder_pid=os.getpid(),
-            ...     budget_cpus=range(8), budget_gpus=("0", "1"), gpus=2)
-            >>> (gpu.ntasks, gpu.threads, gpu.cpus, gpu.gpus)
-            (2, 4, (0, 1, 2, 3, 4, 5, 6, 7), ('0', '1'))
+            >>> one = store.reserve(host="n1", holder_pid=os.getpid(),
+            ...     budget_cpus=range(8), budget_gpus=("0", "1", "2", "3"), gpus=1)
+            >>> (one.ntasks, one.threads, one.cpus, one.gpus)
+            (1, 2, (0, 1), ('0',))
+            >>> two = store.reserve(host="n1", holder_pid=os.getpid(),
+            ...     budget_cpus=range(8), budget_gpus=("0", "1", "2", "3"), gpus=2)
+            >>> (two.ntasks, two.threads, two.cpus, two.gpus)
+            (2, 2, (2, 3, 4, 5), ('1', '2'))
             >>> store.close()
 
         A gpu excluded on the host under this job is never handed out
@@ -1588,7 +1600,9 @@ class SQLiteRunStore:
                     )
                 cpus = list(free_cpus)
                 if gpus > 0:
-                    # One MPI rank per GPU; the cpus become threads across them.
+                    # One MPI rank per GPU. Each rank takes its gpu's share of
+                    # the free cpus as threads, so the gpus left free keep
+                    # cpus for the next launch.
                     if gpus > len(cpus):
                         raise ResourcesError(
                             f"{gpus} gpu(s) asked, one rank per gpu, but only "
@@ -1599,7 +1613,17 @@ class SQLiteRunStore:
                             free=free,
                         )
                     count = gpus
-                    width = max(1, len(cpus) // gpus)
+                    width = max(1, len(free_cpus) // max(gpus, len(free_gpus)))
+                    cpus = cpus[: count * width]
+                elif budget_gpus:
+                    # A budget with gpus: the unsized launch is one rank of the
+                    # plain build and holds no gpu. Its width is capped at one
+                    # gpu's share of the free cpus, so a wide default thread
+                    # count cannot take the whole node from the GPU launches.
+                    count = 1
+                    share = len(cpus) // max(1, len(free_gpus))
+                    width = max(1, min(default_threads, share, len(cpus)))
+                    cpus = cpus[:width]
                 else:
                     count = max(1, min(default_ntasks, len(cpus)))
                     width = max(1, default_threads)

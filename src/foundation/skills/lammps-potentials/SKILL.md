@@ -114,16 +114,21 @@ and whose setup loads its module. The build follows the slice. A launch
 sized with `gpus=` runs the gpu build, and an unsized launch runs the
 plain build, on `relax`, `single_point`, and `run_lammps` alike. Never
 name a build; `engine="lammps"` is all you pass. So a smoke test or a
-small EAM cell runs unsized and never queues for a GPU. ASE appends its
+small EAM cell runs unsized and never queues for a GPU. An unsized
+launch holds one rank and no GPU. Where the `cpu` build in
+`list_engines` shows `requires_gpu: true`, the plain build cannot start
+without a GPU, so size every launch with `gpus=1`, dry runs included.
+ASE appends its
 own flags after the switches. SLAB adds no switch: a build without
 `-k on` runs the plain styles on the host, silently, whatever the build
 contains. The `lammps` entry of `list_engines` lists every build with
 its command and the switches parsed from it. A build whose command
 holds `{ntasks}`, `{threads}`, or `{gpus}` is marked `sized per launch`:
 SLAB fills those from the launch's size, so `gpus=2` on the launch
-runs `-np 2 ... g 2` with one rank per GPU and the free cpus as threads
-(`ntasks=2, gpus=2` says the same), a launch with more ranks than gpus
-is refused before LAMMPS starts, and a gpu build that asks `{gpus}`
+runs `-np 2 ... g 2` with one rank per GPU, each with its GPU's share
+of the free cpus as threads (`ntasks=2, gpus=2` says the same), so
+concurrent `gpus=1` launches fit side by side, a launch with more ranks
+than gpus is refused before LAMMPS starts, and a gpu build that asks `{gpus}`
 under a launch without one is refused naming the build. A build that
 hardcodes its numbers runs as written whatever the launch held. Read the listing before a
 GPU run. When the machine declares no gpu build, pass `command=` with

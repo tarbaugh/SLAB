@@ -108,7 +108,14 @@ def engines_list(registry_path: _RegistryOpt = None) -> None:
             sized = ""
             if build.get("placeholders"):
                 sized = f"sized per launch: {', '.join(build['placeholders'])}; "
-            typer.echo(f"  {name:<14} {build['command']}  ({sized}{_kokkos_text(build['kokkos'])})")
+            needs = (
+                "needs a GPU (requires_gpu), size with gpus=1; "
+                if build.get("requires_gpu")
+                else ""
+            )
+            typer.echo(
+                f"  {name:<14} {build['command']}  ({sized}{needs}{_kokkos_text(build['kokkos'])})"
+            )
             if build.get("setup"):
                 typer.echo(f"  {'':<14} setup: {'; '.join(build['setup'])}")
     typer.echo(f"qe protocols: {', '.join(overview['qe_protocols'])} ('slab protocols show')")
