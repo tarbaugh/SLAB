@@ -21,26 +21,29 @@ import subprocess
 import sys
 import tempfile
 import traceback
-from collections.abc import Iterable, Sequence
-from contextlib import ExitStack, redirect_stderr, redirect_stdout, suppress
+from collections.abc import Iterable, Iterator, Sequence
+from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from foundation.artifacts import ReadThroughStore
 from foundation.errors import (
     FoundationError,
     IllegalStatusChangeError,
     IllegalTransitionError,
     NestedRunError,
+    ReplayError,
     ResourcesError,
+    RunStateError,
     ScriptExitError,
     SessionNotFoundError,
     StorageError,
 )
 from foundation.lifecycle import ExecutionStatus, LifecycleState
-from foundation.models import ArtifactRole, Reservation, Run, utcnow
+from foundation.models import ArtifactRole, CheckResult, Reservation, Run, utcnow
 from foundation.retention import DEFAULT_POLICY, RetentionPolicy, _reachable_hashes, sweep_scratch
-from foundation.runtime import Workspace, describe_liveness, this_host, this_job
+from foundation.runtime import Replay, Workspace, describe_liveness, this_host, this_job
 from foundation.serialize import loads
 from slab.scratch import RUN_ENV, scratch_root
 
@@ -325,6 +328,49 @@ def resources_column(resources: dict[str, Any] | None) -> str:
     return f"{text}/{len(gpus)}g" if gpus else text
 
 
+def check_entry(result: CheckResult) -> dict[str, Any]:
+    """One check result as the evidence surfaces print it.
+
+    Examples:
+        >>> check_entry(CheckResult(run_id="r", name="drift", passed=False,
+        ...     message="returned False", evidence={"source": "def drift(): ...", "keys": {}}))
+        ... # doctest: +NORMALIZE_WHITESPACE
+        {'name': 'drift', 'kind': 'custom', 'passed': False, 'message': 'returned False',
+         'observed': None, 'expected': None, 'pass_no': 1,
+         'evidence': {'source': 'def drift(): ...', 'keys': {}}}
+    """
+    entry: dict[str, Any] = {
+        "name": result.name,
+        "kind": result.kind,
+        "passed": result.passed,
+        "message": result.message,
+        "observed": result.observed,
+        "expected": result.expected,
+        "pass_no": result.pass_no,
+    }
+    if result.evidence is not None:
+        entry["evidence"] = result.evidence
+    return entry
+
+
+def pass_tallies(results: Sequence[CheckResult]) -> list[dict[str, int]]:
+    """``pass_no``, ``passed``, and ``total`` for each verification pass, oldest first.
+
+    Examples:
+        >>> pass_tallies([CheckResult(run_id="r", name="a", passed=False),
+        ...               CheckResult(run_id="r", name="a", passed=True, pass_no=2)])
+        [{'pass_no': 1, 'passed': 0, 'total': 1}, {'pass_no': 2, 'passed': 1, 'total': 1}]
+    """
+    tallies: dict[int, dict[str, int]] = {}
+    for result in results:
+        tally = tallies.setdefault(
+            result.pass_no, {"pass_no": result.pass_no, "passed": 0, "total": 0}
+        )
+        tally["passed"] += int(result.passed)
+        tally["total"] += 1
+    return [tallies[number] for number in sorted(tallies)]
+
+
 def run_details(ws: Workspace, run_id: str) -> dict[str, Any]:
     """Everything about one run: fields, checks, tasks, artifacts, history.
 
@@ -332,7 +378,11 @@ def run_details(ws: Workspace, run_id: str) -> dict[str, Any]:
     ``show_run``): failed runs and tasks carry their structured ``failure``
     record (:func:`foundation.errors.failure_record`), and checks carry the
     ``observed``/``expected`` values their assertions compared — the numbers a
-    correction gets computed from. Artifact entries carry ``bytes_available``
+    correction gets computed from. A failed check that named no observed
+    value carries ``evidence`` instead: its source, the keys of the dicts
+    it read, and the line that raised. ``checks`` is the latest
+    verification pass, and ``earlier_passes`` tallies the passes before
+    it (see :func:`reverify_run`). Artifact entries carry ``bytes_available``
     — whether the content is still in the artifact store or has been
     hash-and-discarded.
     """
@@ -351,17 +401,8 @@ def run_details(ws: Workspace, run_id: str) -> dict[str, Any]:
             "pid": run.pid,
             "host": run.host,
         },
-        "checks": [
-            {
-                "name": c.name,
-                "kind": c.kind,
-                "passed": c.passed,
-                "message": c.message,
-                "observed": c.observed,
-                "expected": c.expected,
-            }
-            for c in checks
-        ],
+        "checks": [check_entry(c) for c in checks],
+        "earlier_passes": pass_tallies(ws.runs.list_check_results(run.id, all_passes=True))[:-1],
         "tasks": [
             {
                 "seq": t.seq,
@@ -825,6 +866,7 @@ def launch_script(
     capture_output: bool = False,
     reservation: Reservation | str | None = None,
     dry_run: bool = False,
+    from_run: str | None = None,
 ) -> dict[str, Any]:
     """Execute a workflow script inside a fresh run context; return the outcome.
 
@@ -851,12 +893,18 @@ def launch_script(
     (runner machinery).
 
     With *dry_run* the script rehearses: see :func:`dry_run_script`, which
-    this calls and whose report it returns. *root* and *reservation* are
-    not used then, because a rehearsal touches no store.
+    this calls and whose report it returns. *reservation* is not used
+    then, because a rehearsal claims nothing. *from_run* (with *dry_run*
+    only) rehearses against that run's cached task results in *root*.
     """
     script_path = Path(script).resolve()
     if not script_path.exists():
         raise FileNotFoundError(f"no such workflow script: {script_path}")
+    if from_run is not None and not dry_run:
+        raise FoundationError(
+            "from_run rehearses a script against a run's cached results; pass it with "
+            "dry_run, or re-verify a run with reverify_run"
+        )
     if dry_run:
         return dry_run_script(
             script_path,
@@ -865,6 +913,8 @@ def launch_script(
             session=session,
             argv=argv,
             capture_output=capture_output,
+            root=root,
+            from_run=from_run,
         )
 
     try:
@@ -912,9 +962,15 @@ def _run_script_in(
     capture_output: bool,
     reservation: Reservation | str | None = None,
     dry_run: bool = False,
+    replay: Replay | None = None,
 ) -> tuple[str, str | None, io.StringIO]:
     """Run *script_path* inside a fresh run of *ws*; return its id, the raw
-    traceback of a failure the run never saw, and the captured output."""
+    traceback of a failure the run never saw, and the captured output.
+
+    With *replay* every task call is answered from another run's results,
+    and a call that has none raises :class:`~foundation.errors.ReplayError`
+    out of this function, even when the script caught it.
+    """
     buffer = io.StringIO()
     error: str | None = None
     run_id: str | None = None
@@ -938,6 +994,7 @@ def _run_script_in(
                 session=session,
                 reservation=reservation,
                 dry_run=dry_run,
+                replay=replay,
             ) as active:
                 run_id = active.id
                 # The script is the run's recompute root and its own
@@ -947,6 +1004,8 @@ def _run_script_in(
                 active.keep(script_path.name, script_path, role=ArtifactRole.INPUT)
                 try:
                     _execute_script(script_path)
+                    if replay is not None and replay.refusal is not None:
+                        raise replay.refusal  # the script caught it; it still stands
                 except (KeyError, TypeError, IndexError, AttributeError) as e:
                     # A shape mistake after a completed run_lammps: the
                     # note names the keys the result holds, so the next
@@ -961,7 +1020,7 @@ def _run_script_in(
             f"execute it with plain 'python {script_path.name}' instead of "
             f"'slab run'"
         ) from None
-    except ResourcesError:
+    except (ResourcesError, ReplayError):
         raise
     except Exception:
         error = traceback.format_exc(limit=8)
@@ -980,15 +1039,46 @@ DRY_RUN_MARKER = "dry run:"
 """The line ``slab run --dry-run`` prints before its JSON report."""
 _DRY_RUN_MARKER_LINE = re.compile(rf"^{re.escape(DRY_RUN_MARKER)}$", re.MULTILINE)
 
-DRY_RUN_CHECKS_NOTE = (
-    "physics checks are expected to fail in a dry run: LAMMPS integrated no steps"
-)
+DRY_RUN_CHECK_FAILED = "expected in a dry run: LAMMPS integrated no steps"
+"""The reading of a check that failed on a rehearsal's empty result."""
+DRY_RUN_CHECK_PASSED = "passed on no data; not evidence"
+"""The reading of a check that passed on a rehearsal's empty result."""
 #: Prepended to a real launch of a script text this session never dry-ran.
 NO_DRY_RUN_WARNING = (
     "warning: no dry run of this script text in this session; a dry run costs one "
     "LAMMPS start and catches script and post-processing errors before the MD leg"
 )
 WORKSPACE_ENV = "SLAB_WORKSPACE"
+
+
+@contextmanager
+def _throwaway_workspace() -> Iterator[Workspace]:
+    """A fresh workspace under ``[paths] scratch`` (else the temp dir), removed after.
+
+    While it is open, ``$SLAB_WORKSPACE`` names it, so a child a script
+    starts lands there too.
+    """
+    scratch = scratch_root()
+    if scratch is not None:
+        scratch.mkdir(parents=True, exist_ok=True)
+    throwaway = Path(tempfile.mkdtemp(prefix="slab-dry-run-", dir=scratch))
+    workspace_before = os.environ.get(WORKSPACE_ENV)
+    os.environ[WORKSPACE_ENV] = str(throwaway)
+    try:
+        with Workspace(throwaway) as ws:
+            yield ws
+    finally:
+        if workspace_before is None:
+            os.environ.pop(WORKSPACE_ENV, None)
+        else:
+            os.environ[WORKSPACE_ENV] = workspace_before
+        shutil.rmtree(throwaway, ignore_errors=True)
+
+
+def _replaying(scratch: Workspace, source: Workspace, run_id: str) -> Replay:
+    """Point *scratch* at *source*'s artifacts for reads; return the replay of *run_id*."""
+    scratch.artifacts = ReadThroughStore(scratch.artifacts.root, fallback=source.artifacts)
+    return Replay(source, run_id)
 
 
 def dry_run_script(
@@ -999,6 +1089,8 @@ def dry_run_script(
     session: str | None = None,
     argv: tuple[str, ...] = (),
     capture_output: bool = False,
+    root: str | os.PathLike[str] | None = None,
+    from_run: str | None = None,
 ) -> dict[str, Any]:
     """Rehearse a workflow script without a real run: ``slab run --dry-run``.
 
@@ -1016,16 +1108,26 @@ def dry_run_script(
     runs, ``$SLAB_WORKSPACE`` names the throwaway
     workspace, so a child the script starts lands there too.
 
+    With *from_run* (a run id in the workspace at *root*) no engine
+    starts: every task call takes that run's cached result instead (see
+    :class:`foundation.runtime.Replay`), so the Python after each call
+    and every check run on real data. A task call the run has no result
+    for is refused with :class:`~foundation.errors.ReplayError`.
+
     The report says what the rehearsal found:
 
     * ``dry_run``: True.
+    * ``from_run``: the run whose results answered, or None.
     * ``reached_end``: the script ran to its last line.
     * ``traceback``: the failure record's traceback, or None.
     * ``lammps``: one entry per ``run_lammps`` call, in order, with the
-      ``label`` and an ``outcome`` of ``setup ok`` or the ``ERROR`` line
-      LAMMPS printed.
+      ``label`` and an ``outcome`` of ``setup ok``, the ``ERROR`` line
+      LAMMPS printed, or ``replayed from run <id>``.
     * ``checks``: every ``@check`` with ``name``, ``passed``, ``message``,
-      and ``checks_note``, which says why a physics check fails here.
+      and ``reading``, which says what the outcome is worth. A check
+      that raised reads ``check raised <Exception>: <text>``, because
+      that is a bug in the check. On an empty result, a failed check
+      reads as expected and a passed one as not evidence.
     * ``outputs``: the names of the files ``run_lammps`` kept, which are
       the names a real run would keep.
     * ``output``: what the script printed, with *capture_output*.
@@ -1033,31 +1135,28 @@ def dry_run_script(
     script_path = Path(script).resolve()
     if not script_path.exists():
         raise FileNotFoundError(f"no such workflow script: {script_path}")
-    scratch = scratch_root()
-    if scratch is not None:
-        scratch.mkdir(parents=True, exist_ok=True)
-    throwaway = Path(tempfile.mkdtemp(prefix="slab-dry-run-", dir=scratch))
-    workspace_before = os.environ.get(WORKSPACE_ENV)
-    os.environ[WORKSPACE_ENV] = str(throwaway)
-    try:
-        with Workspace(throwaway) as ws:
-            run_id, error, buffer = _run_script_in(
-                ws,
-                script_path,
-                name=name,
-                intent=intent,
-                session=session,
-                argv=argv,
-                capture_output=capture_output,
-                dry_run=True,
-            )
-            report = _dry_run_report(ws, run_id, error)
-    finally:
-        if workspace_before is None:
-            os.environ.pop(WORKSPACE_ENV, None)
-        else:
-            os.environ[WORKSPACE_ENV] = workspace_before
-        shutil.rmtree(throwaway, ignore_errors=True)
+    with ExitStack() as stack:
+        source: Workspace | None = None
+        if from_run is not None:
+            if root is None:
+                raise FoundationError("from_run needs the workspace that holds the run")
+            source = stack.enter_context(Workspace(root))
+        ws = stack.enter_context(_throwaway_workspace())
+        replay = None if source is None else _replaying(ws, source, str(from_run))
+        run_id, error, buffer = _run_script_in(
+            ws,
+            script_path,
+            name=name,
+            intent=intent,
+            session=session,
+            argv=argv,
+            capture_output=capture_output,
+            dry_run=True,
+            replay=replay,
+        )
+        report = _dry_run_report(
+            ws, run_id, error, from_run=None if replay is None else replay.run_id
+        )
     if capture_output:
         report["output"] = buffer.getvalue()
     return report
@@ -1106,7 +1205,9 @@ def shape_line(value: dict[str, Any]) -> str:
     return ", ".join(parts)
 
 
-def _dry_run_report(ws: Workspace, run_id: str, error: str | None) -> dict[str, Any]:
+def _dry_run_report(
+    ws: Workspace, run_id: str, error: str | None, *, from_run: str | None = None
+) -> dict[str, Any]:
     """The dry-run report, read from the throwaway run's records."""
     run = ws.runs.get(run_id)
     failure = run.failure
@@ -1122,7 +1223,9 @@ def _dry_run_report(ws: Workspace, run_id: str, error: str | None) -> dict[str, 
                 loaded = loads(ws.artifacts.get(label_hash).read_bytes())
                 if loaded is not None:
                     label = str(loaded)
-        if task.status is ExecutionStatus.COMPLETED:
+        if from_run is not None and task.cache_hit:
+            outcome = f"replayed from run {from_run}"
+        elif task.status is ExecutionStatus.COMPLETED:
             outcome = "setup ok"
         else:
             outcome = _first_error_line(task.failure, task.error)
@@ -1132,18 +1235,262 @@ def _dry_run_report(ws: Workspace, run_id: str, error: str | None) -> dict[str, 
             for ref in ws.runs.list_artifacts(run_id, role=ArtifactRole.INTERMEDIATE)
             if ref.name.startswith(label) and ref.name not in outputs
         )
+    # A rehearsal that emptied a LAMMPS loop gave its checks no data.
+    no_data = from_run is None and bool(lammps)
     return {
         "dry_run": True,
+        "from_run": from_run,
         "reached_end": run.status is ExecutionStatus.COMPLETED,
         "traceback": failure["traceback"] if failure is not None else error,
         "lammps": lammps,
         "checks": [
-            {"name": result.name, "passed": result.passed, "message": result.message}
+            _rehearsed_check(result, no_data=no_data, from_run=from_run)
             for result in ws.runs.list_check_results(run_id)
         ],
-        "checks_note": DRY_RUN_CHECKS_NOTE,
         "outputs": outputs,
     }
+
+
+def _rehearsed_check(
+    result: CheckResult, *, no_data: bool, from_run: str | None
+) -> dict[str, Any]:
+    """One check of a dry-run report; a check that raised names its line and the keys it read."""
+    entry: dict[str, Any] = {
+        "name": result.name,
+        "passed": result.passed,
+        "message": result.message,
+        "reading": check_reading(result, no_data=no_data, from_run=from_run),
+    }
+    evidence = result.evidence or {}
+    if entry["reading"].startswith("check raised") and evidence:
+        entry["evidence"] = {k: evidence[k] for k in ("line", "keys") if k in evidence}
+    return entry
+
+
+def dry_run_clean(report: dict[str, Any]) -> bool:
+    """Whether a dry run found nothing to fix before the real launch.
+
+    Clean means the script reached its end, every ``run_lammps`` set up
+    or was replayed, and no check raised. A check that failed is not a
+    finding, because a rehearsal's empty result is expected to fail one.
+
+    Examples:
+        >>> dry_run_clean({"reached_end": True, "lammps": [{"outcome": "setup ok"}],
+        ...                "checks": [{"reading": "expected in a dry run: ..."}]})
+        True
+        >>> dry_run_clean({"reached_end": True, "lammps": [],
+        ...                "checks": [{"reading": "check raised KeyError: 'rows'"}]})
+        False
+    """
+    return (
+        bool(report.get("reached_end"))
+        and all(
+            entry.get("outcome") == "setup ok"
+            or str(entry.get("outcome", "")).startswith("replayed from run")
+            for entry in report.get("lammps") or []
+        )
+        and not any(
+            str(check.get("reading", "")).startswith("check raised")
+            for check in report.get("checks") or []
+        )
+    )
+
+
+def check_reading(result: CheckResult, *, no_data: bool, from_run: str | None = None) -> str:
+    """What one check outcome of a rehearsal is worth, in one phrase.
+
+    A check that raised is a bug in the check whatever the data was, so
+    it reads as the exception and never as an expected failure.
+
+    Examples:
+        >>> raised = CheckResult(run_id="r", name="f", kind="error", passed=False,
+        ...                      message="check raised ZeroDivisionError: division by zero")
+        >>> check_reading(raised, no_data=True)
+        'check raised ZeroDivisionError: division by zero'
+        >>> held = CheckResult(run_id="r", name="held", passed=True)
+        >>> check_reading(held, no_data=True)
+        'passed on no data; not evidence'
+        >>> check_reading(held.model_copy(update={"passed": False}), no_data=True)
+        'expected in a dry run: LAMMPS integrated no steps'
+        >>> check_reading(held, no_data=False, from_run="ab12")
+        'passed on the cached result of run ab12'
+    """
+    if result.kind == "error" and result.message.startswith("check raised"):
+        return result.message
+    verdict = "passed" if result.passed else "failed"
+    if from_run is not None:
+        return f"{verdict} on the cached result of run {from_run}"
+    if not no_data:
+        return verdict
+    return DRY_RUN_CHECK_PASSED if result.passed else DRY_RUN_CHECK_FAILED
+
+
+def reverify_run(
+    ws: Workspace,
+    run_id: str,
+    script: str | os.PathLike[str],
+    *,
+    capture_output: bool = False,
+) -> dict[str, Any]:
+    """Run a script's checks again on a run's stored results: ``slab runs reverify``.
+
+    The script runs in a throwaway workspace, and every task call takes
+    the named run's own result (see :class:`foundation.runtime.Replay`),
+    so no engine starts and no new run is recorded. The checks the
+    script registers are then stored on the named run as a new
+    verification pass. The run moves to verified when every check of
+    the pass passed, and stays quarantined when one failed. The earlier
+    passes stay in the store, and the script is kept on the run as
+    ``reverify-<pass>-<name>``.
+
+    A task call whose inputs differ from the run's (a changed LAMMPS
+    script, say) is refused with :class:`~foundation.errors.ReplayError`
+    naming the task, because a changed task needs a new computation.
+
+    Returns ``run_id``, ``pass_no``, ``state``, ``checks_passed``,
+    ``checks_total``, ``checks`` (see :func:`check_entry`),
+    ``earlier_passes`` (see :func:`pass_tallies`), ``tasks_replayed``,
+    ``script`` (the name the script was kept under), and ``output`` with
+    *capture_output*.
+
+    Raises:
+        RunStateError: The run is not quarantined.
+        ReplayError: A task call has no matching result in the run.
+        FoundationError: The run did not complete, the script raised
+            before its checks ran, or it registers no check.
+    """
+    script_path = Path(script).resolve()
+    if not script_path.exists():
+        raise FileNotFoundError(f"no such workflow script: {script_path}")
+    run = ws.runs.get(run_id)
+    if run.state is not LifecycleState.QUARANTINED:
+        raise RunStateError(run.id, run.state, "re-verify")
+    if run.status is not ExecutionStatus.COMPLETED:
+        raise FoundationError(
+            f"run {run.id} is {run.status.value}; re-verify runs checks on the results of "
+            f"a completed run, so relaunch the script (its finished tasks cache-hit)"
+        )
+    with _throwaway_workspace() as scratch:
+        replay = _replaying(scratch, ws, run.id)
+        replay_id, error, buffer = _run_script_in(
+            scratch,
+            script_path,
+            name=run.name,
+            intent=None,
+            session=None,
+            argv=(),
+            capture_output=capture_output,
+            replay=replay,
+        )
+        replayed = scratch.runs.get(replay_id)
+        results = scratch.runs.list_check_results(replay_id)
+    if replayed.status is not ExecutionStatus.COMPLETED:
+        trace = replayed.failure["traceback"] if replayed.failure is not None else error
+        raise FoundationError(
+            f"{script_path.name} raised before its checks ran, so no pass was recorded on "
+            f"run {run.id}:\n{str(trace or '').rstrip()}"
+        )
+    if not results:
+        raise FoundationError(
+            f"{script_path.name} registers no @check, so there is nothing to re-verify"
+        )
+    earlier = pass_tallies(ws.runs.list_check_results(run.id, all_passes=True))
+    pass_no = (earlier[-1]["pass_no"] if earlier else 0) + 1
+    stored = ws.runs.add_check_results(
+        run.id, [result.model_copy(update={"pass_no": pass_no}) for result in results]
+    )
+    kept = f"reverify-{pass_no}-{script_path.name}"
+    digest = ws.artifacts.put(script_path)
+    ws.runs.add_artifact(
+        run.id,
+        name=kept,
+        role=ArtifactRole.INPUT,
+        hash=digest,
+        size_bytes=ws.artifacts.size(digest),
+    )
+    passed = sum(1 for result in stored if result.passed)
+    if passed == len(stored):
+        # suppress: someone moved the run meanwhile; the state read below says where
+        with suppress(IllegalTransitionError):
+            ws.runs.transition(
+                run.id,
+                LifecycleState.VERIFIED,
+                actor="reverify",
+                reason=f"pass {pass_no}: {passed}/{len(stored)} assertions passed",
+                expected=LifecycleState.QUARANTINED,
+            )
+    answer: dict[str, Any] = {
+        "run_id": run.id,
+        "pass_no": pass_no,
+        "state": ws.runs.get(run.id).state.value,
+        "checks_passed": passed,
+        "checks_total": len(stored),
+        "checks": [check_entry(result) for result in stored],
+        "earlier_passes": earlier,
+        "tasks_replayed": len(replay.taken),
+        "script": kept,
+    }
+    if capture_output:
+        answer["output"] = buffer.getvalue()
+    return answer
+
+
+def reverify_lines(answer: dict[str, Any]) -> list[str]:
+    r"""The reply to a re-verify, as the CLI, Mason, and MCP print it.
+
+    Examples:
+        >>> print("\n".join(reverify_lines({"run_id": "ab12", "pass_no": 2, "state": "verified",
+        ...     "checks_passed": 1, "checks_total": 1, "tasks_replayed": 3,
+        ...     "earlier_passes": [{"pass_no": 1, "passed": 0, "total": 1}],
+        ...     "checks": [{"name": "drift", "passed": True, "message": "returned True"}]})))
+        run ab12: pass 2 verified, 1/1 checks passed, 3 task result(s) replayed
+        earlier: pass 1 0/1
+          drift passed: returned True
+    """
+    lines = [
+        f"run {answer['run_id']}: pass {answer['pass_no']} {answer['state']}, "
+        f"{answer['checks_passed']}/{answer['checks_total']} checks passed, "
+        f"{answer['tasks_replayed']} task result(s) replayed"
+    ]
+    if answer.get("earlier_passes"):
+        lines.append(
+            "earlier: "
+            + ", ".join(
+                f"pass {p['pass_no']} {p['passed']}/{p['total']}" for p in answer["earlier_passes"]
+            )
+        )
+    for check in answer["checks"]:
+        verdict = "passed" if check["passed"] else "failed"
+        lines.append(f"  {check['name']} {verdict}: {check['message']}")
+        evidence = check.get("evidence")
+        if evidence:
+            lines.extend(f"    {line}" for line in evidence_lines(evidence))
+    return lines
+
+
+def evidence_lines(evidence: dict[str, Any]) -> list[str]:
+    r"""A failed check's evidence as indented text lines.
+
+    Examples:
+        >>> for line in evidence_lines({"source": "def f():\n    return r['n'] > 0",
+        ...     "keys": {"r": ["rows"]}, "raised": "KeyError: 'n'",
+        ...     "line": "md.py:9: return r['n'] > 0"}):
+        ...     print(line)
+        raised KeyError: 'n' at md.py:9: return r['n'] > 0
+        keys of r: rows
+        source:
+          def f():
+              return r['n'] > 0
+    """
+    lines: list[str] = []
+    if evidence.get("raised"):
+        lines.append(f"raised {evidence['raised']} at {evidence.get('line')}")
+    for var, keys in (evidence.get("keys") or {}).items():
+        lines.append(f"keys of {var}: {', '.join(keys) or 'none'}")
+    if evidence.get("source"):
+        lines.append("source:")
+        lines.extend(f"  {line}" for line in str(evidence["source"]).splitlines())
+    return lines
 
 
 def _first_error_line(failure: dict[str, Any] | None, error: str | None) -> str:

@@ -304,7 +304,12 @@ class CheckResult(BaseModel):
 
     Produced when a run's ``@check`` hooks are evaluated at completion. All
     results passing (and at least one existing) is what gates
-    ``quarantined -> verified``.
+    ``quarantined -> verified``. ``pass_no`` numbers the verification pass
+    the result belongs to: 1 at completion, one more for each re-verify.
+    ``evidence`` is set on a failure that named no observed value: the
+    check's source, the keys of the dicts it read, and for a raise the
+    exception and the line that raised (see
+    :func:`foundation.runtime.check_evidence`).
 
     Examples:
         >>> r = CheckResult(run_id="r", name="forces_converged", kind="converged",
@@ -323,6 +328,8 @@ class CheckResult(BaseModel):
     observed: Any = None
     expected: Any = None
     at: datetime = Field(default_factory=utcnow)
+    pass_no: int = Field(default=1, ge=1)
+    evidence: dict[str, Any] | None = None
 
 
 class Reservation(BaseModel):

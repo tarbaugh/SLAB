@@ -1804,7 +1804,7 @@ def test_a_dry_run_records_its_event_and_a_real_launch_without_one_warns(
 
     rehearsed = box.dispatch(_call("launch_workflow", script="wf.py", dry_run=True))
     assert rehearsed.startswith("dry run of wf.py: the script reached its end")
-    assert "held passed" in rehearsed and "expected to fail in a dry run" in rehearsed
+    assert "held passed: completed without assertion errors\n" in rehearsed
     assert "script output:\nprobed 4" in rehearsed
     assert "run 01" not in rehearsed  # no run id: nothing was recorded
     (event,) = _dry_run_events(session)
@@ -1823,6 +1823,69 @@ def test_a_dry_run_records_its_event_and_a_real_launch_without_one_warns(
     script.write_text(DRY_RUN_SCRIPT.replace("probe(4)", "probe(5)"))
     edited = box.dispatch(_call("launch_workflow", script="wf.py", intent="edited"))
     assert edited.startswith("warning: no dry run")
+
+
+# The task writes a line each time it executes: a replay adds none.
+MD_SCRIPT = """\
+from pathlib import Path
+from foundation import check, task
+
+@task
+def simulate(script):
+    with Path(__file__).with_name("calls.log").open("a") as handle:
+        handle.write("ran\\n")
+    return {{"rows": [{{"Temp": 300.0}}, {{"Temp": 302.0}}]}}
+
+result = simulate("run 1000")
+
+@check
+def thermostat_held():
+    return abs(result["rows"][-1]["Temp"] - result["rows"][0]["Temp"]) < {tolerance}
+"""
+
+
+def test_reverify_run_verifies_a_run_a_wrong_check_quarantined(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    box = build_toolbox(session)
+    (tmp_path / "md.py").write_text(MD_SCRIPT.format(tolerance=1.0))
+    (tmp_path / "md_fixed.py").write_text(MD_SCRIPT.format(tolerance=5.0))
+    launched = box.dispatch(_call("launch_workflow", script="md.py", intent="nvt"))
+    assert "state=quarantined" in launched
+    with Workspace(session.workspace_root) as ws:
+        (run,) = ws.runs.list_runs()
+    shown = box.dispatch(_call("show_run", run_id=run.id))
+    assert '"evidence"' in shown and "def thermostat_held" in shown
+
+    rehearsed = box.dispatch(
+        _call("launch_workflow", script="md_fixed.py", dry_run=True, from_run=run.id[:8])
+    )
+    assert rehearsed.startswith(f"dry run of md_fixed.py on the cached results of run {run.id}")
+    assert f"(passed on the cached result of run {run.id})" in rehearsed
+    assert _dry_run_events(session)[-1]["ok"] is True
+
+    answer = box.dispatch(_call("reverify_run", run_id=run.id[:8], script="md_fixed.py"))
+    assert answer.startswith(f"run {run.id}: pass 2 verified, 1/1 checks passed")
+    assert "earlier: pass 1 0/1" in answer
+    with Workspace(session.workspace_root) as ws:
+        assert len(ws.runs.list_runs()) == 1
+        assert ws.runs.get(run.id).state.value == "verified"
+    assert (tmp_path / "calls.log").read_text() == "ran\n"
+
+
+def test_reverify_run_names_the_task_whose_input_changed(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    box = build_toolbox(session)
+    (tmp_path / "md.py").write_text(MD_SCRIPT.format(tolerance=1.0))
+    changed = MD_SCRIPT.format(tolerance=5.0).replace("run 1000", "run 2000")
+    (tmp_path / "md_longer.py").write_text(changed)
+    box.dispatch(_call("launch_workflow", script="md.py", intent="nvt"))
+    with Workspace(session.workspace_root) as ws:
+        (run,) = ws.runs.list_runs()
+    answer = box.dispatch(_call("reverify_run", run_id=run.id, script="md_longer.py"))
+    assert answer.startswith("could not re-verify: task simulate (call 1) differs")
+    assert "its input script changed" in answer
+    refused = box.dispatch(_call("launch_workflow", script="md.py", from_run=run.id))
+    assert refused.startswith("from_run rehearses a script against a run's cached results")
 
 
 def test_a_failing_dry_run_records_a_failed_event_and_names_the_exception(

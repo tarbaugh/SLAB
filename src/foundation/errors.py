@@ -408,6 +408,16 @@ class ResourcesError(SlabResourcesError, FoundationError):
     """
 
 
+class ReplayError(FoundationError):
+    """A replayed task call has no matching result in the run it replays.
+
+    A re-verify and a dry run from a run answer every ``@task`` call
+    from the named run's own task results. A call whose inputs or code
+    differ from the run's, or that the run never completed, is refused
+    by this error, and the message names the task and what differs.
+    """
+
+
 class StorageError(FoundationError):
     """A storage-layer failure (bad data, I/O, or invariant violation)."""
 

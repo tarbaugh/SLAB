@@ -588,6 +588,54 @@ def _three_running(root: Path) -> dict[str, str]:
     return {"dead": dead.id, "live": live.id, "away": away.id, "pid": str(child.pid)}
 
 
+REVERIFY_SCRIPT = """\
+from foundation import check, task
+
+@task
+def simulate(script):
+    return {{"rows": [300.0, 302.0]}}
+
+result = simulate("run 1000")
+
+@check
+def thermostat_held():
+    return abs(result["rows"][-1] - result["rows"][0]) < {tolerance}
+"""
+
+
+def test_runs_reverify_verifies_a_run_and_run_from_run_rehearses_on_its_results(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "ws"
+    wrong = tmp_path / "md.py"
+    wrong.write_text(REVERIFY_SCRIPT.format(tolerance=1.0))
+    fixed = tmp_path / "md_fixed.py"
+    fixed.write_text(REVERIFY_SCRIPT.format(tolerance=5.0))
+    launched = runner.invoke(app, ["run", str(wrong), "-w", str(root)])
+    assert "state=quarantined" in launched.output, launched.output
+    run_id = launched.output.split()[1]
+
+    shown = runner.invoke(app, ["show", run_id, "-w", str(root)])
+    assert "    [x] thermostat_held: returned False\n" in shown.output
+    assert "        keys of result: rows\n" in shown.output
+    assert "        source:\n" in shown.output
+
+    refused = runner.invoke(app, ["run", str(fixed), "-w", str(root), "--from-run", run_id])
+    assert refused.exit_code == 1 and "pass it with --dry-run" in refused.output
+    rehearsed = runner.invoke(
+        app, ["run", str(fixed), "-w", str(root), "--dry-run", "--from-run", run_id[:8]]
+    )
+    assert rehearsed.exit_code == 0, rehearsed.output
+    assert f'"reading": "passed on the cached result of run {run_id}"' in rehearsed.output
+
+    result = runner.invoke(app, ["runs", "reverify", run_id[:8], str(fixed), "-w", str(root)])
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith(f"run {run_id}: pass 2 verified, 1/1 checks passed")
+    shown = runner.invoke(app, ["show", run_id, "-w", str(root)])
+    assert "checks:  1/1 passed (pass 2)" in shown.output
+    assert "earlier pass 1: 0/1" in shown.output
+
+
 def test_runs_reap_marks_the_dead_and_names_what_it_did_not_check(tmp_path: Path) -> None:
     root = tmp_path / "ws"
     ids = _three_running(root)

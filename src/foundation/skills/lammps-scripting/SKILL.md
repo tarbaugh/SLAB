@@ -88,8 +88,10 @@ Dry-run every new or edited script before its first real launch:
 `launch_workflow(script="md.py", dry_run=true)` (or `slab run --dry-run
 md.py`). The script runs to its end or its first exception in a
 throwaway workspace, every `run_lammps` call sets LAMMPS up and
-integrates no step, and the reply lists each LAMMPS error, the checks
-(expected to fail, because no step ran), and the outputs. It costs one
+integrates no step, and the reply lists each LAMMPS error, the checks,
+and the outputs. A check that failed is expected to, because no step
+ran, and a check that passed on no data is not evidence. A check that
+raised is a bug in the check: fix it before the real launch. It costs one
 LAMMPS start and catches a syntax error in the third stage and a wrong
 result key in the analysis before the MD leg is paid for. In a dry run
 each thermo table holds one row (step 0) and each `fix ave/time` file
@@ -405,6 +407,25 @@ atom count equals the structure's), the tail mean of the temperature
 sits within a stated tolerance of the target, the tail of the total
 energy in NVE does not drift, and the pressure under NPT averages to
 the target. State the tolerances before the run.
+
+Return `(passed, observed, expected)` from each check, as in
+`return abs(mean - 300.0) < 15.0, round(mean, 1), "300 +/- 15 K"`. The
+record then states the value the check judged. A bare `True` or
+`False` leaves a record that says only `returned False`; the store
+then keeps the check's source and the keys of the dicts it read, but
+not the number.
+
+A check can be wrong while the physics is right: a tolerance too
+tight, a key the result does not have, a zero denominator on a short
+table. Do not relaunch the run. Fix the check, rehearse the fixed
+script on the run's cached results with
+`launch_workflow(script=..., dry_run=true, from_run=<run>)`, then call
+`reverify_run(run_id=<run>, script=...)` (or `slab runs reverify <run>
+<script>`). Every task call takes the run's own result, no engine
+starts, and no new run is recorded; the checks become a new
+verification pass, and the run moves to verified when all pass. Change
+only the checks: a task whose inputs changed is refused, because it
+needs a new computation.
 
 A slope, a fit, or any number that needs more than the ends and the
 tail reads the rows through `series(result, -1)` for the last thermo

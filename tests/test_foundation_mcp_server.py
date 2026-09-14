@@ -24,6 +24,7 @@ EXPECTED_TOOLS = {
     "expire_runs",
     "gc",
     "launch_workflow",
+    "reverify_run",
     "wait_for_run",
     "list_engines",
     "free_resources",
@@ -139,6 +140,41 @@ def test_launch_workflow(root: Path, tmp_path: Path) -> None:
     assert "result: 15" in result["output"]
     with Workspace(root) as ws:
         assert ws.runs.get(result["run_id"]).intent == "launched by agent"
+
+
+def test_reverify_run_and_a_dry_run_from_a_run(root: Path, tmp_path: Path) -> None:
+    """A run a wrong check quarantined: the fixed checks rehearse on its
+    cached result, then a re-verify moves it to verified with no new run."""
+    body = (
+        "from foundation import check, task\n"
+        "@task\ndef simulate(script):\n    return {'rows': [300.0, 302.0]}\n"
+        "result = simulate('run 1000')\n"
+        "@check\ndef thermostat_held():\n"
+        "    return abs(result['rows'][-1] - result['rows'][0]) < TOLERANCE\n"
+    )
+    (tmp_path / "md.py").write_text("TOLERANCE = 1.0\n" + body)
+    (tmp_path / "md_fixed.py").write_text("TOLERANCE = 5.0\n" + body)
+    server = build_server(root, project=tmp_path)
+    launched = _call(server, "launch_workflow", {"script_path": str(tmp_path / "md.py")})
+    assert launched["state"] == "quarantined"
+    run_id = launched["run_id"]
+    shown = _call(server, "show_run", {"run_id": run_id})
+    assert shown["checks"][0]["evidence"]["keys"] == {"result": ["rows"]}
+
+    rehearsal = _call(
+        server,
+        "launch_workflow",
+        {"script_path": str(tmp_path / "md_fixed.py"), "dry_run": True, "from_run": run_id},
+    )
+    assert rehearsal["from_run"] == run_id
+    assert rehearsal["checks"][0]["reading"] == f"passed on the cached result of run {run_id}"
+
+    answer = _call(
+        server, "reverify_run", {"run_id": run_id[:8], "script_path": str(tmp_path / "md_fixed.py")}
+    )
+    assert (answer["state"], answer["pass_no"], answer["tasks_replayed"]) == ("verified", 2, 1)
+    with Workspace(root) as ws:
+        assert len(ws.runs.list_runs()) == 1
 
 
 def test_launch_workflow_records_the_commands_the_run_resolved(root: Path, tmp_path: Path) -> None:
@@ -347,7 +383,7 @@ def test_the_size_arguments_match_the_resident_agents(root: Path, tmp_path: Path
         name: set(tool.parameters["properties"])
         for name, tool in build_toolbox(session).tools.items()
     }
-    launch = {"ntasks", "threads", "gpus"}
+    launch = {"ntasks", "threads", "gpus", "dry_run", "from_run"}
     assert launch <= over_mcp["launch_workflow"] and launch <= in_mason["launch_workflow"]
     sizes = {"nodes", "ntasks_per_node", "cpus_per_task", "gpus_per_node", "mem"}
     assert sizes <= over_mcp["submit_job"] and sizes <= in_mason["submit_job"]

@@ -295,3 +295,42 @@ class ArtifactStore:
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp.chmod(0o444)
         os.replace(tmp, dest)
+
+
+class ReadThroughStore(ArtifactStore):
+    """An artifact store that writes to its own root and reads through to another.
+
+    A replay runs a script in a throwaway workspace against a real run's
+    task results. The throwaway store takes every write, and a read of a
+    hash it does not hold falls back to the real store, so a cached
+    output and the parsed files a result names resolve without a copy.
+
+    Examples:
+        >>> import tempfile
+        >>> real = ArtifactStore(tempfile.mkdtemp())
+        >>> digest = real.put_bytes(b"thermo")
+        >>> scratch = ReadThroughStore(tempfile.mkdtemp(), fallback=real)
+        >>> scratch.has(digest), scratch.get(digest).read_bytes(), scratch.size(digest)
+        (True, b'thermo', 6)
+        >>> real.has(scratch.put_bytes(b"scratch only"))
+        False
+    """
+
+    def __init__(self, root: str | os.PathLike[str], *, fallback: ArtifactStore) -> None:
+        super().__init__(root)
+        self.fallback = fallback
+
+    def get(self, digest: str) -> Path:
+        try:
+            return super().get(digest)
+        except ArtifactNotFoundError:
+            return self.fallback.get(digest)
+
+    def has(self, digest: str) -> bool:
+        return super().has(digest) or self.fallback.has(digest)
+
+    def size(self, digest: str) -> int:
+        try:
+            return super().size(digest)
+        except ArtifactNotFoundError:
+            return self.fallback.size(digest)

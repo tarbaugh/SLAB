@@ -72,6 +72,7 @@ TOOL_VOCABULARY = frozenset(
         "show_run",
         "read_artifact",
         "launch_workflow",
+        "reverify_run",
         "wait_for_run",
         "list_engines",
         "free_resources",
@@ -750,15 +751,23 @@ def _without_failure_records(details: dict[str, Any]) -> dict[str, Any]:
 
     The ``failure-records`` switch off: a failed run and a failed task keep
     their status and one-line error, and lose the trimmed traceback and
-    diagnostic notes the record carries.
+    diagnostic notes the record carries. A failed check keeps its message
+    and loses its evidence.
 
     Examples:
         >>> stripped = _without_failure_records({"run": {"id": "r", "failure": {"m": 1}},
-        ...     "tasks": [{"seq": 1, "error": "boom", "failure": {"message": "boom"}}]})
-        >>> stripped["run"], stripped["tasks"]
-        ({'id': 'r'}, [{'seq': 1, 'error': 'boom'}])
+        ...     "tasks": [{"seq": 1, "error": "boom", "failure": {"message": "boom"}}],
+        ...     "checks": [{"name": "c", "message": "returned False", "evidence": {}}]})
+        >>> stripped["run"], stripped["tasks"], stripped["checks"]
+        ({'id': 'r'}, [{'seq': 1, 'error': 'boom'}], [{'name': 'c', 'message': 'returned False'}])
     """
     stripped = dict(details)
+    checks = stripped.get("checks")
+    if isinstance(checks, list):
+        stripped["checks"] = [
+            {k: v for k, v in c.items() if k != "evidence"} if isinstance(c, dict) else c
+            for c in checks
+        ]
     run = stripped.get("run")
     if isinstance(run, dict):
         stripped["run"] = {k: v for k, v in run.items() if k != "failure"}
@@ -1312,8 +1321,9 @@ def _dry_run_passed(session: MasonSession, digest: str) -> bool:
 def _dry_run_text(script: Path, result: dict[str, Any], held: str) -> str:
     """The reply to a dry run: what reached, each LAMMPS setup, the checks, the outputs."""
     reached = result.get("reached_end")
+    source = f" on the cached results of run {result['from_run']}" if result.get("from_run") else ""
     lines = [
-        f"dry run of {script.name}: "
+        f"dry run of {script.name}{source}: "
         + ("the script reached its end" if reached else "the script stopped at an exception")
     ]
     for entry in result.get("lammps") or []:
@@ -1322,11 +1332,15 @@ def _dry_run_text(script: Path, result: dict[str, Any], held: str) -> str:
         lines.append(str(result["traceback"]).rstrip())
     checks = result.get("checks") or []
     if checks:
-        lines.append("checks (" + str(result.get("checks_note", "")) + "):")
+        lines.append("checks:")
         for check in checks:
             verdict = "passed" if check.get("passed") else "failed"
-            message = f": {check['message']}" if check.get("message") else ""
-            lines.append(f"  {check.get('name')} {verdict}{message}")
+            message = check.get("message") or ""
+            reading = check.get("reading") or ""
+            if reading not in ("", verdict, message):
+                message = f"{message} ({reading})" if message else reading
+            lines.append(f"  {check.get('name')} {verdict}" + (f": {message}" if message else ""))
+            lines.extend(f"    {line}" for line in _ops.evidence_lines(check.get("evidence") or {}))
     outputs = result.get("outputs") or []
     lines.append("outputs the script would keep: " + (", ".join(outputs) if outputs else "none"))
     lines.append(f"resources held: {held}")
@@ -1717,6 +1731,105 @@ def _add_workflow_tools(
             log_path=Path(script).with_suffix(".launch.log") if not wait else None,
         )
 
+    def _rehearse_from_run(
+        script: Path, wanted: str, args: list[str], dry_run: bool, name: str | None
+    ) -> str:
+        """A dry run whose task calls take a run's cached results: no slice, no engine."""
+        if not dry_run:
+            return (
+                "from_run rehearses a script against a run's cached results; pass it "
+                "with dry_run=true, or call reverify_run to re-verify the run"
+            )
+        try:
+            script_text = Path(script).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            script_text = ""
+        event: dict[str, Any] = {
+            "kind": "launch",
+            "tool": "launch_workflow",
+            "command": shlex.join(["slab", "run", str(script), *args, "--dry-run",
+                                   "--from-run", wanted]),
+            "script": str(script),
+            "args": args,
+            "cwd": str(session.cwd),
+            "dry_run": True,
+            "from_run": wanted,
+        }
+        try:
+            with _open_workspace(session) as ws:
+                run_id, _ = _resolve_run(ws, wanted)
+            result = _ops.launch_script(
+                session.workspace_root,
+                script,
+                name=name,
+                session=session.session_id,
+                argv=tuple(args),
+                capture_output=True,
+                dry_run=True,
+                from_run=run_id,
+            )
+        except (FoundationError, SlabError, OSError) as e:
+            record_command(session, **event, error=str(e))
+            return f"could not rehearse from run {wanted}: {e}"
+        record_command(session, **event)
+        # The run's own LAMMPS input set up and ran already, and the replay
+        # refuses a changed one: a clean replay counts as a dry run.
+        ok = _ops.dry_run_clean(result)
+        digest = hashlib.sha256(script_text.encode("utf-8")).hexdigest()
+        session.record({"type": "dry_run", "script": str(script), "digest": digest, "ok": ok})
+        return _dry_run_text(script, result, "nothing (no engine started)")
+
+    def reverify_run(arguments: dict[str, Any]) -> str:
+        script = _resolve(session, str(arguments["script"]))
+        if denied := _out_of_scope(session, script, read_roots):
+            return denied
+        try:
+            with _open_workspace(session) as ws:
+                run_id, note = _resolve_run(ws, str(arguments["run_id"]))
+                answer = _ops.reverify_run(ws, run_id, script, capture_output=True)
+        except (FoundationError, SlabError, OSError) as e:
+            return f"could not re-verify: {e}"
+        if not enabled(session.agent, "failure-records"):
+            answer["checks"] = [
+                {k: v for k, v in check.items() if k != "evidence"} for check in answer["checks"]
+            ]
+        lines = _ops.reverify_lines(answer)
+        output = str(answer.get("output") or "").rstrip()
+        if output:
+            lines.append(f"script output:\n{output}")
+        return note + "\n".join(lines)
+
+    box.add(
+        Tool(
+            name="reverify_run",
+            description=(
+                "Run a script's @check functions again on a quarantined run's stored "
+                "results, without a relaunch. Use it when a check was wrong and the "
+                "physics was right: fix the check in the script, then call this with "
+                "the run and the script. Every task call takes the run's own result, "
+                "so no engine starts and no new run is recorded; the checks become a "
+                "new verification pass on the run, which moves to verified when all "
+                "pass. A task whose inputs changed (an edited LAMMPS input) is refused "
+                "with the task named: that needs a real launch."
+            ),
+            parameters=_schema(
+                {
+                    "run_id": {
+                        "type": "string",
+                        "description": "the quarantined run: id, prefix, or this session's name",
+                    },
+                    "script": {
+                        "type": "string",
+                        "description": "the workflow script with the fixed checks",
+                    },
+                },
+                ["run_id", "script"],
+            ),
+            handler=reverify_run,
+            requires_approval=True,
+        )
+    )
+
     def launch_workflow(arguments: dict[str, Any]) -> str:
         from foundation._ops import launch_script
 
@@ -1731,6 +1844,8 @@ def _add_workflow_tools(
         name = str(arguments["name"]) if arguments.get("name") else None
         intent = str(arguments["intent"]) if arguments.get("intent") else None
         dry_run = bool(arguments.get("dry_run"))
+        if arguments.get("from_run"):
+            return _rehearse_from_run(script, str(arguments["from_run"]), args, dry_run, name)
         # A dry run returns at once, so it never detaches.
         background = bool(arguments.get("background")) and not dry_run
         sized = any(arguments.get(key) is not None for key in ("ntasks", "threads", "gpus"))
@@ -1821,9 +1936,7 @@ def _add_workflow_tools(
             # touched it, and the child released it on its way out.
             _release(reservation.id)
             record_command(session, **launch_event)
-            ok = bool(result.get("reached_end")) and all(
-                entry.get("outcome") == "setup ok" for entry in result.get("lammps") or []
-            )
+            ok = _ops.dry_run_clean(result)
             session.record(
                 {"type": "dry_run", "script": str(script), "digest": digest, "ok": ok}
             )
@@ -1875,9 +1988,12 @@ def _add_workflow_tools(
                 "launch of a new or edited script, pass dry_run=true: the script "
                 "runs to its end or its first exception in a throwaway workspace, "
                 "every run_lammps call sets LAMMPS up and integrates no step, and "
-                "the reply lists each LAMMPS error, the checks (expected to fail), "
-                "and the outputs; it costs one LAMMPS start and catches script and "
-                "post-processing errors before the MD leg."
+                "the reply lists each LAMMPS error, each check with what its outcome "
+                "is worth (a raise is a bug in the check; a pass on no data is not "
+                "evidence), and the outputs; it costs one LAMMPS start and catches "
+                "script and post-processing errors before the MD leg. With from_run "
+                "and dry_run=true, every task call takes that run's cached result "
+                "instead, so the checks run on real data and no engine starts."
             ),
             parameters=_schema(
                 {
@@ -1900,6 +2016,13 @@ def _add_workflow_tools(
                         "description": (
                             "rehearse the script in a throwaway workspace: LAMMPS "
                             "sets up and integrates no step; nothing is recorded"
+                        ),
+                    },
+                    "from_run": {
+                        "type": "string",
+                        "description": (
+                            "with dry_run=true: a run whose cached task results answer "
+                            "every task call, so the checks run on real data"
                         ),
                     },
                     "ntasks": {

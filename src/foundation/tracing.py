@@ -198,8 +198,17 @@ def _traced_call(
         }
     )
 
-    cached = active.runs.find_cached_task(cache_key) if cacheable else None
-    if cached is not None and all(active.artifacts.has(h) for h in cached.outputs.values()):
+    if active.replay is not None:
+        # A replay never executes the task: the source run's result answers,
+        # or the call is refused.
+        cached: TaskRecord | None = active.replay.take(task_name, cache_key, input_hashes, recipe)
+        replayed = True
+    else:
+        cached = active.runs.find_cached_task(cache_key) if cacheable else None
+        replayed = False
+    if cached is not None and (
+        replayed or all(active.artifacts.has(h) for h in cached.outputs.values())
+    ):
         now = utcnow()
         active.runs.add_task(
             TaskRecord(

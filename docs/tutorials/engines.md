@@ -428,16 +428,17 @@ command in order, prints one thermo row and one loop line per loop, and
 integrates no step. The result keeps its real shape. Each table has one
 row, `steps == 0`, and `thermo` is the step-0 row, so the Python after
 the call is exercised. A physics check judges a state nothing has
-evolved, so expect it to fail, and the report says so. A `fix ave/time`
+evolved, so a failure is expected and a pass is not evidence, and the
+report says which for each check. A `fix ave/time`
 file holds only its header lines, so `series` on it is empty and an
 analysis that indexes its rows stops there; write it to survive an
 empty series. A `dump` file holds its step-0 frame, and `write_data`
 and `write_restart` files are complete.
 
 The command prints a JSON report after a `dry run:` line and exits 0
-when the script reached its end and every `run_lammps` set up cleanly,
-else 1. Executed for real, on a laptop, against a LAMMPS build from
-22 Jul 2025:
+when the script reached its end, every `run_lammps` set up cleanly, and
+no check raised, else 1. Executed for real, on a laptop, against a
+LAMMPS build from 22 Jul 2025:
 
 <!-- no-verify -->
 ```python
@@ -483,6 +484,7 @@ tail mean T = 300.0 K
 dry run:
 {
   "dry_run": true,
+  "from_run": null,
   "reached_end": true,
   "traceback": null,
   "lammps": [
@@ -495,10 +497,10 @@ dry run:
     {
       "name": "the_thermostat_held",
       "passed": true,
-      "message": "completed without assertion errors"
+      "message": "completed without assertion errors",
+      "reading": "passed on no data; not evidence"
     }
   ],
-  "checks_note": "physics checks are expected to fail in a dry run: LAMMPS integrated no steps",
   "outputs": [
     "ar.in",
     "ar.log",
@@ -513,13 +515,20 @@ dry run:
 ```
 
 Here the check passed, because the step-0 temperature is the one
-`velocity create` set. `reached_end` says the script ran to its last
-line, `lammps` lists each `run_lammps` call with `setup ok` or the
-`ERROR` line LAMMPS printed, `checks` shows every check with its
-outcome, and `outputs` names the files the real run would keep. A
-script that dies after `run_lammps` reports `reached_end: false` and
-the traceback. In Python, `launch_script` and `launch_child` take the
-same `dry_run` switch.
+`velocity create` set, so its reading says the pass is not evidence.
+`reached_end` says the script ran to its last line, `lammps` lists each
+`run_lammps` call with `setup ok` or the `ERROR` line LAMMPS printed,
+`checks` shows every check with its outcome and its `reading`, and
+`outputs` names the files the real run would keep. A check that raised
+reads as the exception, because that is a bug in the check and not an
+expected failure. A script that dies after `run_lammps` reports
+`reached_end: false` and the traceback. In Python, `launch_script` and
+`launch_child` take the same `dry_run` switch.
+
+To test the checks on real data, rehearse against a finished run with
+`--from-run <run>`. Every task call then takes that run's cached result
+and no engine starts. [Debugging failures](debugging-failures.md#a-check-failed-on-good-physics)
+walks it, and the re-verify that follows it.
 
 ## Per-engine environments
 

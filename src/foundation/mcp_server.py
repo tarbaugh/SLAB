@@ -212,7 +212,9 @@ def build_server(
     @_surfaced
     def show_run(run_id: str) -> dict[str, Any]:
         """Everything about one run (id or unique prefix): state, intent,
-        check results with the observed/expected values they compared, traced
+        check results with the observed/expected values they compared (a
+        failed check that named none carries 'evidence': its source, the keys
+        of the dicts it read, and the line that raised), traced
         tasks with recipes, artifacts (and whether their bytes are still
         stored), and the lifecycle history. Failed runs and tasks carry a
         'failure' record — exception type, message, trimmed traceback, and
@@ -295,6 +297,7 @@ def build_server(
         threads: int | None = None,
         gpus: int | None = None,
         dry_run: bool = False,
+        from_run: str | None = None,
     ) -> dict[str, Any]:
         """Execute a plain-Python workflow script in a fresh traced run that
         carries this server's session id. Always pass intent — why this run
@@ -302,7 +305,11 @@ def build_server(
         dry_run=True: the script runs to its end or its first exception in a
         throwaway workspace, every run_lammps call sets LAMMPS up and
         integrates no step, nothing is recorded, and the result lists each
-        LAMMPS error, the checks (expected to fail), and the outputs. A real
+        LAMMPS error, each check with a 'reading' of what its outcome is
+        worth (a raise is a bug in the check; a pass on no data is not
+        evidence), and the outputs. With dry_run=True and from_run (a run
+        id), every task call takes that run's cached result instead, so the
+        checks run on real data and no engine starts. A real
         launch of a script text this session never dry-ran carries a
         'warning' field. Size the launch with ntasks (MPI ranks), threads (per rank),
         and gpus: the server reserves that slice of this host before the
@@ -328,6 +335,35 @@ def build_server(
         except OSError:
             script_text = ""  # launch_script reports the missing file itself
         digest = hashlib.sha256(script_text.encode("utf-8")).hexdigest()
+        if from_run is not None:
+            # No slice and no engine: the named run's results answer.
+            rehearsal = _ops.launch_script(
+                root,
+                script_path,
+                name=name,
+                intent=intent,
+                session=session_id,
+                capture_output=True,
+                dry_run=dry_run,
+                from_run=from_run,
+            )
+            driver = ["slab", "run", script_path, "--dry-run", "--from-run", from_run]
+            record.record(
+                {
+                    "type": "command",
+                    "kind": "launch",
+                    "tool": "launch_workflow",
+                    "command": shlex.join(driver),
+                    "script": script_path,
+                    "args": [],
+                    "cwd": str(project_dir),
+                    "dry_run": True,
+                    "from_run": from_run,
+                }
+            )
+            ok = _ops.dry_run_clean(rehearsal)
+            record.record({"type": "dry_run", "script": script_path, "digest": digest, "ok": ok})
+            return rehearsal
         _positive("ntasks", ntasks)
         _positive("threads", threads)
         _positive("gpus", gpus, minimum=0)
@@ -400,9 +436,7 @@ def build_server(
             # record the rehearsal against the script text.
             with Workspace(root) as ws, suppress(FoundationError):
                 ws.runs.release_reservation(reservation.id)
-            ok = bool(result.get("reached_end")) and all(
-                entry.get("outcome") == "setup ok" for entry in result.get("lammps") or []
-            )
+            ok = _ops.dry_run_clean(result)
             record.record({"type": "dry_run", "script": script_path, "digest": digest, "ok": ok})
             return result
         _record_run_commands(result.get("run_id"), "launch_workflow")
@@ -413,6 +447,20 @@ def build_server(
         ):
             result["warning"] = NO_DRY_RUN_WARNING
         return result
+
+    @server.tool()
+    @_surfaced
+    def reverify_run(run_id: str, script_path: str) -> dict[str, Any]:
+        """Run a script's @check functions again on a quarantined run's stored
+        results, without a relaunch. Use it when a check was wrong and the
+        physics was right: fix the check, then pass the run and the script.
+        Every task call takes the run's own result, so no engine starts and
+        no new run is recorded. The checks become a new verification pass
+        ('pass_no') on the run, which moves to verified when all pass;
+        'earlier_passes' tallies the passes before it. A task whose inputs
+        changed (an edited LAMMPS input) is refused with the task named."""
+        with Workspace(root) as ws:
+            return _ops.reverify_run(ws, run_id, script_path, capture_output=True)
 
     @server.tool()
     @_surfaced

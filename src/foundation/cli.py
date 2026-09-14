@@ -123,6 +123,14 @@ def run(
             "'dry run:' line.",
         ),
     ] = False,
+    from_run: Annotated[
+        str | None,
+        typer.Option(
+            "--from-run",
+            help="With --dry-run: answer every task call from this run's cached results, "
+            "so the checks run on real data and no engine starts.",
+        ),
+    ] = None,
 ) -> None:
     """Execute a workflow script; the run lands in quarantine.
 
@@ -133,8 +141,10 @@ def run(
     root = _ops.resolve_root(workspace)
     if reservation is not None:
         _enter_reservation(root, reservation)
+    if from_run is not None and not dry_run:
+        _fail("--from-run rehearses against a run's cached results; pass it with --dry-run")
     if dry_run:
-        _dry_run(root, script, name, intent, session, tuple(args or ()), reservation)
+        _dry_run(root, script, name, intent, session, tuple(args or ()), reservation, from_run)
     try:
         result = _ops.launch_script(
             root,
@@ -172,13 +182,14 @@ def _dry_run(
     session: str | None,
     args: tuple[str, ...],
     reservation: str | None,
+    from_run: str | None = None,
 ) -> NoReturn:
     """Rehearse the script, print the report after ``dry run:``, and exit.
 
     A reservation is released in the real store when the rehearsal ends,
     because the throwaway run claims nothing and the launching session
-    waits on it. Exit 0 when the script reached its end and every
-    ``run_lammps`` set up cleanly, else 1.
+    waits on it. Exit 0 when the rehearsal is clean (see
+    :func:`foundation._ops.dry_run_clean`), else 1.
     """
     try:
         try:
@@ -190,6 +201,7 @@ def _dry_run(
                 session=session,
                 argv=args,
                 dry_run=True,
+                from_run=from_run,
             )
         finally:
             if reservation is not None:
@@ -199,10 +211,7 @@ def _dry_run(
         _fail(str(e))
     typer.echo(_ops.DRY_RUN_MARKER)
     typer.echo(json.dumps(report, indent=2))
-    clean = report["reached_end"] and all(
-        entry["outcome"] == "setup ok" for entry in report["lammps"]
-    )
-    raise typer.Exit(code=0 if clean else 1)
+    raise typer.Exit(code=0 if _ops.dry_run_clean(report) else 1)
 
 
 def _enter_reservation(root: Path, reservation_id: str) -> None:
@@ -315,10 +324,17 @@ def _render_details(details: dict[str, object]) -> None:
     assert isinstance(checks, list)
     if checks:
         passed = sum(1 for c in checks if c["passed"])
-        typer.echo(f"  checks:  {passed}/{len(checks)} passed")
+        earlier = details.get("earlier_passes") or []
+        assert isinstance(earlier, list)
+        which = f" (pass {checks[0]['pass_no']})" if earlier else ""
+        typer.echo(f"  checks:  {passed}/{len(checks)} passed{which}")
         for c in checks:
             mark = "+" if c["passed"] else "x"
             typer.echo(f"    [{mark}] {c['name']}: {c['message']}")
+            for line in _ops.evidence_lines(c.get("evidence") or {}):
+                typer.echo(f"        {line}")
+        for tally in earlier:
+            typer.echo(f"    earlier pass {tally['pass_no']}: {tally['passed']}/{tally['total']}")
 
     if tasks:
         typer.echo("  tasks:")
@@ -601,7 +617,8 @@ def expire(
 
 
 runs_app = typer.Typer(
-    help="Run liveness: reap the runs whose process is gone, or retire one by hand.",
+    help="Run liveness and re-verification: reap the runs whose process is gone, retire "
+    "one by hand, or run fixed checks again on a run's stored results.",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -672,6 +689,30 @@ def runs_fail(
         typer.echo(f"failed {failed.id}  {failed.name}  {failed.error}")
         if run_liveness(before) != "gone":
             typer.echo(f"(not checked: {describe_liveness(before)})")
+
+
+@runs_app.command("reverify")
+def runs_reverify(
+    run_id: Annotated[str, typer.Argument(help="Run id or unique prefix.")],
+    script: Annotated[Path, typer.Argument(help="The workflow script with the fixed checks.")],
+    workspace: _WorkspaceOpt = None,
+) -> None:
+    """Run a script's checks again on a quarantined run's stored results.
+
+    Every task call takes the run's own result, so no engine starts and no
+    new run is recorded. The checks become a new verification pass on the
+    run, and the run moves to verified when all of them pass. A task whose
+    inputs changed is refused, naming the task.
+    """
+    with _open(workspace) as ws:
+        try:
+            answer = _ops.reverify_run(ws, run_id, script)
+        except (FoundationError, SlabError, FileNotFoundError) as e:
+            _fail(str(e))
+    for line in _ops.reverify_lines(answer):
+        typer.echo(line)
+    if answer["state"] != "verified":
+        raise typer.Exit(code=1)
 
 
 @app.command()

@@ -24,8 +24,11 @@ propagates; failed runs simply age out.
 
 from __future__ import annotations
 
+import inspect
 import os
 import socket
+import textwrap
+import traceback
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
@@ -40,12 +43,20 @@ from foundation.errors import (
     IllegalTransitionError,
     NestedRunError,
     NoActiveRunError,
+    ReplayError,
     ResourcesError,
     RunStateError,
     failure_record,
 )
 from foundation.lifecycle import ExecutionStatus, LifecycleState
-from foundation.models import ArtifactRef, ArtifactRole, CheckResult, Reservation, Run
+from foundation.models import (
+    ArtifactRef,
+    ArtifactRole,
+    CheckResult,
+    Reservation,
+    Run,
+    TaskRecord,
+)
 from foundation.retention import (
     DEFAULT_POLICY,
     GcReport,
@@ -156,6 +167,8 @@ class ActiveRun:
     ``dry_run`` is True inside a throwaway run opened by
     ``Workspace.start_run(dry_run=True)``: a task that can run its engine
     without integrating anything (``run_lammps`` with its loops emptied) reads it.
+    ``replay`` is set inside a run opened with ``replay=``: the tracer then
+    answers every ``@task`` call from another run's results (see :class:`Replay`).
     """
 
     def __init__(
@@ -165,11 +178,13 @@ class ActiveRun:
         run_id: str,
         *,
         dry_run: bool = False,
+        replay: Replay | None = None,
     ) -> None:
         self.runs = runs
         self.artifacts = artifacts
         self.id = run_id
         self.dry_run = dry_run
+        self.replay = replay
         self._checks: list[tuple[str, _CheckFn]] = []
 
     def __repr__(self) -> str:
@@ -254,7 +269,110 @@ class ActiveRun:
 
 
 def _evaluate_check(run_id: str, name: str, fn: _CheckFn) -> list[CheckResult]:
-    """Run one check function and coerce whatever it produces into results."""
+    """Run one check function and coerce its outcome into results.
+
+    A failed result that names no observed value carries evidence (see
+    :func:`check_evidence`), so the record says what the check saw.
+    """
+    raised: list[BaseException] = []
+    results = _coerce_check(run_id, name, fn, raised)
+    if all(r.passed or r.observed is not None for r in results):
+        return results
+    evidence = check_evidence(fn, raised[0] if raised else None)
+    return [
+        r if r.passed or r.observed is not None else r.model_copy(update={"evidence": evidence})
+        for r in results
+    ]
+
+
+#: The longest check source a failure record carries, in lines.
+EVIDENCE_SOURCE_LINES = 40
+#: The most keys a failure record lists for one dict the check read.
+EVIDENCE_KEYS = 40
+
+
+def check_evidence(fn: _CheckFn, raised: BaseException | None = None) -> dict[str, Any]:
+    """What a failed check saw, for a record that has no observed value.
+
+    The evidence holds:
+
+    * ``source``: the check's text, at most :data:`EVIDENCE_SOURCE_LINES`
+      lines, or None when Python cannot find it.
+    * ``keys``: for each dict the check reads by name (a closure cell or a
+      module global), its top-level keys. A check that indexes a missing
+      key shows here which keys the result held.
+    * ``raised`` and ``line``, for a check that raised: the exception, and
+      the line of the check's file that raised it.
+
+    Examples:
+        >>> result = {"rows": [], "steps": 0}
+        >>> def fraction_ok():
+        ...     return result["n_fcc"] / result["steps"] > 0.9
+        >>> try:
+        ...     fraction_ok()
+        ... except KeyError as e:
+        ...     evidence = check_evidence(fraction_ok, e)
+        >>> evidence["keys"]
+        {'result': ['rows', 'steps']}
+        >>> evidence["raised"]
+        "KeyError: 'n_fcc'"
+    """
+    evidence: dict[str, Any] = {"source": _check_source(fn), "keys": _dict_keys_read(fn)}
+    if raised is not None:
+        evidence["raised"] = f"{type(raised).__name__}: {raised}"
+        evidence["line"] = _raising_line(fn, raised)
+    return evidence
+
+
+def _check_source(fn: _CheckFn) -> str | None:
+    try:
+        lines = textwrap.dedent(inspect.getsource(fn)).splitlines()
+    except (OSError, TypeError):
+        return None
+    if len(lines) > EVIDENCE_SOURCE_LINES:
+        more = len(lines) - EVIDENCE_SOURCE_LINES
+        lines = [*lines[:EVIDENCE_SOURCE_LINES], f"... ({more} more lines)"]
+    return "\n".join(lines)
+
+
+def _dict_keys_read(fn: _CheckFn) -> dict[str, list[str]]:
+    """The top-level keys of each dict *fn* reads by name."""
+    code = getattr(fn, "__code__", None)
+    if code is None:
+        return {}
+    named: dict[str, object] = {}
+    for var, cell in zip(code.co_freevars, getattr(fn, "__closure__", None) or (), strict=False):
+        with suppress(ValueError):  # an empty cell
+            named[var] = cell.cell_contents
+    module_globals = getattr(fn, "__globals__", {})
+    for var in code.co_names:
+        if var in module_globals and var not in named:
+            named[var] = module_globals[var]
+    keys: dict[str, list[str]] = {}
+    for var, value in named.items():
+        if isinstance(value, dict):
+            listed = [str(k) for k in list(value)[:EVIDENCE_KEYS]]
+            if len(value) > EVIDENCE_KEYS:
+                listed.append(f"... ({len(value) - EVIDENCE_KEYS} more)")
+            keys[var] = listed
+    return keys
+
+
+def _raising_line(fn: _CheckFn, raised: BaseException) -> str | None:
+    """``file:line: text`` of the last frame in the check's file, else the last frame."""
+    frames = traceback.extract_tb(raised.__traceback__)
+    if not frames:
+        return None
+    code = getattr(fn, "__code__", None)
+    own = [f for f in frames if code is not None and f.filename == code.co_filename]
+    frame = (own or frames)[-1]
+    return f"{Path(frame.filename).name}:{frame.lineno}: {(frame.line or '').strip()}"
+
+
+def _coerce_check(
+    run_id: str, name: str, fn: _CheckFn, raised: list[BaseException]
+) -> list[CheckResult]:
+    """Run one check function; *raised* receives what it raised, if anything."""
     try:
         outcome = fn()
         # A generator-based check has not executed yet — its body runs during
@@ -265,9 +383,11 @@ def _evaluate_check(run_id: str, name: str, fn: _CheckFn) -> list[CheckResult]:
         ):
             outcome = list(outcome)
     except AssertionError as e:
+        raised.append(e)
         message = str(e) or "assertion failed"
         return [CheckResult(run_id=run_id, name=name, kind="assert", passed=False, message=message)]
     except Exception as e:  # a crashing check is a failing check, never a crashed run
+        raised.append(e)
         message = f"check raised {type(e).__name__}: {e}"
         return [CheckResult(run_id=run_id, name=name, kind="error", passed=False, message=message)]
 
@@ -387,6 +507,130 @@ def _from_assertion(run_id: str, name: str, assertion: Assertion) -> CheckResult
         expected=assertion.expected,
     )
 
+
+
+# -- replay ----------------------------------------------------------------------
+
+
+class Replay:
+    """Answers a script's ``@task`` calls from one completed run's results.
+
+    A re-verify and a dry run from a run execute the script again in a
+    throwaway workspace, with no engine started. Each task call is
+    matched to a completed task of the source run, and the call returns
+    that task's stored outputs. A call matches when it has the source
+    task's cache identity, or the same name, inputs, code, engine
+    versions, and engine command. A call with no match raises
+    :class:`~foundation.errors.ReplayError` naming the task and what
+    differs, and :attr:`refusal` keeps the error, so a script that
+    catches it still ends refused.
+
+    Examples:
+        >>> import tempfile
+        >>> ws = Workspace(tempfile.mkdtemp())
+        >>> with ws.start_run(name="empty") as run:
+        ...     pass
+        >>> replay = Replay(ws, run.id)
+        >>> try:
+        ...     replay.take("relax", "0" * 64, {}, {})
+        ... except ReplayError as e:
+        ...     print(str(e).split(";")[0])
+        run ... has no result for task relax (call 1): it completed 0 relax call(s)
+        >>> ws.close()
+    """
+
+    def __init__(self, source: Workspace, run_id: str) -> None:
+        self.run_id = source.runs.get(run_id).id
+        self.artifacts = source.artifacts
+        self.tasks = [
+            t
+            for t in source.runs.list_tasks(self.run_id)
+            if t.status is ExecutionStatus.COMPLETED
+        ]
+        self.taken: list[TaskRecord] = []
+        self.refusal: ReplayError | None = None
+        self._calls: dict[str, int] = {}
+
+    def take(
+        self,
+        task_name: str,
+        cache_key: str,
+        inputs: Mapping[str, str],
+        recipe: Mapping[str, Any],
+    ) -> TaskRecord:
+        """The source task that answers this call, or raise :class:`ReplayError`."""
+        call = self._calls.get(task_name, 0)
+        self._calls[task_name] = call + 1
+        same_name = [t for t in self.tasks if t.name == task_name]
+        match = next((t for t in same_name if t.cache_key == cache_key), None)
+        if match is None:
+            match = next(
+                (
+                    t
+                    for t in same_name
+                    if dict(t.inputs) == dict(inputs)
+                    and _replay_identity(t.recipe) == _replay_identity(recipe)
+                ),
+                None,
+            )
+        if match is None:
+            self.refusal = ReplayError(self._difference(task_name, call, same_name, inputs, recipe))
+            raise self.refusal
+        gone = [h for h in match.outputs.values() if not self.artifacts.has(h)]
+        if gone:
+            self.refusal = ReplayError(
+                f"the output bytes of task {task_name} (call {call + 1}) in run "
+                f"{self.run_id} are gone, so the run cannot be replayed; relaunch the script"
+            )
+            raise self.refusal
+        self.taken.append(match)
+        return match
+
+    def _difference(
+        self,
+        task_name: str,
+        call: int,
+        same_name: list[TaskRecord],
+        inputs: Mapping[str, str],
+        recipe: Mapping[str, Any],
+    ) -> str:
+        label = _replay_label(recipe)
+        where = f"task {task_name}{label} (call {call + 1})"
+        remedy = (
+            "a replay answers every task call from the run's own results and starts "
+            "no engine; relaunch the script to compute the changed task"
+        )
+        if call >= len(same_name):
+            return (
+                f"run {self.run_id} has no result for {where}: it completed "
+                f"{len(same_name)} {task_name} call(s); {remedy}"
+            )
+        source = same_name[call]
+        changed = sorted(
+            name for name in set(inputs) | set(source.inputs)
+            if inputs.get(name) != source.inputs.get(name)
+        )
+        if changed:
+            what = f"its input {', '.join(changed)} changed"
+        else:
+            mine, theirs = _replay_identity(recipe), _replay_identity(source.recipe)
+            parts = ("code", "engine versions", "engine command")
+            what = ", ".join(
+                f"its {part} changed" for part, a, b in zip(parts, mine, theirs, strict=True)
+                if a != b
+            ) or "its cache identity changed"
+        return f"{where} differs from run {self.run_id}'s: {what}; {remedy}"
+
+
+def _replay_identity(recipe: Mapping[str, Any]) -> tuple[object, object, object]:
+    """The parts of a recipe that decide a task's answer, apart from its inputs."""
+    extra = {k: v for k, v in (recipe.get("extra") or {}).items() if k != "provenance"}
+    return recipe.get("code_sha256"), recipe.get("engines") or {}, extra
+
+
+def _replay_label(recipe: Mapping[str, Any]) -> str:
+    label = (recipe.get("params") or {}).get("label")
+    return f" {label!r}" if isinstance(label, str) else ""
 
 
 # -- run liveness --------------------------------------------------------------
@@ -616,6 +860,7 @@ class Workspace:
         session: str | None = None,
         reservation: Reservation | str | None = None,
         dry_run: bool = False,
+        replay: Replay | None = None,
     ) -> Iterator[ActiveRun]:
         """Open a traced run; yield its :class:`ActiveRun` handle.
 
@@ -650,6 +895,10 @@ class Workspace:
         is True, and a task that can rehearse its engine (``run_lammps``
         with its loops emptied) integrates nothing. The run record itself is
         an ordinary run; open it in a throwaway workspace.
+
+        *replay* answers every ``@task`` call inside the run from another
+        run's results (see :class:`Replay`). Open it in a throwaway
+        workspace too.
 
         Raises:
             NestedRunError: A run is already active in this context.
@@ -697,7 +946,9 @@ class Workspace:
             self.runs.set_status(
                 created.id, ExecutionStatus.RUNNING, pid=os.getpid(), host=host
             )
-        active = ActiveRun(self.runs, self.artifacts, created.id, dry_run=dry_run)
+        active = ActiveRun(
+            self.runs, self.artifacts, created.id, dry_run=dry_run, replay=replay
+        )
         token = _CURRENT.set(active)
         # Every scratch directory a calculation makes inside the run is
         # stamped with the run's id (slab.scratch reads the variable), so

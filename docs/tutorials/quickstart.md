@@ -153,6 +153,7 @@ The verbs, in full:
 | `slab promote --session <id> [--force]` | Promote every run one agent session created, reporting each outcome. Failed runs are never promoted this way. |
 | `slab sessions` | List the sessions that created runs, with run counts and state breakdowns. |
 | `slab runs reap` | Mark failed every run at status `running` whose recorded process on this host is gone or whose scheduler job ended. Mason does the same reap at session start and on every `list_runs` and `wait_for_run` call. |
+| `slab runs reverify <id> <script>` | Run a fixed script's checks on a quarantined run's stored results, as a new verification pass. No engine starts and no new run is recorded. `slab run --dry-run --from-run <id> <script>` rehearses the same on the run's cached results. |
 | `slab runs fail <id> --reason TEXT` | Retire one running run by hand, for a run started on another host or before the process stamp. Refused while the run's process is alive on this host. |
 | `slab expire [--older-than 30d] [--include-running]` | Expire unpromoted runs past their TTL (state change only). `0d` = everything unpromoted, now. Runs at status `running` are protected unless `--include-running` (for hard-killed processes that can never advance their own status; they are marked failed first). |
 | `slab gc [--dry-run]` | Drop artifact bytes no retention rule demands. |

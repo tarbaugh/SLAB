@@ -167,9 +167,18 @@ return both fields, next to the structured failure records described in
 [Debugging failures](debugging-failures.md):
 
 ```json
-{"name": "forces_converged", "kind": "converged", "passed": false,
- "message": "fmax=0.062 !< 0.05", "observed": 0.062, "expected": {"below": 0.05}}
+{"name": "forces_converged", "kind": "converged", "passed": false, "message": "fmax=0.062 !< 0.05", "observed": 0.062, "expected": {"below": 0.05}, "pass_no": 1}
 ```
+
+`pass_no` numbers the verification pass the result belongs to. A run is
+verified once when it completes, and again by each re-verify. A check
+that returns a bare bool, runs a plain `assert`, or raises names no
+observed value. Its failed record carries `evidence` instead: the
+check's source, the top-level keys of each dict it reads by name, and
+for a raise the exception and the line that raised it. So return
+`(passed, observed, expected)` when you can. [Debugging
+failures](debugging-failures.md#a-check-failed-on-good-physics) shows
+the evidence, and how to fix a wrong check without a relaunch.
 
 ## Force-promotion, the recorded escape hatch
 

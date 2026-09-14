@@ -5,6 +5,28 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- A failed check says what it saw, and a check can be run again
+  without a relaunch. A failed check that names no observed value (a
+  bare `False`, an `assert`, a raise) stores `evidence`: its source
+  (at most 40 lines), the top-level keys of each dict it reads by
+  name, and for a raise the exception and the line that raised it.
+  `slab show`, `show_run`, and `run_details` carry it. `slab runs
+  reverify <run> <script>`, the Mason and MCP `reverify_run` tools,
+  and `foundation._ops.reverify_run` run a script's checks on a
+  quarantined run's stored results. Every task call takes the run's
+  own result (`foundation.runtime.Replay`), so no engine starts and no
+  new run is recorded, and the checks become a new verification pass
+  on the same run. Schema 8 adds `pass_no` and `evidence` to checks;
+  `list_check_results` returns the latest pass, and `all_passes=True`
+  returns all. A task call whose inputs differ from the run's is
+  refused with `ReplayError`, naming the task. `launch_workflow` with
+  `dry_run` and `from_run` (`slab run --dry-run --from-run <run>`)
+  rehearses a script on a run's cached results, so the checks run on
+  real data. In a dry-run report each check has a `reading`: a raise
+  reads `check raised <Exception>: <text>` and carries its line and
+  keys, a pass on a zero-step result reads `passed on no data; not
+  evidence`, and a raise makes the rehearsal not clean. The report's
+  `checks_note` is gone.
 - `slab mason read --live` follows a session as it works, like
   `tail -f`. The viewer shows the transcript, then each event the
   session appends, until Ctrl+C. It follows the transcripts of the
