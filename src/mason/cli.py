@@ -725,6 +725,9 @@ def _command_details(event: dict[str, Any]) -> list[str]:
         >>> _command_details({"kind": "engine", "engine": "qe",
         ...                   "template": "mpirun -np {ntasks} pw.x"})
         ['engine qe', 'template: mpirun -np {ntasks} pw.x']
+        >>> _command_details({"kind": "engine", "engine": "qe", "setup": [],
+        ...                   "setup_recorded": 3})
+        ['engine qe', 'setup: the 3 line(s) recorded earlier']
         >>> _command_details({"kind": "shell", "cwd": "/proj"})
         ['cwd /proj']
         >>> _command_details({"kind": "launch", "sized": True,
@@ -741,6 +744,8 @@ def _command_details(event: dict[str, Any]) -> list[str]:
         details.append(f"template: {event['template']}")
     if event.get("setup"):
         details.append("setup: " + "; ".join(str(line) for line in event["setup"]))
+    elif event.get("setup_recorded"):
+        details.append(f"setup: the {event['setup_recorded']} line(s) recorded earlier")
     kokkos = event.get("kokkos")
     if isinstance(kokkos, dict):
         if kokkos.get("enabled"):

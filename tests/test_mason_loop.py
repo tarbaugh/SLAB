@@ -986,6 +986,59 @@ def test_repeated_identical_calls_get_escalating_notes(tmp_path: Path) -> None:
     assert "finish with a report naming the blocker" in tool_results[3]
 
 
+def _still_running_forever(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every wait_for_run return the same still_running answer at once."""
+    from foundation import _ops
+    from foundation.models import Run
+
+    run = Run(name="md-900K", status="running", pid=1, host="another-node")
+
+    def waited(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "outcome": "still_running",
+            "note": "",
+            "timeout_s": 21600.0,
+            "asked_s": 21600.0,
+            "running": [(run, "tasks: 1 running", "not checked", "started 2h 0m ago")],
+        }
+
+    monkeypatch.setattr(_ops, "wait_for_run", waited)
+
+
+def test_a_wait_on_a_running_run_is_never_a_repeat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A planner waited on a 3-hour run, got the same answer three times, and
+    read the repeat note as a stall. A still-running wait carries the
+    progress line instead, however often it recurs."""
+    _still_running_forever(monkeypatch)
+    wait = _tool_reply("wait_for_run", timeout_s=21600)
+    loop = Mason(
+        _session(tmp_path),
+        client=FakeClient([wait, wait, wait, wait, _text_reply("done")]),
+    )
+    loop.run_turn("wait for the melt")
+    results = [m["content"] for m in loop.messages if m.get("role") == "tool"]
+    assert len(results) == 4 and len(set(results)) == 1
+    for result in results:
+        assert "[note" not in result and "[unchanged" not in result
+        assert result.endswith("the run is alive and progressing; waiting again is the right call")
+        assert "started 2h 0m ago" in result
+
+
+def test_waiting_on_a_running_run_holds_the_looking_streak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Twenty waits on a long run are not twenty steps of reading around."""
+    _still_running_forever(monkeypatch)
+    replies: list[ChatReply | Exception] = [_tool_reply("wait_for_run") for _ in range(20)]
+    replies.append(_text_reply("done"))
+    client = FakeClient(replies)
+    Mason(_session(tmp_path), client=client).run_turn("wait")
+    hints = [request[0][-1]["content"] for request in client.requests]
+    assert all("consecutive steps" not in hint for hint in hints)
+
+
 def test_a_changed_result_resets_the_repetition_streak(tmp_path: Path) -> None:
     marker = tmp_path / "marker"
     poll = _tool_reply("shell", command=f"ls {marker} 2>/dev/null | wc -l")

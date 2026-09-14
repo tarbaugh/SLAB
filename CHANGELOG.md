@@ -5,6 +5,25 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- Waiting on a long run costs one call and never reads as a stall.
+  `wait_for_run` blocks for up to 6 hours, where it stopped at 30
+  minutes without saying so, and an answer cut by the cap says
+  `waited N s, capped from the M s asked`. It reads the run store after
+  1 s, then at doubling gaps up to 30 s. Without a run id it returns
+  when the first running run of the session finishes, names it, and
+  lists the rest; `all=true` keeps the old wait for every run. A
+  still-running answer adds the time since the run started and, from
+  the live log of a `run_lammps` task, the step LAMMPS has reached
+  against the end of the current `run` (`slab.outputs.lammps_run_progress`,
+  `foundation._ops.run_advance`). It ends with a line saying that
+  waiting again is the right call. The loop never appends the repeat
+  note to that answer, and such a step does not count toward the
+  step-back hint. A wait records the engine commands of the runs that
+  finished during it only, a resumed session skips runs its transcript
+  holds, and a setup block is recorded once per transcript
+  (`setup_recorded` on a later command). The MCP `wait_for_run` has
+  the same cap, the same first-finish rule, and the same fields.
+
 - `slab mason read --live` follows a session as it works, like
   `tail -f`. The viewer shows the transcript, then each event the
   session appends, until Ctrl+C. It follows the transcripts of the

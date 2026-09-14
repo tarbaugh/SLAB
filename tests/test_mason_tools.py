@@ -872,7 +872,7 @@ def test_two_background_launches_get_disjoint_slices(
     one, two = [e for e in _command_events(box.session) if e["kind"] == "launch"]
     assert one["resources"]["cpus"] != two["resources"]["cpus"]
     assert not set(one["resources"]["cpus"]) & set(two["resources"]["cpus"])
-    box.dispatch(_call("wait_for_run", timeout_s=60))
+    box.dispatch(_call("wait_for_run", timeout_s=60, all=True))
     with Workspace(box.session.workspace_root) as ws:
         held = {run.name: run.resources["cpus"] for run in ws.runs.list_runs()}
         assert held["one"] == one["resources"]["cpus"]
@@ -1133,7 +1133,7 @@ def test_wait_for_run_timeout_reports_still_running(
         waited = box.dispatch(_call("wait_for_run", timeout_s=1))
         assert "still running after 1s" in waited
         assert "slowpoke" in waited
-        assert "call wait_for_run again" in waited
+        assert "waiting again is the right call" in waited
         assert "running; tasks:" in waited  # the tally says whether it is moving
     finally:
         # The detached run must not outlive the test on a shared machine.
@@ -1578,6 +1578,83 @@ def test_the_transcript_records_every_command_that_ran(tmp_path: Path) -> None:
     # a wait on the same run records its commands no second time
     box.dispatch(_call("wait_for_run", run_id=run_id))
     assert len(_command_events(session)) == 3
+
+
+def test_a_wait_records_only_the_run_that_just_finished(tmp_path: Path) -> None:
+    """Every id-less wait used to replay the engine commands of runs finished
+    earlier, each with its setup block. A wait records the run it collected,
+    a resumed toolbox knows what the transcript holds, and a setup block is
+    recorded once per transcript."""
+    session = _session(tmp_path)
+    box = build_toolbox(session)
+    (tmp_path / "wf.py").write_text(COMMAND_WORKFLOW)
+    first = _run_id(box.dispatch(_call("launch_workflow", script="wf.py", name="one")))
+    (engine,) = [e for e in _command_events(session) if e["kind"] == "engine"]
+    assert engine["run_id"] == first and engine["setup"] == ["module load lammps"]
+    # A resumed toolbox: the same transcript, a fresh set of recorded runs.
+    resumed = build_toolbox(session)
+    answer = resumed.dispatch(_call("wait_for_run", timeout_s=1))
+    assert "no run of this session is running" in answer
+    answer = resumed.dispatch(_call("wait_for_run", run_id=first, timeout_s=1))
+    assert "export" not in answer and "module load" not in answer
+    assert len([e for e in _command_events(session) if e["kind"] == "engine"]) == 1
+    # A second run with the same setup: its command is recorded, the setup is not.
+    second = _run_id(resumed.dispatch(_call("launch_workflow", script="wf.py", name="two")))
+    engines = [e for e in _command_events(session) if e["kind"] == "engine"]
+    assert [e["run_id"] for e in engines] == [first, second]
+    assert engines[1]["setup"] == [] and engines[1]["setup_recorded"] == 1
+
+
+def _running_elsewhere(session: MasonSession, name: str) -> str:
+    """A run of *session* whose process runs on another host, so no reap ends it."""
+    from foundation import Workspace
+    from foundation.models import Run
+
+    with Workspace(session.workspace_root) as ws:
+        run = ws.runs.create(Run(name=name, session=session.session_id))
+        ws.runs.set_status(run.id, "running", pid=1, host="another-node")
+    return run.id
+
+
+def test_wait_for_run_is_capped_at_six_hours_and_says_so(
+    box: Toolbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mason import tools
+
+    assert tools._MAX_WAIT_TIMEOUT_S == 6 * 3600
+    description = box.tools["wait_for_run"].description
+    assert "capped at 21600 s (6 h)" in description and "all=true" in description
+    monkeypatch.setattr(tools, "_MAX_WAIT_TIMEOUT_S", 0.3)
+    _running_elsewhere(box.session, "melt")
+    waited = box.dispatch(_call("wait_for_run", run_id="melt", timeout_s=10800))
+    assert "still running: waited 0 s, capped from the 10800 s asked" in waited
+    assert waited.endswith("the run is alive and progressing; waiting again is the right call")
+    assert "started " in waited and " ago" in waited
+
+
+def test_an_id_less_wait_returns_on_the_first_finish_and_names_it(box: Toolbox) -> None:
+    """One of two runs finished and its GPU sat idle for an hour while the
+    wait blocked on the other. Now the first finish returns."""
+    import threading
+
+    from foundation import Workspace
+
+    short = _running_elsewhere(box.session, "T600")
+    long = _running_elsewhere(box.session, "T900")
+
+    def finish() -> None:
+        with Workspace(box.session.workspace_root) as ws:
+            ws.runs.set_status(short, "completed")
+
+    timer = threading.Timer(0.5, finish)
+    timer.start()
+    try:
+        waited = box.dispatch(_call("wait_for_run", timeout_s=30))
+    finally:
+        timer.cancel()
+    assert waited.startswith(f"run {short} (T600): ") and "status=completed" in waited
+    assert "still running:" in waited and f"{long[:10]}  T900  running" in waited
+    assert "wait_for_run again collects the next one to finish" in waited
 
 
 def test_a_delegated_child_records_commands_under_its_own_card(tmp_path: Path) -> None:

@@ -167,11 +167,15 @@ _MAX_DIR_ENTRIES = 200
 _MAX_SEARCH_MATCHES = 100
 _MAX_SHELL_TIMEOUT_S = 600.0
 # wait_for_run: one blocking call replaces a chain of sleep-and-poll shell
-# commands. The cap bounds a single tool call, not the wait — the tool says
-# to call again, and each re-issue costs one step instead of six.
-_MAX_WAIT_TIMEOUT_S = 1800.0
-_WAIT_POLL_S = 5.0
+# commands. The cap bounds a single tool call, and a 3-hour run fits in one.
+# The wait sleeps in this process between reads of the run store and makes
+# no model call until it returns.
+_MAX_WAIT_TIMEOUT_S = _ops.MAX_WAIT_S
+_WAIT_POLL_S = _ops.WAIT_POLL_S
 _WAIT_GRACE_S = 10.0
+#: The line every still_running answer carries. The loop reads it: a wait
+#: that is still running never counts as a repeated call.
+WAIT_STILL_RUNNING = _ops.STILL_RUNNING_LINE
 
 Handler = Callable[[dict[str, Any]], str]
 
@@ -1448,10 +1452,22 @@ def _reserve_for(session: MasonSession, arguments: dict[str, Any]) -> Reservatio
 def _add_workflow_tools(
     box: Toolbox, session: MasonSession, read_roots: tuple[Path, ...]
 ) -> None:
-    recorded_runs: set[str] = set()
+    # What this transcript already holds, so a resumed session does not
+    # record a run twice or repeat a setup block.
+    earlier = [e for e in session.recorded("command") if e.get("kind") == "engine"]
+    recorded_runs: set[str] = {str(e["run_id"]) for e in earlier if e.get("run_id")}
+    recorded_setups: set[tuple[str, ...]] = {
+        tuple(str(line) for line in e["setup"]) for e in earlier if e.get("setup")
+    }
 
     def _record_run_commands(run_id: str | None, tool: str) -> None:
-        """Record the engine commands a finished run resolved, once per run."""
+        """Record the engine commands a finished run resolved, once per run.
+
+        A setup block is recorded once per transcript. The next command
+        that shares it carries ``setup_recorded`` and the line count
+        instead, because the same module lines repeated under every wait
+        buried the commands that differed.
+        """
         if not run_id or run_id in recorded_runs:
             return
         recorded_runs.add(run_id)
@@ -1462,6 +1478,11 @@ def _add_workflow_tools(
             record_command(session, kind="engine", tool=tool, run_id=run_id, error=str(e))
             return
         for entry in entries:
+            setup = tuple(entry.get("setup") or ())
+            if setup and setup in recorded_setups:
+                entry = {**entry, "setup": [], "setup_recorded": len(setup)}
+            elif setup:
+                recorded_setups.add(setup)
             record_command(session, kind="engine", tool=tool, **entry)
 
     def _run_line(run: Any) -> str:
@@ -1924,7 +1945,7 @@ def _add_workflow_tools(
 
     def wait_for_run(arguments: dict[str, Any]) -> str:
         wanted = arguments.get("run_id")
-        timeout = min(float(arguments.get("timeout_s", 900.0)), _MAX_WAIT_TIMEOUT_S)
+        asked = float(arguments.get("timeout_s", _ops.DEFAULT_WAIT_S))
         with _open_workspace(session):
             pass  # a store that cannot be opened is named here, with the recovery
         # The wait reaps the dead on every poll (foundation._ops.wait_for_run).
@@ -1932,31 +1953,46 @@ def _add_workflow_tools(
             session.workspace_root,
             run_id=str(wanted) if wanted else None,
             session=session.session_id,
-            timeout_s=timeout,
+            timeout_s=min(asked, _MAX_WAIT_TIMEOUT_S),
             poll_s=_WAIT_POLL_S,
             grace_s=_WAIT_GRACE_S,
+            all_runs=bool(arguments.get("all")),
         )
         note = waited["note"]
         outcome = waited["outcome"]
+        # Only the runs that finished during this wait: a run recorded
+        # earlier, or one another wait collected, is not replayed.
         if outcome in ("finished", "process_gone"):
-            _record_run_commands(waited["run"].id, "wait_for_run")
-        elif outcome == "none_running":
-            for finished in waited["runs"]:
+            for finished in [waited["run"], *waited.get("also_finished", [])]:
                 _record_run_commands(finished.id, "wait_for_run")
+        # An id-less wait returns on the first finish; the others follow it.
+        others: list[str] = []
+        if waited.get("also_finished"):
+            others.append("also finished: " + ", ".join(
+                f"{r.id[:10]} {r.name} ({r.status.value})" for r in waited["also_finished"]
+            ))
+        if waited.get("running"):
+            others.append("still running:")
+            others += [
+                f"{r.id[:10]}  {r.name}  running; {progress}; {advance}"
+                for r, progress, _liveness, advance in waited["running"]
+            ]
+            others.append("wait_for_run again collects the next one to finish")
+        rest = "".join(f"\n{line}" for line in others)
         if outcome == "process_gone":
             run = waited["run"]
             return (
                 f"{note}this run's process is gone: run {run.id} was running as "
                 f"process {run.pid} on {run.host}, and that process no longer exists; "
                 f"marked failed by wait_for_run. {waited['progress']}; read it with "
-                f"show_run, and launch again if the work is still wanted"
+                f"show_run, and launch again if the work is still wanted{rest}"
             )
         if outcome == "finished":
             run = waited["run"]
             return (
-                f"{note}run {run.id}: state={_state_text(run)} "
+                f"{note}run {run.id} ({run.name}): state={_state_text(run)} "
                 f"status={run.status.value}; {waited['progress']}; "
-                f"read it with show_run"
+                f"read it with show_run{rest}"
             )
         if outcome == "no_runs":
             return (
@@ -1968,14 +2004,18 @@ def _add_workflow_tools(
             return f"no run of this session is running; the record:\n{finished}"
         # The tally answers "is it moving?" without a show_run of the whole
         # record: a real session queried the database by hand for this count.
+        waited_s = waited["timeout_s"]
+        head = f"still running after {waited_s:.0f}s"
+        if asked > waited_s:
+            head = f"still running: waited {waited_s:.0f} s, capped from the {asked:.0f} s asked"
+        if not waited["running"]:
+            # A timeout shorter than the grace: the launch has not registered.
+            return f"{note}{head}:\n(none registered yet; a launch takes a few seconds)"
         lines = "\n".join(
-            f"{r.id[:10]}  {r.name}  running; {progress}; {liveness}"
-            for r, progress, liveness in waited["running"]
-        ) or "(none registered yet)"
-        return (
-            f"{note}still running after {timeout:.0f}s:\n{lines}\n"
-            f"call wait_for_run again to keep waiting"
+            f"{r.id[:10]}  {r.name}  running; {progress}; {liveness}; {advance}"
+            for r, progress, liveness, advance in waited["running"]
         )
+        return f"{note}{head}:\n{lines}\n{WAIT_STILL_RUNNING}"
 
     box.add(
         Tool(
@@ -1983,11 +2023,16 @@ def _add_workflow_tools(
             description=(
                 "Block until a run finishes (or the timeout passes), then report "
                 "its state and task tally. run_id takes an id, a unique prefix, or "
-                "the name of a run this session created; without it, waits for "
-                "every running run this session created — the partner of "
-                "launch_workflow background=true. One call replaces a chain of "
-                "sleep-and-poll shell commands, and the timeout answer says how "
-                "far each run has got."
+                "the name of a run this session created. Without it, the call "
+                "returns as soon as the first running run of this session "
+                "finishes, names it, and lists the rest; all=true waits for every "
+                "one instead. The partner of launch_workflow background=true. The "
+                f"timeout defaults to {_ops.DEFAULT_WAIT_S:.0f} s and is capped at "
+                f"{_MAX_WAIT_TIMEOUT_S:.0f} s ({_MAX_WAIT_TIMEOUT_S / 3600:.0f} h), so "
+                "one call covers a run of that length. The wait costs no model "
+                "call while it blocks. A still-running answer says how far each "
+                "run has got; waiting again is then the right call, never a "
+                "repeat."
             ),
             parameters=_schema(
                 {
@@ -1997,7 +2042,17 @@ def _add_workflow_tools(
                     },
                     "timeout_s": {
                         "type": "number",
-                        "description": "seconds to wait before reporting back (default 900)",
+                        "description": (
+                            f"seconds to wait before reporting back (default "
+                            f"{_ops.DEFAULT_WAIT_S:.0f}, cap {_MAX_WAIT_TIMEOUT_S:.0f})"
+                        ),
+                    },
+                    "all": {
+                        "type": "boolean",
+                        "description": (
+                            "without run_id: wait until no run of this session is "
+                            "running, instead of returning on the first finish"
+                        ),
                     },
                 },
                 [],
