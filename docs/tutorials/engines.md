@@ -381,7 +381,8 @@ its ends, its row count `n_rows`, its loop line, and the mean and standard
 deviation of every column over the tail of its rows, which is what the
 check judged. `seconds`, `atoms`, and `rate` come from the loop lines, so
 a step rate is never computed by hand; `wall_time` is LAMMPS's own text.
-`averages` holds every `fix ave/time` file in the same shape as a table.
+`averages` holds the summary of every `fix ave/time` file in the same
+shape as a table summary, and `series(result, "<file>")` reads its rows.
 The script asks for `thermo_modify line yaml` after its `thermo_style`
 line, so LAMMPS printed the table as one YAML document and the task read
 it by schema. `info["thermo_format"]` reports `yaml`. A script without

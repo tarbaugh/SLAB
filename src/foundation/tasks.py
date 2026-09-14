@@ -1440,6 +1440,10 @@ class TableSummary(dict):
         Traceback (most recent call last):
         ...
         KeyError: "rows live in the md-averages.json artifact; call series(result, 'msd.dat')"
+        >>> summary.setdefault("rows", [])
+        Traceback (most recent call last):
+        ...
+        KeyError: "rows live in the md-averages.json artifact; call series(result, 'msd.dat')"
     """
 
     def __init__(self, summary: Mapping[str, Any], *, artifact: str) -> None:
@@ -1464,6 +1468,18 @@ class TableSummary(dict):
         if key in _ROW_KEYS:
             raise self._refusal()
         return super().get(key, default)
+
+    def setdefault(self, key: Any, default: Any = None) -> Any:
+        # ``summary.setdefault("rows", [])`` would hand back an empty list
+        # and plant the key, the silent failure this mapping exists to stop.
+        if key in _ROW_KEYS:
+            raise self._refusal()
+        return super().setdefault(key, default)
+
+    def pop(self, key: Any, *default: Any) -> Any:
+        if key in _ROW_KEYS:
+            raise self._refusal()
+        return super().pop(key, *default)
 
 
 def _refusing_summaries(value: tuple[dict[str, Any], dict[str, Any]]) -> Any:

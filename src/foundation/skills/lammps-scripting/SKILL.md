@@ -432,8 +432,9 @@ Do not read rows from `result["averages"]`. It holds summaries only,
 and a check that did so once quarantined two three-hour runs.
 
 `series` returns every row. The summary's `tail` covers the last half
-of the rows, at least one: `rows[max(1, len(rows) // 2):]` when there
-is more than one row. Slice the rows that way to reproduce the tail.
+of the rows, and at least one row. The slice is
+`rows[max(1, len(rows) // 2):]` when there is more than one row, so
+slice the rows that way to reproduce the tail.
 Prefer `"production"` to `-1` when the script minimizes first or ends
 with `run 0`, because each of those prints a table of its own.
 
