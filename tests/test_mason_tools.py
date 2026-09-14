@@ -1869,7 +1869,9 @@ def test_a_shape_mistake_after_run_lammps_gets_the_result_keys_as_a_note(
     notes = shown["run"]["failure"]["notes"]
     (note,) = [n for n in notes if n.startswith("run_lammps result keys:")]
     # The recorded result comes back with its keys sorted.
-    assert "tables[1]{columns,first,last,loop,n_rows,tail}" in note
+    assert "tables[1]{columns,first,last,loop,minimize,n_rows,series,tail}" in note
+    # The KeyError itself names the call that reads the rows.
+    assert "call series(result, 0)" in shown["run"]["failure"]["message"]
     assert "averages{fs_probe.dat}" in note and "rate{atom_steps_per_s,steps_per_s}" in note
     assert ", seconds, steps, " in note and "wall_time;" in note
     assert note.endswith("the lammps-scripting skill section 2 has the shape")

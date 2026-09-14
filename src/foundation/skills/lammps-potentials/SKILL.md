@@ -296,7 +296,8 @@ These lines belong in a script under the `run_lammps` task (the
 lammps-scripting skill): the run keeps the log with the halt, the dump
 of the extrapolating frames, and the `fix ave/time` file if you write
 one, and a `@check` on the result decides whether the run reached its
-steps. They cannot act inside the `lammps` engine, which drives MD from
+steps. The file's rows come back through `series(result, "<file>")`;
+`result["averages"]` holds only its summary. They cannot act inside the `lammps` engine, which drives MD from
 ASE one `run 0` at a time, and a LAMMPS input started from the shell is
 not a run: nothing traces it, and its numbers cannot be reported. For a
 1L, 2L, or 3L model, grade the frames of a recorded run afterwards with

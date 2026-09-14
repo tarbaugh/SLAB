@@ -63,10 +63,11 @@ is hcp, 5 is unknown; the cutoff sits between the first and second
 neighbour shells), `variable isfcc atom "c_cna == 1"` marks the
 crystalline ones, `compute nfcc all reduce sum v_isfcc` counts them,
 and `fix frac all ave/time 10 10 100 c_nfcc file fraction.dat` writes
-the series. The file comes back parsed as
-`result["averages"]["fraction.dat"]`, and `series(result,
-"fraction.dat")` from `foundation.tasks` gives its rows for the slope
-fit, keyed by column. Never parse the `.dat` file yourself. The
+the series. The file's rows come back through `series(result,
+"fraction.dat")` from `foundation.tasks`, keyed by column, for the
+slope fit. `result["averages"]` holds only its summary, and reading
+`rows` from that summary raises a `KeyError`. Never parse the `.dat`
+file yourself. The
 trajectory route is the alternative when the classification needs the
 bond-order parameter:
 

@@ -5,6 +5,24 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- The averages summary cannot be mistaken for the rows. Every entry of
+  `run_lammps`'s `result["tables"]` and `result["averages"]` is a
+  `foundation.tasks.TableSummary`. Reading `rows`, `data`, or `values`
+  from it raises a `KeyError` that names the artifact and the call, for
+  example `rows live in the md-averages.json artifact; call
+  series(result, 'fraction.dat')`. A check that read rows from the
+  summary got an empty list and quarantined two three-hour runs, so it
+  now fails at once. Each summary carries its call under `series`, and
+  a thermo table's summary says whether a `minimize` printed it.
+  `series(result, "production")` returns the longest table, not a
+  minimize one, whose Step range covers the table the last `run`
+  printed, so a leading `minimize` or a trailing `run 0` no longer
+  hides the production run. The summaries stay plain JSON in the
+  store, and `task` gains `on_return` so a cache hit gets the same
+  refusal. `slab.outputs.lammps_thermo` marks a table `minimize` from
+  the log's `Minimization stats:` block. The lammps-scripting,
+  two-phase-melting, and lammps-potentials skills send the rows through
+  `series`.
 - `slab mason read --live` follows a session as it works, like
   `tail -f`. The viewer shows the transcript, then each event the
   session appends, until Ctrl+C. It follows the transcripts of the

@@ -2006,6 +2006,18 @@ def test_close_contact_guidance_reaches_the_builder_and_the_runner() -> None:
         assert line in recipe and line in scripting, line
 
 
+def test_skills_send_ave_time_rows_through_series() -> None:
+    """No skill says an ave/time file "comes back parsed" in the result, the
+    wording that led a check to read rows from the summary. Every skill that
+    names one sends the rows through series()."""
+    for manifest in sorted(SKILLS.glob("*/SKILL.md")):
+        assert "comes back parsed" not in manifest.read_text(), manifest.parent.name
+    for skill in ("lammps-scripting", "two-phase-melting", "lammps-potentials"):
+        text = " ".join((SKILLS / skill / "SKILL.md").read_text().split())
+        assert "rows come back through `series(result," in text, skill
+        assert '`result["averages"]` holds only its summary' in text, skill
+
+
 @pytest.mark.skipif(not os.environ.get("SLAB_TEST_LMP"), reason="needs a real lmp")
 def test_pushoff_recipe_separates_random_overlaps(tmp_path: Path) -> None:
     """Under a real LAMMPS the skill's push-off takes the overlapping argon

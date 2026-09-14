@@ -73,6 +73,7 @@ def task(
     name: str | None = None,
     engines: str | Sequence[str] = (),
     cache_extra: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    on_return: Callable[[Any], Any] | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
 def task(
     fn: Callable[P, R] | None = None,
@@ -80,6 +81,7 @@ def task(
     name: str | None = None,
     engines: str | Sequence[str] = (),
     cache_extra: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    on_return: Callable[[Any], Any] | None = None,
 ) -> Callable[P, R] | Callable[[Callable[P, R]], Callable[P, R]]:
     """Make a plain function a traced task, without changing how it is called.
 
@@ -98,6 +100,10 @@ def task(
             ``provenance`` enters the recipe and not the key. Put there
             what describes this execution without changing its answer,
             such as an engine command filled for the launch's width.
+        on_return: Callable applied to the value the caller receives,
+            computed or restored from the cache, and never to the stored
+            bytes. Use it to hand back a view of the result, such as a
+            mapping that refuses a key a reader might expect.
 
     Examples:
         >>> @task
@@ -122,19 +128,21 @@ def task(
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             active = current_run()
             if active is None:
-                return f(*args, **kwargs)
-            return _traced_call(
-                active,
-                f,
-                signature,
-                task_name,
-                code_hash,
-                bytecode_hash,
-                engine_names,
-                cache_extra,
-                args,
-                kwargs,
-            )
+                result = f(*args, **kwargs)
+            else:
+                result = _traced_call(
+                    active,
+                    f,
+                    signature,
+                    task_name,
+                    code_hash,
+                    bytecode_hash,
+                    engine_names,
+                    cache_extra,
+                    args,
+                    kwargs,
+                )
+            return on_return(result) if on_return is not None else result
 
         return wrapper
 

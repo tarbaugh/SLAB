@@ -1030,6 +1030,7 @@ def _lammps_identity(arguments: dict[str, Any]) -> dict[str, Any]:
             else {}
         ),
     },
+    on_return=lambda value: _refusing_summaries(value),
 )
 def run_lammps(
     script: str,
@@ -1105,15 +1106,21 @@ def run_lammps(
     last row of the last thermo table, keyed by column), ``tables`` (one
     entry per table: ``columns``, ``first`` and ``last`` row, ``n_rows``,
     the ``loop`` line's steps, atoms, and seconds, or None for a table
-    without one, and ``tail`` statistics), ``averages`` (one entry per
-    ``fix ave/time`` file the script wrote, keyed by basename, in the
-    same shape as a table), ``steps`` (the sum over loops), ``seconds``
+    without one, ``tail`` statistics, ``minimize`` (True for a table a
+    ``minimize`` command printed), and ``series``, the call that reads
+    its rows), ``averages`` (one entry per ``fix ave/time`` file the
+    script wrote, keyed by basename, in the same shape as a table less
+    ``minimize``), ``steps`` (the sum over loops, minimizer iterations
+    included), ``seconds``
     (the sum of the loop lines' seconds), ``atoms`` (the last loop
     line's count), ``rate`` (``steps_per_s`` and ``atom_steps_per_s``
     from the loop lines), ``wall_time`` (LAMMPS's own text, for the
     report, never for arithmetic), ``label``, and ``artifacts`` (the
     hashes of the parsed ``thermo`` and ``averages`` files, which
-    :func:`series` reads). *info* is the machine side:
+    :func:`series` reads). Every entry of ``tables`` and ``averages`` is a
+    summary and holds no rows: reading ``rows``, ``data``, or ``values``
+    from it raises a ``KeyError`` that names the :func:`series` call.
+    *info* is the machine side:
     ``build`` (``cpu``, ``gpu``, or an alias name), ``command``, ``argv``
     (the exact argument vector that ran), ``version``, ``setup``,
     ``kokkos`` (what the log says KOKKOS did:
@@ -1240,9 +1247,19 @@ def run_lammps(
     result: dict[str, Any] = {
         "label": name,
         "thermo": _last_thermo_row(tables),
-        "tables": [_table_summary(table) for table in tables],
+        "tables": [
+            {
+                **_table_summary(table, f"series(result, {index})"),
+                "minimize": bool(table.get("minimize")),
+            }
+            for index, table in enumerate(tables)
+        ],
         "averages": {
-            basename: _table_summary(parsed) for basename, parsed in averages.items()
+            basename: _table_summary(
+                parsed,
+                None if parsed.get("mode") == "vector" else f"series(result, {basename!r})",
+            )
+            for basename, parsed in averages.items()
         },
         "steps": sum(int(loop["steps"]) for loop in loops),
         "seconds": sum(float(loop["seconds"]) for loop in loops),
@@ -1356,25 +1373,27 @@ def _last_thermo_row(tables: list[dict[str, Any]]) -> dict[str, Any]:
     return {}
 
 
-def _table_summary(table: dict[str, Any]) -> dict[str, Any]:
+def _table_summary(table: dict[str, Any], call: str | None = None) -> dict[str, Any]:
     """One table, bounded: its ends, its row count, its loop line, and tail statistics.
 
     Serves a thermo table and a parsed ``fix ave/time`` file alike. The
     tail is the last half of the rows (at least one), the span a
     ``@check`` judges an equilibrated average on. ``n_rows`` is a count;
     the rows themselves are the ``-thermo.json`` or ``-averages.json``
-    artifact, read with :func:`series`. ``loop`` is None for a table
-    without a loop line (an averages file, or a table LAMMPS never
-    finished).
+    artifact, read with :func:`series`, and *call* is that call as text
+    (None for a vector-mode averages file, which has no scalar rows).
+    ``loop`` is None for a table without a loop line (an averages file,
+    or a table LAMMPS never finished).
 
     Examples:
         >>> summary = _table_summary(
-        ...     {"columns": ["Step", "Temp"], "rows": [[0, 300.0], [10, 310.0]], "loop": None}
+        ...     {"columns": ["Step", "Temp"], "rows": [[0, 300.0], [10, 310.0]], "loop": None},
+        ...     "series(result, 0)",
         ... )
         >>> summary["n_rows"], summary["first"], summary["last"], summary["loop"]
         (2, {'Step': 0, 'Temp': 300.0}, {'Step': 10, 'Temp': 310.0}, None)
-        >>> summary["tail"]["n_rows"], summary["tail"]["mean"]["Temp"]
-        (1, 310.0)
+        >>> summary["tail"]["n_rows"], summary["tail"]["mean"]["Temp"], summary["series"]
+        (1, 310.0, 'series(result, 0)')
     """
     columns = list(table["columns"])
     rows = table["rows"]
@@ -1392,7 +1411,81 @@ def _table_summary(table: dict[str, Any]) -> dict[str, Any]:
         "n_rows": len(rows),
         "loop": table.get("loop"),
         "tail": tail,
+        "series": call,
     }
+
+
+#: The keys a reader reaches for when it expects the rows in a summary.
+_ROW_KEYS = frozenset({"rows", "data", "values"})
+
+
+class TableSummary(dict):
+    """A table summary that refuses the keys the rows would sit under.
+
+    ``run_lammps`` hands back its ``tables`` and ``averages`` entries as
+    this mapping. Reading ``rows``, ``data``, or ``values`` raises a
+    ``KeyError`` that names the artifact holding the rows and the
+    :func:`series` call that reads them, so a check that looks for rows
+    in the summary fails at once rather than judging an empty list. It
+    is a plain ``dict`` to ``json`` and to the artifact store.
+
+    Examples:
+        >>> summary = TableSummary(
+        ...     {"n_rows": 2, "series": "series(result, 'msd.dat')"},
+        ...     artifact="md-averages.json",
+        ... )
+        >>> summary["n_rows"], "rows" in summary
+        (2, False)
+        >>> summary.get("rows", [])
+        Traceback (most recent call last):
+        ...
+        KeyError: "rows live in the md-averages.json artifact; call series(result, 'msd.dat')"
+    """
+
+    def __init__(self, summary: Mapping[str, Any], *, artifact: str) -> None:
+        super().__init__(summary)
+        self.artifact = artifact
+
+    def _refusal(self) -> KeyError:
+        call = dict.get(self, "series")
+        if call is None:
+            return KeyError(
+                f"a vector-mode file has no scalar rows; its blocks are in the "
+                f"{self.artifact} artifact"
+            )
+        return KeyError(f"rows live in the {self.artifact} artifact; call {call}")
+
+    def __getitem__(self, key: Any) -> Any:
+        if key in _ROW_KEYS:
+            raise self._refusal()
+        return super().__getitem__(key)
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        if key in _ROW_KEYS:
+            raise self._refusal()
+        return super().get(key, default)
+
+
+def _refusing_summaries(value: tuple[dict[str, Any], dict[str, Any]]) -> Any:
+    """``run_lammps``'s return value with every summary a :class:`TableSummary`.
+
+    Applied to a computed result and to one the cache restored alike,
+    because the stored bytes are plain JSON.
+    """
+    result, info = value
+    label = result.get("label") or "lammps"
+    result = {
+        **result,
+        "tables": [
+            TableSummary(entry, artifact=f"{label}-thermo.json")
+            for entry in result.get("tables") or []
+        ],
+        "averages": {
+            basename: TableSummary(entry, artifact=f"{label}-averages.json")
+            for basename, entry in (result.get("averages") or {}).items()
+        },
+    }
+    return result, info
 
 
 def _lammps_rate(loops: list[dict[str, Any]]) -> dict[str, float | None]:
@@ -1484,15 +1577,33 @@ def series(
     """The full rows of a thermo table or a ``fix ave/time`` file, keyed by column.
 
     The one documented way to a time series from ``run_lammps``: a thermo
-    table by index (``0``, ``-1``) or an averages file by basename
-    (``"msd.dat"``), read from the ``-thermo.json`` or ``-averages.json``
-    artifact the run kept. *source* is the ``result`` dict (its
-    ``artifacts`` entry names the two parsed files, which a cache hit
-    still resolves), the ``info`` dict, or a run id, with *label* for a
-    run whose label was not ``lammps``. Each row is a dict keyed by
-    column, so a slope or a fit reads ``[row["Temp"] for row in rows]``
-    and never parses a file. A vector-mode averages file has no scalar
-    rows; read that artifact itself.
+    table by index (``0``, ``-1``), the production table by the name
+    ``"production"``, or an averages file by basename (``"msd.dat"``),
+    read from the ``-thermo.json`` or ``-averages.json`` artifact the run
+    kept. ``result["averages"]`` and ``result["tables"]`` hold only
+    summaries; each names its own call under ``series``. *source* is the
+    ``result`` dict (its ``artifacts`` entry names the two parsed files,
+    which a cache hit still resolves), the ``info`` dict, or a run id,
+    with *label* for a run whose label was not ``lammps``. Each row is a
+    dict keyed by column, so a slope or a fit reads
+    ``[row["Temp"] for row in rows]`` and never parses a file. A
+    vector-mode averages file has no scalar rows; read that artifact
+    itself.
+
+    Every row comes back. The summary's ``tail`` statistics cover the
+    last half of the rows, at least one: ``rows[max(1, len(rows) // 2):]``
+    for more than one row. Slice the same way to reproduce them.
+
+    A ``minimize`` prints its own table, and a ``run 0`` after it prints
+    a second table of one row. So ``series(result, -1)`` after
+    ``minimize`` then ``run 0`` is that single row, and the minimizer's
+    table is marked ``minimize`` in ``result["tables"]``. Its rows count
+    minimizer iterations, and so does its share of ``result["steps"]``.
+    ``"production"`` skips both traps. It takes the table the last
+    ``run`` printed and returns the longest table, not printed by a
+    ``minimize``, whose Step range covers that run's. The search goes
+    back only while the steps never decrease, so a ``reset_timestep``
+    ends it. A trailing ``run 0`` therefore resolves to the run before it.
 
     Examples:
         >>> series({"artifacts": {}}, 0)
@@ -1502,7 +1613,8 @@ def series(
     """
     import json
 
-    kind = "averages" if isinstance(name, str) else "thermo"
+    production = name == "production"
+    kind = "averages" if isinstance(name, str) and not production else "thermo"
     with _training_stores() as (runs, artifacts):
         if isinstance(source, str):
             ref = runs.get_artifact(source, f"{label or 'lammps'}-{kind}.json")
@@ -1521,7 +1633,9 @@ def series(
                 f"a run_lammps call returned inside a run, or the run id with label="
             )
         data = json.loads(artifacts.get(digest).read_text(encoding="utf-8"))
-    if isinstance(name, str):
+    if production:
+        table = data[_production_index(data)]
+    elif isinstance(name, str):
         entry = data.get(name)
         if entry is None:
             raise FoundationError(
@@ -1543,6 +1657,57 @@ def series(
             ) from None
     columns = list(table["columns"])
     return [dict(zip(columns, row, strict=False)) for row in table["rows"]]
+
+
+def _production_index(tables: list[dict[str, Any]]) -> int:
+    """The index of the production table among a run's parsed thermo tables.
+
+    The last table a ``run`` printed fixes a Step range. The answer is
+    the longest table, never a ``minimize`` one, whose Step range covers
+    it, searched back only while the steps never decrease.
+
+    Examples:
+        >>> def t(steps, minimize=False):
+        ...     return {"columns": ["Step"], "rows": [[s] for s in steps], "minimize": minimize}
+        >>> _production_index([t(range(0, 58)), t([57]), t(range(57, 1058, 100))])
+        2
+        >>> _production_index([t(range(0, 58), True), t([57])])  # minimize, run 0
+        1
+        >>> _production_index([t(range(0, 58), True), t(range(57, 1058, 100)), t([1057])])
+        1
+        >>> _production_index([t(range(0, 2001, 100)), t(range(0, 1001, 100)), t([1000])])
+        1
+    """
+
+    def span(table: dict[str, Any]) -> tuple[Any, Any] | None:
+        columns = list(table.get("columns") or [])
+        if "Step" not in columns or not table.get("rows"):
+            return None
+        at = columns.index("Step")
+        return table["rows"][0][at], table["rows"][-1][at]
+
+    runs = [i for i, table in enumerate(tables) if not table.get("minimize") and table.get("rows")]
+    if not runs:
+        raise FoundationError(
+            f"no run command printed a thermo table; the run printed {len(tables)} "
+            f"table(s), each from a minimize or empty"
+        )
+    last = best = runs[-1]
+    target = span(tables[last])
+    if target is None:
+        return last
+    index, start = last, target[0]
+    while index > 0:
+        earlier = span(tables[index - 1])
+        if earlier is None or earlier[1] > start:  # a reset_timestep, or no Step to follow
+            break
+        index -= 1
+        start = earlier[0]
+        table = tables[index]
+        covers = earlier[0] <= target[0] and earlier[1] >= target[1]
+        if covers and not table.get("minimize") and len(table["rows"]) > len(tables[best]["rows"]):
+            best = index
+    return best
 
 
 def _json_dumps(value: Any) -> str:

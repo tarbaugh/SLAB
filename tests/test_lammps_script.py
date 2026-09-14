@@ -3,8 +3,9 @@ real-LAMMPS-free.
 
 The fake speaks LAMMPS's command-line protocol (``-in``, ``-log``, ``-h``),
 echoes the script into the log the way ``echo log`` does, writes one thermo
-table per ``run`` with the header ``thermo_style custom`` asks for, the
-``Loop time`` and ``Total wall time`` lines, and the files that ``dump``,
+table per ``run`` or ``minimize`` with the header ``thermo_style custom``
+asks for, the ``Loop time``, ``Minimization stats:``, and ``Total wall
+time`` lines, and the files that ``dump``,
 ``write_data``, ``write_restart``, and ``fix ave/time`` name. It fails the
 way LAMMPS fails: the echoed command, an ``ERROR: ... (src/...)`` line, exit
 1. A gated test at the bottom runs the skill's template against a real
@@ -131,15 +132,20 @@ for raw in script.splitlines():
                 handle.write("%d %.3f\\n" % (100 * k, temp * (1.0 + 0.01 * (k % 3 - 1))))
     elif cmd == "print" and "slow" in line:
         time.sleep(30)
-    elif cmd == "run":
-        n = int(tok[1])
+    elif cmd in ("run", "minimize"):
+        # A minimize prints its own table: at most seven iterations, the
+        # last one always printed, then the Minimization stats block.
+        n = int(tok[1]) if cmd == "run" else min(int(tok[3]), 7)
+        steps = list(range(step, step + n + 1, every))
+        if cmd == "minimize" and steps[-1] != step + n:
+            steps.append(step + n)
         if yaml_thermo:
             lines.append("---")
             lines.append("keywords: [" + "".join("'%s', " % c for c in columns) + "]")
             lines.append("data:")
         else:
             lines.append(" ".join(columns))
-        for s in range(step, step + n + 1, every):
+        for s in steps:
             wobble = 1.0 + 0.01 * ((s // every) % 3 - 1)
             row = {{"Step": s, "Temp": temp * wobble, "E_pair": -3.5 * natoms,
                    "PotEng": -3.5 * natoms, "KinEng": 0.0388 * natoms * wobble,
@@ -155,6 +161,8 @@ for raw in script.splitlines():
         if yaml_thermo:
             lines.append("...")
         lines.append("Loop time of 0.0123 on 1 procs for %d steps with %d atoms" % (n, natoms))
+        if cmd == "minimize":
+            lines.extend(["", "Minimization stats:", "  Stopping criterion = energy tolerance"])
         step += n
 if not failed:
     lines.append("Total wall time: 0:00:01")
@@ -801,6 +809,59 @@ def test_run_lammps_result_carries_rate_seconds_atoms_and_parsed_averages(
     full = json.loads(ws.artifacts.get(result["artifacts"]["averages"]).read_text())
     assert full["ar-temp.txt"]["fix"] == "avg" and len(full["ar-temp.txt"]["rows"]) == 10
     assert ws.runs.get(run.id).status is ExecutionStatus.COMPLETED
+
+
+def test_a_summary_refuses_the_rows_and_names_the_series_call(
+    ws: Workspace, fake_lmp: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A check that reads rows from a summary fails at once, with a message
+    naming series(); the summary carries that call under "series", and a
+    cache hit refuses the same way. The stored result stays plain JSON."""
+    monkeypatch.setenv("SLAB_WORKSPACE", str(ws.root))
+    with ws.start_run(name="ar-nvt"):
+        result, _ = run_lammps(SCRIPT, atoms=_argon(), label="ar", command=fake_lmp)
+    average = result["averages"]["ar-temp.txt"]
+    message = "rows live in the ar-averages.json artifact; call series(result, 'ar-temp.txt')"
+    for read in (
+        lambda: average.get("rows", []),
+        lambda: average["rows"],
+        lambda: average["data"],
+        lambda: average.get("values"),
+    ):
+        with pytest.raises(KeyError) as caught:
+            read()
+        assert caught.value.args[0] == message
+    with pytest.raises(KeyError, match=r"ar-thermo\.json artifact; call series\(result, 0\)"):
+        result["tables"][0]["rows"]
+    assert average["series"] == "series(result, 'ar-temp.txt')"
+    assert result["tables"][0]["series"] == "series(result, 0)"
+    rows = eval(average["series"], {"series": series, "result": result})
+    assert len(rows) == 10 and rows[0]["TimeStep"] == 100
+    # json and the artifact store see a plain dict.
+    assert json.loads(json.dumps(result["averages"]))["ar-temp.txt"]["n_rows"] == 10
+    with ws.start_run(name="ar-nvt-again") as again:
+        cached, _ = run_lammps(SCRIPT, atoms=_argon(), label="ar", command=fake_lmp)
+    assert ws.runs.list_tasks(again.id)[0].cache_hit is True
+    with pytest.raises(KeyError, match="call series"):
+        cached["averages"]["ar-temp.txt"].get("rows", [])
+
+
+def test_series_production_skips_the_minimize_and_the_trailing_run_zero(
+    ws: Workspace, fake_lmp: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """minimize, run 0, run 1000, run 0: four tables. The last is one row,
+    the first counts minimizer iterations, and "production" is the run 1000
+    table, the longest one covering the final run 0's step."""
+    monkeypatch.setenv("SLAB_WORKSPACE", str(ws.root))
+    script = SCRIPT.replace("run 1000\n", "minimize 1e-6 1e-8 100 1000\nrun 0\nrun 1000\nrun 0\n")
+    with ws.start_run(name="ar-relax-nvt"):
+        result, _ = run_lammps(script, atoms=_argon(), label="ar", command=fake_lmp)
+    assert [table["minimize"] for table in result["tables"]] == [True, False, False, False]
+    assert [table["n_rows"] for table in result["tables"]] == [2, 1, 11, 1]
+    assert result["steps"] == 1007  # the minimizer's seven iterations count too
+    assert len(series(result, -1)) == 1
+    rows = series(result, "production")
+    assert len(rows) == 11 and (rows[0]["Step"], rows[-1]["Step"]) == (7, 1007)
 
 
 def test_series_is_the_one_way_to_a_time_series(
