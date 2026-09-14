@@ -1841,6 +1841,70 @@ def test_a_failing_dry_run_records_a_failed_event_and_names_the_exception(
     assert real.startswith("warning: no dry run")
 
 
+def test_a_failed_dry_runs_lammps_files_are_read_through_read_artifact(
+    tmp_path: Path,
+) -> None:
+    """The dry run said its LAMMPS files were kept, and the throwaway store
+    that kept them was gone. The reply now names a dry-<stamp> record, and
+    read_artifact opens its files by that id."""
+    from test_lammps_script import _FAKE, _script
+
+    fake = _script(tmp_path / "fake-lmp", _FAKE)
+    session = _session(tmp_path)
+    box = build_toolbox(session)
+    (tmp_path / "md.py").write_text(
+        "from foundation.tasks import run_lammps\n"
+        f"run_lammps('units metal\\npair_style nonsense\\nrun 10\\n', label='md', "
+        f"command={fake!r})\n"
+    )
+    answer = box.dispatch(_call("launch_workflow", script="md.py", dry_run=True))
+    assert "run_lammps md: ERROR: Unrecognized pair style 'nonsense'" in answer
+    (line,) = [ln for ln in answer.splitlines() if ln.startswith("dry-run record ")]
+    record_id = line.split()[2]
+    assert record_id.startswith("dry-")
+    assert "md-failed.in, md-failed.log, md-failed.screen" in line
+    assert answer.count("Traceback (most recent call last)") == 1
+
+    def read(**arguments: object) -> str:
+        call = ToolCall(id="ra", name="read_artifact", arguments=arguments, arguments_raw="{}")
+        return box.dispatch(call)
+
+    shown = read(run_id=record_id, name="md-failed.log", raw=True)
+    assert shown.startswith("md-failed.log (") and f"dry-run record {record_id})" in shown
+    assert "ERROR: Unrecognized pair style 'nonsense'" in shown
+    missing = read(run_id=record_id, name="md.log")
+    assert missing.startswith("no file named 'md.log' in dry-run record")
+    assert "md-failed.in" in missing
+    gone = read(run_id="dry-20260101-000000-0000", name="md-failed.log")
+    assert gone.startswith("no dry-run record dry-20260101-000000-0000")
+
+
+def test_the_dry_run_reply_prints_the_traceback_once() -> None:
+    """A child dry run's output ends in the JSON report, which holds the whole
+    traceback; the reply's own lines keep the last frame and the exception."""
+    from foundation._ops import DRY_RUN_MARKER
+    from mason.tools import _dry_run_text
+
+    trace = (
+        "Traceback (most recent call last):\n"
+        '  File "md.py", line 2, in <module>\n'
+        "    run_lammps(script)\n"
+        '  File "tasks.py", line 9, in run_lammps\n'
+        "    raise LammpsScriptError(message)\n"
+        "slab.errors.LammpsScriptError: LAMMPS failed (exit 1):\n"
+        "  ERROR: Unrecognized pair style 'nonsense'"
+    )
+    report = {"dry_run": True, "reached_end": False, "traceback": trace, "lammps": []}
+    child = dict(report, output=f"{DRY_RUN_MARKER}\n{json.dumps(report, indent=2)}\n")
+    text = _dry_run_text(Path("md.py"), child, "1 cpu")
+    assert text.count('File \\"md.py\\"') == 1  # inside the JSON only
+    assert '\n  File "tasks.py", line 9, in run_lammps\n' in text
+    assert text.count("Traceback (most recent call last)") == 1
+    in_process = _dry_run_text(Path("md.py"), dict(report, output=""), "1 cpu")
+    assert in_process.count("Traceback (most recent call last)") == 1
+    assert '  File "md.py", line 2' in in_process
+
+
 def test_a_shape_mistake_after_run_lammps_gets_the_result_keys_as_a_note(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

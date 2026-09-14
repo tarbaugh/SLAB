@@ -27,6 +27,7 @@ from slab.lammps import (
     SCREEN_NAME,
     describe_lammps,
     error_lines,
+    failure_evidence,
     kokkos_report,
     kokkos_switches,
     lammps_build,
@@ -75,6 +76,15 @@ if os.environ.get("FAKE_CUDA_BUSY") and "-k" in args:
                      " CUDA-capable device(s) is/are busy or unavailable"
                      " /opt/lammps/lib/kokkos/core/src/Cuda/Kokkos_Cuda_Instance.cpp:135\\n")
     sys.exit(134)
+if os.environ.get("FAKE_DIE"):
+    # A process that dies before the script: the banner reaches the log,
+    # the last words reach the screen alone, and the exit code is given.
+    code, _, words = os.environ["FAKE_DIE"].partition(":")
+    with open(log_name, "w") as handle:
+        handle.write("\\n".join(lines) + "\\n")
+    sys.stdout.write("\\n".join(lines) + "\\n")
+    sys.stdout.write(words.replace("|", "\\n") + "\\n")
+    sys.exit(int(code))
 natoms, every, temp, step = 0, 1, 300.0, 0
 columns = ["Step", "Temp", "E_pair", "E_mol", "TotEng", "Press"]
 yaml_thermo = False
@@ -286,6 +296,95 @@ def test_run_lammps_script_says_when_lammps_wrote_nothing(tmp_path: Path) -> Non
     assert "Library not loaded" in excinfo.value.screen
     assert excinfo.value.log == ""
     assert error_lines("") == ["LAMMPS wrote nothing: the process died before the script started"]
+
+
+KOKKOS_ABORT = (
+    "Kokkos ERROR: Cuda execution space is being constructed before initialize()"
+)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        KOKKOS_ABORT,
+        "terminate called after throwing an instance of 'std::runtime_error'",
+        "what():  cudaSetDevice(0) error( cudaErrorNoDevice): no CUDA-capable device",
+        "lmp: error while loading shared libraries: libcudart.so.12: cannot open shared "
+        "object file: No such file or directory",
+        "/bin/bash: line 3: 4242 Segmentation fault      (core dumped) lmp -in in.lammps",
+        "MPI_ABORT was invoked on rank 0 in communicator MPI_COMM_WORLD",
+        "ERROR: Unrecognized pair style 'eam/aloy' (src/force.cpp:275)",
+    ],
+)
+def test_each_cause_is_an_error_line(line: str) -> None:
+    """Each cause a campaign met is an error line, so the failure record quotes it."""
+    assert error_lines(f"LAMMPS (22 Jul 2025)\n  {line}\n")[-1] == line
+    assert failure_evidence("LAMMPS (22 Jul 2025)", f"banner\n{line}", exit_code=1)[-1] == line
+
+
+def test_epoll_noise_is_not_an_error_line() -> None:
+    noise = "[warn] Epoll MOD(1) on fd 14 failed. Old events were 6; read change was 0 (none)"
+    assert error_lines(f"banner\n{noise}") == ["banner", noise]
+    assert failure_evidence("", f"banner\n{noise}", exit_code=1)[0] == "screen tail:"
+
+
+def test_a_kokkos_abort_puts_the_kokkos_line_in_the_failure_record(
+    tmp_path: Path, fake_lmp: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The campaign's failure: the log held the banner alone and the Kokkos
+    line reached the screen. The record now quotes the Kokkos line."""
+    monkeypatch.setenv("FAKE_DIE", f"1:{KOKKOS_ABORT}")
+    cwd = tmp_path / "scratch"
+    cwd.mkdir()
+    (cwd / "in.lammps").write_text("units metal\n")
+    with pytest.raises(LammpsScriptError) as excinfo:
+        run_lammps_script(cwd=cwd, command=fake_lmp)
+    message = str(excinfo.value)
+    assert message.startswith("LAMMPS failed (exit 1):")
+    assert f"\n  {KOKKOS_ABORT}" in message
+    assert KOKKOS_ABORT not in excinfo.value.log
+    with Workspace(tmp_path / "ws") as ws:
+        with pytest.raises(LammpsScriptError), ws.start_run(name="kokkos") as run:
+            run_lammps("units metal\n", label="kk", command=fake_lmp)
+        record = ws.runs.get(run.id).failure
+    assert record is not None and KOKKOS_ABORT in record["message"]
+
+
+def test_the_screen_tail_is_the_evidence_when_no_line_names_a_cause(
+    tmp_path: Path, fake_lmp: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A nonzero exit with no error line anywhere: the last screen lines
+    are the record, under a "screen tail" label, and the last one survives
+    even behind a long banner."""
+    words = "|".join([f"library chatter line {n} " + "x" * 120 for n in range(40)] + ["Killed"])
+    monkeypatch.setenv("FAKE_DIE", f"137:{words}")
+    cwd = tmp_path / "scratch"
+    cwd.mkdir()
+    (cwd / "in.lammps").write_text("units metal\n")
+    with pytest.raises(LammpsScriptError) as excinfo:
+        run_lammps_script(cwd=cwd, command=fake_lmp)
+    message = str(excinfo.value)
+    assert "exit 137" in message
+    assert "\n  screen tail:\n" in message
+    assert message.endswith("\n  Killed")
+    assert "library chatter line 39" in message
+    assert len(message) < 2000  # a failure record clips its message at 2000 characters
+
+
+def test_a_dry_run_names_the_kokkos_line_as_the_outcome(
+    tmp_path: Path, fake_lmp: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from foundation._ops import launch_script
+
+    monkeypatch.setenv("FAKE_DIE", f"1:{KOKKOS_ABORT}")
+    script = tmp_path / "kk.py"
+    script.write_text(
+        "from foundation.tasks import run_lammps\n"
+        f"run_lammps('units metal\\n', label='kk', command={fake_lmp!r})\n"
+    )
+    report = launch_script(tmp_path / "ws", script, dry_run=True)
+    assert report["lammps"] == [{"label": "kk", "outcome": KOKKOS_ABORT}]
+    assert report["record"]["files"] == ["kk-failed.in", "kk-failed.log", "kk-failed.screen"]
 
 
 def test_run_lammps_script_kills_the_process_group_on_timeout(
@@ -689,7 +788,7 @@ def test_a_device_error_is_quoted_from_the_screen_and_names_the_slice(
     assert (result["state"], result["status"]) == ("quarantined", "failed")
     message = result["failure"]["message"]
     assert "cudaErrorDevicesUnavailable" in message, message
-    assert "context: terminate called" in message
+    assert "\n  terminate called after throwing" in message
     notes = result["failure"]["notes"]
     assert (
         "the launch held gpu id(s) 1 from a budget of 1 (source: slurm_job_gpus); a device "

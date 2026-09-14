@@ -447,6 +447,7 @@ would delete harness records: 1 (37 bytes)
 would delete job files: 2 (89 bytes)
   jobs/nb-bcc-md-1244113.out
   jobs/nb-bcc-md-1244113.sbatch
+would delete dry-run records: none
 would delete expired runs: 2
   01m28ga4r3qnqe15290302b09y  nb-bcc-md
   01m28ga4r14tqp0cdm2grnzvsd  nb-bcc-probe
@@ -466,6 +467,7 @@ The categories, in the order purge deletes them:
 - Files under `mason/sessions/` and `mason/reviews/` that no transcript claims. Purge lists them under `unrecognised` and deletes them only with `--all-sessions`, never silently.
 - The records of harness sessions over MCP (`sessions/`), except one whose session still has a run at status `running`. The newest record stays unless you pass `--all-sessions`.
 - The `.sbatch` scripts and SLURM `.out` files of finished jobs, from `<workspace>/jobs/` and from the serve directory. Jobs still in the queue keep their files, and the serve endpoint record is never touched.
+- The dry-run records under `<workspace>/dry-runs/`, which keep the files of a dry run's failed `run_lammps` calls. The newest conversation's records stay, so its `read_artifact` calls keep working. Pass `--all-sessions` to remove them too.
 - The database rows of every expired run: the run, its transitions, its artifact references, its tasks, and its checks. `slab show` can no longer answer for a purged run.
 - The artifact bytes those runs referenced, unless a surviving run references the same hash. Blobs that no run references at all stay, exactly as in `gc`.
 - Scratch directories under `[paths] scratch` that no live calculation owns. Every slab-managed scratch directory carries a `.slab-owner` marker naming its process, its host, and its run, so ownership is recorded and never inferred from age. A directory goes when its run is over or no longer exists. It also goes when it names no run and its process is gone from this host, and when it has no marker at all. A directory of a running run, of a live process, or of a process on another host is kept and reported with the reason. So is a marker-less directory made less than a minute ago, because its marker is on its way. Only the configured root is read, only its `slab-*` entries, and the platform temp directory is never swept.

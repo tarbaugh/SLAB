@@ -1318,8 +1318,19 @@ def _dry_run_text(script: Path, result: dict[str, Any], held: str) -> str:
     ]
     for entry in result.get("lammps") or []:
         lines.append(f"run_lammps {entry.get('label')}: {entry.get('outcome')}")
-    if result.get("traceback"):
-        lines.append(str(result["traceback"]).rstrip())
+    record = result.get("record")
+    if record:
+        lines.append(
+            f"dry-run record {record['id']} keeps {', '.join(record['files'])}; read them "
+            f"with read_artifact run_id={record['id']} name=<file> for the rest of this session"
+        )
+    output = str(result.get("output") or "").rstrip()
+    trace = str(result.get("traceback") or "").rstrip()
+    if trace and _ops.parse_dry_run_report(output) is not None:
+        # The report printed below holds the whole traceback.
+        lines.append(last_frame(trace))
+    elif trace:
+        lines.append(trace)
     checks = result.get("checks") or []
     if checks:
         lines.append("checks (" + str(result.get("checks_note", "")) + "):")
@@ -1330,10 +1341,34 @@ def _dry_run_text(script: Path, result: dict[str, Any], held: str) -> str:
     outputs = result.get("outputs") or []
     lines.append("outputs the script would keep: " + (", ".join(outputs) if outputs else "none"))
     lines.append(f"resources held: {held}")
-    output = str(result.get("output") or "").rstrip()
     if output:
         lines.append(f"script output:\n{output}")
     return "\n".join(lines)
+
+
+def last_frame(trace: str) -> str:
+    """A traceback's last frame and what follows it: the exception and its notes.
+
+    Examples:
+        >>> text = (
+        ...     "Traceback (most recent call last):\\n"
+        ...     '  File "md.py", line 3, in <module>\\n'
+        ...     "    run_lammps(script)\\n"
+        ...     '  File "tasks.py", line 9, in run_lammps\\n'
+        ...     "    raise LammpsScriptError(message)\\n"
+        ...     "slab.errors.LammpsScriptError: LAMMPS failed (exit 1):\\n"
+        ...     "  ERROR: Unrecognized pair style")
+        >>> print(last_frame(text))
+          File "tasks.py", line 9, in run_lammps
+            raise LammpsScriptError(message)
+        slab.errors.LammpsScriptError: LAMMPS failed (exit 1):
+          ERROR: Unrecognized pair style
+        >>> last_frame("KeyError: 'thermo'")
+        "KeyError: 'thermo'"
+    """
+    lines = trace.rstrip().splitlines()
+    frames = [index for index, line in enumerate(lines) if line.startswith('  File "')]
+    return "\n".join(lines[frames[-1] :]) if frames else trace.rstrip()
 
 
 def record_command(session: MasonSession, **event: Any) -> None:
@@ -1568,35 +1603,61 @@ def _add_workflow_tools(
             details = _without_failure_records(details)
         return note + json.dumps(details, indent=1, ensure_ascii=False)
 
+    def _read_dry_run_file(record_id: str, wanted: str) -> tuple[str, str, bytes] | str:
+        """A dry-run record's file as (name, head, bytes), or the reply saying why not."""
+        try:
+            directory, row = _ops.dry_run_record(session.workspace_root, record_id)
+        except FoundationError as e:
+            return str(e)
+        files = [str(name) for name in row.get("files") or []]
+        if wanted not in files or not (directory / wanted).is_file():
+            names = ", ".join(files) or "none"
+            return f"no file named {wanted!r} in dry-run record {record_id}; it has: {names}"
+        raw = (directory / wanted).read_bytes()
+        return wanted, f"{wanted} ({len(raw)} bytes, dry-run record {record_id})", raw
+
     def read_artifact(arguments: dict[str, Any]) -> str:
         from foundation._ops import run_details
 
         wanted = str(arguments["name"])
         offset = max(int(arguments.get("offset", 1)), 1)
         limit = int(arguments.get("limit", _MAX_READ_LINES))
-        with _open_workspace(session) as ws:
-            run_id, note = _resolve_run(ws, str(arguments["run_id"]))
-            artifacts = run_details(ws, run_id)["artifacts"]
-            found = [a for a in artifacts if a["name"] == wanted or a["hash"].startswith(wanted)]
-            if not found:
-                names = ", ".join(a["name"] for a in artifacts) or "none"
-                return f"{note}no artifact named {wanted!r} on run {run_id[:10]}; it has: {names}"
-            artifact = found[0]
-            if not ws.artifacts.has(artifact["hash"]):
-                return (
-                    f"{note}the bytes of {wanted!r} are no longer stored (retention "
-                    f"reclaimed them); the record keeps its hash {artifact['hash'][:12]}"
-                )
-            raw = ws.artifacts.get(artifact["hash"]).read_bytes()
-        head = (
-            f"{note}{artifact['name']} ({artifact['size_bytes']} bytes, "
-            f"sha256 {artifact['hash'][:12]})"
-        )
+        requested = str(arguments["run_id"])
+        if requested.startswith(_ops.DRY_RUN_PREFIX):
+            found_file = _read_dry_run_file(requested, wanted)
+            if isinstance(found_file, str):
+                return found_file
+            name, head, raw = found_file
+        else:
+            with _open_workspace(session) as ws:
+                run_id, note = _resolve_run(ws, requested)
+                artifacts = run_details(ws, run_id)["artifacts"]
+                found = [
+                    a for a in artifacts if a["name"] == wanted or a["hash"].startswith(wanted)
+                ]
+                if not found:
+                    names = ", ".join(a["name"] for a in artifacts) or "none"
+                    return (
+                        f"{note}no artifact named {wanted!r} on run {run_id[:10]}; "
+                        f"it has: {names}"
+                    )
+                artifact = found[0]
+                if not ws.artifacts.has(artifact["hash"]):
+                    return (
+                        f"{note}the bytes of {wanted!r} are no longer stored (retention "
+                        f"reclaimed them); the record keeps its hash {artifact['hash'][:12]}"
+                    )
+                raw = ws.artifacts.get(artifact["hash"]).read_bytes()
+            name = artifact["name"]
+            head = (
+                f"{note}{artifact['name']} ({artifact['size_bytes']} bytes, "
+                f"sha256 {artifact['hash'][:12]})"
+            )
         if b"\x00" in raw[:8192]:
             return f"{head}\nlooks binary; read_artifact only reads text"
         text = raw.decode("utf-8", errors="replace")
         lines = text.splitlines()
-        if digested := _digest_unless_raw(arguments, artifact["name"], text, len(lines)):
+        if digested := _digest_unless_raw(arguments, name, text, len(lines)):
             return f"{head}\n{digested}"
         window = lines[offset - 1 : offset - 1 + limit]
         numbered = []
@@ -1645,7 +1706,8 @@ def _add_workflow_tools(
             name="read_artifact",
             description=(
                 "Read one of a run's artifacts. name is the artifact's name from show_run "
-                "(or a hash prefix); run_id as for show_run. This is how to read an "
+                "(or a hash prefix); run_id as for show_run, or the dry-<stamp> id a "
+                "failed dry run names for its LAMMPS files. This is how to read an "
                 "engine's output file (a .pwo, a LAMMPS log) after the run: the store "
                 "is content-addressed, so do not go looking for the path by hand. A "
                 "recognised engine output comes back as a digest first: system, "

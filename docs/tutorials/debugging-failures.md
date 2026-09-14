@@ -220,9 +220,27 @@ So the failure path reads the explanation back out of the retained files:
 - For LAMMPS, the `ERROR` line(s) become notes, with one line of preceding
   context, which is the echoed command that died or the last thermo row
   before a blow-up. The input, log, and data files are kept.
-- For a script under `run_lammps`, the `ERROR` line and its context are
+- For a script under `run_lammps`, the error line and its context are
   the error message itself, and the script, the log, and the screen
   capture are kept under `{label}-failed` names.
+
+`run_lammps` reads the log first and then the screen capture, because
+some causes reach the screen alone. These lines count as error lines:
+
+| A line that | Comes from |
+|---|---|
+| starts with `ERROR` or `Last command:` | LAMMPS |
+| starts with `Kokkos::` or `Kokkos ERROR` | a Kokkos abort |
+| starts with `terminate called` or `what():` | a C++ exception that ended the process |
+| contains `cudaError` or `CUDA error` | the CUDA runtime |
+| contains `error while loading shared libraries` | the dynamic loader |
+| contains `Segmentation fault` | the shell that ran LAMMPS |
+| contains `MPI_ABORT` | the MPI launcher |
+
+A line that starts with `[warn] Epoll` is not an error line, because some
+MPI launchers print it on every run. When the exit code is not zero and
+no line matches, the error message holds the last 30 lines of the screen
+capture under a `screen tail:` label.
 
 A LAMMPS potential file that cannot be opened, captured from a real run:
 
@@ -278,6 +296,19 @@ run 01m26dcaf6m3nw7jt3mxzkdn3a  ar-dies
 "convergence NOT achieved" is a correction an agent can actually compute.
 The kept `si-failed.pwi` is the exact input that crashed, and you can
 reproduce it outside SLAB with nothing but `pw.x`.
+
+A dry run keeps a failed script's files too. The rehearsal runs in a
+throwaway workspace that is removed when it ends, so SLAB first copies
+the `{label}-failed` files of each failed `run_lammps` call into a
+dry-run record in the real workspace. The record is a directory under
+`<workspace>/dry-runs/`. Its `record.json` holds one row of kind
+`dry_run` with the id `dry-<stamp>`, the session, the script, and the
+file names. The dry-run report names the record under `record`, and the
+reply of the Mason `launch_workflow` tool names the id. Read a file with
+`read_artifact`, and give the record id as the run id. The record stays
+for the rest of the session. `slab purge` removes the records, but it
+keeps the newest conversation's records unless you pass
+`--all-sessions`. A clean dry run keeps no record.
 
 ## Checks as correction inputs
 

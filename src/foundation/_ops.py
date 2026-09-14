@@ -851,8 +851,9 @@ def launch_script(
     (runner machinery).
 
     With *dry_run* the script rehearses: see :func:`dry_run_script`, which
-    this calls and whose report it returns. *root* and *reservation* are
-    not used then, because a rehearsal touches no store.
+    this calls and whose report it returns. *reservation* is not used
+    then, because a rehearsal touches no store, and *root* only receives
+    the dry-run record of a failed ``run_lammps``.
     """
     script_path = Path(script).resolve()
     if not script_path.exists():
@@ -860,6 +861,7 @@ def launch_script(
     if dry_run:
         return dry_run_script(
             script_path,
+            root=root,
             name=name,
             intent=intent,
             session=session,
@@ -994,6 +996,7 @@ WORKSPACE_ENV = "SLAB_WORKSPACE"
 def dry_run_script(
     script: str | os.PathLike[str],
     *,
+    root: str | os.PathLike[str] | None = None,
     name: str | None = None,
     intent: str | None = None,
     session: str | None = None,
@@ -1022,13 +1025,22 @@ def dry_run_script(
     * ``reached_end``: the script ran to its last line.
     * ``traceback``: the failure record's traceback, or None.
     * ``lammps``: one entry per ``run_lammps`` call, in order, with the
-      ``label`` and an ``outcome`` of ``setup ok`` or the ``ERROR`` line
-      LAMMPS printed.
+      ``label`` and an ``outcome`` of ``setup ok`` or the first error
+      line of the failure (an ``ERROR`` line, a Kokkos abort, and their
+      kin, see :func:`slab.lammps.error_lines`).
     * ``checks``: every ``@check`` with ``name``, ``passed``, ``message``,
       and ``checks_note``, which says why a physics check fails here.
     * ``outputs``: the names of the files ``run_lammps`` kept, which are
       the names a real run would keep.
+    * ``record``: the dry-run record of the failed ``run_lammps`` calls,
+      or None. It holds ``id`` (``dry-<stamp>``), ``path``, and ``files``.
     * ``output``: what the script printed, with *capture_output*.
+
+    The throwaway workspace is gone when the report returns, so the files
+    a failed ``run_lammps`` kept (``{label}-failed.in``, ``.log``,
+    ``.screen``, and what the script wrote) are copied first into a
+    dry-run record in *root*, the real workspace: see
+    :func:`keep_dry_run_record`. Without *root* no record is kept.
     """
     script_path = Path(script).resolve()
     if not script_path.exists():
@@ -1052,6 +1064,11 @@ def dry_run_script(
                 dry_run=True,
             )
             report = _dry_run_report(ws, run_id, error)
+            report["record"] = None
+            if root is not None:
+                report["record"] = keep_dry_run_record(
+                    Path(root), ws, run_id, script=script_path, session=session
+                )
     finally:
         if workspace_before is None:
             os.environ.pop(WORKSPACE_ENV, None)
@@ -1115,13 +1132,7 @@ def _dry_run_report(ws: Workspace, run_id: str, error: str | None) -> dict[str, 
     for task in ws.runs.list_tasks(run_id):
         if task.name != "run_lammps":
             continue
-        label = "lammps"
-        label_hash = task.inputs.get("label")
-        if label_hash is not None:
-            with suppress(Exception):
-                loaded = loads(ws.artifacts.get(label_hash).read_bytes())
-                if loaded is not None:
-                    label = str(loaded)
+        label = _lammps_label(ws, task)
         if task.status is ExecutionStatus.COMPLETED:
             outcome = "setup ok"
         else:
@@ -1146,27 +1157,172 @@ def _dry_run_report(ws: Workspace, run_id: str, error: str | None) -> dict[str, 
     }
 
 
+def _lammps_label(ws: Workspace, task: Any) -> str:
+    """The ``label`` a ``run_lammps`` task was called with, ``lammps`` by default."""
+    label_hash = task.inputs.get("label")
+    if label_hash is not None:
+        with suppress(Exception):
+            loaded = loads(ws.artifacts.get(label_hash).read_bytes())
+            if loaded is not None:
+                return str(loaded)
+    return "lammps"
+
+
+DRY_RUN_RECORDS = "dry-runs"
+"""The directory of the real workspace that holds the dry-run records."""
+DRY_RUN_PREFIX = "dry-"
+"""The prefix of a dry-run record's id, which ``read_artifact`` takes as a run id."""
+_DRY_RUN_RECORD_FILE = "record.json"
+
+
+def keep_dry_run_record(
+    root: Path,
+    ws: Workspace,
+    run_id: str,
+    *,
+    script: Path,
+    session: str | None = None,
+) -> dict[str, Any] | None:
+    """Copy a dry run's failed ``run_lammps`` files into the real workspace.
+
+    The record is ``<root>/dry-runs/<stamp>/``: the files under their
+    artifact names, and ``record.json``, one row of kind ``dry_run``
+    with the ``id`` (``dry-<stamp>``), the ``stamp``, the ``session``,
+    the ``script``, and the ``files``. ``read_artifact`` opens the files
+    by that id for the rest of the session, and ``slab purge`` removes
+    the record. Returns ``{"id", "path", "files"}``, or None when no
+    ``run_lammps`` failed. Never raises: a record that cannot be written
+    is left out, and the report still says what failed.
+    """
+    try:
+        failed = [
+            _lammps_label(ws, task)
+            for task in ws.runs.list_tasks(run_id)
+            if task.name == "run_lammps" and task.status is not ExecutionStatus.COMPLETED
+        ]
+        refs = [
+            ref
+            for ref in ws.runs.list_artifacts(run_id, role=ArtifactRole.INTERMEDIATE)
+            if any(ref.name.startswith(f"{label}-failed") for label in failed)
+        ]
+        if not refs:
+            return None
+        records = Path(root) / DRY_RUN_RECORDS
+        records.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(UTC)
+        for _ in range(100):
+            stamp = f"{now:%Y%m%d-%H%M%S}-{os.urandom(2).hex()}"
+            directory = records / stamp
+            try:
+                directory.mkdir()
+                break
+            except FileExistsError:
+                continue
+        else:
+            return None
+        files: list[str] = []
+        for ref in refs:
+            if not ws.artifacts.has(ref.hash):
+                continue
+            shutil.copyfile(ws.artifacts.get(ref.hash), directory / ref.name)
+            files.append(ref.name)
+        row = {
+            "kind": "dry_run",
+            "id": DRY_RUN_PREFIX + stamp,
+            "stamp": stamp,
+            "created_at": now.isoformat(timespec="seconds"),
+            "session": session or os.environ.get("SLAB_SESSION") or None,
+            "script": str(script),
+            "files": files,
+        }
+        (directory / _DRY_RUN_RECORD_FILE).write_text(
+            json.dumps(row, indent=1) + "\n", encoding="utf-8"
+        )
+    except Exception:
+        return None
+    return {"id": row["id"], "path": str(directory), "files": files}
+
+
+def dry_run_records(root: Path) -> list[tuple[Path, dict[str, Any]]]:
+    """Every dry-run record in the workspace at *root*, oldest first, with its row.
+
+    A directory under ``dry-runs`` whose row is missing or unreadable is
+    listed with an empty row, so purge still reaches it.
+    """
+    base = Path(root) / DRY_RUN_RECORDS
+    if not base.is_dir():
+        return []
+    found: list[tuple[Path, dict[str, Any]]] = []
+    for directory in sorted(p for p in base.iterdir() if p.is_dir()):
+        row: dict[str, Any] = {}
+        with suppress(OSError, ValueError):
+            loaded = json.loads((directory / _DRY_RUN_RECORD_FILE).read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                row = loaded
+        found.append((directory, row))
+    return found
+
+
+def dry_run_record(root: Path, record_id: str) -> tuple[Path, dict[str, Any]]:
+    """The dry-run record *record_id* (``dry-<stamp>``): its directory and its row.
+
+    Raises :class:`~foundation.errors.FoundationError` when no such record
+    is kept, which is also the case after ``slab purge`` removed it.
+
+    Examples:
+        >>> import tempfile
+        >>> dry_run_record(Path(tempfile.mkdtemp()), "dry-20260914-101500-ab12")
+        Traceback (most recent call last):
+        ...
+        foundation.errors.FoundationError: no dry-run record dry-20260914-101500-ab12 in ...
+    """
+    stamp = record_id.removeprefix(DRY_RUN_PREFIX)
+    for directory, row in dry_run_records(root):
+        if directory.name == stamp and stamp:
+            return directory, row
+    raise FoundationError(
+        f"no dry-run record {record_id} in {Path(root) / DRY_RUN_RECORDS}; slab purge "
+        f"removes the records, and a dry run keeps one only when a run_lammps failed"
+    )
+
+
 def _first_error_line(failure: dict[str, Any] | None, error: str | None) -> str:
-    r"""The ``ERROR`` line a failed ``run_lammps`` recorded, else its one-line error.
+    r"""The first error line a failed ``run_lammps`` recorded, else its one-line error.
+
+    An error line is one :func:`slab.lammps.is_error_line` takes: an
+    ``ERROR`` line, a Kokkos abort, a loader failure, and their kin. A
+    message that ends in a screen tail gives its first line and the
+    tail's last line.
 
     Examples:
         >>> record = {"message": "LAMMPS failed (exit 1):\n  context: unfix nosuch\n"
         ...           "  ERROR: Could not find fix ID nosuch to delete (src/modify.cpp:1071)"}
         >>> _first_error_line(record, None)
         'ERROR: Could not find fix ID nosuch to delete (src/modify.cpp:1071)'
+        >>> _first_error_line({"message": "LAMMPS failed (exit 1):\n  context: banner\n"
+        ...                    "  Kokkos ERROR: Cuda execution space"}, None)
+        'Kokkos ERROR: Cuda execution space'
+        >>> _first_error_line({"message": "LAMMPS failed (exit 137):\n  screen tail:\n"
+        ...                    "  LAMMPS (22 Jul 2025)\n  Killed"}, None)
+        'LAMMPS failed (exit 137): the screen tail ends with: Killed'
         >>> _first_error_line(None, "LammpsScriptError: timed out")
         'LammpsScriptError: timed out'
     """
+    from slab.lammps import is_error_line
+
     texts: list[str] = []
     if failure is not None:
         texts.append(str(failure.get("message", "")))
         texts.extend(str(note) for note in failure.get("notes", ()))
     for text in texts:
         for line in text.splitlines():
-            if line.strip().startswith("ERROR"):
+            if is_error_line(line.strip()):
                 return line.strip()
     if failure is not None and failure.get("message"):
-        return str(failure["message"]).splitlines()[0]
+        lines = str(failure["message"]).splitlines()
+        if "  screen tail:" in lines and lines[-1].strip() != "screen tail:":
+            return f"{lines[0]} the screen tail ends with: {lines[-1].strip()}"
+        return lines[0]
     return error or "failed"
 
 

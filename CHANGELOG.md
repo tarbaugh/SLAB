@@ -5,6 +5,23 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- A failure record carries the cause, and a failed dry run's LAMMPS
+  files can be read. `run_lammps` now takes `Kokkos ERROR`,
+  `terminate called`, `what():`, `error while loading shared
+  libraries`, `Segmentation fault`, and `MPI_ABORT` lines as error
+  lines, and a line with one of them fails the script as an `ERROR`
+  line did. A `[warn] Epoll` line is not an error line. When the exit
+  code is not zero and no line matches, the error message holds the
+  last 30 lines of the screen capture under a `screen tail:` label. A
+  dry run copies the `{label}-failed` files of each failed `run_lammps`
+  call into a dry-run record, `<workspace>/dry-runs/<stamp>/`, before
+  its throwaway workspace is removed. The report names it under
+  `record`, and the Mason `read_artifact` tool opens its files by the
+  run id `dry-<stamp>`. `slab purge` removes the records and keeps the
+  newest conversation's records unless `--all-sessions` is given. The
+  Mason dry-run reply shows the traceback once. When the output ends in
+  the JSON report, the reply keeps the last frame and the exception.
+
 - `slab mason read --live` follows a session as it works, like
   `tail -f`. The viewer shows the transcript, then each event the
   session appends, until Ctrl+C. It follows the transcripts of the
