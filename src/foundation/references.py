@@ -58,7 +58,7 @@ class RunReference:
             ValueError: *entry* starts with ``run:`` and is malformed, or
                 its basename has a directory component.
         """
-        if not isinstance(entry, str) or not entry.startswith(RUN_REFERENCE_PREFIX):
+        if not isinstance(entry, str) or not entry.strip().startswith(RUN_REFERENCE_PREFIX):
             return None
         match = _RUN_REFERENCE.fullmatch(entry.strip())
         if match is None:
@@ -136,15 +136,26 @@ def producing_runs(runs: SQLiteRunStore, run_id: str) -> list[tuple[TaskRecord, 
     return pairs
 
 
+#: The shortest hash prefix a name is read as: a two-letter name that
+#: happens to be hex must not pick an arbitrary artifact.
+MIN_HASH_PREFIX = 6
+
+
 def _match(refs: list[ArtifactRef], wanted: str) -> ArtifactRef | None:
-    """The reference named *wanted*, else the first whose hash starts with it."""
+    """The reference named *wanted*, else the one whose hash starts with it.
+
+    A prefix shorter than :data:`MIN_HASH_PREFIX` or one that two
+    references share matches nothing, so a wrong guess never feeds the
+    wrong bytes to a script.
+    """
     for ref in refs:
         if ref.name == wanted:
             return ref
-    if _HEX.fullmatch(wanted.lower()):
-        for ref in refs:
-            if ref.hash.startswith(wanted.lower()):
-                return ref
+    prefix = wanted.lower()
+    if len(prefix) >= MIN_HASH_PREFIX and _HEX.fullmatch(prefix):
+        hits = [ref for ref in refs if ref.hash.startswith(prefix)]
+        if len({ref.hash for ref in hits}) == 1:
+            return hits[0]
     return None
 
 
@@ -154,7 +165,9 @@ def find_artifact(runs: SQLiteRunStore, run_id: str, name: str) -> FoundArtifact
     The run's own references come first. When none matches, each of the
     run's cache-hit tasks is followed to the run where that task
     executed, and the first match there is returned with the task that
-    led to it.
+    led to it. A producing run is searched whole, because an artifact
+    is not tied to the task that kept it, so a name another task of that
+    run kept can answer; the head line names the run it came from.
 
     Raises:
         RunNotFoundError: No run matches *run_id*.
