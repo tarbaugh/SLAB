@@ -5,6 +5,19 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- A cut reply keeps its design. When a reply is cut with no text and no
+  call, the loop shows the model its reasoning for one call and asks for
+  the design decisions in the notebook. The request for a short answer
+  at low effort follows the notebook call. A card without the notebook,
+  or a cut with no reasoning, gets the short-answer request as before.
+  The loop also cuts a reasoning loop early. Each model call streams
+  under the `continue-cut-reply` switch, and when one 200-character
+  passage of the reasoning appears three times, the client closes the
+  stream there (finish reason `reasoning_loop`). The `cut` event records
+  `design` and the passage's first line as `loop`, and
+  `slab mason read` prints both. The sandbox bridge relays a streamed
+  answer as it arrives, and the Anthropic client marks a streamed call
+  whose input never closed as cut inside its arguments.
 - `slab mason read --live` follows a session as it works, like
   `tail -f`. The viewer shows the transcript, then each event the
   session appends, until Ctrl+C. It follows the transcripts of the

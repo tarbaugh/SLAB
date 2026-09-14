@@ -12,8 +12,9 @@ from mason.anthropic import (
     parse_reply,
     translate_messages,
 )
-from mason.client import ContextOverflowError, LlmError
+from mason.client import REASONING_LOOP, ContextOverflowError, LlmError
 from mason.config import MasonConfig
+from mason.loop import ReasoningLoopWatch
 
 # -- message translation -----------------------------------------------------
 
@@ -523,3 +524,102 @@ def test_a_call_may_override_effort_and_reply_budget(llm_server: tuple[str, LlmS
     sent = script.requests[0]
     assert sent["output_config"] == {"effort": "low"}
     assert sent["max_tokens"] == 512
+
+
+# -- streaming under a reasoning watch ----------------------------------------
+
+
+def _block_delta(index: int, **delta: Any) -> dict[str, Any]:
+    return {"type": "content_block_delta", "index": index, "delta": delta}
+
+
+def _stream_start() -> dict[str, Any]:
+    return {
+        "type": "message_start",
+        "message": {"usage": {"input_tokens": 40, "cache_read_input_tokens": 60}},
+    }
+
+
+def test_a_streamed_message_is_assembled_like_a_whole_one(
+    llm_server: tuple[str, LlmScript],
+) -> None:
+    url, script = llm_server
+    events = [
+        _stream_start(),
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking"}},
+        _block_delta(0, type="thinking_delta", thinking="plan "),
+        _block_delta(0, type="thinking_delta", thinking="it"),
+        _block_delta(0, type="signature_delta", signature="sig"),
+        {"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}},
+        _block_delta(1, type="text_delta", text="Reading."),
+        {
+            "type": "content_block_start",
+            "index": 2,
+            "content_block": {"type": "tool_use", "id": "t1", "name": "read_file", "input": {}},
+        },
+        _block_delta(2, type="input_json_delta", partial_json='{"path": '),
+        _block_delta(2, type="input_json_delta", partial_json='"a.txt"}'),
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "tool_use"},
+            "usage": {"output_tokens": 7},
+        },
+        {"type": "message_stop"},
+    ]
+    script.responses.append((200, {"_sse": events}))
+    watch = ReasoningLoopWatch()
+    client = AnthropicClient("claude-opus-5", "sk-ant-test", endpoint=url)
+    reply = client.chat([{"role": "user", "content": "go"}], watch=watch)
+    assert script.requests[0]["stream"] is True
+    assert reply.reasoning == "plan it" and reply.content == "Reading."
+    (call,) = reply.tool_calls
+    assert (call.id, call.name, call.arguments, call.arguments_error) == (
+        "t1",
+        "read_file",
+        {"path": "a.txt"},
+        None,
+    )
+    assert reply.finish_reason == "tool_use"
+    assert (reply.prompt_tokens, reply.completion_tokens) == (100, 7)
+
+
+def test_a_streamed_call_cut_before_its_input_closed_is_marked(
+    llm_server: tuple[str, LlmScript],
+) -> None:
+    url, script = llm_server
+    events = [
+        _stream_start(),
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "tool_use", "id": "t1", "name": "write_file", "input": {}},
+        },
+        _block_delta(0, type="input_json_delta", partial_json='{"path": "a.py", "content": "x ='),
+        {"type": "message_delta", "delta": {"stop_reason": "max_tokens"}},
+    ]
+    script.responses.append((200, {"_sse": events}))
+    client = AnthropicClient("claude-opus-5", "sk-ant-test", endpoint=url)
+    reply = client.chat([{"role": "user", "content": "go"}], watch=ReasoningLoopWatch())
+    (call,) = reply.tool_calls
+    assert call.name == "write_file" and call.arguments_error is not None
+    assert reply.finish_reason == "max_tokens"
+
+
+def test_the_watch_cuts_a_streamed_message_where_the_thinking_loops(
+    llm_server: tuple[str, LlmScript],
+) -> None:
+    url, script = llm_server
+    passage = "The thermostat damping: Tdamp 100 timesteps, so 0.1 ps at 1 fs. " * 4
+    events = [
+        _stream_start(),
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking"}},
+    ]
+    events += [_block_delta(0, type="thinking_delta", thinking=passage) for _ in range(8)]
+    events += [{"type": "message_delta", "delta": {"stop_reason": "end_turn"}}]
+    script.responses.append((200, {"_sse": events}))
+    client = AnthropicClient("claude-opus-5", "sk-ant-test", endpoint=url)
+    reply = client.chat([{"role": "user", "content": "go"}], watch=ReasoningLoopWatch())
+    assert reply.finish_reason == REASONING_LOOP
+    assert reply.content is None and reply.tool_calls == ()
+    assert reply.reasoning is not None and reply.reasoning.count(passage) == 3
+    assert reply.prompt_tokens == 100  # the input count arrives before the cut

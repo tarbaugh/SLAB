@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from mason.client import ChatReply, ContextOverflowError, ToolCall
+from mason.client import REASONING_LOOP, ChatReply, ContextOverflowError, ToolCall
 from mason.config import MasonConfig
 from mason.errors import MasonError
 from mason.loop import Mason
@@ -572,6 +572,155 @@ def test_continue_cut_reply_off_restores_the_brevity_nudge_for_every_cut(tmp_pat
     assert [m for m in client.requests[1][0] if m["role"] == "tool"]  # the old path answered it
     event = _cut_events(session)[-1]  # both sessions of this second share one transcript name
     assert event["case"] == 3 and event["continued"] is False
+
+
+class StreamingClient(FakeClient):
+    """A fake that streams: a script item of (reasoning pieces, reply) feeds
+    each piece to the call's watch and ends the reply where it says stop."""
+
+    accepts_watch = True
+
+    def __init__(self, replies: list[Any]) -> None:
+        super().__init__(replies)
+        self.pieces_read: list[int] = []
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        **options: Any,
+    ) -> ChatReply:
+        self.requests.append(([dict(m) for m in messages], tools))
+        self.options.append(dict(options))
+        answer = self.replies.pop(0)
+        if not isinstance(answer, tuple):
+            return answer
+        pieces, whole = answer
+        watch = options.get("watch")
+        for count, _piece in enumerate(pieces, start=1):
+            if watch is not None and watch.feed(_piece):
+                self.pieces_read.append(count)
+                return ChatReply(
+                    content="",
+                    reasoning="".join(pieces[:count]),
+                    finish_reason=REASONING_LOOP,
+                )
+        self.pieces_read.append(len(pieces))
+        return whole
+
+
+_DESIGN = "I settled on fix nph with Pdamp 1.0, static groups, and zero-argument checks."
+
+
+def _design_cut() -> ChatReply:
+    return ChatReply(
+        content=None,
+        reasoning=_DESIGN,
+        finish_reason="max_tokens",
+        prompt_tokens=100,
+        completion_tokens=16_000,
+    )
+
+
+def test_a_cut_reply_is_followed_by_a_notebook_call_then_the_brevity_nudge(
+    tmp_path: Path,
+) -> None:
+    """The acceptance case. A reply cut with no text and no call had reached
+    a design in its reasoning. The loop shows that reasoning for one call
+    and asks for the decisions in the notebook; the brevity nudge comes
+    only after the notebook call, so the next script keeps the design."""
+    session = _session(tmp_path, effort="high")
+    client = FakeClient(
+        [
+            _design_cut(),
+            _tool_reply("notebook", entry="Design: Pdamp 1.0, static groups, zero-arg checks"),
+            _text_reply("script written"),
+        ]
+    )
+    result = Mason(session, client=client).run_turn("write the npt script")
+    assert result.text == "script written"
+    design_request = client.requests[1][0]
+    nudge = design_request[-2]
+    assert nudge["role"] == "user" and nudge["content"].startswith(
+        "[harness] your reasoning was cut; write the design decisions you reached so "
+        "far into the notebook in one call, then continue."
+    )
+    # The reasoning is shown to the design call, and to that call only.
+    assert _DESIGN in design_request[-1]["content"]
+    assert client.options[1]["effort"] == "low"
+    assert not any(_DESIGN in str(m.get("content")) for m in client.requests[2][0])
+    assert "Pdamp 1.0" in (tmp_path / "NOTEBOOK.md").read_text()
+    # After the notebook call: the brevity nudge, with the design in history.
+    after = client.requests[2][0]
+    assert after[-3]["role"] == "tool" and after[-2]["content"].startswith(
+        "[harness] the design decisions are in the notebook entry above."
+    )
+    assert client.options[2]["effort"] == "low"
+    (event,) = _cut_events(session)
+    assert (event["case"], event["continued"], event["design"]) == (1, False, True)
+    assert "loop" not in event
+    # The empty cut reply stands in the history as an empty string, never null.
+    assert design_request[-3] == {"role": "assistant", "content": ""}
+
+
+def test_a_design_reply_that_is_cut_again_gets_the_brevity_nudge(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    client = FakeClient([_design_cut(), _design_cut(), _text_reply("short")])
+    result = Mason(session, client=client).run_turn("go")
+    assert result.text == "short"
+    assert "none of it was received" in client.requests[2][0][-2]["content"]
+    assert [e.get("design", False) for e in _cut_events(session)] == [True, False]
+
+
+def test_the_design_path_needs_reasoning_and_the_notebook(tmp_path: Path) -> None:
+    """Without the notebook tool, or with no reasoning to write down, a
+    case-1 cut takes the brevity nudge as before."""
+    mason = Mason(_session(tmp_path), client=FakeClient([_design_cut(), _text_reply("ok")]))
+    del mason.toolbox.tools["notebook"]
+    mason.run_turn("go")
+    assert "none of it was received" in mason.client.requests[1][0][-2]["content"]
+
+
+def test_a_reasoning_loop_is_cut_where_it_repeats(tmp_path: Path) -> None:
+    """A stream whose reasoning repeats one passage is cut at the third copy,
+    not at the ceiling. The design call sees the reasoning up to where the
+    repetition began, and the transcript names the passage's first line."""
+    session = _session(tmp_path)
+    passage = "fix 1 all nph iso 0.0 0.0 1.0\nPdamp must be in time units, so 1.0 ps.\n" * 3
+    assert len(passage) > 200
+    pieces = ["Design: static groups first.\n"] + [passage] * 20
+    never = ChatReply(content="unreached", prompt_tokens=100)
+    client = StreamingClient(
+        [
+            (pieces, never),
+            _tool_reply("notebook", entry="Pdamp 1.0; static groups"),
+            _text_reply("done"),
+        ]
+    )
+    result = Mason(session, client=client).run_turn("go")
+    assert result.text == "done"
+    assert client.pieces_read[0] == 4  # cut at the third copy of 21 pieces
+    (event,) = _cut_events(session)
+    assert event["loop"] == "fix 1 all nph iso 0.0 0.0 1.0"
+    assert event["design"] is True
+    nudge = client.requests[1][0][-2]["content"]
+    assert "repeated one passage three times, starting 'fix 1 all nph iso 0.0 0.0 1.0'" in nudge
+    quoted = client.requests[1][0][-1]["content"]
+    assert "Design: static groups first." in quoted
+    # The derivation up to where the repetition began, not the copies.
+    assert quoted.count("Pdamp must be in time units") <= 3
+    # Every ordinary step carried a watch of its own.
+    watches = [options.get("watch") for options in client.options]
+    assert all(watch is not None for watch in watches) and len(set(map(id, watches))) == 3
+
+
+def test_without_continue_cut_reply_no_watch_is_passed(tmp_path: Path) -> None:
+    from mason.mechanisms import ALL_MECHANISMS
+
+    off = sorted(ALL_MECHANISMS - {"continue-cut-reply"})
+    client = StreamingClient([_text_reply("ok")])
+    Mason(_session(tmp_path, mechanisms=off), client=client).run_turn("go")
+    assert "watch" not in client.options[0]
 
 
 def test_a_cut_reply_is_asked_again_once_at_low_effort(tmp_path: Path) -> None:

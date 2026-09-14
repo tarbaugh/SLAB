@@ -834,11 +834,13 @@ def _render_event(event: dict[str, Any], full: bool) -> None:
     elif kind == "cut":
         what = {1: "no text and no call", 2: "mid-text", 3: "inside a tool call"}
         how = "continued" if event.get("continued") else "nudged for brevity"
+        if event.get("design"):
+            how = "asked for the design in the notebook"
         case = what.get(int(event.get("case") or 0), "?")
-        typer.secho(
-            f"[{stamp}] reply cut at the ceiling ({case}); {how}",
-            fg=typer.colors.YELLOW,
-        )
+        where = "at the ceiling" if event.get("loop") is None else "early, in a reasoning loop"
+        typer.secho(f"[{stamp}] reply cut {where} ({case}); {how}", fg=typer.colors.YELLOW)
+        if event.get("loop") is not None:
+            typer.secho(f"  repeated: {event['loop']}", dim=True)
     elif kind == "edit":
         typer.secho(f"[{stamp}] {event.get('tool')} wrote {event.get('path')}", dim=True)
     elif kind == "dry_run":
