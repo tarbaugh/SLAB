@@ -996,7 +996,8 @@ the design decisions in the notebook first. The request begins:
 > reached so far into the notebook in one call, then continue.
 
 The request for a short answer follows the notebook call, so the next
-script starts from the recorded design. One delegate took the short-answer
+script starts from the recorded design. The design call and that request
+both run at low effort. One delegate took the short-answer
 request at once, dropped the design it had reasoned out (`Pdamp 1.0`,
 static groups, zero-argument checks), and paid ten failed dry runs for
 it. A long reasoning is shown by its first and last 12,000 characters.
@@ -1010,8 +1011,8 @@ event records the first line of the repeated passage as `loop`, and
 call re-deriving `fix nph` syntax before the ceiling cut it. With the
 `continue-cut-reply` switch on, every model call streams. Inside a
 sandbox, the bridge passes a streamed answer on as it arrives.
-And after
-fifteen consecutive steps made only of reading and listing tools, with
+
+After fifteen consecutive steps made only of reading and listing tools, with
 nothing launched, planned, noted, briefed, or finished, the per-step
 budget line tells the model to step back, and says so again every five
 steps. One campaign spent 72 minutes in such a run with nothing to

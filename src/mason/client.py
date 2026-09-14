@@ -481,6 +481,10 @@ def _read_chat_stream(response: Any, url: str, watch: ReasoningWatch) -> dict[st
                     ],
                     "usage": {"completion_tokens": len(text) // _CHARS_PER_TOKEN},
                 }
+    if finish_reason is None:
+        # A stream that closes without a finish reason ended upstream, in a
+        # bridge or a proxy: its half-built reply is not an answer.
+        raise LlmError(f"{url}: the stream ended before the reply finished")
     message: dict[str, Any] = {"content": "".join(content) if content else None}
     if reasoning:
         message["reasoning_content"] = "".join(reasoning)

@@ -182,6 +182,9 @@ _DESIGN_KEPT_NUDGE = (
 #: nudge re-derived the same fix syntax until the ceiling cut it.
 _LOOP_WINDOW_CHARS = 200
 _LOOP_REPEATS = 3
+#: Copies farther apart than this many windows are drafts, not a loop: a
+#: script written three times with one preamble, pages apart, is work.
+_LOOP_MAX_GAP_WINDOWS = 20
 #: A cut inside a tool call's arguments: no call in that reply runs, and
 #: the model is told which tool and how to fit the call in the ceiling.
 _CUT_CALL_NUDGE = (
@@ -327,8 +330,11 @@ class ReasoningLoopWatch:
     A loop is one window of *window* characters seen *repeats* times. A
     copy counts only when it starts at or past the end of the copy counted
     before it, so text that overlaps itself (a run of one character) counts
-    once per window length. Windows are keyed by their hash, and only the
-    last ``window - 1`` characters are kept between pieces.
+    once per window length, and only when it starts within *max_gap*
+    characters of that copy, so a passage repeated pages apart (a script
+    drafted three times) starts a new count. Windows are keyed by their
+    hash, and only the last ``window - 1`` characters are kept between
+    pieces.
 
     Examples:
         >>> watch = ReasoningLoopWatch(window=4, repeats=3)
@@ -348,11 +354,20 @@ class ReasoningLoopWatch:
         False
         >>> ReasoningLoopWatch(window=4, repeats=3).feed("aaaaaaaaaaaa")
         True
+        >>> far = ReasoningLoopWatch(window=4, repeats=3, max_gap=8)
+        >>> far.feed("abcd0123456789ABCDEFGHIJabcdKLMNOPQRSTUVWXYZklmnabcd")
+        False
     """
 
-    def __init__(self, window: int = _LOOP_WINDOW_CHARS, repeats: int = _LOOP_REPEATS) -> None:
+    def __init__(
+        self,
+        window: int = _LOOP_WINDOW_CHARS,
+        repeats: int = _LOOP_REPEATS,
+        max_gap: int | None = None,
+    ) -> None:
         self.window = window
         self.repeats = repeats
+        self.max_gap = window * _LOOP_MAX_GAP_WINDOWS if max_gap is None else max_gap
         self.reset()
 
     def reset(self) -> None:
@@ -402,6 +417,10 @@ class ReasoningLoopWatch:
                 self._seen[hash(passage)] = [-1, start, 1]
                 continue
             if start < entry[1] + width:
+                continue
+            if start - entry[1] > self.max_gap:
+                # Too far from the last copy to be a loop: count afresh.
+                entry[:] = [-1, start, 1]
                 continue
             entry[1] = start
             entry[2] += 1
@@ -982,7 +1001,7 @@ class Mason:
                     return TurnResult(text=text, stop_reason="answer", steps=step, truncated=True)
                 if cut_prefix is not None:
                     text = _join_cut(cut_prefix, text)
-                if not text.strip() and not empty_nudged and reply.finish_reason != "max_tokens":
+                if not text.strip() and not empty_nudged and not cut:
                     # No text and no call is a fault, not an answer. Ask once;
                     # a second empty reply ends the turn below.
                     empty_nudged = True

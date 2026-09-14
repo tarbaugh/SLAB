@@ -7,8 +7,9 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 - A cut reply keeps its design. When a reply is cut with no text and no
   call, the loop shows the model its reasoning for one call and asks for
-  the design decisions in the notebook. The request for a short answer
-  at low effort follows the notebook call. A card without the notebook,
+  the design decisions in the notebook. The design call and the request
+  for a short answer that follows the notebook call both run at low
+  effort. A card without the notebook,
   or a cut with no reasoning, gets the short-answer request as before.
   The loop also cuts a reasoning loop early. Each model call streams
   under the `continue-cut-reply` switch, and when one 200-character

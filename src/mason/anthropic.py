@@ -373,6 +373,8 @@ def _read_message_stream(response: Any, url: str, watch: ReasoningWatch) -> dict
                 details = delta["stop_details"]
             if isinstance(event.get("usage"), dict):
                 usage.update(event["usage"])
+    if stop_reason is None:
+        raise LlmError(f"{url}: the stream ended before the reply finished")
     for index, parts in pieces.items():
         raw = "".join(parts)
         try:
