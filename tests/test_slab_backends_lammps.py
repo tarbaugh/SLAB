@@ -797,8 +797,8 @@ def test_lammps_env_wrapped_command_builds(tmp_path: Path) -> None:
 
 
 _PIN_REFUSAL = (
-    "the reservation chooses the device; exclude a bad device with SLAB_GPU_EXCLUDE "
-    "or [workspace] exclude_gpus"
+    "the reservation chooses the device; exclude a bad device with SLAB_GPU_EXCLUDE, "
+    "[workspace] exclude_gpus, or the partition's exclude_gpus"
 )
 
 

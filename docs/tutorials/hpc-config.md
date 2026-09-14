@@ -448,7 +448,9 @@ instead. `slab run`, `slab mcp`, and the Mason session export it as
 launch they start inherits it. A value already in the environment wins,
 an empty one included.
 
-Both lists are facts about one machine. Keep them in the site file or in
+A partition's list applies on every node of the partition, so a device
+excluded for one faulty node is lost on the healthy nodes too. Both
+lists are facts about one machine. Keep them in the site file or in
 the machine's own config file, and never in a project file that travels
 to another machine. A device that refuses a launch while nobody has
 listed it yet is excluded for the rest of that job by the refusal

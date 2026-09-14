@@ -1675,7 +1675,7 @@ def _refuse_srun_outside_allocation(command: str, engine: str) -> None:
 _DEVICE_PIN = re.compile(r"(?<![$\w{])CUDA_VISIBLE_DEVICES\b")
 DEVICE_PIN_REFUSAL = (
     "the reservation chooses the device; exclude a bad device with "
-    "SLAB_GPU_EXCLUDE or [workspace] exclude_gpus"
+    "SLAB_GPU_EXCLUDE, [workspace] exclude_gpus, or the partition's exclude_gpus"
 )
 
 

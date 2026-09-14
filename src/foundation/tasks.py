@@ -1619,7 +1619,11 @@ def _note_device_error(e: LammpsScriptError) -> None:
     if active is not None and e.elapsed_s is not None and not active.dry_run:
         from foundation._ops import exclude_refused_gpus, exclusion_note
 
+        # A launcher with no rank flag (``srun lmp``) takes the count the
+        # reservation sized, which the envelope carries.
         ranks = launch_ranks(e.command) if e.command else None
+        if ranks is None:
+            ranks = env.ntasks
         try:
             row, reason = exclude_refused_gpus(
                 active.runs,

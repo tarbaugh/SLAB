@@ -451,8 +451,9 @@ another, `free_resources` would report a used device as free, and two
 runs could meet on one device. SLAB refuses such a command before
 LAMMPS starts, whether the pin is bare, under `env`, or in a setup line.
 The refusal ends with `the reservation chooses the device; exclude a bad
-device with SLAB_GPU_EXCLUDE or [workspace] exclude_gpus`. The `devices`
-entry of `info["kokkos"]` records the gpu ids a launch held.
+device with SLAB_GPU_EXCLUDE, [workspace] exclude_gpus, or the partition's
+exclude_gpus`. The `devices` entry of `info["kokkos"]` records the gpu
+ids a launch held.
 
 A device that stays broken belongs in the machine's `exclude_gpus`
 (see [Exclude a broken GPU](hpc-config.md#exclude-a-broken-gpu)). Mason
