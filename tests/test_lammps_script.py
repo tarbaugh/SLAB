@@ -25,6 +25,7 @@ from slab.errors import EngineNotAvailableError, LammpsScriptError, ResourcesErr
 from slab.lammps import (
     LOG_NAME,
     SCREEN_NAME,
+    compose_setup,
     describe_lammps,
     error_lines,
     kokkos_report,
@@ -32,6 +33,7 @@ from slab.lammps import (
     lammps_build,
     lammps_builds,
     run_lammps_script,
+    setup_lines,
 )
 from slab.outputs import lammps_thermo
 
@@ -207,6 +209,10 @@ pair_coeff 1 1 Cu_u3.eam
 thermo 10
 run 100
 """
+
+LJ_BOX_SCRIPT = EAM_SCRIPT.replace("pair_style eam", "pair_style lj/cut 8.5").replace(
+    "pair_coeff 1 1 Cu_u3.eam", "pair_coeff 1 1 0.0104 3.40"
+)
 
 
 def _script(path: Path, body: str) -> str:
@@ -544,6 +550,85 @@ def test_run_lammps_takes_a_build_by_alias_and_records_it(
     assert over["setup"] == ["export FAKE_MARK=kokkos"]
     with pytest.raises(EngineNotAvailableError, match="is not a LAMMPS build"):
         run_lammps(SCRIPT, atoms=_argon(), engine="emt-cluster")
+
+
+def test_a_string_setup_runs_as_lines_never_as_characters(
+    ws: Workspace, tmp_path: Path, fake_lmp: str
+) -> None:
+    """A delegate passed setup="set -e\\nexport ..." and bash ran each character
+    as a line ("e: command not found"). A string is one line per newline, blank
+    lines dropped, in the task, in the runner, and in the cache identity."""
+    setup = "set -e\n\nexport FAKE_MARK=joined\n"
+    assert setup_lines(setup) == ("set -e", "export FAKE_MARK=joined")
+    assert describe_lammps(fake_lmp, setup)["setup"] == ["set -e", "export FAKE_MARK=joined"]
+    cwd = tmp_path / "direct"
+    cwd.mkdir()
+    (cwd / "in.lammps").write_text(LJ_BOX_SCRIPT)
+    outcome = run_lammps_script(cwd=cwd, command=fake_lmp, setup=setup)
+    assert "FAKE_MARK=joined" in outcome.log
+    with ws.start_run(name="string") as run:
+        _, info = run_lammps(SCRIPT, atoms=_argon(), label="s", command=fake_lmp, setup=setup)
+    assert info["setup"] == ["set -e", "export FAKE_MARK=joined"]
+    assert info["setup_call"] == ["set -e", "export FAKE_MARK=joined"]
+    assert "FAKE_MARK=joined" in ws.artifacts.get(info["artifacts"]["s.log"]).read_text()
+    (task,) = ws.runs.list_tasks(run.id)
+    assert task.recipe["extra"]["setup"] == ["set -e", "export FAKE_MARK=joined"]
+
+
+def test_a_per_call_setup_extends_the_build_unless_told_to_replace_it(
+    ws: Workspace, tmp_path: Path, fake_lmp: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One delegate broke the build's module environment twice by passing its
+    own setup. Per-call lines now run after the build's lines by default; with
+    setup_mode='replace' they run alone. The provenance names both halves and
+    the mode, and the mode is in the cache identity."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("SLAB_GPUS", "")
+    _registry_with_builds(tmp_path, fake_lmp, monkeypatch)
+    call = 'export FAKE_MARK="$FAKE_MARK+call"'
+    with ws.start_run(name="extend") as run:
+        _, extended = run_lammps(
+            SCRIPT, atoms=_argon(), label="x", engine="lammps-kokkos", setup=[call]
+        )
+    assert extended["setup"] == ["export FAKE_MARK=kokkos", call]
+    assert extended["setup_build"] == ["export FAKE_MARK=kokkos"]
+    assert extended["setup_call"] == [call] and extended["setup_mode"] == "extend"
+    assert "FAKE_MARK=kokkos+call" in ws.artifacts.get(extended["artifacts"]["x.log"]).read_text()
+    (task,) = ws.runs.list_tasks(run.id)
+    assert task.recipe["extra"]["setup_mode"] == "extend"
+    assert task.recipe["extra"]["provenance"]["setup_build"] == ["export FAKE_MARK=kokkos"]
+    assert task.recipe["extra"]["provenance"]["setup_call"] == [call]
+    extend_key = task.cache_key
+
+    with ws.start_run(name="replace") as run:
+        _, replaced = run_lammps(
+            SCRIPT, atoms=_argon(), label="x", engine="lammps-kokkos", setup=[call],
+            setup_mode="replace",
+        )
+    assert replaced["setup"] == [call] and replaced["setup_mode"] == "replace"
+    assert replaced["setup_build"] == ["export FAKE_MARK=kokkos"]
+    assert "FAKE_MARK=+call" in ws.artifacts.get(replaced["artifacts"]["x.log"]).read_text()
+    (task,) = ws.runs.list_tasks(run.id)
+    assert task.cache_hit is False and task.cache_key != extend_key
+
+    # With no build lines the two modes run the same lines, and the mode
+    # still separates the cache keys.
+    keys = {}
+    for mode in ("extend", "replace", "extend"):
+        with ws.start_run(name=mode) as run:
+            run_lammps(
+                LJ_BOX_SCRIPT, command=fake_lmp, setup=["export FAKE_MARK=same"], setup_mode=mode
+            )
+        (task,) = ws.runs.list_tasks(run.id)
+        assert task.cache_hit is (mode in keys)
+        keys[mode] = task.cache_key
+    assert keys["extend"] != keys["replace"]
+
+    with pytest.raises(LammpsScriptError, match="setup_mode='replace' needs setup= lines"):
+        run_lammps(SCRIPT, atoms=_argon(), command=fake_lmp, setup_mode="replace")
+    with pytest.raises(LammpsScriptError, match="setup_mode 'append' is not one of"):
+        run_lammps(SCRIPT, atoms=_argon(), command=fake_lmp, setup=[call], setup_mode="append")
+    assert compose_setup(["a"], [], "replace")["lines"] == ()
 
 
 def test_run_lammps_follows_the_slice_to_the_gpu_build(

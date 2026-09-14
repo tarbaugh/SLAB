@@ -438,7 +438,22 @@ rows read:
    context window row says the loop compacts against a default the
    endpoint may not serve. Each is a legitimate choice, so the doctor
    states it and does not fail.
-8. Read the `leftovers` row on the same run. It counts what `slab purge`
+8. Read the launcher row of each LAMMPS build. The doctor runs the
+   build's `setup` lines in a subshell, then `command -v` on the first
+   word of its `command`. These rows come from a laptop config whose
+   plain build names an absolute `mpirun` and whose gpu build names a
+   bare `mpirun` after a setup that resets PATH:
+
+   ```text
+   [+] lammps cpu build: launcher /opt/homebrew/bin/mpirun on PATH
+   [x] lammps gpu build: launcher mpirun not found after setup; put its directory on PATH in setup or write the absolute path (the setup shell gave no detail)
+   ```
+
+   A failing row means every launch of that build dies with
+   `mpirun: not found`. The launch-time checks do not catch it, because
+   they look through the launcher to the `lmp` it starts. Fix the build
+   before a campaign uses it.
+9. Read the `leftovers` row on the same run. It counts what `slab purge`
    would still sweep: scratch directories under `[paths] scratch` whose
    owner process is gone, delegation transcripts whose conversation is
    gone, and session locks no process holds. The row is `+` when there

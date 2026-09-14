@@ -23,6 +23,7 @@ import re
 import shlex
 import signal
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -111,11 +112,80 @@ def lammps_template(command: str | None = None) -> str:
     return _lammps_template({"command": command})
 
 
-def lammps_setup(setup: str | tuple[str, ...] | list[str] | None = None) -> tuple[str, ...]:
+def lammps_setup(setup: str | Sequence[str] | None = None) -> tuple[str, ...]:
     """Setup lines for the LAMMPS subprocess: per-call, else the chosen build's."""
     from slab.backends import _lammps_setup
 
-    return _lammps_setup(setup)
+    return _lammps_setup(setup_lines(setup))
+
+
+#: How per-call setup lines combine with the build's own lines.
+SETUP_MODES = ("extend", "replace")
+
+
+def setup_lines(setup: str | Sequence[str] | None) -> tuple[str, ...] | None:
+    """Setup as shell lines, one entry per line; None stays None.
+
+    A string is split at each newline and its blank lines are dropped, so
+    ``"set -e\\nexport X=1"`` is two lines and never one entry per
+    character. A sequence stays as it is.
+
+    Examples:
+        >>> setup_lines("set -e\\n\\nexport OMP_PROC_BIND=spread\\n")
+        ('set -e', 'export OMP_PROC_BIND=spread')
+        >>> setup_lines(["module load lammps"])
+        ('module load lammps',)
+        >>> setup_lines(None) is None
+        True
+    """
+    if setup is None:
+        return None
+    if isinstance(setup, str):
+        return tuple(line for line in setup.splitlines() if line.strip())
+    return tuple(str(line) for line in setup)
+
+
+def compose_setup(
+    build_setup: str | Sequence[str] | None,
+    setup: str | Sequence[str] | None = None,
+    mode: str = "extend",
+) -> dict[str, Any]:
+    """The setup lines one LAMMPS call runs: the build's, the call's, and the mode.
+
+    With *mode* ``extend`` (the default) the per-call lines run after the
+    build's lines, so a call adds an export without losing the build's
+    module environment. With ``replace`` the per-call lines run alone.
+    ``replace`` without per-call lines is refused, because it would drop
+    the build's lines silently; pass ``setup=[]`` to run with none.
+
+    Returns ``build`` (the build's lines, resolved), ``call`` (the
+    per-call lines, or None), ``mode``, and ``lines`` (what runs).
+
+    Examples:
+        >>> compose_setup(["module load lammps"], "export X=1")["lines"]
+        ('module load lammps', 'export X=1')
+        >>> compose_setup(["module load lammps"], ["export X=1"], "replace")["lines"]
+        ('export X=1',)
+    """
+    if mode not in SETUP_MODES:
+        raise LammpsScriptError(
+            f"setup_mode {mode!r} is not one of {', '.join(SETUP_MODES)}; extend runs "
+            "the per-call setup lines after the build's, replace runs them alone"
+        )
+    call = setup_lines(setup)
+    if mode == "replace" and call is None:
+        raise LammpsScriptError(
+            "setup_mode='replace' needs setup= lines to replace the build's with; "
+            "pass setup=[] to run with no setup lines at all"
+        )
+    build = lammps_setup(build_setup)
+    if call is None:
+        lines = build
+    elif mode == "extend":
+        lines = (*build, *call)
+    else:
+        lines = call
+    return {"build": build, "call": call, "mode": mode, "lines": lines}
 
 
 def describe_lammps(
@@ -135,8 +205,9 @@ def describe_lammps(
     from slab.backends import describe_engine
 
     options: dict[str, Any] = {"command": command}
-    if setup is not None:
-        options["setup"] = setup
+    lines = setup_lines(setup)
+    if lines is not None:
+        options["setup"] = lines
     described = describe_engine("lammps", options)
     return {key: value for key, value in described.items() if key != "source"}
 
@@ -300,6 +371,47 @@ def lammps_builds() -> dict[str, dict[str, Any]]:
             "kokkos": kokkos_switches(filled),
         }
     return builds
+
+
+def launcher_after_setup(
+    command: str, setup: str | Sequence[str] | None = None
+) -> dict[str, Any]:
+    """Where the first program of a build's command resolves once its setup ran.
+
+    The program is the command's first word, after an ``env VAR=val``
+    wrapper: ``mpirun`` in ``mpirun -np {ntasks} lmp``. With setup lines
+    the answer comes from ``command -v`` in the same login shell a launch
+    uses, run after the setup lines; without them it comes from this
+    process's PATH, because such a command is executed directly. The
+    launch-time guards look through a launcher to the binary it starts, so
+    only this check catches a bare launcher the setup never provides.
+
+    Returns ``launcher`` (the word checked), ``path`` (where it resolved,
+    or None), and ``detail`` (the shell's own words when it did not).
+
+    Examples:
+        >>> launcher_after_setup("/bin/sh -c true")["path"]
+        '/bin/sh'
+        >>> launcher_after_setup("definitely-not-installed-mpirun lmp")["path"] is None
+        True
+    """
+    import shutil
+
+    from slab.backends import _command_payload, _setup_which
+
+    try:
+        words = _command_payload(command) or shlex.split(command)
+    except ValueError as e:
+        return {"launcher": command, "path": None, "detail": f"not parseable shell ({e})"}
+    if not words:
+        return {"launcher": "", "path": None, "detail": "the command names no program"}
+    launcher = words[0]
+    lines = setup_lines(setup) or ()
+    if not lines:
+        found = shutil.which(launcher)
+        return {"launcher": launcher, "path": found, "detail": "" if found else "not on PATH"}
+    resolved, detail = _setup_which(lines, launcher)
+    return {"launcher": launcher, "path": resolved[0] if resolved else None, "detail": detail}
 
 
 def script_scratch_dir() -> Path:

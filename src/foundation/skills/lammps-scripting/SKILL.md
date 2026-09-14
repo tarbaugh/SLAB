@@ -76,8 +76,12 @@ result, info = run_lammps(SCRIPT, atoms=STRUCTURE, files=["W.eam.fs"], label="w-
   command holds `{ntasks}`, `{threads}`, or `{gpus}` is filled from the
   launch's size (the `placeholders` field names them). Nothing adds a
   switch a build lacks: a run whose `kokkos.enabled` is false is a host
-  run whatever the build contains. `command=` and `setup=` override the
-  chosen build for that call alone. `info["build"]` names the build
+  run whatever the build contains. `command=` overrides the chosen
+  build's command for that call alone. `setup=` (a list, or one string
+  with a line per newline) runs after the build's own setup lines, so
+  the build's module environment stays. `setup_mode="replace"` runs the
+  per-call lines alone; do not use it unless the build's lines are
+  wrong. `info["build"]` names the build
   that ran, and the build and the filled command enter the cache
   identity.
 - `timeout_s` kills the process group; the job's time limit is the

@@ -306,6 +306,12 @@ def test_doctor_runs_the_rootstock_setup_lines(project: Path) -> None:
     assert result.exit_code != 0
 
 
+def _launcher_found(command: str, setup: object = None) -> dict[str, object]:
+    """The launcher probe answering as it does on a machine that has the build."""
+    first = command.split()[0]
+    return {"launcher": first, "path": f"/opt/bin/{first}", "detail": ""}
+
+
 def test_the_doctor_says_whether_the_lammps_build_prints_yaml_thermo(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -317,6 +323,7 @@ def test_the_doctor_says_whether_the_lammps_build_prints_yaml_thermo(
     (project / "slab.toml").write_text(base + '[engines.lammps]\ncommand = "lmp"\n')
     probed: dict[str, object] = {"version": "22 Jul 2025 - Update 4"}
     monkeypatch.setattr(doctor, "describe_lammps", lambda command, setup: probed)
+    monkeypatch.setattr(doctor, "launcher_after_setup", _launcher_found)
     result = runner.invoke(app, ["doctor", "--offline"])
     assert result.exit_code == 0, result.output
     assert (
@@ -339,9 +346,12 @@ def test_the_doctor_says_whether_the_lammps_build_prints_yaml_thermo(
     assert "lammps thermo yaml" not in result.output
 
 
-def test_the_doctor_names_the_lammps_plain_build_launcher(project: Path) -> None:
+def test_the_doctor_names_the_lammps_plain_build_launcher(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A plain command with no launcher and no {ntasks} runs one rank whatever
     the launch reserved. That is a legitimate choice, so the row is a fact."""
+    monkeypatch.setattr(doctor, "launcher_after_setup", _launcher_found)
     base = '[agent]\nmodel = "m"\n[hpc]\ndefault_partition = "cpu"\n[hpc.partitions.cpu]\n'
     (project / "slab.toml").write_text(base + '[engines.lammps]\ncommand = "lmp"\n')
     result = runner.invoke(app, ["doctor", "--offline"])
@@ -371,6 +381,51 @@ def test_the_doctor_names_the_lammps_plain_build_launcher(project: Path) -> None
     (project / "slab.toml").write_text(base)
     result = runner.invoke(app, ["doctor", "--offline"])
     assert "lammps plain build" not in result.output
+
+
+def test_the_doctor_runs_each_builds_setup_and_finds_its_launcher(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both builds at a site called bare mpirun under a setup that never put it
+    on PATH, and each delegate rediscovered "mpirun: not found". The launch
+    guards look through the launcher to lmp, so the doctor runs the build's
+    setup and asks for the launcher itself."""
+    monkeypatch.delenv("SLAB_GPUS", raising=False)
+    bindir = project / "mpi" / "bin"
+    bindir.mkdir(parents=True)
+    launcher = bindir / "slab-test-mpirun"
+    launcher.write_text("#!/bin/sh\nexit 0\n")
+    launcher.chmod(0o755)
+    base = '[agent]\nmodel = "m"\n[hpc]\ndefault_partition = "cpu"\n[hpc.partitions.cpu]\n'
+    (project / "slab.toml").write_text(
+        base
+        + "[engines.lammps.gpu]\n"
+        + 'command = "slab-test-mpirun -np {gpus} lmp -k on g {gpus} -sf kk"\n'
+        + 'setup = ["export OMP_PROC_BIND=spread"]\n'
+    )
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert result.exit_code != 0
+    assert (
+        "[x] lammps gpu build: launcher slab-test-mpirun not found after setup; put its "
+        "directory on PATH in setup or write the absolute path" in result.output
+    )
+    assert "lammps cpu build" not in result.output  # no [engines.lammps], no plain-build row
+
+    (project / "slab.toml").write_text(
+        base
+        + "[engines.lammps.gpu]\n"
+        + f'command = "{launcher} -np {{gpus}} lmp -k on g {{gpus}} -sf kk"\n'
+        + 'setup = ["export OMP_PROC_BIND=spread"]\n'
+        + "[engines.lammps]\n"
+        + 'command = "slab-test-mpirun -np {ntasks} lmp"\n'
+        + f'setup = ["export PATH={bindir}:$PATH"]\n'
+    )
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert f"[+] lammps gpu build: launcher {launcher} on PATH\n" in result.output
+    assert f"[+] lammps cpu build: launcher slab-test-mpirun on PATH ({launcher})" in (
+        result.output
+    )
+    assert "[x] lammps" not in result.output
 
 
 def test_the_doctor_names_the_context_window_the_loop_assumes(project: Path) -> None:

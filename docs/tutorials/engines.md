@@ -267,8 +267,10 @@ The details that keep runs honest and directories clean:
   not check values. A smoke test on the login node and a small EAM cell
   run unsized, so they take the plain build, and a launch sized with
   `gpus=` takes the gpu build. `command=` and `setup=` in
-  `calculator_options`, or on `run_lammps`, override the chosen build for
-  that call alone. `slab engines list` and the MCP `list_engines` tool
+  `calculator_options` override the chosen build for that call alone.
+  `command=` on `run_lammps` does the same, and `setup=` on `run_lammps`
+  adds lines after the build's lines, as
+  [below](#running-a-lammps-input-script-whole) describes. `slab engines list` and the MCP `list_engines` tool
   list every build with its command and the switches parsed from it, so
   you and the agent can read what a run will ask for before it runs:
 
@@ -396,8 +398,8 @@ bare basename, so the run keeps it; a path with a directory component is
 refused before LAMMPS starts. The build follows the slice exactly as for the engine, and a
 KOKKOS or MPI launch rides in the build's command. `info["build"]` names
 the build that ran, `cpu`, `gpu`, or an alias. The build, the command,
-the detected version, the setup lines, and the content of every staged
-file enter the cache identity. After the run,
+the detected version, the setup lines, the setup mode, and the content
+of every staged file enter the cache identity. After the run,
 `info["kokkos"]` says what the log reported: whether KOKKOS mode was
 enabled, the GPUs per node and the OpenMP threads per task it used, the
 `/kk` styles that ran, and under `switches` what the command asked for.
@@ -406,6 +408,32 @@ is the exact argument vector that ran. The `lammps-scripting` skill
 carries the input anatomy, the ensembles, and the checks for the resident
 agent, and `slab.outputs` digests the kept log on `read_artifact`. A script that dies keeps its evidence; see
 [Debugging failures](debugging-failures.md#when-the-engine-writes-files).
+
+`setup=` on `run_lammps` gives one call its own shell lines, for an
+export or one more module. Pass a list of lines, or one string with a
+line per newline. SLAB drops the blank lines of a string. `setup_mode=`
+says how the lines combine with the build's own `setup`:
+
+| `setup_mode` | Lines that run |
+|---|---|
+| `extend` (the default) | the build's lines, then the per-call lines |
+| `replace` | the per-call lines alone |
+
+Keep the default. A build's `setup` usually loads the module environment
+that its MPI and its GPU libraries need, and a call that replaces it
+runs without that environment. `replace` without `setup=` is refused,
+and `setup=[]` with `replace` runs no setup lines at all. The lines that
+run and the mode enter the cache identity. `info["setup"]` holds the
+lines that ran, and `info["setup_build"]`, `info["setup_call"]`, and
+`info["setup_mode"]` record where each line came from.
+
+A launcher must be on PATH after the build's setup lines run. The
+launch-time checks look through `mpirun` to the `lmp` it starts, so
+they do not find a bare `mpirun` that the setup never provides. Run
+`slab doctor` after you declare a build. It runs each build's setup in
+a subshell and then `command -v` on the first word of the command. A
+missing launcher is a failing row. Put the launcher's directory on PATH
+in `setup`, or write its absolute path in `command`.
 
 ### Dry run
 

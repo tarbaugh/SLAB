@@ -4,9 +4,10 @@ One command that means "ready to launch a campaign". Each row probes the
 real campaign path — the configuration, the workspace and what a purge
 would sweep from it, the memory store, the engines, the scheduler and
 its partition caps, the gpu budget and the devices, the LAMMPS plain
-build, the agent's context window, the mp snapshot, the gracemaker
-trainer, the model endpoint, the sandbox, and the freshness of the
-rendered job — and the command exits nonzero only on an ``x`` row. An ``=`` row is a fact,
+build, the launcher of each LAMMPS build, the agent's context window,
+the mp snapshot, the gracemaker trainer, the model endpoint, the
+sandbox, and the freshness of the rendered job — and the command exits
+nonzero only on an ``x`` row. An ``=`` row is a fact,
 not a failure: a laptop with no scheduler is healthy, and the doctor must
 say so rather than fail it.
 
@@ -31,7 +32,12 @@ from mason.errors import MasonError
 from mason.session import stale_locks, transcript_groups
 from slab._ops import engines_overview
 from slab.errors import SlabError
-from slab.lammps import describe_lammps, yaml_thermo_supported
+from slab.lammps import (
+    describe_lammps,
+    lammps_builds,
+    launcher_after_setup,
+    yaml_thermo_supported,
+)
 from slab.resources import budget, device_status, gres_gpus
 from slab.scratch import leftovers, scratch_root
 
@@ -262,6 +268,46 @@ def _lammps_yaml_row(slab_cfg: SlabConfig | None) -> tuple[str, str]:
         "thermo_modify line yaml line errors with Illegal thermo_modify command "
         "on this build",
     )
+
+
+_LAUNCHER_FIX = "put its directory on PATH in setup or write the absolute path"
+
+
+def _lammps_launcher_rows(slab_cfg: SlabConfig | None) -> list[tuple[str, str]]:
+    """One row per LAMMPS build: its launcher resolves after its setup lines ran.
+
+    The launch-time guards look through ``mpirun`` to the binary it
+    starts, so a build whose setup never puts ``mpirun`` on PATH passes
+    them and dies with ``mpirun: not found`` at every launch. This row runs
+    the build's setup and then ``command -v`` on the command's first word.
+    The plain build gets a row only when ``[engines.lammps]`` sets a
+    command or setup lines, so a machine with no LAMMPS stays healthy.
+    """
+    lammps = getattr(getattr(slab_cfg, "engines", None), "lammps", None)
+    plain_configured = bool(getattr(lammps, "command", None) or getattr(lammps, "setup", None))
+    try:
+        builds = lammps_builds()
+    except _ERRORS as e:
+        return [("x", f"lammps builds: {e}")]
+    rows: list[tuple[str, str]] = []
+    for name, build in builds.items():
+        if name == "cpu" and not plain_configured:
+            continue
+        found = launcher_after_setup(build["command"], build["setup"])
+        launcher = found["launcher"]
+        if found["path"] is not None:
+            where = "" if found["path"] == launcher else f" ({found['path']})"
+            rows.append(("+", f"lammps {name} build: launcher {launcher} on PATH{where}"))
+            continue
+        detail = f" ({found['detail']})" if found["detail"] else ""
+        rows.append(
+            (
+                "x",
+                f"lammps {name} build: launcher {launcher} not found after setup; "
+                f"{_LAUNCHER_FIX}{detail}",
+            )
+        )
+    return rows
 
 
 def _context_window_row(agent: AgentConfig) -> tuple[str, str] | None:
@@ -639,6 +685,7 @@ def run(
     if plain_row is not None:
         rows.append(plain_row)
         rows.append(_lammps_yaml_row(slab_cfg))
+    rows.extend(_lammps_launcher_rows(slab_cfg))
     if agent is not None:
         window_row = _context_window_row(agent)
         if window_row is not None:

@@ -61,6 +61,7 @@ from slab.lammps import (
     INPUT_NAME,
     LOG_NAME,
     SCREEN_NAME,
+    compose_setup,
     cuda_device_error,
     describe_lammps,
     kokkos_report,
@@ -1006,13 +1007,30 @@ _MAX_KEPT_FAILURE_FILES = 20
 # serializer would otherwise hash a potential file by its path string, and
 # changed bytes at the same path must miss.
 def _lammps_identity(arguments: dict[str, Any]) -> dict[str, Any]:
-    """The binary a ``run_lammps`` call names: the build, then per-call overrides."""
+    """The binary a ``run_lammps`` call names: the build, then per-call overrides.
+
+    The lines that run and the mode enter the cache key; which of them
+    came from the build and which from the call is provenance.
+    """
     build = lammps_build(arguments.get("engine"))
     command = arguments.get("command") or build["command"]
-    setup = arguments.get("setup") if arguments.get("setup") is not None else build["setup"]
-    described = describe_lammps(command=command, setup=setup)
+    setup = compose_setup(
+        build["setup"], arguments.get("setup"), arguments.get("setup_mode") or "extend"
+    )
+    described = describe_lammps(command=command, setup=setup["lines"])
     described["build"] = build["build"]
+    described["setup_mode"] = setup["mode"]
+    described["provenance"] = {**described.get("provenance", {}), **_setup_provenance(setup)}
     return described
+
+
+def _setup_provenance(setup: dict[str, Any]) -> dict[str, Any]:
+    """The build's setup lines, the call's, and how they combined, as recorded."""
+    return {
+        "setup_build": list(setup["build"]),
+        "setup_call": None if setup["call"] is None else list(setup["call"]),
+        "setup_mode": setup["mode"],
+    }
 
 
 @task(
@@ -1040,7 +1058,8 @@ def run_lammps(
     label: str | None = None,
     engine: str | None = None,
     command: str | None = None,
-    setup: Sequence[str] | None = None,
+    setup: str | Sequence[str] | None = None,
+    setup_mode: str = "extend",
     timeout_s: float = 86400.0,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run a LAMMPS input script whole, in its own scratch, traced.
@@ -1070,14 +1089,21 @@ def run_lammps(
     and one without runs ``[engines.lammps]`` (else
     ``$ASE_LAMMPSRUN_COMMAND``, else ``lmp``); size the launch with
     ``gpus=`` and never name a build. A registry alias that runs the
-    LAMMPS factory is a further build under its own name. *command* and
-    *setup* override the chosen build's own. A KOKKOS or MPI launch rides
+    LAMMPS factory is a further build under its own name. *command*
+    overrides the chosen build's command. A KOKKOS or MPI launch rides
     in the command (``mpirun -np {ntasks} lmp -k on g {gpus} -sf kk``),
     and nothing adds a switch the command lacks: without ``-k on`` a
-    KOKKOS build runs its plain styles on the host. The build, the
-    command, the detected version, the setup lines, and the content of
-    every staged file enter the cache identity, so a different binary,
-    switch, or potential file honestly recomputes.
+    KOKKOS build runs its plain styles on the host.
+
+    *setup* is shell lines for the LAMMPS subprocess, as a list or as
+    one string with a line per newline. By default (*setup_mode*
+    ``extend``) the per-call lines run after the build's own setup lines,
+    so the build's module environment stays. With *setup_mode*
+    ``replace`` the per-call lines run alone and the build's lines do
+    not run. The build, the command, the detected version, the setup
+    lines that run, the setup mode, and the content of every staged file
+    enter the cache identity, so a different binary, switch, environment,
+    or potential file honestly recomputes.
 
     Kept with the run: the script as ``{label}.in``, the log as
     ``{label}.log``, the screen capture as ``{label}.screen``, the
@@ -1115,7 +1141,9 @@ def run_lammps(
     hashes of the parsed ``thermo`` and ``averages`` files, which
     :func:`series` reads). *info* is the machine side:
     ``build`` (``cpu``, ``gpu``, or an alias name), ``command``, ``argv``
-    (the exact argument vector that ran), ``version``, ``setup``,
+    (the exact argument vector that ran), ``version``, ``setup`` (the
+    lines that ran), ``setup_build`` (the build's lines), ``setup_call``
+    (the per-call lines, or None), ``setup_mode``,
     ``kokkos`` (what the log says KOKKOS did:
     ``enabled``, ``gpus``, ``threads``, the ``/kk`` styles that ran, and
     the ``switches`` the command asked for), ``types``, ``files`` (the
@@ -1140,7 +1168,10 @@ def run_lammps(
         label: Names the kept artifacts (default ``lammps``).
         engine: ``lammps`` (the build follows the slice) or a registry alias.
         command: Override the chosen build's LAMMPS command.
-        setup: Override the chosen build's setup lines.
+        setup: Setup lines for this call: a list, or one string with a
+            line per newline.
+        setup_mode: ``extend`` (default) runs *setup* after the build's
+            setup lines; ``replace`` runs *setup* alone.
         timeout_s: Hard kill for the script (default 24 h; the batch
             job's own time limit is the outer guard).
     """
@@ -1158,9 +1189,8 @@ def run_lammps(
     build = lammps_build(engine)
     own_shape = command is not None  # a per-call command is the caller's own launch shape
     command = command or build["command"]
-    if setup is None:
-        setup = build["setup"]
-    setup_lines = tuple(str(line) for line in setup) if setup is not None else None
+    composed = compose_setup(build["setup"], setup, setup_mode)
+    setup_lines = composed["lines"]
     described = describe_lammps(command=command, setup=setup_lines)
     active = current_run()
     scratch = script_scratch_dir()
@@ -1261,6 +1291,7 @@ def run_lammps(
         "argv": list(outcome.argv),
         "version": described.get("version"),
         "setup": list(described.get("setup") or []),
+        **_setup_provenance(composed),
         "kokkos": {**kokkos_report(outcome.log), "switches": kokkos_switches(outcome.command)},
         "types": types,
         "files": kept_files,

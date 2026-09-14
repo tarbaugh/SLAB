@@ -5,6 +5,20 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- The `setup=` contract of `run_lammps` is stated and correct. A string
+  runs as one line per newline, with blank lines dropped. Before, the
+  task iterated it per character, so `"set -e\nexport ..."` failed with
+  `e: command not found`. One helper (`slab.lammps.setup_lines`) does
+  this for the task, the runner, and the cache identity. Per-call lines
+  now run after the build's own lines by default (`setup_mode="extend"`),
+  so a call cannot drop the build's module environment by accident.
+  `setup_mode="replace"` runs the per-call lines alone. The mode enters
+  the cache identity, and `info` records the build's lines, the call's
+  lines, and the mode. `slab doctor` gains one row per LAMMPS build. The
+  row runs the build's setup, then `command -v` on the first word of the
+  command, and fails when the launcher is not on PATH, because the
+  launch-time checks look through `mpirun` to `lmp` and never find a
+  bare `mpirun` that the setup does not provide.
 - `slab mason read --live` follows a session as it works, like
   `tail -f`. The viewer shows the transcript, then each event the
   session appends, until Ctrl+C. It follows the transcripts of the

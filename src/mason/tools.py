@@ -1877,7 +1877,11 @@ def _add_workflow_tools(
                 "every run_lammps call sets LAMMPS up and integrates no step, and "
                 "the reply lists each LAMMPS error, the checks (expected to fail), "
                 "and the outputs; it costs one LAMMPS start and catches script and "
-                "post-processing errors before the MD leg."
+                "post-processing errors before the MD leg. "
+                "A run_lammps setup= (a list, or one string with a line per newline) "
+                "runs after the build's own setup lines, which stay. "
+                "Pass setup_mode='replace' only to run the per-call lines alone, "
+                "without the build's module environment."
             ),
             parameters=_schema(
                 {
