@@ -72,6 +72,7 @@ from slab.lammps import (
 )
 from slab.mp import describe_mp, mp_root, structure_path
 from slab.outputs import lammps_ave_time, lammps_thermo, lammps_thermo_format
+from slab.resources import envelope
 
 
 # cache_extra folds the resolved engine's identity (source + the registry's
@@ -1117,8 +1118,9 @@ def run_lammps(
     ``build`` (``cpu``, ``gpu``, or an alias name), ``command``, ``argv``
     (the exact argument vector that ran), ``version``, ``setup``,
     ``kokkos`` (what the log says KOKKOS did:
-    ``enabled``, ``gpus``, ``threads``, the ``/kk`` styles that ran, and
-    the ``switches`` the command asked for), ``types``, ``files`` (the
+    ``enabled``, ``gpus``, ``threads``, the ``/kk`` styles that ran, the
+    ``switches`` the command asked for, and the ``devices``, the gpu ids
+    the launch held), ``types``, ``files`` (the
     kept names of what the script wrote), ``artifacts`` (name to hash),
     ``thermo_format`` (``yaml`` when every table came as a YAML document,
     ``text`` when every table was read from a text header, ``mixed``
@@ -1261,7 +1263,11 @@ def run_lammps(
         "argv": list(outcome.argv),
         "version": described.get("version"),
         "setup": list(described.get("setup") or []),
-        "kokkos": {**kokkos_report(outcome.log), "switches": kokkos_switches(outcome.command)},
+        "kokkos": {
+            **kokkos_report(outcome.log),
+            "switches": kokkos_switches(outcome.command),
+            "devices": list(envelope().gpus),
+        },
         "types": types,
         "files": kept_files,
         "artifacts": artifact_hashes,
@@ -1594,13 +1600,47 @@ def _note_device_error(e: LammpsScriptError) -> None:
     is also what a device in exclusive compute mode answers to the second
     rank that opens it, so that error adds the rank and gpu counts of the
     launch beside the ids.
+
+    Inside a run, a device the evidence convicts
+    (:func:`foundation._ops.refused_gpu`: ``cudaErrorDevicesUnavailable``
+    within a minute of LAMMPS starting, no more ranks than gpus) is
+    recorded in the run store as excluded, so every later reservation of
+    the job skips it, and a note says so
+    (:func:`foundation._ops.exclusion_note`).
     """
-    from slab.resources import budget, envelope
+    from slab.lammps import launch_ranks
+    from slab.resources import budget
 
     line = cuda_device_error(e.screen) or cuda_device_error(e.log)
     if line is None:
         return
     env = envelope()
+    active = current_run()
+    if active is not None and e.elapsed_s is not None and not active.dry_run:
+        from foundation._ops import exclude_refused_gpus, exclusion_note
+
+        ranks = launch_ranks(e.command) if e.command else None
+        try:
+            row, reason = exclude_refused_gpus(
+                active.runs,
+                evidence=f"{e.screen}\n{e.log}",
+                held=env.gpus,
+                ranks=ranks,
+                elapsed_s=e.elapsed_s,
+                run_id=active.id,
+            )
+        except Exception as secondary:  # the failure being noted must still surface
+            e.add_note(f"(recording the refused gpu also failed: {secondary})")
+            row, reason = None, ""
+        if row is not None:
+            e.add_note(exclusion_note(row))
+        elif reason.startswith("the error line names no device"):
+            # KOKKOS prints cudaSetDevice(cuda_device_id), not the number.
+            e.add_note(
+                f"the error does not say which of gpu(s) {','.join(env.gpus)} refused, so "
+                f"none is excluded; a launch with gpus=1 finds the device, and its "
+                f"refusal excludes it for the rest of the job"
+            )
     held = ",".join(env.gpus) or "none"
     found = budget()
     e.add_note(

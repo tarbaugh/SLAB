@@ -63,10 +63,23 @@ class LammpsScriptError(SlabError):
 
     Carries the log file's text on ``log`` and the captured screen output
     on ``screen`` so a caller can keep both as evidence; the message holds
-    the extracted ``ERROR`` lines with one line of context.
+    the extracted ``ERROR`` lines with one line of context. A failure of a
+    LAMMPS that started also carries the ``command`` it ran and
+    ``elapsed_s``, the seconds from its start to its end, so a device that
+    refused within seconds can be told from a fault later in the run.
     """
 
-    def __init__(self, message: str, *, log: str = "", screen: str = "") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        log: str = "",
+        screen: str = "",
+        command: str | None = None,
+        elapsed_s: float | None = None,
+    ) -> None:
         super().__init__(message)
         self.log = log
         self.screen = screen
+        self.command = command
+        self.elapsed_s = elapsed_s

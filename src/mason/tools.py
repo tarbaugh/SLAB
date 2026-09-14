@@ -1416,6 +1416,44 @@ def _count_argument(arguments: dict[str, Any], key: str, *, minimum: int = 1) ->
     return count
 
 
+def _exclusion_hint(failure: dict[str, Any] | None) -> str | None:
+    """A suggestion to remember a gpu that refused a launch, or None.
+
+    The child that ran LAMMPS recorded the exclusion and left a note on the
+    failure record (:func:`foundation._ops.exclusion_note`). The store
+    forgets the row when the job ends, so the fact reaches the next
+    session only through a memory, and the agent decides whether to write
+    one; this never writes it.
+
+    Examples:
+        >>> note = ("gpu 0 excluded: reservations skip it for the rest of job 7; "
+        ...         "'slab runs gpus' lists it")
+        >>> _exclusion_hint({"notes": [note]}).startswith("gpu 0 refused this launch")
+        True
+        >>> _exclusion_hint({"notes": ["last energy: -3.2"]}) is None
+        True
+    """
+    for note in (failure or {}).get("notes") or []:
+        match = _ops.EXCLUSION_NOTE.match(str(note))
+        if match is None:
+            continue
+        gpu, job = match.group("gpu", "job")
+        scope = (
+            f"for the rest of job {job}, and the exclusion ends with the job"
+            if job
+            else f"on this machine until 'slab runs gpus --clear {gpu}'"
+        )
+        return (
+            f"gpu {gpu} refused this launch (cudaErrorDevicesUnavailable within a minute of "
+            f"LAMMPS starting) and is out of the budget {scope}. Reservations skip it, so "
+            f"launch again sized as before. If the next session on this machine should "
+            f"know, call remember with the device id (gpu {gpu}), the job "
+            f"({job or 'none'}), and the error. Do not pin CUDA_VISIBLE_DEVICES in a "
+            f"command; the reservation chooses the device."
+        )
+    return None
+
+
 def _reserve_for(session: MasonSession, arguments: dict[str, Any]) -> Reservation | str:
     """Check out the slice a launch asks for, or the refusal text.
 
@@ -1842,6 +1880,8 @@ def _add_workflow_tools(
             if enabled(session.agent, "failure-records"):
                 lines.append("failure record:")
                 lines.append(json.dumps(result["failure"], indent=1, ensure_ascii=False))
+                if hint := _exclusion_hint(result["failure"]):
+                    lines.append(hint)
         elif result.get("traceback"):
             lines.append(str(result["traceback"]))
         lines.append(f"resources held: {held}")
@@ -1953,10 +1993,16 @@ def _add_workflow_tools(
             )
         if outcome == "finished":
             run = waited["run"]
+            hint = (
+                _exclusion_hint(run.failure)
+                if enabled(session.agent, "failure-records")
+                else None
+            )
             return (
                 f"{note}run {run.id}: state={_state_text(run)} "
                 f"status={run.status.value}; {waited['progress']}; "
                 f"read it with show_run"
+                + (f"\n{hint}" if hint else "")
             )
         if outcome == "no_runs":
             return (
@@ -2043,6 +2089,7 @@ def _add_engine_tools(box: Toolbox, session: MasonSession) -> None:
             + (f" (ids {','.join(budget['gpus'])}, source {budget['gpu_source']})"
                if budget["gpus"] else ""),
             *_ops.gpu_lines(budget["gpus"]),
+            *(f"  {line}" for line in answer.get("excluded_lines", [])),
             _ops.free_line(answer),
         ]
         if answer["held"]:
@@ -2058,7 +2105,8 @@ def _add_engine_tools(box: Toolbox, session: MasonSession) -> None:
             description=(
                 "What is free on this host right now: the budget (with the gpu ids "
                 "and where they came from), the memory each budget gpu has in use "
-                "per nvidia-smi, the free cpu and gpu counts, and one line per live "
+                "per nvidia-smi, the gpus excluded after a refusal in this job, the "
+                "free cpu and gpu counts, and one line per live "
                 "reservation (its slice, the run or the holder, its age). Call it "
                 "before a concurrent launch; the environment block's free amounts "
                 "were read when the prompt was built."

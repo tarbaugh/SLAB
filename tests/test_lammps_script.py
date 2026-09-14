@@ -414,9 +414,11 @@ def test_kokkos_switches_read_the_command_and_kokkos_report_reads_the_log() -> N
 
 
 def test_run_lammps_records_what_kokkos_did_and_the_exact_argv(
-    ws: Workspace, fake_lmp: str
+    ws: Workspace, fake_lmp: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A GPU run has to show it: the switches asked for, and what the log says ran."""
+    """A GPU run has to show it: the switches asked for, what the log says ran,
+    and the device ids the launch held."""
+    monkeypatch.setenv("SLAB_GPUS", "1")
     accelerated = f"{fake_lmp} -k on g 1 -sf kk -pk kokkos newton on neigh half"
     with ws.start_run(name="kk"):
         _, info = run_lammps(SCRIPT, atoms=_argon(), label="kk", command=accelerated)
@@ -433,11 +435,14 @@ def test_run_lammps_records_what_kokkos_did_and_the_exact_argv(
             "enabled": True, "gpus": 1, "threads": None, "suffix": True,
             "package": "newton on neigh half",
         },
+        "devices": ["1"],
     }
+    monkeypatch.setenv("SLAB_GPUS", "")
     with ws.start_run(name="plain"):
         _, plain = run_lammps(SCRIPT, atoms=_argon(), label="plain", command=fake_lmp)
     assert plain["kokkos"]["enabled"] is False and plain["kokkos"]["styles"] == []
     assert plain["kokkos"]["switches"]["enabled"] is False
+    assert plain["kokkos"]["devices"] == []
 
 
 def _registry_with_builds(

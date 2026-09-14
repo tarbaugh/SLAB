@@ -409,6 +409,56 @@ keeps a slice from the next one. A reservation claimed by a run is
 released when the run ends, and `slab show` prints the slice the run
 held under `resources`.
 
+## A GPU that refuses every launch
+
+A broken device fails every CUDA context within seconds with
+`cudaErrorDevicesUnavailable`, while `nvidia-smi` shows it idle. The
+failure record of such a run quotes the error and names the gpu ids the
+launch held. SLAB also takes the device out of the budget for the rest
+of the job, without a config change, when all of these hold:
+
+- the evidence names `cudaErrorDevicesUnavailable`;
+- LAMMPS failed within 60 seconds of its start;
+- the launch ran no more MPI ranks than it held gpus, because a second
+  rank on a healthy exclusive-mode device fails the same way;
+- the launch held one gpu, or the error names the ordinal of the
+  device.
+
+The run store then records the device id with the host, the job, the
+reason, and the time. While the row exists, a reservation on that host
+under that job skips the id. The failure record carries the note
+`gpu 0 excluded: reservations skip it for the rest of job 812; 'slab
+runs gpus' lists it`, and `free_resources` lists the device as
+`gpu 0: excluded (refused at 14:02, job 812)`. Launch again, sized as
+before, and the reservation holds another device.
+
+KOKKOS does not print the ordinal of the device that refused. So when a
+failed launch held several gpus, SLAB excludes none of them and adds a
+note that says so. Launch with `gpus=1` to find the bad device. Its
+refusal then excludes it.
+
+The row lives as long as its job. `slab purge` removes the rows of
+every job the scheduler reports ended, and `slab hpc cancel <job>`
+removes the job's rows. A row recorded outside a job stays until you
+remove it. `slab runs gpus` lists every row, says which apply to this
+host and job, and prints the static list in `SLAB_GPU_EXCLUDE`.
+`slab runs gpus --clear 0` removes the row for gpu 0 on this host under
+this job, and `--host` and `--job` name another.
+
+Do not pin `CUDA_VISIBLE_DEVICES` in an engine command to route around
+the device. The run record would name one device while LAMMPS ran on
+another, `free_resources` would report a used device as free, and two
+runs could meet on one device. SLAB refuses such a command before
+LAMMPS starts, whether the pin is bare, under `env`, or in a setup line.
+The refusal ends with `the reservation chooses the device; exclude a bad
+device with SLAB_GPU_EXCLUDE or [workspace] exclude_gpus`. The `devices`
+entry of `info["kokkos"]` records the gpu ids a launch held.
+
+A device that stays broken belongs in the machine's `exclude_gpus`
+(see [Exclude a broken GPU](hpc-config.md#exclude-a-broken-gpu)). Mason
+suggests a `remember` with the device id and the job after a refusal,
+so the next session learns it, but it never writes the memory itself.
+
 ## The surfaces
 
 `slab show` renders each traceback under its owner. The run's `failure`

@@ -25,6 +25,7 @@ from collections.abc import Iterable, Sequence
 from contextlib import ExitStack, redirect_stderr, redirect_stdout, suppress
 from datetime import UTC, datetime
 from pathlib import Path
+from types import EllipsisType
 from typing import TYPE_CHECKING, Any
 
 from foundation.errors import (
@@ -38,7 +39,7 @@ from foundation.errors import (
     StorageError,
 )
 from foundation.lifecycle import ExecutionStatus, LifecycleState
-from foundation.models import ArtifactRole, Reservation, Run, utcnow
+from foundation.models import ArtifactRole, GpuExclusion, Reservation, Run, utcnow
 from foundation.retention import DEFAULT_POLICY, RetentionPolicy, _reachable_hashes, sweep_scratch
 from foundation.runtime import Workspace, describe_liveness, this_host, this_job
 from foundation.serialize import loads
@@ -214,8 +215,10 @@ def free_resources(ws: Workspace) -> dict[str, Any]:
 
     :meth:`Workspace.free_resources` plus ``held``: one line per live
     reservation from :func:`describe_reservation`, in the order the
-    reservations were made. Dead reservations are released first, so the
-    answer is what a launch made now would be judged against.
+    reservations were made, and ``excluded_lines``: one line per gpu that
+    refused a launch under this job (:func:`exclusion_line`). Dead
+    reservations are released first, so the answer is what a launch made
+    now would be judged against.
     """
     ws.reap_dead(caller="free_resources")
     # One read: a reservation that ends between two reads would be listed
@@ -224,7 +227,157 @@ def free_resources(ws: Workspace) -> dict[str, Any]:
     live = ws.runs.live_reservations(this_host(), this_job())
     answer = ws.free_resources(live=live)
     answer["held"] = [describe_reservation(row) for row in live]
+    answer["excluded_lines"] = [
+        exclusion_line(GpuExclusion.model_validate({**row, "host": answer["host"]}))
+        for row in answer["excluded"]
+    ]
     return answer
+
+
+#: A device that refuses a launch this soon after LAMMPS started is taken
+#: as broken for the rest of the job. A refusal later in a run is a
+#: different fault (a device lost mid-run), and it is left to the reader.
+REFUSAL_WINDOW_S = 60.0
+
+
+def exclusion_line(row: GpuExclusion) -> str:
+    """One line for an excluded gpu: ``gpu 0: excluded (refused at 14:02, job 812)``.
+
+    The time is the host's local clock, the one an operator reads.
+
+    Examples:
+        >>> from datetime import datetime, timezone
+        >>> row = GpuExclusion(gpu="0", host="n1", job_id="812", reason="refused",
+        ...                    at=datetime(2026, 9, 14, 12, 2, tzinfo=timezone.utc))
+        >>> exclusion_line(row).startswith("gpu 0: excluded (refused at ")
+        True
+        >>> exclusion_line(row).endswith(", job 812)")
+        True
+        >>> exclusion_line(row.model_copy(update={"job_id": None})).endswith(":02)")
+        True
+    """
+    at = row.at.astimezone().strftime("%H:%M")
+    job = f", job {row.job_id}" if row.job_id is not None else ""
+    return f"gpu {row.gpu}: excluded (refused at {at}{job})"
+
+
+def refused_gpu(
+    evidence: str, held: Sequence[str], *, ranks: int | None, elapsed_s: float
+) -> tuple[str | None, str]:
+    """The held gpu a launch's failure evidence convicts, and why or why not.
+
+    A device is convicted when all of these hold:
+
+    * the evidence names ``cudaErrorDevicesUnavailable``
+      (:func:`slab.lammps.cuda_device_error`);
+    * LAMMPS failed within :data:`REFUSAL_WINDOW_S` of its start;
+    * the launch ran no more MPI ranks than it held gpus, because a second
+      rank on an exclusive-mode device gets the same error from a healthy
+      device (an unknown rank count convicts nothing);
+    * the device resolves: the ``cudaSetDevice(N)`` ordinal indexes the
+      held ids (:func:`slab.lammps.cuda_device_ordinal`), else the launch
+      held exactly one gpu.
+
+    Returns ``(gpu, reason)`` with *gpu* None when nothing is convicted;
+    *reason* then says which condition failed.
+
+    Examples:
+        >>> line = "what():  cudaSetDevice(1) error( cudaErrorDevicesUnavailable): busy"
+        >>> refused_gpu(line, ("2", "3"), ranks=2, elapsed_s=1.2)
+        ('3', 'cudaErrorDevicesUnavailable on gpu 3 1.2 s after LAMMPS started')
+        >>> refused_gpu(line, ("2",), ranks=4, elapsed_s=1.2)[0] is None
+        True
+        >>> refused_gpu(line, ("2", "3"), ranks=2, elapsed_s=600)[1]
+        'the device refused 600 s after LAMMPS started, past the 60 s window'
+    """
+    from slab.lammps import cuda_device_error, cuda_device_ordinal
+
+    line = cuda_device_error(evidence)
+    if line is None or "cudaErrorDevicesUnavailable" not in line:
+        return None, "the evidence names no cudaErrorDevicesUnavailable"
+    if elapsed_s > REFUSAL_WINDOW_S:
+        return None, (
+            f"the device refused {elapsed_s:.0f} s after LAMMPS started, past the "
+            f"{REFUSAL_WINDOW_S:.0f} s window"
+        )
+    if not held:
+        return None, "the launch held no gpu"
+    if ranks is None or ranks > len(held):
+        count = "an unknown number of" if ranks is None else str(ranks)
+        return None, (
+            f"the launch ran {count} rank(s) on {len(held)} gpu(s), so a healthy "
+            f"exclusive-mode device refuses the same way"
+        )
+    ordinal = cuda_device_ordinal(line)
+    if ordinal is not None and ordinal < len(held):
+        gpu = held[ordinal]
+    elif ordinal is None and len(held) == 1:
+        gpu = held[0]
+    else:
+        return None, f"the error line names no device among the held ids {','.join(held)}"
+    return gpu, (
+        f"cudaErrorDevicesUnavailable on gpu {gpu} {elapsed_s:.1f} s after LAMMPS started"
+    )
+
+
+def exclude_refused_gpus(
+    runs: Any,
+    *,
+    evidence: str,
+    held: Sequence[str],
+    ranks: int | None,
+    elapsed_s: float,
+    run_id: str | None = None,
+    host: str | None = None,
+    job_id: str | EllipsisType | None = ...,
+) -> tuple[GpuExclusion | None, str]:
+    """Record the gpu a launch was refused on, when :func:`refused_gpu` convicts one.
+
+    *runs* is the run store. The row is keyed by this host and this job
+    unless *host* and *job_id* are given, and it keeps the gpu out of every
+    reservation of the job until the job ends. Returns the row, or None,
+    and the reason from :func:`refused_gpu`.
+    """
+    gpu, reason = refused_gpu(evidence, held, ranks=ranks, elapsed_s=elapsed_s)
+    if gpu is None:
+        return None, reason
+    row = runs.exclude_gpu(
+        gpu,
+        host=host if host is not None else this_host(),
+        job_id=this_job() if job_id is ... else job_id,
+        reason=reason,
+        run_id=run_id,
+    )
+    return row, reason
+
+
+def exclusion_note(row: GpuExclusion) -> str:
+    """The failure note that says a gpu is now out of the budget.
+
+    Mason reads the note back from the failure record to suggest a
+    ``remember`` (:data:`EXCLUSION_NOTE` matches it).
+
+    Examples:
+        >>> note = exclusion_note(GpuExclusion(gpu="0", host="n1", job_id="7", reason="r"))
+        >>> note
+        "gpu 0 excluded: reservations skip it for the rest of job 7; 'slab runs gpus' lists it"
+        >>> EXCLUSION_NOTE.match(note).group("gpu", "job")
+        ('0', '7')
+    """
+    scope = f"the rest of job {row.job_id}" if row.job_id is not None else (
+        f"this machine until 'slab runs gpus --clear {row.gpu}'"
+    )
+    return (
+        f"gpu {row.gpu} excluded: reservations skip it for {scope}; "
+        f"'slab runs gpus' lists it"
+    )
+
+
+#: Matches :func:`exclusion_note`; ``job`` is None for an exclusion outside a job.
+EXCLUSION_NOTE = re.compile(
+    r"^gpu (?P<gpu>\S+) excluded: reservations skip it for "
+    r"(?:the rest of job (?P<job>[^;\s]+)|this machine)"
+)
 
 
 def budget_counts(
@@ -1640,15 +1793,17 @@ def cancel_job(job_id: str, *, workspace: str | os.PathLike[str] | None = None) 
     died with the job and nothing else will advance the record. Failing a
     run releases the reservation it held, and the host's dead reservations
     are released with it. The scratch directories the failed runs made
-    under ``[paths] scratch`` are removed. Nothing is expired or purged.
+    under ``[paths] scratch`` are removed, and the gpus the job's
+    launches were refused on stop being excluded, because the exclusion
+    lived as long as the job. Nothing is expired or purged.
 
     The summary also lists the machine memories written since the job's
     first run started. A dead job may have recorded a fact it never
     verified, so the operator reviews them; nothing is deleted here.
 
     Returns ``job_id``, ``runs_failed`` (id and name), ``reservations_released``
-    (id and slice), ``scratch_removed`` (paths), and ``memories`` (name,
-    description, when written).
+    (id and slice), ``scratch_removed`` (paths), ``gpus_cleared`` (gpu and
+    host), and ``memories`` (name, description, when written).
     """
     from foundation import memory as memory_store
     from slab.hpc import cancel
@@ -1660,11 +1815,15 @@ def cancel_job(job_id: str, *, workspace: str | os.PathLike[str] | None = None) 
         "runs_failed": [],
         "reservations_released": [],
         "scratch_removed": [],
+        "gpus_cleared": [],
         "memories": [],
     }
     if workspace is None:
         return summary
     with Workspace(workspace) as ws:
+        summary["gpus_cleared"] = [
+            {"gpu": row.gpu, "host": row.host} for row in ws.runs.expire_excluded_gpus([job_id])
+        ]
         stamped = ws.runs.list_runs(job_id=job_id)
         doomed = [run for run in stamped if run.status == ExecutionStatus.RUNNING]
         if not doomed:
@@ -1723,6 +1882,8 @@ def cancel_lines(summary: dict[str, Any]) -> list[str]:
         lines.append(f"released {held['id']}  {held['slice']}")
     for path in summary.get("scratch_removed", []):
         lines.append(f"removed scratch {path}")
+    for row in summary.get("gpus_cleared", []):
+        lines.append(f"cleared  gpu {row['gpu']} on {row['host']}: no longer excluded")
     for memory in summary.get("memories", []):
         age = age_text(datetime.fromisoformat(memory["written_at"]))
         lines.append(

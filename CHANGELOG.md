@@ -5,6 +5,28 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- A known-bad GPU is kept out of the budget, by config and by refusal.
+  `SLAB_GPU_EXCLUDE` (comma-separated ids in the budget's numbering)
+  removes ids from `slab.resources.budget`, and `gpu_source` says how
+  many went (`cuda_visible_devices, 1 excluded`). A partition's
+  `exclude_gpus` makes every job rendered for it export the variable,
+  and the sandbox passes it into the container and names the devices in
+  its context. `[workspace] exclude_gpus` serves a workstation, exported
+  by `slab run`, `slab mcp`, and the Mason session unless the
+  environment already sets it. When LAMMPS fails with
+  `cudaErrorDevicesUnavailable` within 60 s of its start, on a launch
+  with no more ranks than gpus and one gpu or a named ordinal, the run
+  store records the device in the new `excluded_gpus` table (schema 8).
+  While the row exists, reservations on that host under that job skip
+  the id, `free_resources` lists it as `gpu 0: excluded (refused at
+  HH:MM, job N)`, and the failure record says so. The row goes when the
+  job ends (`slab purge`, `slab hpc cancel`, a reap that finds the job
+  ended). `slab runs gpus` lists the rows, and `slab runs gpus --clear
+  ID` removes one. An engine command or setup line that sets
+  `CUDA_VISIBLE_DEVICES` is refused before launch, because the
+  reservation chooses the device. `info["kokkos"]["devices"]` records
+  the gpu ids a launch held, and after a refusal Mason suggests a
+  `remember` with the device id and the job but never writes one.
 - `slab mason read --live` follows a session as it works, like
   `tail -f`. The viewer shows the transcript, then each event the
   session appends, until Ctrl+C. It follows the transcripts of the

@@ -498,9 +498,12 @@ def build_server(
         cpu ids and gpu ids, 'reservations' the ids of the live
         reservations that hold the difference, and 'held' one line per
         live reservation: its slice, the run that claimed it or the
-        process that holds it, and its age. Call it before a concurrent
-        launch; list_engines and the environment state free amounts from
-        the moment they were read."""
+        process that holds it, and its age. 'excluded' lists the gpus
+        that refused a launch under this job (cudaErrorDevicesUnavailable
+        within a minute); reservations skip them until the job ends, and
+        'excluded_lines' says so in one line each. Call it before a
+        concurrent launch; list_engines and the environment state free
+        amounts from the moment they were read."""
         with Workspace(root) as ws:
             return _ops.free_resources(ws)
 
@@ -840,5 +843,13 @@ def build_server(
 
 
 def serve(root: Path, *, project: Path | None = None) -> None:  # pragma: no cover - blocks on stdio
-    """Run the MCP server on stdio until the client disconnects."""
+    """Run the MCP server on stdio until the client disconnects.
+
+    ``[workspace] exclude_gpus`` is exported first
+    (:func:`foundation.config.apply_gpu_exclusion`), so the server's budget
+    and every launch it starts leave a broken device out.
+    """
+    from foundation.config import apply_gpu_exclusion
+
+    apply_gpu_exclusion(project)
     build_server(root, project=project).run()

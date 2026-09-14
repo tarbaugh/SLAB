@@ -1709,6 +1709,7 @@ def _sandbox_context(
     snapshots: dict[str, SetupSnapshot] | None = None,
     gpus: int | None = None,
     gres: str | None = None,
+    excluded: tuple[str, ...] = (),
 ) -> str:
     """The sandbox facts as a prompt block, written at render time.
 
@@ -1746,7 +1747,7 @@ def _sandbox_context(
         "  missing — use python or /proc instead of probing for them.",
         "- $HOME is not mounted."
         + (f" Machine memories are at {memories} (rw)." if memories else ""),
-        *(_gpu_lines(gpus, gres) if gpu else ["- GPU: none on this partition."]),
+        *(_gpu_lines(gpus, gres, excluded) if gpu else ["- GPU: none on this partition."]),
         "- Mounted paths and their modes (nothing else exists in here):",
         *rows,
     ]
@@ -1783,21 +1784,26 @@ def _sandbox_context(
     return "\n".join(lines)
 
 
-def _gpu_lines(gpus: int | None, gres: str | None) -> list[str]:
+def _gpu_lines(
+    gpus: int | None, gres: str | None, excluded: tuple[str, ...] = ()
+) -> list[str]:
     """The GPU lines of the context: how many the job holds and how they are named.
 
     The ids are the scheduler's, exported into the container as
     ``CUDA_VISIBLE_DEVICES`` at job start, so the render states the count
-    it can know and where the ids come from.
+    it can know and where the ids come from. The partition's
+    ``exclude_gpus`` adds a line: those ids are out of the budget.
 
     Examples:
+        >>> _gpu_lines(4, "gpu:4", ("0",))[-2]
+        '- GPU id(s) 0 are broken on this machine and out of the budget'
         >>> _gpu_lines(4, "gpu:a100:4")[0]
         '- GPU: the host driver stack is mounted (--nv); the job holds 4 GPU(s) (gres gpu:a100:4).'
         >>> _gpu_lines(None, "gpu")[0]
         '- GPU: the host driver stack is mounted (--nv); the job holds a GPU (gres gpu).'
     """
     held = f"{gpus} GPU(s)" if gpus is not None else "a GPU"
-    return [
+    lines = [
         f"- GPU: the host driver stack is mounted (--nv); the job holds {held} (gres {gres}).",
         "  Their ids are the ones in CUDA_VISIBLE_DEVICES, resolved by the job's",
         "  prologue from the scheduler's allocation (CUDA_VISIBLE_DEVICES as set,",
@@ -1805,6 +1811,12 @@ def _gpu_lines(gpus: int | None, gres: str | None) -> list[str]:
         "  of the node). The budget is the allocation: `list_engines` lists the",
         "  ids and their source (gpu_source), and a launch holds some with gpus=.",
     ]
+    if excluded:
+        lines += [
+            f"- GPU id(s) {','.join(excluded)} are broken on this machine and out of the budget",
+            "  (the partition's exclude_gpus). Do not pin CUDA_VISIBLE_DEVICES in a command.",
+        ]
+    return lines
 
 
 def _source_commit() -> str | None:
@@ -1993,6 +2005,14 @@ def render_sandbox_script(
         'for _ in $(seq 50); do [ -S "$BRIDGE" ] && break; sleep 0.1; done',
         *GPU_ID_LINES,
     ]
+    # render_sbatch exports SLAB_GPU_EXCLUDE from the partition's list
+    # before these lines; --cleanenv would strip it at the container.
+    excluded = partition_spec.exclude_gpus
+    if excluded:
+        prologue.append(
+            'echo "gpu ids excluded from the budget: $SLAB_GPU_EXCLUDE '
+            '(exclude_gpus of the partition)"'
+        )
 
     inner = "\n".join(
         [
@@ -2051,6 +2071,9 @@ def render_sandbox_script(
             # would see no GPU and one thread.
             '--env CUDA_VISIBLE_DEVICES="$SANDBOX_GPUS"',
             '--env SLAB_GPU_SOURCE="$SANDBOX_GPU_SOURCE"',
+            # A device the site knows is broken stays out of the budget
+            # inside, as it does outside (the partition's exclude_gpus).
+            *(['--env SLAB_GPU_EXCLUDE="$SLAB_GPU_EXCLUDE"'] if excluded else []),
             '--env SLURM_CPUS_PER_TASK="${SLURM_CPUS_PER_TASK:-1}"',
             # OpenMPI inside the namespace: there is no ssh and no
             # scheduler, so component selection must not go looking for
@@ -2104,6 +2127,7 @@ def render_sandbox_script(
         snapshots=snapshots,
         gpus=held_gpus,
         gres=partition_spec.gres,
+        excluded=excluded,
     )
     context_path = toml_path.with_name("context.md")
     if not context_path.is_relative_to(project):

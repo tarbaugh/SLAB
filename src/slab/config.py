@@ -431,9 +431,17 @@ class Partition(BaseModel):
     is checked against, so the partition is described once. A field the
     partition leaves unset is no cap, and SLURM enforces its own limit.
 
+    ``exclude_gpus`` names gpu ids a job on this partition must never hold,
+    in the numbering the job's budget uses (:func:`slab.resources.budget`).
+    It is a fact about the machine, such as a device that refuses every
+    CUDA context. A job rendered for the partition exports the list as
+    ``SLAB_GPU_EXCLUDE``, and the budget inside the job leaves the ids out.
+
     Examples:
         >>> Partition.model_validate({"time_limit": "24:00:00", "gres": "gpu:a100:4"}).gres
         'gpu:a100:4'
+        >>> Partition.model_validate({"exclude_gpus": [" 0 ", 3]}).exclude_gpus
+        ('0', '3')
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -453,6 +461,44 @@ class Partition(BaseModel):
     setup: tuple[str, ...] = ()
     launcher: str | None = None
     sbatch_extra: tuple[str, ...] = ()
+    exclude_gpus: tuple[str, ...] = ()
+
+    @field_validator("exclude_gpus", mode="before")
+    @classmethod
+    def _gpu_ids(cls, value: object) -> object:
+        return gpu_id_list(value)
+
+
+def gpu_id_list(value: object) -> object:
+    """Normalize a configured list of gpu ids: strings, stripped, no blanks, no commas.
+
+    Integers are taken as ids (``[0]`` is ``("0",)``). A comma inside one
+    entry is refused, because the list travels as a comma-joined variable.
+    Anything that is not a list is passed on for pydantic to refuse.
+
+    Examples:
+        >>> gpu_id_list([0, " 2 "])
+        ('0', '2')
+        >>> gpu_id_list(["0,1"])
+        Traceback (most recent call last):
+        ...
+        ValueError: exclude_gpus entry '0,1' holds a comma; write one id per entry
+    """
+    if not isinstance(value, (list, tuple)):
+        return value
+    ids: list[str] = []
+    for entry in value:
+        if isinstance(entry, bool) or not isinstance(entry, (str, int)):
+            raise ValueError(f"exclude_gpus entry {entry!r} is not a gpu id")
+        text = str(entry).strip()
+        if not text:
+            raise ValueError("exclude_gpus holds an empty entry")
+        if "," in text:
+            raise ValueError(
+                f"exclude_gpus entry {text!r} holds a comma; write one id per entry"
+            )
+        ids.append(text)
+    return tuple(dict.fromkeys(ids))
 
 
 class HpcConfig(BaseModel):

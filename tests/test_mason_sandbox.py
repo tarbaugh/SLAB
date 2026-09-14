@@ -138,6 +138,42 @@ def test_render_re_exports_the_gpu_ids_and_turns_binding_off(tmp_path: Path) -> 
     assert "--env OMPI_MCA_hwloc_base_binding_policy=none" in script
 
 
+def test_the_prologue_exports_the_partition_gpu_exclusion(tmp_path: Path) -> None:
+    """A partition's exclude_gpus becomes SLAB_GPU_EXCLUDE in the job script,
+    before the gpu id lines, and crosses --cleanenv into the container, so
+    the budget inside leaves the device out. The cage description says so.
+    A partition without the list renders without either line."""
+    from mason.sandbox import GPU_ID_LINES
+
+    gpu_hpc = HpcConfig.model_validate(
+        {
+            "default_partition": "a40",
+            "partitions": {"a40": {"gres": "gpu:4", "exclude_gpus": ["0"]}},
+        }
+    )
+    script, _, context = render_sandbox_script(
+        _agent(),
+        gpu_hpc,
+        _slab_cfg(),
+        tmp_path / "ws",
+        tmp_path / "project",
+        "goal",
+        toml_path=tmp_path / "sandbox" / "slab.toml",
+    )
+    assert "export SLAB_GPU_EXCLUDE=0" in script
+    assert script.index("export SLAB_GPU_EXCLUDE=0") < script.index(GPU_ID_LINES[0])
+    assert '--env SLAB_GPU_EXCLUDE="$SLAB_GPU_EXCLUDE"' in script
+    assert "GPU id(s) 0 are broken on this machine and out of the budget" in context
+    # The exported value is what the budget inside reads.
+    prologue = script[script.index("export SLAB_GPU_EXCLUDE") : script.index("apptainer exec")]
+    probe = prologue.split("\n", 1)[0] + '\nprintf "%s" "$SLAB_GPU_EXCLUDE"\n'
+    result = subprocess.run(["sh", "-c", probe], capture_output=True, text=True, check=True)
+    assert result.stdout == "0"
+    plain, _, plain_context = _render(tmp_path, _agent(), _slab_cfg())
+    assert "SLAB_GPU_EXCLUDE" not in plain
+    assert "are broken on this machine" not in plain_context
+
+
 def test_render_carries_the_job_id_into_the_container(tmp_path: Path) -> None:
     """--cleanenv strips SLURM_JOB_ID; start_run stamps runs with it, and
     'slab hpc cancel' finds them by it. Empty outside a job."""

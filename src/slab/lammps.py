@@ -23,6 +23,7 @@ import re
 import shlex
 import signal
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -328,7 +329,8 @@ def run_lammps_script(
     timeout the whole group is killed, so MPI ranks die with the launcher.
     Success returns the log and the screen text; failure (a nonzero exit,
     or an ``ERROR`` line in the log or on the screen) raises
-    :class:`~slab.errors.LammpsScriptError` carrying both.
+    :class:`~slab.errors.LammpsScriptError` carrying both, the command,
+    and the seconds LAMMPS ran.
 
     With *dry_run* the script is rehearsed: every ``run`` line becomes
     ``run 0`` and every ``minimize`` line gets zero iterations (see
@@ -359,6 +361,7 @@ def run_lammps_script(
         script_path.write_text(text, encoding="utf-8")
     run_argv = _run_argv(resolved, lines)
     env = {**os.environ, "LANG": "C", "LC_ALL": "C"}
+    started = time.monotonic()
     try:
         process = subprocess.Popen(
             run_argv,
@@ -382,6 +385,8 @@ def run_lammps_script(
             f"was killed (command: {resolved})",
             log=_read_log(directory),
             screen=partial,
+            command=resolved,
+            elapsed_s=time.monotonic() - started,
         ) from e
     screen = screen or ""
     _write_screen(directory, screen)
@@ -389,7 +394,11 @@ def run_lammps_script(
     if process.returncode != 0 or _has_error(log) or _has_error(screen):
         evidence = "\n  ".join(failure_evidence(log, screen))
         raise LammpsScriptError(
-            f"LAMMPS failed (exit {process.returncode}):\n  {evidence}", log=log, screen=screen
+            f"LAMMPS failed (exit {process.returncode}):\n  {evidence}",
+            log=log,
+            screen=screen,
+            command=resolved,
+            elapsed_s=time.monotonic() - started,
         )
     return LammpsOutcome(
         command=resolved,
@@ -698,6 +707,60 @@ def cuda_device_error(text: str) -> str | None:
         if _CUDA_DEVICE_ERROR.search(line):
             return line.strip()
     return None
+
+
+_CUDA_ORDINAL = re.compile(r"cudaSetDevice\(\s*(\d+)\s*\)")
+_LAUNCHERS = frozenset({"mpirun", "mpiexec", "srun", "orterun", "prterun"})
+_RANK_FLAGS = frozenset({"-n", "-np", "--np", "--ntasks"})
+
+
+def cuda_device_ordinal(line: str) -> int | None:
+    """The device ordinal a KOKKOS ``cudaSetDevice(N)`` error line names, or None.
+
+    CUDA numbers the devices a process can see from zero, so the ordinal
+    indexes the ids in the process's ``CUDA_VISIBLE_DEVICES``, not the
+    node's numbering.
+
+    Examples:
+        >>> cuda_device_ordinal("what():  cudaSetDevice(1) error( cudaErrorDevicesUnavailable)")
+        1
+        >>> cuda_device_ordinal("cudaErrorNoDevice: no CUDA-capable device") is None
+        True
+    """
+    match = _CUDA_ORDINAL.search(line)
+    return int(match.group(1)) if match else None
+
+
+def launch_ranks(command: str) -> int | None:
+    """The MPI rank count a filled launch command states, or None when it states none.
+
+    A command without an MPI launcher runs one rank. A launcher with a
+    rank flag (``-np 2``, ``-n 2``, ``--ntasks=2``) runs that many. A
+    launcher without one takes its count from elsewhere (the slots, the
+    allocation), so the count is unknown here.
+
+    Examples:
+        >>> launch_ranks("lmp -k on g 1 -sf kk"), launch_ranks("mpirun -np 2 lmp -sf kk")
+        (1, 2)
+        >>> launch_ranks("env OMP_NUM_THREADS=4 srun --ntasks=4 lmp"), launch_ranks("srun lmp")
+        (4, None)
+    """
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return None
+    for index, token in enumerate(argv):
+        if Path(token).name not in _LAUNCHERS:
+            continue
+        for position, flag in enumerate(argv[index + 1 :], start=index + 1):
+            name, equals, value = flag.partition("=")
+            if name not in _RANK_FLAGS:
+                continue
+            if not equals:
+                value = argv[position + 1] if position + 1 < len(argv) else ""
+            return int(value) if value.isdigit() else None
+        return None
+    return 1
 
 
 def _is_error_line(line: str) -> bool:

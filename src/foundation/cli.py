@@ -21,10 +21,11 @@ from typing import Annotated, NoReturn
 import typer
 
 from foundation import _ops
+from foundation.config import apply_gpu_exclusion
 from foundation.errors import FoundationError
 from foundation.lifecycle import LifecycleState
 from foundation.models import Reservation
-from foundation.runtime import Workspace, describe_liveness, run_liveness, this_host
+from foundation.runtime import Workspace, describe_liveness, run_liveness, this_host, this_job
 from slab.errors import SlabError
 from slab.scratch import process_alive
 
@@ -131,6 +132,7 @@ def run(
     should be executed with plain ``python`` instead.
     """
     root = _ops.resolve_root(workspace)
+    apply_gpu_exclusion()
     if reservation is not None:
         _enter_reservation(root, reservation)
     if dry_run:
@@ -652,6 +654,60 @@ def _describe_reservation(held: Reservation) -> str:
     else:
         alive = "alive" if process_alive(held.holder_pid) else "gone"
     return f"{slice_text}  unclaimed, holder {held.holder_pid} on {held.host} ({alive})  {age}"
+
+
+@runs_app.command("gpus")
+def runs_gpus(
+    clear: Annotated[
+        str | None,
+        typer.Option("--clear", help="Remove the exclusion of this gpu id.", metavar="ID"),
+    ] = None,
+    host: Annotated[
+        str | None, typer.Option("--host", help="With --clear: the host (default: this one).")
+    ] = None,
+    job: Annotated[
+        str | None,
+        typer.Option("--job", help="With --clear: the job (default: $SLURM_JOB_ID, else none)."),
+    ] = None,
+    workspace: _WorkspaceOpt = None,
+) -> None:
+    """List the gpus excluded after a refusal, or remove one exclusion with --clear.
+
+    A gpu that answered cudaErrorDevicesUnavailable within a minute of a
+    launch is kept out of every reservation on its host for the rest of
+    its job. The row goes when the job ends. A row applies here when its
+    host and job are this process's. The static list in SLAB_GPU_EXCLUDE
+    is printed too; it is config, not a row.
+    """
+    import os
+
+    from slab.resources import GPU_EXCLUDE_ENV
+
+    with _open(workspace) as ws:
+        if clear is not None:
+            where = host if host is not None else this_host()
+            under = job if job is not None else this_job()
+            removed = ws.runs.clear_excluded_gpu(clear, host=where, job_id=under)
+            scope = f"job {under}" if under is not None else "no job"
+            if not removed:
+                _fail(f"no exclusion of gpu {clear} on {where} under {scope}; 'slab runs gpus' "
+                      f"lists them")
+            typer.echo(f"cleared gpu {clear} on {where} under {scope}")
+            return
+        rows = ws.runs.list_excluded_gpus()
+    static = os.environ.get(GPU_EXCLUDE_ENV)
+    if static:
+        typer.echo(f"{GPU_EXCLUDE_ENV}: {static} (left out of the budget by config)")
+    if not rows:
+        typer.echo("no gpu excluded after a refusal")
+        return
+    here, now_job = this_host(), this_job()
+    for row in rows:
+        applies = "applies here" if (row.host, row.job_id) == (here, now_job) else "not here"
+        run = f"  run {row.run_id}" if row.run_id else ""
+        typer.echo(
+            f"{_ops.exclusion_line(row)}  on {row.host}  {applies}  {row.reason}{run}"
+        )
 
 
 @runs_app.command("fail")

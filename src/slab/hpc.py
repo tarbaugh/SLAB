@@ -29,6 +29,7 @@ from __future__ import annotations
 import getpass
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from collections.abc import Iterable
@@ -39,7 +40,7 @@ from pydantic import BaseModel, ConfigDict
 
 from slab.config import HpcConfig, load_config
 from slab.errors import SlabError
-from slab.resources import JobSize, budget, check_size, envelope
+from slab.resources import GPU_EXCLUDE_ENV, JobSize, budget, check_size, envelope
 
 _SBATCH_TIMEOUT_S = 60
 _SQUEUE_TIMEOUT_S = 60
@@ -180,6 +181,10 @@ def render_sbatch(
     refused by :func:`slab.resources.check_size` before anything renders.
     Without a size the output is what it always was.
 
+    A partition that names ``exclude_gpus`` gets an ``export
+    SLAB_GPU_EXCLUDE=...`` line after its setup lines, so the budget of
+    every process in the job leaves those devices out.
+
     Examples:
         >>> from slab.config import HpcConfig
         >>> hpc = HpcConfig.model_validate({
@@ -263,6 +268,9 @@ def render_sbatch(
     if include_global_setup:
         body.extend(hpc.setup)
     body.extend(spec.setup)
+    if spec.exclude_gpus:
+        # A known-bad device stays out of every budget inside the job.
+        body.append(f"export {GPU_EXCLUDE_ENV}={shlex.quote(','.join(spec.exclude_gpus))}")
     body.extend(prologue)
     launcher = spec.launcher if use_launcher else None
     driver = _driver_payload_name(command) if launcher else None

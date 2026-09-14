@@ -729,6 +729,23 @@ def test_partition_node_table_and_max_nodes_are_unknown_keys(
     assert "unknown key" in str(excinfo.value)
 
 
+def test_exclude_gpus_on_a_partition_and_on_the_workspace(tmp_path: Path) -> None:
+    """exclude_gpus is a per-machine list in two tables: a partition's (for its
+    jobs) and [workspace]'s (for a workstation). Ids are strings; a comma
+    inside one entry is refused, because the list travels comma-joined."""
+    from foundation.config import load_config as load_foundation_config
+
+    (tmp_path / "slab.toml").write_text(
+        '[hpc.partitions.gpu]\ngres = "gpu:4"\nexclude_gpus = ["0", 3]\n'
+        '[workspace]\nexclude_gpus = ["1"]\n'
+    )
+    assert load_config(tmp_path).hpc.partitions["gpu"].exclude_gpus == ("0", "3")
+    assert load_foundation_config(tmp_path).workspace.exclude_gpus == ("1",)
+    (tmp_path / "slab.toml").write_text('[hpc.partitions.gpu]\nexclude_gpus = ["0,1"]\n')
+    with pytest.raises(ConfigError, match="one id per entry"):
+        load_config(tmp_path)
+
+
 def test_memory_mb_rounds_kilobytes_up_and_refuses_zero() -> None:
     """A K value truncated to zero would pass every cap and render --mem=0."""
     from slab.config import memory_mb

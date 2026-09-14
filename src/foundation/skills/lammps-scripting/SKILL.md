@@ -481,7 +481,14 @@ the environment block were read when the prompt was built and the first
 launch now holds its slice. On a login node the same run is a job on
 the GPU partition through `submit_job` with `gpus_per_node` and
 `ntasks_per_node` equal to it. Never login-node work. After the run,
-`info["kokkos"]["gpus"]` must equal what the launch held.
+`info["kokkos"]["gpus"]` must equal what the launch held, and
+`info["kokkos"]["devices"]` names the gpu ids it held.
+
+A device that refuses a one-GPU launch with `cudaErrorDevicesUnavailable`
+within a minute of LAMMPS starting is excluded from the budget for the
+rest of the job, and the failure record says so. Launch again, sized as
+before. The reservation skips the device. Never pin
+`CUDA_VISIBLE_DEVICES` in `command=`; SLAB refuses it.
 
 When the machine declares no gpu build, or the budget holds no gpu, the
 fallback is threads through the plain build: size the launch with

@@ -534,9 +534,13 @@ def job_states_for(runs: Iterable[Run]) -> dict[str, JobState]:
     caller that cannot know never fails a run for it. An ``undetermined``
     answer is kept as such and is not terminal.
     """
-    jobs = sorted({run.job_id for run in runs if run.job_id is not None})
+    return job_states_of(run.job_id for run in runs if run.job_id is not None)
+
+
+def job_states_of(job_ids: Iterable[str]) -> dict[str, JobState]:
+    """Ask the scheduler once about each distinct job id; see :func:`job_states_for`."""
     states: dict[str, JobState] = {}
-    for job_id in jobs:
+    for job_id in sorted(set(job_ids)):
         try:
             states[job_id] = job_state(job_id).state
         except SchedulerError:
@@ -801,9 +805,11 @@ class Workspace:
 
         The read side of :meth:`reserve`: ``budget`` and ``free`` each list
         cpu ids and gpu ids, ``budget`` says where its gpu ids came from
-        (``gpu_source``, see :func:`slab.resources.budget`), and
+        (``gpu_source``, see :func:`slab.resources.budget`),
         ``reservations`` lists the ids of the live reservations that hold
-        the difference. Derived, never counted. The budget is one
+        the difference, and ``excluded`` lists the budget gpus that refused
+        a launch under this job (:meth:`~foundation.store.SQLiteRunStore.exclude_gpu`),
+        which are not free either. Derived, never counted. The budget is one
         allocation, so only the reservations of this process's job
         (:func:`this_job`) count against it.
         A caller that has already read the live reservations passes them
@@ -817,6 +823,10 @@ class Workspace:
             live = self.runs.live_reservations(where, this_job())
         used_cpus = {cpu for row in live for cpu in row.cpus}
         used_gpus = {gpu for row in live for gpu in row.gpus}
+        excluded = [
+            row for row in self.runs.excluded_gpus(where, this_job()) if row.gpu in found.gpus
+        ]
+        refused = {row.gpu for row in excluded}
         return {
             "host": where,
             "budget": {
@@ -826,9 +836,16 @@ class Workspace:
             },
             "free": {
                 "cpus": [cpu for cpu in found.cpus if cpu not in used_cpus],
-                "gpus": [gpu for gpu in found.gpus if gpu not in used_gpus],
+                "gpus": [
+                    gpu for gpu in found.gpus if gpu not in used_gpus and gpu not in refused
+                ],
             },
             "reservations": [row.id for row in live],
+            "excluded": [
+                {"gpu": row.gpu, "at": row.at.isoformat(), "job_id": row.job_id,
+                 "reason": row.reason, "run_id": row.run_id}
+                for row in excluded
+            ],
         }
 
     def release_dead(self) -> list[Reservation]:
@@ -867,8 +884,9 @@ class Workspace:
         marked the run in its error line. Returns the runs marked failed.
         The reservations those runs held, and every other dead reservation
         of this job on this host, are released on the way
-        (:meth:`release_dead`), and the scratch directories those runs made
-        are removed (:func:`foundation.retention.sweep_scratch`).
+        (:meth:`release_dead`), the gpu exclusions of the jobs found ended
+        go with them, and the scratch directories those runs made are
+        removed (:func:`foundation.retention.sweep_scratch`).
 
         Examples:
             >>> import tempfile
@@ -902,6 +920,9 @@ class Workspace:
                 continue
             with suppress(IllegalStatusChangeError):  # it may finish under us; fine
                 reaped.append(self.runs.set_status(run.id, ExecutionStatus.FAILED, error=error))
+        self.runs.expire_excluded_gpus(
+            job for job, state in states.items() if state.is_terminal
+        )
         self.release_dead()
         if reaped:
             sweep_scratch(self, only=[run.id for run in reaped])
@@ -923,8 +944,12 @@ class Workspace:
         scheduler still holds or cannot place, and every run where the
         scheduler cannot be reached stay as they are. Each failed run's
         reservation is released with it, and the scratch directories the
-        failed runs made are removed. With *dry_run* nothing changes, and
-        the runs that would be failed are returned as they stand.
+        failed runs made are removed. The gpu exclusions of every ended
+        job go too (:meth:`~foundation.store.SQLiteRunStore.expire_excluded_gpus`),
+        so the jobs named by exclusion rows are asked about as well, even
+        when no run of theirs is still running. With *dry_run* nothing
+        changes, and the runs that would be failed are returned as they
+        stand.
 
         Examples:
             >>> import tempfile
@@ -936,8 +961,11 @@ class Workspace:
             ['left']
             >>> ws.runs.get(left.id).status.value
             'running'
+            >>> _ = ws.runs.exclude_gpu("0", host="n1", job_id="8", reason="refused")
             >>> [r.error for r in ws.settle_ended_jobs(caller="t", ended=["8"])]
             ['job 8 ended; marked failed by t']
+            >>> ws.runs.list_excluded_gpus()
+            []
             >>> ws.close()
         """
         forced = set(ended)
@@ -946,7 +974,10 @@ class Workspace:
             for run in self.runs.list_runs(status=ExecutionStatus.RUNNING)
             if run.job_id is not None
         ]
-        states = job_states_for([run for run in running if run.job_id not in forced])
+        excluded_jobs = {
+            row.job_id for row in self.runs.list_excluded_gpus() if row.job_id is not None
+        }
+        states = job_states_of(({str(run.job_id) for run in running} | excluded_jobs) - forced)
         settled: list[Run] = []
         for run in running:
             if run.job_id in forced:
@@ -961,6 +992,9 @@ class Workspace:
                 continue
             with suppress(IllegalStatusChangeError):  # it may finish under us; fine
                 settled.append(self.runs.set_status(run.id, ExecutionStatus.FAILED, error=error))
+        if not dry_run:
+            ended_jobs = forced | {job for job, state in states.items() if state.is_terminal}
+            self.runs.expire_excluded_gpus(ended_jobs)
         if settled and not dry_run:
             sweep_scratch(self, only=[run.id for run in settled])
         return settled

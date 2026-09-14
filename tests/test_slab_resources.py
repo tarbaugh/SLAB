@@ -38,6 +38,7 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "SLURM_GPUS",
         "SLURM_JOB_ID",
         "SLAB_GPU_SOURCE",
+        "SLAB_GPU_EXCLUDE",
         "SLURM_NTASKS",
         "SLURM_CPUS_PER_TASK",
     ):
@@ -90,6 +91,34 @@ def test_the_gpu_budget_is_the_allocation_inside_a_job(
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
     monkeypatch.setenv("SLAB_GPU_SOURCE", "slurm_job_gpus")
     assert (budget().gpus, budget().gpu_source) == (("1",), "slurm_job_gpus")
+
+
+def test_slab_gpu_exclude_removes_ids_from_the_budget(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A known-bad device never enters the budget. The ids are in the
+    budget's own numbering, the source says how many went, and an envelope
+    that falls back to the budget never holds one."""
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3")
+    monkeypatch.setenv("SLAB_GPU_EXCLUDE", "0")
+    found = budget()
+    assert found.gpus == ("1", "2", "3")
+    assert found.gpu_source == "cuda_visible_devices, 1 excluded"
+    assert envelope().gpus == ("1", "2", "3")
+    # Two ids, one of them outside the budget: only the one inside counts.
+    monkeypatch.setenv("SLAB_GPU_EXCLUDE", "2, 9")
+    assert (budget().gpus, budget().gpu_source) == (
+        ("0", "1", "3"), "cuda_visible_devices, 1 excluded"
+    )
+    # A renumbered allocation: the job's two devices are 0 and 1 inside it.
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES")
+    monkeypatch.setenv("SLURM_JOB_ID", "812")
+    monkeypatch.setenv("SLURM_JOB_GPUS", "4,5")
+    monkeypatch.setenv("SLAB_GPU_EXCLUDE", "0")
+    assert (budget().gpus, budget().gpu_source) == (("1",), "slurm_job_gpus, 1 excluded")
+    # An empty value excludes nothing.
+    monkeypatch.setenv("SLAB_GPU_EXCLUDE", "")
+    assert (budget().gpus, budget().gpu_source) == (("0", "1"), "slurm_job_gpus")
 
 
 def test_device_status_reads_nvidia_smi_or_says_it_is_missing(

@@ -347,10 +347,15 @@ class MasonSession:
         self.base_agent: AgentConfig = self.agent
         self.hpc: HpcConfig = hpc if hpc is not None else load_slab_config(self.cwd).hpc
         from foundation._ops import resolve_root
+        from foundation.config import apply_gpu_exclusion
 
         self.workspace_root = (
             Path(workspace_root) if workspace_root is not None else resolve_root(None)
         )
+        # [workspace] exclude_gpus: a broken device stays out of this
+        # session's budget and every launch's, unless the environment
+        # already says otherwise (the sandbox exports the partition's list).
+        apply_gpu_exclusion(self.cwd)
         self.approver: Approver = approver if approver is not None else _approve_nothing
         self.auto_approve = auto_approve
         # API keys this session (and its delegates) read from the
