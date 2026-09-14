@@ -336,8 +336,14 @@ def test_the_planner_runs_nothing_itself(tmp_path: Path) -> None:
     tools = set(mason.toolbox.tools)
     assert {"delegate", "plan", "show_run", "list_runs", "notebook", "finish"} <= tools
     assert not tools & {"shell", "launch_workflow", "write_file", "edit_file", "submit_job"}
+    # It reads evidence itself: a check is two reads, not a delegation.
+    assert {"read_artifact", "read_file"} <= tools
     (system,) = mason.messages
     content = system["content"]
+    absent = content.split("Not available in this session, whatever the text above says: ")[1]
+    absent = absent.split(".")[0].split(", ")
+    assert "launch_workflow" in absent and "shell" in absent
+    assert "read_artifact" not in absent and "read_file" not in absent
     assert "# Your team" in content
     assert "- worker:" in content and "- dft-expert:" in content
     assert "- pi:" not in content and "- planner:" not in content

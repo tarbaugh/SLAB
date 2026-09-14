@@ -18,6 +18,7 @@ from typing import Any
 from foundation import memory as memory_store
 from mason.mechanisms import ALL_MECHANISMS, effective, enabled
 from mason.notes import notes_block
+from mason.prior import prior_findings_block
 from mason.reviews import review_block
 from mason.roster import AgentSpec, critics, hands
 from mason.session import MasonSession
@@ -261,6 +262,9 @@ def core_prompt(mechanisms: Iterable[str]) -> str:
     return "\n\n".join(chosen) + "\n"
 
 
+#: How much of the notebook's end the environment block shows as its latest entries.
+NOTEBOOK_TAIL_CHARS = 3_000
+
 #: The whole core, as a session with every mechanism sees it.
 CORE_PROMPT = core_prompt(ALL_MECHANISMS)
 
@@ -462,6 +466,55 @@ def _sandbox_context_text() -> str:
         return ""
 
 
+#: The concurrency rule: one wave of launches sized to what is free.
+WAVE_RULE = (
+    "Size a wave to the free budget: as many concurrent launches as free GPUs "
+    "(or free CPU slices), one wait on the wave, and the next wave when the "
+    "first finishes."
+)
+
+
+def _free_counts(session: MasonSession, *, reap: bool) -> dict[str, int] | None:
+    """The free cpu and gpu counts from the run store, or None when it cannot be read.
+
+    *reap* first marks failed the runs whose process is gone, so their
+    slices count as free. That can ask the scheduler, so a caller that
+    reads the counts every step passes False.
+    """
+    import sqlite3
+
+    from foundation.errors import FoundationError
+    from foundation.runtime import Workspace
+
+    try:
+        with Workspace(session.workspace_root) as ws:
+            if reap:
+                ws.reap_dead(caller="environment_block")
+            return {key: len(ids) for key, ids in ws.free_resources()["free"].items()}
+    except (FoundationError, sqlite3.Error, OSError):
+        return None
+
+
+def free_line(session: MasonSession) -> str:
+    """The free resources right now, for a lead that sizes briefs it cannot launch.
+
+    The environment block reads them once, when the prompt is built. A
+    planner briefs launches through the whole session, so the loop adds
+    this line to every step's request, and each brief is sized to what is
+    free at that step. Empty when the run store cannot be read.
+    """
+    from slab.resources import budget
+
+    free = _free_counts(session, reap=False)
+    if free is None:
+        return ""
+    found = budget().counts
+    return (
+        f"[harness: free right now: {free['cpus']} of {found['cpus']} cpu(s), "
+        f"{free['gpus']} of {found['gpus']} gpu(s). {WAVE_RULE}]"
+    )
+
+
 def resources_line(session: MasonSession) -> str:
     """The cpus line of the environment block: budget, free, default ranks, the promise.
 
@@ -469,20 +522,10 @@ def resources_line(session: MasonSession) -> str:
     the difference; a store that cannot be opened leaves the budget alone
     on the line, and the tools report the fault when they are called.
     """
-    import sqlite3
-
-    from foundation.errors import FoundationError
-    from foundation.runtime import Workspace
     from slab.resources import budget, envelope
 
     found = budget().counts
-    free: dict[str, int] | None = None
-    try:
-        with Workspace(session.workspace_root) as ws:
-            ws.reap_dead(caller="environment_block")
-            free = {key: len(ids) for key, ids in ws.free_resources()["free"].items()}
-    except (FoundationError, sqlite3.Error, OSError):
-        free = None
+    free = _free_counts(session, reap=True)
     free_text = (
         f"free right now: {free['cpus']} cpu(s), {free['gpus']} gpu(s); "
         if free is not None
@@ -495,7 +538,7 @@ def resources_line(session: MasonSession) -> str:
         f"launch that does not fit what is free is refused with the free amounts, "
         f"and so is a shell command or script that spells out more ranks. The free "
         f"amounts above were read when this prompt was built; call `free_resources` "
-        f"before a concurrent launch."
+        f"before a concurrent launch. {WAVE_RULE}"
     )
 
 
@@ -506,11 +549,15 @@ def environment_block(
     *,
     review: bool = False,
     minimal: bool = False,
+    inherit: bool = False,
 ) -> str:
     """The per-session context: where we are, what exists here, what memory says.
 
     *review* adds the latest review of the plan, read fresh each time the
     block is built so a verdict recorded a moment ago survives compaction.
+    *inherit* adds the earlier notebook entries of this project that the
+    notebook tail leaves out (:func:`mason.prior.prior_findings_block`),
+    for a card that writes the plan.
     *minimal* is the block for a card without the core prompt: the
     directories, the date, the CPU budget, the skill catalog when the
     session offers the skill tool, and the project conventions. No
@@ -573,7 +620,11 @@ def environment_block(
         latest = review_block(session)
         if latest:
             lines.append("\n" + latest)
-    notebook = session.notebook_tail()
+    if inherit:
+        prior = prior_findings_block(session.cwd, NOTEBOOK_TAIL_CHARS)
+        if prior:
+            lines.append("\n" + prior)
+    notebook = session.notebook_tail(NOTEBOOK_TAIL_CHARS)
     if notebook:
         lines.append("\n# Lab notebook (latest entries)\n" + notebook)
     return "\n".join(lines)
@@ -598,6 +649,7 @@ def system_messages(
     skills: dict[str, Skill] | None = None,
     team: str | None = None,
     review: bool = False,
+    inherit: bool = False,
     absent_tools: Sequence[str] = (),
 ) -> list[dict[str, Any]]:
     """The system prompt: role, core, budget, software notes, protocol, environment.
@@ -612,6 +664,7 @@ def system_messages(
     the shared text mentions that this session does not offer (a
     specialist without ``plan``, a laptop without ``submit_job``), so the
     model is told rather than left to discover it through a failed call.
+    *inherit* shows a plan-writing card the earlier notebook findings.
     """
     if spec is not None and not spec.core:
         # The card is the whole prompt: no discipline, no budget, no notes.
@@ -634,7 +687,7 @@ def system_messages(
         prompt += "\n" + notes_block(load_slab_config(session.cwd)) + "\n"
     if catalog is not None:
         prompt += FENCED_PROTOCOL.replace("{catalog}", catalog)
-    environment = environment_block(session, skills, team, review=review)
+    environment = environment_block(session, skills, team, review=review, inherit=inherit)
     if absent_tools:
         environment += (
             "\n\nNot available in this session, whatever the text above says: "

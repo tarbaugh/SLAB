@@ -389,7 +389,7 @@ more than model choice.
 | `list_tasks`, `describe_task` | the task vocabulary: every traced task with its signature, and one task's full docstring, so the agent never reads the package source to learn a call |
 | `search_materials`, `get_material`, `query_materials` | the offline Materials Project snapshot, present only when `[builders.mp]` names one: filtered search, one record with its CIF path, and one read-only row-capped SELECT; the structure itself arrives traced via `fetch_structure` in a workflow |
 | `submit_job`, `job_status`, `cancel_job` | SLURM plumbing, present only when the config declares partitions. `submit_job` takes `nodes`, `ntasks_per_node`, `cpus_per_task`, `gpus_per_node`, and `mem`; the size replaces the partition's directives and must fit the node the partition declares. `cancel_job` also marks the job's running runs failed, releases their reservations, and lists the memories written since the job started |
-| `notebook`, `plan` | the memory instruments (below) |
+| `notebook`, `plan` | the memory instruments (below). `plan` refuses a plan whose Goal names a quantity the notebook already reports, until it has a line `prior result: ...`, and it checks each `run:<id>/<name>` reference against the run store. A reference to a cache-hit run is rewritten to the run that produced the file |
 | `recall`, `remember` | the machine's memory across sessions, described in [Memory](memory.md) |
 | `skill` | load a skill: its instructions, root path, and bundled files; the catalog is per-agent |
 | `delegate` | hand one scoped task to a specialist's own loop; the PI only, one level deep, sequential |
@@ -925,6 +925,16 @@ under version control, readable by humans:
   token totals.
 * **`AGENTS.md`** is the cross-tool conventions standard, and if the project
   has one, it enters the system prompt every session.
+
+The environment block shows the last 3000 characters of the notebook
+under "Lab notebook (latest entries)". A card that writes the plan also
+sees "Prior findings (notebook)": the last six earlier entries that the
+tail leaves out, each with its dated heading and up to 600 characters.
+When a heading in the notebook names the project directory, only the
+entries whose heading names it are shown, because the others belong to
+another campaign in the same directory. A finding from an earlier
+session therefore reaches the planner's first prompt even when later
+entries have pushed it out of the tail.
 
 ### Context hygiene
 

@@ -393,3 +393,32 @@ def test_a_child_that_ends_whole_hands_back_no_partial_outcome(tmp_path: Path) -
     _mason, client, _result = _delegated_turn(tmp_path)
     handed = next(m["content"] for m in client.requests[-1] if m["role"] == "tool")
     assert "[partial outcome:" not in handed
+
+
+def test_a_brief_naming_a_cache_hit_file_is_sent_to_the_producer(tmp_path: Path) -> None:
+    from foundation import Workspace, current_run, task
+
+    @task
+    def averaged(temperature: float) -> float:
+        current_run().keep("averages.json", {"T": temperature})
+        return temperature
+
+    with Workspace(tmp_path / ".slab") as ws:
+        with ws.start_run(name="first"):
+            averaged(1180.0)
+        with ws.start_run(name="again"):
+            averaged(1180.0)
+        producer, hit = (run.id for run in reversed(ws.runs.list_runs()))
+    client = FakeClient(
+        [
+            _call("delegate", agent="analysis-expert", task=f"read run:{hit}/averages.json"),
+            _call("finish", report="T = 1180 K"),
+            _text("done"),
+        ]
+    )
+    Mason(_session(tmp_path), client=client).run_turn("check it")
+    assert client.requests[1][1]["content"] == f"read run:{producer}/averages.json"
+    footer = next(
+        m for m in client.requests[-1] if m.get("tool_call_id") == "c_delegate"
+    )["content"]
+    assert f"[harness] brief: run:{hit}/averages.json rewritten to run:{producer}/" in footer

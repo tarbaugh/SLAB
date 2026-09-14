@@ -1901,3 +1901,94 @@ def test_remember_says_when_a_memory_describes_slab_itself(
               body="Otherwise ranks pile on one core.")
     )
     assert "describes SLAB itself" not in plain
+
+
+# -- the plan inherits the record ---------------------------------------------
+
+
+def test_the_plan_tool_asks_for_the_prior_result(tmp_path: Path) -> None:
+    """A plan re-measured a melting point the notebook already placed near 1180 K."""
+    from foundation.project import notebook_append
+
+    notebook_append(
+        tmp_path, "Coexistence at 1180 K: melting point near 1180 K (run 01abc).", heading="probe"
+    )
+    box = build_toolbox(_session(tmp_path))
+    plan = "# Plan\n\n## Goal\nThe melting point of W under the model.\n\n## Steps\n1. ladder"
+    refused = box.dispatch(_call("plan", content=plan))
+    assert refused.startswith("plan not written: the Goal names 'melting point'")
+    assert "UTC — probe: 'Coexistence at 1180 K" in refused
+    assert "prior result:" in refused
+    assert not (tmp_path / "PLAN.md").exists()
+    cited = plan.replace("## Steps", "prior result: 1180 K two-phase (run 01abc)\n\n## Steps")
+    assert box.dispatch(_call("plan", content=cited)).startswith("PLAN.md updated:")
+    # One shared word is weak evidence: the plan is written, with a note.
+    weak = "Goal: when melting starts on heating\n1. ramp"
+    written = box.dispatch(_call("plan", content=weak))
+    assert written.startswith("PLAN.md updated:")
+    assert "[note] the notebook reports a quantity that shares a word" in written
+    assert "'melting' in " in written
+
+
+def test_a_result_this_session_notes_is_not_prior(tmp_path: Path) -> None:
+    box = build_toolbox(_session(tmp_path))
+    box.dispatch(_call("notebook", entry="lattice constant a = 3.615 Å (run 01abc)"))
+    plan = "Goal: the lattice constant of Cu\n1. [done] relax"
+    assert box.dispatch(_call("plan", content=plan)).startswith("PLAN.md updated:")
+    # The next session inherits it.
+    again = build_toolbox(_session(tmp_path))
+    assert again.dispatch(_call("plan", content=plan)).startswith("plan not written")
+
+
+_KEEPS_AVERAGES = """\
+from foundation import current_run, task
+
+@task
+def averaged(temperature):
+    current_run().keep("averages.json", {"T": temperature, "density": 17.1})
+    return temperature
+
+averaged(1180.0)
+"""
+
+
+def test_the_plan_tool_follows_a_cache_hit_to_its_producer(box: Toolbox, tmp_path: Path) -> None:
+    """A brief named averages.json on a cache-hit run, which holds no such file."""
+    (tmp_path / "avg.py").write_text(_KEEPS_AVERAGES)
+    producer = _run_id(box.dispatch(_call("launch_workflow", script="avg.py", intent="first")))
+    hit = _run_id(box.dispatch(_call("launch_workflow", script="avg.py", intent="again")))
+    with Workspace(tmp_path / ".slab") as ws:
+        assert [t.cache_hit for t in ws.runs.list_tasks(hit)] == [True]
+        assert not ws.runs.list_artifacts(hit, role="intermediate")
+    plan = (
+        f"1. read run:{hit[:12]}/averages.json and run:{producer}/averages.json\n"
+        f"2. compare with run:{producer[:12]}/wf.py"
+    )
+    answer = box.dispatch(_call("plan", content=plan))
+    assert answer.startswith("plan not written: the artifact reference ")
+    missing = f"run:{producer[:12]}/wf.py: run {producer[:10]} keeps no artifact named 'wf.py'"
+    assert missing in answer
+    assert "it keeps: avg.py, averages.json" in answer
+    written = box.dispatch(_call("plan", content=plan.split("\n2.")[0]))
+    assert written.startswith("PLAN.md updated:")
+    on_disk = (tmp_path / "PLAN.md").read_text()
+    assert on_disk == f"1. read run:{producer}/averages.json and run:{producer}/averages.json\n"
+    assert (
+        f"[note] run:{hit[:12]}/averages.json rewritten to run:{producer}/averages.json: "
+        f"run {hit[:10]} was a cache hit"
+    ) in written
+    unknown = box.dispatch(_call("plan", content="1. read run:zzzzzzzz/averages.json"))
+    assert unknown.startswith("plan not written: the artifact reference run:zzzzzzzz/")
+
+
+def test_a_planner_reads_an_averages_artifact_itself(tmp_path: Path) -> None:
+    from mason.roster import discover_roster
+
+    (tmp_path / "avg.py").write_text(_KEEPS_AVERAGES)
+    runner = build_toolbox(_session(tmp_path))
+    run_id = _run_id(runner.dispatch(_call("launch_workflow", script="avg.py", intent="avg")))
+    roster = discover_roster(tmp_path)
+    planner = build_toolbox(_session(tmp_path), roster["planner"], roster=roster)
+    assert "launch_workflow" not in planner.tools
+    shown = planner.dispatch(_call("read_artifact", run_id=run_id, name="averages.json"))
+    assert shown.startswith("averages.json (") and "17.1" in shown

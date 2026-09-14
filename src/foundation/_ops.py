@@ -1484,6 +1484,31 @@ def resolve_run(ws: Workspace, value: str, *, session: str | None = None) -> tup
         )
 
 
+def artifact_holder(ws: Workspace, run_id: str, name: str) -> str | None:
+    """The id of the run that holds artifact *name* for run *run_id*, or None.
+
+    That is the run itself when it keeps an artifact of that name. A run
+    whose task was a cache hit ran nothing, so the files that task keeps
+    beside its outputs (a LAMMPS log, a dump, an averages table) sit on
+    the run whose task really ran: the first holder of that name among the
+    producers of the run's hits is the answer. *run_id* takes an id or a
+    unique prefix, and a run that matches neither raises
+    :class:`~foundation.errors.RunNotFoundError`.
+    """
+    rid = ws.runs.resolve(run_id)
+    if any(ref.name == name for ref in ws.runs.list_artifacts(rid)):
+        return rid
+    for task in ws.runs.list_tasks(rid):
+        if not task.cache_hit or not task.cache_key:
+            continue
+        producer = ws.runs.find_producing_task(task.cache_key)
+        if producer is None or producer.run_id == rid:
+            continue
+        if any(ref.name == name for ref in ws.runs.list_artifacts(producer.run_id)):
+            return producer.run_id
+    return None
+
+
 def wait_for_run(
     root: Path,
     *,

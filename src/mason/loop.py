@@ -50,7 +50,7 @@ from mason.client import (
 from mason.config import AgentConfig, override_agent, roster_agent_config
 from mason.errors import MasonError
 from mason.mechanisms import effective, enabled
-from mason.prompts import COMPACTION_PROMPT, system_messages, team_block
+from mason.prompts import COMPACTION_PROMPT, free_line, system_messages, team_block
 from mason.reviews import plan_is_approved
 from mason.roster import (
     AgentSpec,
@@ -582,6 +582,13 @@ class Mason:
         # The latest review of the plan is shown to whoever acts on it: a
         # card that can ask for one, or one that may not launch without one.
         self._shows_review = "review" in self.toolbox.tools or spec.review_first
+        # A card that writes the plan inherits the project's earlier findings.
+        self._inherits = "plan" in self.toolbox.tools
+        # A lead that briefs launches it cannot make sizes every brief to
+        # what is free, so each step's request carries the free amounts.
+        self._sizes_briefs = "delegate" in self.toolbox.tools and not (
+            {"launch_workflow", "submit_job"} & set(self.toolbox.tools)
+        )
         self.messages: list[dict[str, Any]] = system_messages(
             session,
             spec,
@@ -589,6 +596,7 @@ class Mason:
             skills=self.skills,
             team=self._team,
             review=self._shows_review,
+            inherit=self._inherits,
             absent_tools=self._absent_tools(),
         )
         self._catalog = catalog
@@ -707,6 +715,8 @@ class Mason:
                 budget=enabled(self.session.agent, "budget-hint"),
                 step_back=enabled(self.session.agent, "looking-hint"),
             )
+            if self._sizes_briefs:
+                hint = " ".join(part for part in (hint, free_line(self.session)) if part)
             reply = self._call_model(hint=hint or None)
             cut = reply.finish_reason == "max_tokens"
             cut_call = self._cut_call_name(reply) if cut else None
@@ -1413,6 +1423,7 @@ class Mason:
             skills=self.skills,
             team=self._team,
             review=self._shows_review,
+            inherit=self._inherits,
             absent_tools=self._absent_tools(),
         )
         tail = self.messages[boundary:]

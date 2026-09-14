@@ -422,6 +422,10 @@ class RunStore(Protocol):
         """Return the most recent completed task with this cache key, if any."""
         ...
 
+    def find_producing_task(self, cache_key: str) -> TaskRecord | None:
+        """Return the first completed task with this cache key that really ran."""
+        ...
+
     def add_check_results(self, run_id: str, results: Sequence[CheckResult]) -> list[CheckResult]:
         """Record verification results on a run."""
         ...
@@ -1085,6 +1089,28 @@ class SQLiteRunStore:
         with self._lock:
             row = self._conn.execute(
                 "SELECT * FROM tasks WHERE cache_key = ? AND status = ? ORDER BY seq DESC LIMIT 1",
+                (cache_key, ExecutionStatus.COMPLETED.value),
+            ).fetchone()
+        return None if row is None else _row_to_task(row)
+
+    def find_producing_task(self, cache_key: str) -> TaskRecord | None:
+        """Return the first *completed* task with this cache key that was not a hit.
+
+        A cache hit copies its outputs from an earlier task and runs nothing,
+        so what that task kept beside its outputs (a log, a dump, a table)
+        sits on the run of the task that really ran. This is how a reader
+        finds that run from a hit.
+
+        Examples:
+            >>> store = SQLiteRunStore(":memory:")
+            >>> store.find_producing_task("ab" * 32) is None
+            True
+            >>> store.close()
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM tasks WHERE cache_key = ? AND status = ? AND cache_hit = 0 "
+                "ORDER BY seq LIMIT 1",
                 (cache_key, ExecutionStatus.COMPLETED.value),
             ).fetchone()
         return None if row is None else _row_to_task(row)
