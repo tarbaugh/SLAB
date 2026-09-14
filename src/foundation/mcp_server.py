@@ -763,6 +763,14 @@ def build_server(
         about_slab = memory_store.about_slab(text, _TOOL_NAMES)
         if about_slab and "slab-stack" in versions:
             against.setdefault("slab-stack", versions["slab-stack"])
+        checked: list[str] = []
+        if memory_store.run_ids(evidence):
+            with Workspace(root) as ws:
+                checked = _ops.evidence_lines(ws, evidence)
+        # Evidence naming only runs this workspace never held is a claim.
+        doubted = bool(checked) and all(
+            line.endswith("no such run in this workspace") for line in checked
+        )
         written = memory_store.write(
             name,
             description,
@@ -770,7 +778,7 @@ def build_server(
             agent="mcp",
             against=against,
             evidence=evidence,
-            unverified=unverified,
+            unverified=unverified or doubted,
         )
         answer: dict[str, Any] = {
             "name": written.name,
@@ -778,9 +786,10 @@ def build_server(
             "against": dict(written.against),
             "unverified": written.unverified,
         }
-        if memory_store.run_ids(written.evidence):
-            with Workspace(root) as ws:
-                answer["evidence_runs"] = _ops.evidence_lines(ws, written.evidence)
+        if checked:
+            answer["evidence_runs"] = checked
+        if doubted:
+            answer["doubt"] = "unverified: the evidence names no run this workspace holds"
         if about_slab:
             answer["note"] = ABOUT_SLAB_NOTE.format(version=written.against.get("slab-stack", "?"))
         return answer

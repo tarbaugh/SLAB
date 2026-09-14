@@ -2980,7 +2980,14 @@ def _add_machine_memory_tools(box: Toolbox, session: MasonSession) -> None:
         description = str(arguments["description"])
         body = str(arguments["body"])
         evidence = arguments.get("evidence")
-        unverified = arguments.get("unverified") is True
+        flag = arguments.get("unverified")
+        unverified = flag is True or (isinstance(flag, str) and flag.strip().lower() == "true")
+        # Evidence that names runs this workspace never held is no evidence:
+        # the memory is stored, but as a claim, so the catalog says so.
+        checked = _evidence_lines(session, str(evidence) if evidence is not None else None)
+        doubted = bool(checked) and all(line.endswith(_NO_SUCH_RUN) for line in checked)
+        if doubted:
+            unverified = True
         text = f"{name}\n{description}\n{body}"
         versions = session.software_versions()
         # Stamped with the software the text names, at today's versions,
@@ -3026,18 +3033,31 @@ def _add_machine_memory_tools(box: Toolbox, session: MasonSession) -> None:
                 # memory: forget puts it back. A later write in the same
                 # session keeps the first write's answer.
                 "before": first["before"] if first else written.replaced,
+                # Its text too: the history keeps ten versions, and a session
+                # that rewrites a memory more often prunes the file above.
+                "before_text": first["before_text"]
+                if first
+                else (
+                    written.replaced.read_text(encoding="utf-8")
+                    if written.replaced is not None
+                    else None
+                ),
             }
         )
         answer = (
             f"recorded as memory {written.name!r} in {written.path}; "
             f"every later session on this machine reads it"
         )
-        if written.unverified:
+        if doubted:
+            answer += (
+                "; it is marked unverified because its evidence names no run this "
+                "workspace holds"
+            )
+        elif written.unverified:
             answer += "; it is marked unverified until a run confirms it"
         if written.against:
             stamped = ", ".join(f"{n} {v}" for n, v in written.against.items())
             answer += f" (stamped against {stamped})"
-        checked = _evidence_lines(session, written.evidence)
         if checked:
             answer += "; the evidence runs now: " + "; ".join(checked)
         if about_slab:
@@ -3094,25 +3114,38 @@ def _add_machine_memory_tools(box: Toolbox, session: MasonSession) -> None:
         name = str(arguments["name"])
         entry = session.written_memory(name)
         if entry is None:
-            written = sorted({e["name"] for e in session.memories_written})
+            written = sorted(
+                {e["name"] for e in session.memories_written if not e.get("forgotten")}
+            )
             return (
                 f"refused: {name!r} was not written in this session, so it is not "
                 f"yours to forget; the person removes it with 'slab memory forget "
                 f"{name}'. Written in this session: {', '.join(written) or 'none'}"
             )
+        if entry.get("forgotten"):
+            return f"refused: {name!r} was already forgotten in this session"
         try:
             if entry["before"] is None:
                 memory_store.delete(name)
                 outcome = f"forgot {name!r}; it did not exist before this session"
-            else:
+            elif Path(entry["before"]).is_file():
                 restored = memory_store.restore(name, Path(entry["before"]))
                 outcome = (
                     f"restored {name!r} to the version from before this session "
                     f"({restored.updated or 'undated'}); the rejected version is kept "
                     f"in its history"
                 )
+            else:
+                # The history pruned that file; the session kept its text.
+                restored = memory_store.restore_text(name, str(entry["before_text"]))
+                outcome = (
+                    f"restored {name!r} to the version from before this session "
+                    f"({restored.updated or 'undated'}) from the session's copy; the "
+                    f"rejected version is kept in its history"
+                )
         except MemoryStoreError as e:
             return f"not forgotten: {e}"
+        entry["forgotten"] = True
         session.record({"type": "forget", "name": name})
         return outcome
 
@@ -3131,6 +3164,9 @@ def _add_machine_memory_tools(box: Toolbox, session: MasonSession) -> None:
             requires_approval=True,
         )
     )
+
+
+_NO_SUCH_RUN = "no such run in this workspace"
 
 
 def _evidence_lines(session: MasonSession, evidence: str | None) -> list[str]:

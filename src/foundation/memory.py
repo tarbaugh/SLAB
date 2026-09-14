@@ -511,6 +511,7 @@ def write(
         if replaced is not None:
             replaced.unlink(missing_ok=True)
         raise
+    _prune(root, name)
     return replace(parse_memory(path), replaced=replaced)
 
 
@@ -548,9 +549,13 @@ def _archive(root: Path, name: str) -> Path:
             with suppress(OSError):
                 empty.rmdir()
         raise MemoryStoreError(f"cannot keep the replaced version of {name!r}: {e}") from e
-    for old in sorted(history.glob("*.md"))[:-MAX_VERSIONS]:
-        old.unlink(missing_ok=True)
     return kept
+
+
+def _prune(root: Path, name: str) -> None:
+    """Drop the oldest kept versions of *name* past the cap, once a write landed."""
+    for old in sorted(_history(root, name).glob("*.md"))[:-MAX_VERSIONS]:
+        old.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True)
@@ -612,10 +617,24 @@ def restore(name: str, version: Path, directory: Path | None = None) -> Memory:
     root = directory if directory is not None else memory_dir()
     if version.parent.resolve() != _history(root, name).resolve() or not version.is_file():
         raise MemoryStoreError(f"{version} is not a kept version of the memory {name!r}")
-    text = version.read_text(encoding="utf-8")
+    return restore_text(name, version.read_text(encoding="utf-8"), root)
+
+
+def restore_text(name: str, text: str, directory: Path | None = None) -> Memory:
+    """Put *text*, a memory file's whole content, back as the current *name*.
+
+    The undo for a session that rewrote a memory more times than the
+    history keeps: the version from before the session is gone from the
+    history, but the session kept its text. The current file goes into
+    the history first.
+    """
+    root = directory if directory is not None else memory_dir()
+    if not valid_name(name):
+        raise MemoryStoreError(f"{name!r} is not a memory name")
     if (root / f"{name}.md").is_file():
         _archive(root, name)
     _put(root / f"{name}.md", text)
+    _prune(root, name)
     return parse_memory(root / f"{name}.md")
 
 
