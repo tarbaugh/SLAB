@@ -1135,6 +1135,7 @@ def test_wait_for_run_timeout_reports_still_running(
         assert "slowpoke" in waited
         assert "call wait_for_run again" in waited
         assert "running; tasks:" in waited  # the tally says whether it is moving
+        assert len(waited) < 2_000  # read once per wait, dozens of times a campaign
     finally:
         # The detached run must not outlive the test on a shared machine.
         import os as _os
@@ -1901,3 +1902,169 @@ def test_remember_says_when_a_memory_describes_slab_itself(
               body="Otherwise ranks pile on one core.")
     )
     assert "describes SLAB itself" not in plain
+
+
+# -- context hygiene: setup blocks, waits, table windows -------------------------
+
+#: A site's environment block as one campaign's gpu build carried it: 45
+#: export lines, about 7 KB in every result that printed it.
+SITE_SETUP = [f"export SITE_VAR_{i}=/opt/site/stack/{i}/{'x' * 120}" for i in range(45)]
+
+SETUP_WORKFLOW = f"""\
+from foundation import task
+
+IDENTITY = {{"engine": "lammps", "command": "mpirun -np 1 lmp -k on g 1 -sf kk",
+            "setup": {SITE_SETUP!r}, "version": "22 Jul 2025"}}
+
+@task(cache_extra=lambda arguments: IDENTITY)
+def probe(x):
+    return x
+
+probe(1)
+"""
+
+
+def _export_lines(text: str) -> list[str]:
+    """The lines of a result that print an export, bare or as a JSON string."""
+    return [line for line in text.splitlines() if line.strip().strip('"').startswith("export")]
+
+
+def test_list_engines_folds_setup_blocks_and_keeps_every_build_command_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One campaign's listing printed the gpu build's 45 export lines and
+    was cut at the result cap inside that build's command line. The block
+    is one line now, and when the listing still overflows, the rootstock
+    checkpoint ids fold before any build does."""
+    import slab._ops
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("SLAB_ENGINES", raising=False)
+    monkeypatch.delenv("SLAB_CONFIG", raising=False)
+    gpu_command = "mpirun -np {ntasks} lmp -k on g {gpus} -sf kk -pk kokkos newton on"
+    (tmp_path / "slab.toml").write_text(
+        f'[engines.lammps.gpu]\ncommand = "{gpu_command}"\nsetup = {json.dumps(SITE_SETUP)}\n'
+    )
+    checkpoints = {"mace": [f"mace-checkpoint-{i:04d}" for i in range(200)]}
+    monkeypatch.setattr(
+        slab._ops,
+        "_rootstock_checkpoints_overview",
+        lambda: {"root": "/opt/rs", "root_source": "config", "checkpoints": checkpoints},
+    )
+    answer = build_toolbox(_session(tmp_path, max_tool_output_chars=6_000)).dispatch(
+        _call("list_engines")
+    )
+    assert _export_lines(answer) == []
+    listed = json.loads(answer)  # the cap had nothing left to cut
+    gpu = listed["lammps"]["builds"]["gpu"]
+    assert gpu["command"] == gpu_command
+    assert gpu["setup"].startswith("45 lines (module loads and exports), sha256 ")
+    assert gpu["setup"].endswith("slab engines show lammps --setup prints them")
+    assert listed["rootstock"]["checkpoints"] == {"mace": "200 ids"}
+    assert list(listed)[:2] == ["builtin", "lammps"]
+    # Under the default cap the ids fit, and they are listed.
+    roomy = json.loads(build_toolbox(_session(tmp_path)).dispatch(_call("list_engines")))
+    assert roomy["rootstock"]["checkpoints"] == checkpoints
+
+
+def test_show_run_names_a_setup_block_by_digest_unless_asked(
+    box: Toolbox, tmp_path: Path
+) -> None:
+    (tmp_path / "wf.py").write_text(SETUP_WORKFLOW)
+    run_id = _run_id(box.dispatch(_call("launch_workflow", script="wf.py", intent="setup")))
+    for arguments in ({"task": "1"}, {"full": True}):
+        shown = box.dispatch(_call("show_run", run_id=run_id, **arguments))
+        assert _export_lines(shown) == []
+        assert '45 lines (module loads and exports), sha256 ' in shown
+        assert "show_run task=<n> setup=true prints them" in shown
+    whole = json.loads(box.dispatch(_call("show_run", run_id=run_id, task="1", setup=True)))
+    assert whole["task"]["recipe"]["extra"]["setup"] == SITE_SETUP
+
+
+def test_wait_results_name_the_finished_run_and_count_the_others(
+    box: Toolbox, tmp_path: Path
+) -> None:
+    """Every wait of one campaign re-listed the session record; a finished
+    wait now names its run and counts the rest."""
+    (tmp_path / "wf.py").write_text(SETUP_WORKFLOW)
+    first = _run_id(box.dispatch(_call("launch_workflow", script="wf.py", name="one")))
+    second = _run_id(box.dispatch(_call("launch_workflow", script="wf.py", name="two")))
+    waited = box.dispatch(_call("wait_for_run", run_id=second, timeout_s=5))
+    assert waited.startswith(f"run {second}: ") and first not in waited
+    assert waited.splitlines()[-1] == (
+        "1 other run(s) in this session, 0 running; list_runs session='this' lists them"
+    )
+    newest = box.dispatch(_call("wait_for_run", timeout_s=0.2))
+    assert newest.startswith("no run of this session is running; the newest:\n")
+    assert second[:10] in newest and first[:10] not in newest
+    for answer in (waited, newest):
+        assert _export_lines(answer) == [] and len(answer) < 2_000
+
+
+def test_the_transcript_carries_each_setup_block_once(tmp_path: Path) -> None:
+    """The launch's engine event keeps the block and its digest; every later
+    event, the delegation's included, names the digest, and
+    'slab mason read --full' expands it from the first."""
+    from typer.testing import CliRunner
+
+    from mason.cli import app
+
+    session = _session(tmp_path)
+    (tmp_path / "wf.py").write_text(SETUP_WORKFLOW)
+    first = build_toolbox(session).dispatch(_call("launch_workflow", script="wf.py", name="a"))
+    child = session.spawn("md-expert", session.agent)
+    (tmp_path / "wf2.py").write_text(SETUP_WORKFLOW.replace("probe(1)", "probe(2)"))
+    build_toolbox(child).dispatch(_call("launch_workflow", script="wf2.py", name="b"))
+    (kept,) = [e for e in _command_events(session) if e["kind"] == "engine"]
+    (named,) = [e for e in _command_events(child) if e["kind"] == "engine"]
+    assert kept["run_id"] == _run_id(first) and kept["setup"] == SITE_SETUP
+    assert kept["setup_lines"] == 45 and named["setup_digest"] == kept["setup_digest"]
+    assert "setup" not in named
+    written = session.transcript_path.read_text() + child.transcript_path.read_text()
+    assert written.count("export SITE_VAR_7=") == 1
+    shown = CliRunner().invoke(app, ["read", str(child.transcript_path), "--full"])
+    assert shown.exit_code == 0, shown.output
+    assert f"setup (sha256 {kept['setup_digest']}, as first recorded): export SITE_VAR_0=" in (
+        shown.output
+    )
+
+
+def test_read_artifact_samples_a_json_table_by_columns_and_rows(
+    box: Toolbox, tmp_path: Path
+) -> None:
+    """A 3,000-row thermo series was 30,000 JSON lines; one call now
+    samples chosen columns and says what it left out."""
+    table = {
+        "columns": ["Step", "Temp", "PotEng", "Press"],
+        "rows": [[step * 10, 300.0 + step, -1.5, 0.0] for step in range(3000)],
+        "loop": None,
+    }
+    (tmp_path / "md-thermo.json").write_text(json.dumps([table], indent=1))
+    (tmp_path / "series.dat").write_text("".join(f"{i} {i * i}\n" for i in range(1, 101)))
+    (tmp_path / "keep.py").write_text(
+        "from pathlib import Path\nfrom foundation import current_run\n"
+        f"current_run().keep('md-thermo.json', Path({str(tmp_path / 'md-thermo.json')!r}))\n"
+        f"current_run().keep('series.dat', Path({str(tmp_path / 'series.dat')!r}))\n"
+    )
+    run_id = _run_id(box.dispatch(_call("launch_workflow", script="keep.py", intent="table")))
+
+    def read(**arguments: object) -> str:
+        call = ToolCall(id="ra", name="read_artifact", arguments=arguments, arguments_raw="{}")
+        return box.dispatch(call)
+
+    sampled = read(run_id=run_id, name="md-thermo.json", columns="Step,Temp", every=100)
+    lines = sampled.splitlines()
+    assert lines[1] == "table 0: 3000 rows; columns Step, Temp of Step, Temp, PotEng, Press"
+    assert lines[2] == "   row\tStep\tTemp"
+    assert lines[3] == "     1\t0\t300.0" and lines[4] == "   101\t1000\t400.0"
+    assert lines[-1] == "[rows 1-3000, every 100th: 30 shown, 2970 omitted]"
+    assert len(sampled) < 2_000
+    missing = read(run_id=run_id, name="md-thermo.json", columns="Tmp")
+    assert "no column 'Tmp' in table 0; its columns: Step, Temp, PotEng, Press" in missing
+    raw = read(run_id=run_id, name="md-thermo.json", raw=True, limit=2)
+    assert raw.splitlines()[1:3] == ["     1\t[", "     2\t {"]
+    thinned = read(run_id=run_id, name="series.dat", every=25)
+    assert "\n     1\t1 1\n    26\t26 676\n" in thinned
+    assert thinned.endswith("[artifact has 100 lines; every 25th from line 1: 4 shown, 96 omitted]")
+    refused = read(run_id=run_id, name="series.dat", columns="Step")
+    assert "columns= reads a JSON table" in refused

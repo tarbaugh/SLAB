@@ -548,6 +548,47 @@ def test_list_engines_reports_budget_and_free(root: Path, no_gpus: None) -> None
     assert after["free"]["cpus"] == answer["budget"]["cpus"] - 1
 
 
+def test_list_engines_and_show_run_fold_setup_blocks_unless_asked(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_gpus: None
+) -> None:
+    """The MCP surfaces name a build's setup block by digest, as Mason's do."""
+    setup = [f"export SITE_VAR_{i}=/opt/{i}" for i in range(45)]
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("SLAB_ENGINES", raising=False)
+    (tmp_path / "slab.toml").write_text(
+        f'[engines.lammps.gpu]\ncommand = "lmp -k on g 1 -sf kk"\nsetup = {json.dumps(setup)}\n'
+    )
+    server = build_server(root, project=tmp_path, session="mcp-fold")
+    folded = _call(server, "list_engines")["lammps"]["builds"]["gpu"]
+    assert folded["command"] == "lmp -k on g 1 -sf kk"
+    assert folded["setup"].startswith("45 lines (module loads and exports), sha256 ")
+    assert folded["setup"].endswith("list_engines setup=True returns them")
+    assert _call(server, "list_engines", {"setup": True})["lammps"]["builds"]["gpu"][
+        "setup"
+    ] == setup
+    (tmp_path / "wf.py").write_text(
+        "from foundation import task\n"
+        f"IDENTITY = {{'engine': 'lammps', 'command': 'lmp', 'setup': {setup!r}}}\n"
+        "@task(cache_extra=lambda arguments: IDENTITY)\n"
+        "def probe(x):\n    return x\n"
+        "probe(1)\nprobe(2)\n"
+    )
+    script = {"script_path": str(tmp_path / "wf.py")}
+    run_id = _call(server, "launch_workflow", script)["run_id"]
+    details = json.dumps(_call(server, "show_run", {"run_id": run_id}))
+    assert "export SITE_VAR_0" not in details
+    assert "show_run setup=True returns them" in details
+    assert "export SITE_VAR_0" in json.dumps(
+        _call(server, "show_run", {"run_id": run_id, "setup": True})
+    )
+    _call(server, "launch_workflow", script)
+    # The session record carries the block once; the second run names its digest.
+    events = find_session_record(root, "mcp-fold").events()
+    first, second = [e for e in events if e.get("type") == "command" and e["kind"] == "engine"]
+    assert first["setup"] == setup and "setup" not in second
+    assert second["setup_digest"] == first["setup_digest"] and second["setup_lines"] == 45
+
+
 def test_free_resources_matches_the_workspace_and_names_the_holders(
     root: Path, no_gpus: None
 ) -> None:

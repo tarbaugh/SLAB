@@ -113,6 +113,9 @@ def _positive(name: str, value: int | None, *, minimum: int = 1) -> None:
         raise ValueError(f"{name} must be {wanted}, not {value!r}")
 
 
+#: Where show_run's folded setup block is returned in full.
+_SETUP_SHOWN_BY_SHOW_RUN = "show_run setup=True returns them"
+
 _INSTRUCTIONS = """\
 SLAB tracks materials-modeling runs through a lifecycle:
 quarantined (ephemeral, expires) -> verified (checks passed) -> promoted (permanent).
@@ -147,6 +150,14 @@ def build_server(
     hpc = load_slab_config(project_dir).hpc
     versions: dict[str, dict[str, str]] = {}
     recorded_runs: set[str] = set()
+    # The setup blocks a command event of this record already carries in
+    # full; a later event names the digest only. Seeded from the record, so
+    # a restarted server does not copy a block twice.
+    recorded_setups: set[str] = {
+        str(event["setup_digest"])
+        for event in record.events()
+        if event.get("type") == "command" and event.get("setup") and event.get("setup_digest")
+    }
 
     def _record_run_commands(run_id: str | None, tool: str) -> None:
         # The session record says what a run ran, the way a Mason
@@ -169,7 +180,7 @@ def build_server(
                 }
             )
             return
-        for entry in entries:
+        for entry in _ops.name_setups_once(entries, recorded_setups):
             record.record({"type": "command", "kind": "engine", "tool": tool, **entry})
 
     def software_versions() -> dict[str, str]:
@@ -210,7 +221,7 @@ def build_server(
 
     @server.tool()
     @_surfaced
-    def show_run(run_id: str) -> dict[str, Any]:
+    def show_run(run_id: str, setup: bool = False) -> dict[str, Any]:
         """Everything about one run (id or unique prefix): state, intent,
         check results with the observed/expected values they compared, traced
         tasks with recipes, artifacts (and whether their bytes are still
@@ -219,9 +230,11 @@ def build_server(
         diagnostic notes (e.g. relax notes its completed steps and last
         energy, and keeps the partial trajectory as an artifact) — the
         evidence for deciding a specific correction instead of retrying
-        blind."""
+        blind. An engine's setup block (module loads and exports) is named
+        by its line count and digest; setup=True returns the lines."""
         with Workspace(root) as ws:
-            return _ops.run_details(ws, run_id)
+            details = _ops.run_details(ws, run_id)
+        return details if setup else _ops.fold_setups(details, _SETUP_SHOWN_BY_SHOW_RUN)
 
     @server.tool()
     @_surfaced
@@ -448,7 +461,7 @@ def build_server(
 
     @server.tool()
     @_surfaced
-    def list_engines() -> dict[str, Any]:
+    def list_engines(setup: bool = False) -> dict[str, Any]:
         """What can be computed here: slab's built-in engines
         (emt/lammps/lj/qe/rootstock — qe drives pw.x and needs only the
         executable plus pseudopotentials; lammps drives lmp and needs the
@@ -471,22 +484,34 @@ def build_server(
         process may use on this host (cpu and gpu counts) and 'free' what
         no live reservation holds right now; size launch_workflow within
         'free'. When the run store cannot be opened, 'free' is null and
-        'resources_note' says why; the engines are still listed."""
+        'resources_note' says why; the engines are still listed. Each LAMMPS
+        build's setup block (module loads and exports) is one line with its
+        line count and digest; setup=True returns the lines."""
+        from slab._ops import fold_build_setups
         from slab.resources import budget as discover_budget
 
+        overview = engines_overview()
+        lammps = overview.get("lammps")
+        if not setup and isinstance(lammps, dict) and isinstance(lammps.get("builds"), dict):
+            overview["lammps"] = {
+                **lammps,
+                "builds": fold_build_setups(
+                    lammps["builds"], "list_engines setup=True returns them"
+                ),
+            }
         try:
             with Workspace(root) as ws:
                 ws.reap_dead(caller="list_engines")
                 resources = ws.free_resources()
         except (FoundationError, sqlite3.Error, OSError) as e:
             found = discover_budget()
-            return engines_overview() | {
+            return overview | {
                 "budget": _ops.budget_counts(found.cpus, found.gpus, found.gpu_source),
                 "free": None,
                 "resources_note": f"run store unavailable: {e}",
             }
         held = resources["budget"]
-        return engines_overview() | {
+        return overview | {
             "budget": _ops.budget_counts(held["cpus"], held["gpus"], held["gpu_source"]),
             "free": {key: len(ids) for key, ids in resources["free"].items()},
         }

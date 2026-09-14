@@ -1166,6 +1166,108 @@ def test_old_tool_results_are_cleared_in_batches_and_skills_kept(tmp_path: Path)
     assert not any(str(c).startswith("[cleared:") for c in recorded_results)
 
 
+def _reads(prompt_tokens: int, *limits: int) -> ChatReply:
+    """One reply that calls read_file once per limit, all in parallel."""
+    return ChatReply(
+        content=None,
+        tool_calls=tuple(
+            ToolCall(
+                id=f"call_read_{limit}",
+                name="read_file",
+                arguments={"path": "big.txt", "limit": limit},
+                arguments_raw=json.dumps({"path": "big.txt", "limit": limit}),
+            )
+            for limit in limits
+        ),
+        prompt_tokens=prompt_tokens,
+        completion_tokens=10,
+    )
+
+
+def _cleared(request: list[dict[str, Any]]) -> list[str]:
+    """The tool results of one request that were cleared to placeholders."""
+    return [
+        str(m["content"])
+        for m in request
+        if m.get("role") == "tool" and str(m["content"]).startswith("[cleared:")
+    ]
+
+
+def _hygiene_session(tmp_path: Path) -> MasonSession:
+    (tmp_path / "big.txt").write_text(("x" * 80 + "\n") * 40)  # ~3,200 chars per read
+    return _session(
+        tmp_path,
+        context_window=40_000,
+        clear_tool_results_at=0.5,
+        keep_tool_results=1,
+        memory=False,
+        software_notes=False,
+    )
+
+
+def test_clearing_never_takes_a_result_the_model_has_not_read(tmp_path: Path) -> None:
+    """One step's four parallel reads outnumber keep_tool_results, and the
+    prompt is past the clearing threshold, yet the model reads all four
+    before any is cleared. A real delegation lost results this way and
+    read one script six times."""
+    replies: list[ChatReply | Exception] = [
+        _reads(25_000, 40, 39, 38, 37),
+        _reads(25_000, 36),
+        _text_reply("read enough"),
+    ]
+    client = FakeClient(replies)
+    Mason(_hygiene_session(tmp_path), client=client).run_turn("read big.txt")
+    assert _cleared(client.requests[1][0]) == []  # the four fresh results reach the model
+    # Once read, they clear as before; the newest result is the one kept.
+    assert len(_cleared(client.requests[2][0])) == 4
+
+
+def test_a_cut_reply_leaves_the_results_before_it_unread(tmp_path: Path) -> None:
+    """A reply cut at the ceiling read nothing the model can act on, so the
+    results it followed stay exempt at the next step too."""
+    cut = ChatReply(
+        content="the four reads say\nthat the fi",
+        finish_reason="max_tokens",
+        prompt_tokens=25_000,
+        completion_tokens=50,
+    )
+    replies: list[ChatReply | Exception] = [
+        _reads(25_000, 40, 39, 38, 37),
+        cut,
+        _text_reply("that the file is all x", prompt_tokens=25_000),
+    ]
+    client = FakeClient(replies)
+    Mason(_hygiene_session(tmp_path), client=client).run_turn("read big.txt")
+    assert _cleared(client.requests[1][0]) == []
+    assert _cleared(client.requests[2][0]) == []
+
+
+def test_compaction_keeps_the_unread_results_of_a_wide_step(tmp_path: Path) -> None:
+    """The fold keeps six messages. Under the fenced protocol a step of
+    eight calls leaves eight labeled results after the reply, and the old
+    boundary fell among them; now all eight survive into the next request."""
+    session = _session(tmp_path, context_window=4_096, compact_at=0.1, tool_protocol="fenced")
+    block = '```tool\n{"tool": "list_dir", "arguments": {"path": "."}}\n```'
+    wide = _text_reply("\n".join([block] * 8), prompt_tokens=3_000)
+    # The padded history folds before the first step, and again before the second.
+    replies: list[ChatReply | Exception] = [
+        _text_reply("STATE: first fold"),
+        wide,
+        _text_reply("STATE: folded"),
+        _text_reply("done"),
+    ]
+    client = FakeClient(replies)
+    mason = Mason(session, client=client)
+    for i in range(8):
+        mason.messages.append({"role": "user", "content": f"filler {i}"})
+    assert mason.run_turn("go").stop_reason == "answer"
+    assert session.compactions_path.read_text().count("context compaction") == 2
+    after = client.requests[-1][0]
+    assert any("STATE: folded" in str(m.get("content")) for m in after)
+    results = [m for m in after if str(m.get("content")).startswith("[tool result: list_dir]")]
+    assert len(results) == 8
+
+
 def test_clearing_waits_for_a_worthwhile_batch(tmp_path: Path) -> None:
     """A clearing rewrites the cached prefix, so a trivial one is deferred."""
     session = _session(

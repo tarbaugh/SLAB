@@ -284,7 +284,11 @@ lammps builds (gpu build chosen when the launch holds gpus):
   them. The switches parsed from such a build show no GPU count, because
   the count is the launch's. A registry alias whose calculator is
   `slab.backends.lammps_calculator` is a further build under its own
-  name, listed after `gpu`, and `engine="<alias>"` selects it.
+  name, listed after `gpu`, and `engine="<alias>"` selects it. The
+  agent's `list_engines` names each setup block by its line count and a
+  sha256 prefix, because a site's block of exports can fill a tool
+  result. `slab engines show lammps` prints each build with that digest,
+  and `--setup` adds the lines.
 
 - **Units come back converted.** Whatever `units=` the potential requires
   (`metal`, `real`, ...), ASE converts results to eV and eV/Å, so `relax`'s

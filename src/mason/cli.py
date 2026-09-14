@@ -13,6 +13,7 @@ scheduler are the machine groups.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, NoReturn
@@ -711,8 +712,14 @@ def _command_line(event: dict[str, Any]) -> str:
     return f"{head}: {event.get('command', '')}"
 
 
-def _command_details(event: dict[str, Any]) -> list[str]:
+def _command_details(
+    event: dict[str, Any], setups: dict[str, list[str]] | None = None
+) -> list[str]:
     """The lines under a command event that --full shows.
+
+    An engine event names a setup block by digest once an earlier event
+    of the conversation carries it in full; *setups* maps each digest to
+    those lines, and the block is expanded from it.
 
     Examples:
         >>> _command_details({"kind": "engine", "engine": "lammps", "version": "22 Jul 2025",
@@ -725,6 +732,9 @@ def _command_details(event: dict[str, Any]) -> list[str]:
         >>> _command_details({"kind": "engine", "engine": "qe",
         ...                   "template": "mpirun -np {ntasks} pw.x"})
         ['engine qe', 'template: mpirun -np {ntasks} pw.x']
+        >>> _command_details({"kind": "engine", "setup_digest": "9cce24613aca",
+        ...                   "setup_lines": 1}, {"9cce24613aca": ["module load lammps"]})
+        ['setup (sha256 9cce24613aca, as first recorded): module load lammps']
         >>> _command_details({"kind": "shell", "cwd": "/proj"})
         ['cwd /proj']
         >>> _command_details({"kind": "launch", "sized": True,
@@ -741,6 +751,19 @@ def _command_details(event: dict[str, Any]) -> list[str]:
         details.append(f"template: {event['template']}")
     if event.get("setup"):
         details.append("setup: " + "; ".join(str(line) for line in event["setup"]))
+    elif event.get("setup_digest"):
+        digest = str(event["setup_digest"])
+        known = (setups or {}).get(digest)
+        if known is not None:
+            details.append(
+                f"setup (sha256 {digest}, as first recorded): "
+                + "; ".join(str(line) for line in known)
+            )
+        else:
+            details.append(
+                f"setup: {event.get('setup_lines', '?')} lines, sha256 {digest}; no event "
+                f"of this conversation carries the lines"
+            )
     kokkos = event.get("kokkos")
     if isinstance(kokkos, dict):
         if kokkos.get("enabled"):
@@ -766,6 +789,38 @@ def _command_details(event: dict[str, Any]) -> list[str]:
     if event.get("cwd"):
         details.append(f"cwd {event['cwd']}")
     return details
+
+
+#: Setup blocks by digest, from the command events rendered or scanned so
+#: far: --full expands an event that names a block by digest from these.
+_SETUPS: dict[str, list[str]] = {}
+
+
+def _learn_setups(transcript: Path) -> None:
+    """Collect the setup blocks the transcript's conversation carries in full.
+
+    A delegation's event can name a block its conversation's transcript
+    holds, so the whole group is read: the conversation and every
+    delegation beside it.
+    """
+    from mason.session import _DELEGATION_TRANSCRIPT
+
+    match = _DELEGATION_TRANSCRIPT.match(transcript.name)
+    stem = match.group(1) if match else transcript.stem
+    for path in sorted(transcript.parent.glob(f"{stem}*.jsonl")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if '"setup_digest"' not in line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict) and event.get("setup") and event.get("setup_digest"):
+                _SETUPS.setdefault(str(event["setup_digest"]), list(event["setup"]))
 
 
 def _render_event(event: dict[str, Any], full: bool) -> None:
@@ -812,8 +867,10 @@ def _render_event(event: dict[str, Any], full: bool) -> None:
         if not full and len(line) > 200:
             line = line[:200] + " ..."
         typer.secho(f"[{stamp}] {line}", fg=typer.colors.GREEN)
+        if event.get("setup") and event.get("setup_digest"):
+            _SETUPS.setdefault(str(event["setup_digest"]), list(event["setup"]))
         if full:
-            for detail in _command_details(event):
+            for detail in _command_details(event, _SETUPS):
                 typer.secho(f"    {detail}", fg=typer.colors.GREEN)
     elif kind == "review":
         typer.secho(
@@ -1019,6 +1076,8 @@ def mason_read(
     if not transcript.is_file():
         _fail(f"no transcript at {transcript}")
     usage = _Usage()
+    if full:
+        _learn_setups(transcript)
     if live:
         _follow(transcript, full, usage)
     else:

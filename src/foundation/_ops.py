@@ -512,6 +512,107 @@ def _promote_one(
     }
 
 
+def fold_setups(value: Any, shown_by: str) -> Any:
+    """*value* with every setup block folded to one line; everything else kept.
+
+    A LAMMPS task records its build's setup twice: the ``setup`` list in
+    the recipe and the task's ``info``, and the login-shell script in
+    ``argv``, whose last element is ``set -e``, the setup lines, and the
+    ``exec`` line. One campaign's gpu build carried 45 export lines, about
+    7 KB, into every record of a task. A ``setup`` list of strings becomes
+    :func:`slab._ops.folded_setup`; an ``argv`` element with line breaks
+    keeps its ``exec`` line and names the lines before it by digest.
+
+    Examples:
+        >>> task = {"recipe": {"extra": {"setup": ["module load x", "export A=1"]}},
+        ...         "outputs": {"info": {"argv": ["/bin/bash", "-l", "-c",
+        ...             "set -e\\nmodule load x\\nexport A=1\\nexec lmp -in in.lammps"]}}}
+        >>> folded = fold_setups(task, "show_run setup=true prints them")
+        >>> folded["recipe"]["extra"]["setup"][:43]
+        '2 lines (module loads and exports), sha256 '
+        >>> folded["outputs"]["info"]["argv"][-1]
+        '[setup: 2 lines, sha256 c389e99cae62] exec lmp -in in.lammps'
+        >>> fold_setups({"setup": []}, "x")
+        {'setup': []}
+    """
+    from slab._ops import folded_setup
+
+    if isinstance(value, dict):
+        folded: dict[Any, Any] = {}
+        for key, item in value.items():
+            if (
+                key == "setup"
+                and isinstance(item, list)
+                and item
+                and all(isinstance(line, str) for line in item)
+            ):
+                folded[key] = folded_setup(item, shown_by)
+            elif key == "argv" and isinstance(item, list):
+                folded[key] = [
+                    _folded_shell(token) if isinstance(token, str) else token
+                    for token in item
+                ]
+            else:
+                folded[key] = fold_setups(item, shown_by)
+        return folded
+    if isinstance(value, list):
+        return [fold_setups(item, shown_by) for item in value]
+    return value
+
+
+def _folded_shell(token: str) -> str:
+    """A login-shell script argument with its setup lines named by digest."""
+    from slab._ops import setup_digest
+
+    lines = token.splitlines()
+    if len(lines) < 2:
+        return token
+    body = lines[:-1]
+    if body and body[0].strip() == "set -e":
+        body = body[1:]
+    if not body:
+        return token
+    return f"[setup: {len(body)} lines, sha256 {setup_digest(body)}] {lines[-1]}"
+
+
+def name_setups_once(entries: list[dict[str, Any]], seen: set[str]) -> list[dict[str, Any]]:
+    """Engine command records with each setup block kept in full once per transcript.
+
+    Every entry gains ``setup_digest`` and ``setup_lines``. The first entry
+    to carry a given block keeps its ``setup`` list; a later one, in this
+    call or a later call sharing *seen*, drops the list and names the
+    digest only, and ``slab mason read --full`` expands it from the first.
+    *seen* is updated in place.
+
+    Examples:
+        >>> seen: set[str] = set()
+        >>> first = name_setups_once([{"command": "lmp", "setup": ["module load x"]}], seen)
+        >>> first[0]["setup"], first[0]["setup_lines"]
+        (['module load x'], 1)
+        >>> again = name_setups_once([{"command": "lmp", "setup": ["module load x"]}], seen)
+        >>> "setup" in again[0], again[0]["setup_digest"] == first[0]["setup_digest"]
+        (False, True)
+        >>> name_setups_once([{"command": "lmp", "setup": []}], seen)
+        [{'command': 'lmp', 'setup': []}]
+    """
+    from slab._ops import setup_digest
+
+    named: list[dict[str, Any]] = []
+    for entry in entries:
+        setup = entry.get("setup")
+        if not setup:
+            named.append(entry)
+            continue
+        digest = setup_digest(setup)
+        entry = {**entry, "setup_digest": digest, "setup_lines": len(setup)}
+        if digest in seen:
+            del entry["setup"]
+        else:
+            seen.add(digest)
+        named.append(entry)
+    return named
+
+
 def run_commands(ws: Workspace, run_id: str) -> list[dict[str, Any]]:
     """The external commands a run's tasks resolved, one entry per distinct command.
 
