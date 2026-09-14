@@ -66,6 +66,12 @@ result, info = run_lammps(SCRIPT, atoms=STRUCTURE, files=["W.eam.fs"], label="w-
 - `files=` stages potential files, data files, and restarts beside the
   script under their basenames. Name each by bare basename in the
   script; the task refuses a file the script never mentions.
+- `files=` also takes an earlier run's artifact, so the next leg never
+  copies out of the store through the shell:
+  `files=[f"run:{MD_RUN}/w-npt-final.data as start.data"]` stages it
+  as `start.data` (without `as`, under its own name). The reference
+  follows a cache hit to the run that holds the file, and the bytes,
+  not the run id, enter the cache identity.
 - `engine="lammps"` is all you pass. The build follows the slice: a
   launch sized with `gpus=` runs the gpu build under
   `[engines.lammps.gpu]`, and an unsized launch runs the plain build
@@ -441,6 +447,7 @@ and the run id. A number without a run id is a rumor.
 | `Non-numeric atom coords - simulation unstable`, `Non-numeric pressure` | the same blow-up, caught by another guard | the same fixes |
 | `Unrecognized pair style 'x'` | the build lacks the package, or a typo | the lammps-potentials skill; check the binary's `-h` package list |
 | `Cannot open file X` | not staged, or named by a path | pass it in `files=` and name it by bare basename |
+| `Must define pair_style before Pair Coeffs` | a data file written with its coefficients, read before `pair_style` | write it with `write_data <file> nocoeff`, or set `pair_style` before `read_data` |
 | `Incorrect args for pair coefficients` | the element list does not match the atom types | `info["types"]` gives the order; one symbol per type |
 | `Unknown identifier in data file`, `Incorrect atom format in data file` | `atom_style` does not match the data file | the task writes `atomic`; set that, or stage your own data file |
 | `Neighbor list overflow, boost neigh_modify one` | too many neighbors per atom for the page | `neigh_modify one 10000 page 100000` |

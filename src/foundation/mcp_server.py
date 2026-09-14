@@ -225,6 +225,47 @@ def build_server(
 
     @server.tool()
     @_surfaced
+    def read_artifact(
+        run_id: str | None = None,
+        name: str | None = None,
+        hash: str | None = None,
+        offset: int = 1,
+        limit: int = 400,
+    ) -> dict[str, Any]:
+        """Read a run's artifact by run_id and name (or a hash prefix), or
+        any bytes the workspace holds by hash alone (a sha256 prefix of 6+
+        characters, a task's input or output included). A run whose task
+        was a cache hit holds no files for it: the read follows the hit to
+        the run that executed the task, and 'head' says so on its first
+        line. A hash read's 'head' names the runs and tasks that reference
+        it. 'text' is lines offset..offset+limit-1 of the content; 'lines'
+        is the total. To hand a run's file to run_lammps, pass
+        files=['run:<id>/<name>'] (or 'run:<id>/<name> as <basename>')
+        instead of copying it."""
+        _positive("offset", offset)
+        _positive("limit", limit)
+        with Workspace(root) as ws:
+            read = _ops.read_artifact(
+                ws, run_id=run_id, name=name, digest=hash, session=session_id
+            )
+        answer: dict[str, Any] = {
+            "head": "\n".join(read.head),
+            "name": read.name,
+            "run_id": read.run_id,
+            "hash": read.digest,
+            "size_bytes": read.size_bytes,
+        }
+        if read.text is None:
+            return answer | {"text": None, "reason": read.reason}
+        lines = read.text.splitlines()
+        return answer | {
+            "text": "\n".join(lines[offset - 1 : offset - 1 + limit]),
+            "lines": len(lines),
+            "offset": offset,
+        }
+
+    @server.tool()
+    @_surfaced
     def promote_run(run_id: str, reason: str | None = None, force: bool = False) -> dict[str, Any]:
         """Make a run permanent (verified -> promoted). Give a reason — it is
         recorded as provenance. force=True promotes an unverified run and is

@@ -5,6 +5,22 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- Artifacts follow the cache, and a run's artifact can feed the next
+  task. `read_artifact` on a run whose task was a cache hit reads the
+  file from the run where the task executed, and the first line of the
+  answer says so. `show_run` gives every cache-hit task `artifacts_on`,
+  the id of that run. `run_lammps(files=)` takes `run:<id>/<name>` and
+  `run:<id>/<name> as <basename>`, which stage a run's artifact beside
+  the script with no copy through the shell. The reference follows
+  cache hits too, and it enters the cache identity through the
+  artifact's hash and basename, not the run id (the tracer's new
+  `canonical=` hook), while the recipe records the run under
+  `provenance`. A dry run reads the reference from the real workspace.
+  `read_artifact(hash=)` reads any bytes the workspace holds by a
+  SHA-256 prefix, a task's input or output value included, and names
+  the runs and tasks that reference them. MCP gains `read_artifact`
+  with the same arguments. See the new [Artifacts](docs/tutorials/artifacts.md)
+  page.
 - `slab mason read --live` follows a session as it works, like
   `tail -f`. The viewer shows the transcript, then each event the
   session appends, until Ctrl+C. It follows the transcripts of the

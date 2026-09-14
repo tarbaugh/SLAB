@@ -324,6 +324,8 @@ def _render_details(details: dict[str, object]) -> None:
         typer.echo("  tasks:")
         for position, t in enumerate(tasks, start=1):
             cached = " (cached)" if t["cache_hit"] else ""
+            if t.get("artifacts_on"):
+                cached = f" (cached; artifacts on run {str(t['artifacts_on'])[:10]})"
             duration = "" if t["duration_s"] is None else f"  {t['duration_s']}s"
             error = "" if not t["error"] else f"  error: {t['error']}"
             typer.echo(f"    {position}. {t['name']}  {t['status']}{cached}{duration}{error}")

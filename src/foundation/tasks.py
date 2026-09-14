@@ -44,6 +44,7 @@ from ase.optimize import BFGS, CellAwareBFGS
 from foundation.errors import ArtifactExistsError, FoundationError
 from foundation.lifecycle import ExecutionStatus
 from foundation.models import ArtifactRole
+from foundation.references import ResolvedReference, RunReference, resolve_reference
 from foundation.runtime import current_run
 from foundation.serialize import loads as foundation_loads
 from foundation.tracing import task
@@ -1004,7 +1005,9 @@ _MAX_KEPT_FAILURE_FILES = 20
 # cache_extra folds the binary's identity (command, detected version, setup
 # lines) AND every staged file's content hash into the cache key: the
 # serializer would otherwise hash a potential file by its path string, and
-# changed bytes at the same path must miss.
+# changed bytes at the same path must miss. A run artifact reference enters
+# by the artifact's hash (canonical= rewrites the entry itself), so two runs
+# holding the same bytes give one identity.
 def _lammps_identity(arguments: dict[str, Any]) -> dict[str, Any]:
     """The binary a ``run_lammps`` call names: the build, then per-call overrides."""
     build = lammps_build(arguments.get("engine"))
@@ -1015,21 +1018,78 @@ def _lammps_identity(arguments: dict[str, Any]) -> dict[str, Any]:
     return described
 
 
+def _files_list(files: str | os.PathLike[str] | Sequence[Any] | None) -> list[Any]:
+    """The ``files=`` entries as a list: None is none, one string is one."""
+    if files is None:
+        return []
+    if isinstance(files, (str, os.PathLike)):
+        return [files]
+    return list(files)
+
+
+def _resolved_entry(entry: object) -> ResolvedReference | None:
+    """The run artifact a ``files=`` entry names, or None for a path."""
+    try:
+        reference = RunReference.parse(entry)
+    except ValueError as e:
+        raise LammpsScriptError(str(e)) from None
+    if reference is None:
+        return None
+    active = current_run()
+    if active is None:
+        raise LammpsScriptError(
+            f"files= entry {entry!r} names a run's artifact, which only a traced "
+            "call can read; launch the script as a workflow"
+        )
+    runs, artifacts = active.lookup
+    try:
+        return resolve_reference(runs, artifacts, reference)
+    except FoundationError as e:
+        raise LammpsScriptError(f"files= entry {entry!r}: {e}") from e
+
+
+def _lammps_files_identity(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Each staged file's hash by basename, and where each run artifact came from."""
+    entries = _files_list(arguments.get("files"))
+    if not entries:
+        return {}
+    hashes: dict[str, str] = {}
+    sources: dict[str, str] = {}
+    for entry in entries:
+        resolved = _resolved_entry(entry)
+        if resolved is None:
+            hashes[Path(entry).name] = _file_sha256(entry, what="staged file")
+        else:
+            hashes[resolved.reference.basename] = resolved.digest
+            sources[resolved.reference.basename] = resolved.source
+    identity: dict[str, Any] = {"files_sha256": hashes}
+    if sources:
+        # The recipe says which run held the bytes; the key sees only the bytes.
+        identity["provenance"] = {"files": sources}
+    return identity
+
+
+def _lammps_canonical(arguments: dict[str, Any]) -> dict[str, Any]:
+    """``files=`` with each run artifact reference replaced by its hash."""
+    entries = _files_list(arguments.get("files"))
+    resolved = [_resolved_entry(entry) for entry in entries]
+    if not any(resolved):
+        return {}
+    return {
+        "files": [
+            entry if found is None else found.canonical
+            for entry, found in zip(entries, resolved, strict=True)
+        ]
+    }
+
+
 @task(
     engines=("ase",),
     cache_extra=lambda arguments: {
         **_lammps_identity(arguments),
-        **(
-            {
-                "files_sha256": {
-                    Path(f).name: _file_sha256(f, what="staged file")
-                    for f in arguments["files"]
-                }
-            }
-            if arguments.get("files")
-            else {}
-        ),
+        **_lammps_files_identity(arguments),
     },
+    canonical=_lammps_canonical,
 )
 def run_lammps(
     script: str,
@@ -1057,7 +1117,12 @@ def run_lammps(
     the text is what enters the cache identity. Reference every staged
     file by bare basename. *files* are copied beside the script under
     their basenames (potential files, a data file, a restart), and the
-    task refuses a file the script never mentions. With *atoms* the task
+    task refuses a file the script never mentions. An entry
+    ``run:<id>/<name>`` stages the artifact *name* of run *id* (an id or
+    a unique prefix) under its own name, and ``run:<id>/<name> as
+    <basename>`` stages it under *basename*. The reference follows the
+    run's cache hits to the run that holds the artifact, and it enters
+    the cache identity by the artifact's hash, not the run id. With *atoms* the task
     writes the structure as ``structure.data`` (``units metal``,
     ``atom_style atomic``, masses included) and the script must
     ``read_data structure.data``. *specorder* fixes the atom types in
@@ -1134,7 +1199,8 @@ def run_lammps(
 
     Args:
         script: The full input-script text, agent-authored.
-        files: Paths of the files the script reads, staged by basename.
+        files: The files the script reads, staged by basename: paths, or
+            ``run:<id>/<name> [as <basename>]`` run artifact references.
         atoms: A structure to write as ``structure.data``.
         specorder: Element symbols in atom-type order for *atoms*.
         label: Names the kept artifacts (default ``lammps``).
@@ -1166,8 +1232,12 @@ def run_lammps(
     scratch = script_scratch_dir()
     try:
         (scratch / INPUT_NAME).write_text(script, encoding="utf-8")
-        for source in staged:
-            shutil.copy2(source, scratch / source.name)
+        for source, basename, from_store in staged:
+            if from_store:
+                # A stored blob is read-only; the staged copy must not be.
+                shutil.copyfile(source, scratch / basename)
+            else:
+                shutil.copy2(source, scratch / basename)
         if atoms is not None:
             ase_write(
                 scratch / STRUCTURE_DATA,
@@ -1274,29 +1344,38 @@ def run_lammps(
     return result, info
 
 
-def _staged_lammps_files(files: Sequence[str] | None, script: str) -> list[Path]:
-    """The files to copy beside the script: existing, unique by basename, and named in it."""
-    if files is None:
-        return []
-    if isinstance(files, (str, os.PathLike)):
-        files = [str(files)]
-    staged: list[Path] = []
-    for entry in files:
-        path = Path(entry).expanduser()
-        if not path.is_file():
-            raise LammpsScriptError(f"staged file {str(entry)!r} does not exist or is not a file")
-        if path.name in {other.name for other in staged}:
+def _staged_lammps_files(
+    files: Sequence[str] | None, script: str
+) -> list[tuple[Path, str, bool]]:
+    """The files to copy beside the script: existing, unique by basename, and named in it.
+
+    Each entry is the source path, the basename it is staged under, and
+    whether the source is a blob in the artifact store.
+    """
+    staged: list[tuple[Path, str, bool]] = []
+    for entry in _files_list(files):
+        resolved = _resolved_entry(entry)
+        if resolved is not None:
+            path, basename = resolved.path, resolved.reference.basename
+        else:
+            path = Path(entry).expanduser()
+            basename = path.name
+            if not path.is_file():
+                raise LammpsScriptError(
+                    f"staged file {str(entry)!r} does not exist or is not a file"
+                )
+        if basename in {other for _, other, _ in staged}:
             raise LammpsScriptError(
-                f"two staged files share the basename {path.name!r}; they would "
+                f"two staged files share the basename {basename!r}; they would "
                 "overwrite each other beside the script"
             )
-        if path.name not in script:
+        if basename not in script:
             raise LammpsScriptError(
-                f"the script never mentions the staged file's basename {path.name!r}; "
+                f"the script never mentions the staged file's basename {basename!r}; "
                 "reference it by bare basename (it is copied beside the script under "
                 "that name)"
             )
-        staged.append(path)
+        staged.append((path, basename, resolved is not None))
     return staged
 
 

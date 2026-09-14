@@ -25,7 +25,7 @@ The workspace is resolved exactly as for the CLI: `-w/--workspace` flag > `$SLAB
 
 ## The toolbox
 
-Twenty-five tools, each a thin wrapper over the operations layer, and three more on a cluster:
+Twenty-six tools, each a thin wrapper over the operations layer, and three more on a cluster:
 
 | Tool | What it does |
 | --- | --- |
@@ -33,6 +33,7 @@ Twenty-five tools, each a thin wrapper over the operations layer, and three more
 | `wait_for_run` | Block until a run finishes or the timeout passes. Takes an id, a prefix, or a run name; without one, waits for every running run of this session. A run whose recorded process on this host is gone is marked failed and answered at once with outcome `process_gone`. |
 | `list_runs` | Runs newest first, filterable by lifecycle `state`, execution `status`, and the `session` that created them. Marks failed every running run whose recorded process on this host is gone before it lists. |
 | `show_run` | Everything about one run: checks, tasks, artifacts, history, failure evidence. |
+| `read_artifact` | Read a run's artifact by `run_id` and `name`, or any stored bytes by `hash` alone. A read on a run whose task was a cache hit follows the hit to the run that executed the task. See [Artifacts](artifacts.md). |
 | `promote_run` | Make a run permanent (`verified -> promoted`), with a recorded reason. |
 | `list_sessions` | The client sessions that created runs, with run counts and state breakdowns. |
 | `promote_session` | Promote every run one session created, reporting each outcome. |
@@ -69,7 +70,7 @@ Files and a shell are not offered either. A harness brings its own. The science 
 
 The three size arguments make the launch sized. The server reserves `ntasks x threads` cpu ids and `gpus` gpu ids of its host before the run starts. It runs the script as a child process that claims the reservation, and the child takes the slice as its affinity mask and `CUDA_VISIBLE_DEVICES`. A slice that does not fit what is free is refused with the free amounts. `list_engines` reports `budget` and `free`, so a harness sizes within them. An unsized launch runs in the server's process and reserves every free cpu, and `gpus` without `ntasks` takes the gpus asked, one MPI rank per gpu, and every free cpu as threads. A GPU launch with more ranks than gpus is refused by the gpu build, so size it with `gpus` alone or with `ntasks` equal to `gpus`. A size that is not a positive integer is refused by name. The Mason tool takes the same three arguments. The reservation is released when the run ends or the holder dies; see [Mason](mason.md#compute-budget-sizing-the-physics-to-the-machine) for the guarantee.
 
-**`show_run(run_id)`** is the evidence surface. Beyond the run's fields, it returns check results with the observed/expected values their assertions compared, traced tasks with recipes and cache-hit flags, artifacts annotated with `bytes_available` (still stored, or hash-and-discarded), and the full lifecycle history. Failed runs and tasks carry a `failure` record with the exception type, message, trimmed traceback, and diagnostic notes, which is the input for a specific correction instead of a blind retry. Ids accept unique prefixes, git-style, here and in `promote_run`.
+**`show_run(run_id)`** is the evidence surface. Beyond the run's fields, it returns check results with the observed/expected values their assertions compared, traced tasks with recipes and cache-hit flags, artifacts annotated with `bytes_available` (still stored, or hash-and-discarded), and the full lifecycle history. A cache-hit task carries `artifacts_on`, the run that executed it and holds its files. Failed runs and tasks carry a `failure` record with the exception type, message, trimmed traceback, and diagnostic notes, which is the input for a specific correction instead of a blind retry. Ids accept unique prefixes, git-style, here and in `promote_run`.
 
 **`list_engines()`** answers "what can I compute with, here". It lists SLAB's built-ins (`emt`/`lammps`/`lj`/`qe`/`rootstock`), and everything the cluster's engine registry declares, with the maintainer's declared versions and whether a probe verifies each entry. Under `rootstock`, it lists the canonical MLIP checkpoint ids the local rootstock install serves, each usable directly as the `engine=` argument. It also lists the named QE input protocols (`qe_protocols`) and the installed pseudopotential families (`pseudo_families`). See [Engines](engines.md) and [Protocols & pseudopotentials](protocols-and-pseudos.md).
 
@@ -179,7 +180,7 @@ print("scored:", record["passed"], record["engine_class"], record["engines"], re
 ```
 
 ```text
-25 tools: describe_task, expire_runs, free_resources, gc, get_material, launch_workflow, list_engines, list_memories, list_runs, list_sessions, list_skills, list_tasks, notebook, plan, promote_run, promote_session, query_materials, recall, remember, report_results, retire_session, search_materials, show_run, skill, wait_for_run
+26 tools: describe_task, expire_runs, free_resources, gc, get_material, launch_workflow, list_engines, list_memories, list_runs, list_sessions, list_skills, list_tasks, notebook, plan, promote_run, promote_session, query_materials, read_artifact, recall, remember, report_results, retire_session, search_materials, show_run, skill, wait_for_run
 skill: equation-of-state files: ['SKILL.md', 'assets/eos_scan.py', 'scripts/fit_eos.py']
 verified 1/1 checks passed; a0 = 3.5907 Å
 reported for session mcp-demo -> mcp-demo.jsonl

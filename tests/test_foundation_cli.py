@@ -163,6 +163,19 @@ def test_show_renders_sections(root: Path) -> None:
     assert "quarantined -> verified" in out
 
 
+def test_show_names_the_run_that_holds_a_cache_hits_files(root: Path, tmp_path: Path) -> None:
+    from foundation._ops import launch_script
+
+    script = tmp_path / "wf.py"
+    script.write_text(HAPPY_SCRIPT)
+    first = launch_script(root, script, capture_output=True)
+    again = launch_script(root, script, capture_output=True)
+    shown = runner.invoke(app, ["show", again["run_id"], "-w", str(root)]).output
+    assert f"double  completed (cached; artifacts on run {first['run_id'][:10]})" in shown
+    first_shown = runner.invoke(app, ["show", first["run_id"], "-w", str(root)]).output
+    assert "double  completed  " in first_shown and "cached" not in first_shown
+
+
 def test_show_json(root: Path) -> None:
     run_id = _seed_run(root)
     result = runner.invoke(app, ["show", run_id, "-w", str(root), "--json"])

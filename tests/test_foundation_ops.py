@@ -997,3 +997,214 @@ def test_launch_child_dry_run_returns_the_report_and_releases_the_reservation(
     with Workspace(root) as ws:
         assert ws.runs.list_runs() == []
         assert ws.runs.list_reservations() == []
+
+
+# -- artifacts follow the cache, and feed the next task ---------------------------
+
+# A LAMMPS that integrates nothing: it echoes the script into its log, copies
+# every read_data file's text into the log after a DATA marker, and writes
+# what write_data names. The DATA line is the proof the staged bytes arrived.
+_ECHO_LMP = '''#!{python}
+import sys
+args = sys.argv[1:]
+if "-h" in args:
+    print("Large-scale Atomic/Molecular Massively Parallel Simulator - 22 Jul 2025 - Update 4")
+    sys.exit(0)
+script = open(args[args.index("-in") + 1]).read()
+log = ["LAMMPS (22 Jul 2025 - Update 4)"]
+for line in script.splitlines():
+    log.append(line)
+    words = line.split()
+    if words[:1] == ["read_data"]:
+        log.append("DATA " + open(words[1]).read().strip())
+    if words[:1] == ["write_data"]:
+        open(words[1], "w").write("Cu data " + words[-1] + "\\n")
+log.append("Total wall time: 0:00:00")
+open(args[args.index("-log") + 1], "w").write("\\n".join(log) + "\\n")
+'''
+
+MD_SCRIPT = "units metal\nwrite_data final.data v1\n"
+NEXT_SCRIPT = "units metal\nread_data start.data\n"
+
+
+@pytest.fixture()
+def echo_lmp(tmp_path: Path) -> str:
+    import sys
+
+    path = tmp_path / "echo-lmp"
+    path.write_text(_ECHO_LMP.format(python=sys.executable))
+    path.chmod(0o755)
+    return str(path)
+
+
+def _md_twice(ws: Workspace, lmp: str) -> tuple[str, str]:
+    """The MD leg run once, then relaunched as a cache hit: (producer, hit)."""
+    from foundation.tasks import run_lammps
+
+    with ws.start_run(name="md") as first:
+        run_lammps(MD_SCRIPT, label="md", command=lmp)
+    with ws.start_run(name="md-relaunch") as again:
+        run_lammps(MD_SCRIPT, label="md", command=lmp)
+    return first.id, again.id
+
+
+def test_read_artifact_follows_a_cache_hit_to_the_producing_run(
+    root: Path, echo_lmp: str
+) -> None:
+    from foundation._ops import read_artifact
+
+    with Workspace(root) as ws:
+        producer, hit = _md_twice(ws, echo_lmp)
+        assert ws.runs.list_tasks(hit)[0].cache_hit is True
+        assert ws.runs.list_artifacts(hit) == []  # a cache hit keeps no files
+        read = read_artifact(ws, run_id=hit, name="md-final.data")
+        details = run_details(ws, hit)
+        produced = run_details(ws, producer)
+        own = read_artifact(ws, run_id=producer, name="md-final.data")
+    assert read.head[0] == (
+        f"md-final.data is read from run {producer[:10]}: task "
+        f"{details['tasks'][0]['seq']} run_lammps on run {hit[:10]} was a cache hit of that run"
+    )
+    assert read.text == "Cu data v1\n" and read.run_id == producer
+    assert own.head == [f"md-final.data ({own.size_bytes} bytes, sha256 {own.digest[:12]})"]
+    assert details["tasks"][0]["artifacts_on"] == producer
+    assert "artifacts_on" not in produced["tasks"][0]
+
+
+def test_read_artifact_names_what_each_run_holds_when_nothing_matches(
+    root: Path, echo_lmp: str
+) -> None:
+    from foundation._ops import read_artifact
+    from foundation.errors import ArtifactNotFoundError
+
+    with Workspace(root) as ws:
+        producer, hit = _md_twice(ws, echo_lmp)
+        with pytest.raises(ArtifactNotFoundError) as excinfo:
+            read_artifact(ws, run_id=hit, name="md.dump")
+        with pytest.raises(ValueError, match="needs run_id and name, or hash"):
+            read_artifact(ws, run_id=hit)
+    message = str(excinfo.value)
+    assert message.startswith(f"no artifact named 'md.dump' on run {hit[:10]}; it has: none")
+    assert f"its cache hits reused run {producer[:10]}, which has: md.in, md.log" in message
+
+
+def test_a_run_reference_in_files_stages_the_artifact_bytes(root: Path, echo_lmp: str) -> None:
+    """The planner's brief names the verified relaunch, whose MD leg was a
+    cache hit: the reference follows the hit and stages the producer's file."""
+    from foundation.tasks import run_lammps
+
+    with Workspace(root) as ws:
+        producer, hit = _md_twice(ws, echo_lmp)
+        with ws.start_run(name="next") as run:
+            _, info = run_lammps(
+                NEXT_SCRIPT,
+                files=[f"run:{hit}/md-final.data as start.data"],
+                label="next",
+                command=echo_lmp,
+            )
+        log = ws.artifacts.get(info["artifacts"]["next.log"]).read_text()
+        (record,) = ws.runs.list_tasks(run.id)
+        digest = ws.runs.get_artifact(producer, "md-final.data").hash
+    assert "DATA Cu data v1" in log
+    assert record.recipe["extra"]["files_sha256"] == {"start.data": digest}
+    assert record.recipe["extra"]["provenance"]["files"] == {
+        "start.data": f"run:{producer}/md-final.data"
+    }
+    assert hit not in json.dumps(record.recipe["params"])  # the key holds bytes, not a run id
+
+
+def test_a_run_reference_enters_the_cache_identity_by_its_bytes(
+    root: Path, tmp_path: Path, echo_lmp: str
+) -> None:
+    from foundation.tasks import run_lammps
+
+    with Workspace(root) as ws:
+        producer, _ = _md_twice(ws, echo_lmp)
+        same = tmp_path / "copy.data"
+        same.write_text("Cu data v1\n")
+        other = tmp_path / "other.data"
+        other.write_text("Cu data v2\n")
+        with ws.start_run(name="holder") as holder:
+            holder.keep("copy.data", same)
+            holder.keep("other.data", other)
+
+        def hit(entry: str) -> bool:
+            with ws.start_run(name="next") as run:
+                run_lammps(NEXT_SCRIPT, files=[entry], label="next", command=echo_lmp)
+            return ws.runs.list_tasks(run.id)[0].cache_hit
+
+        assert hit(f"run:{producer}/md-final.data as start.data") is False
+        assert hit(f"run:{holder.id}/copy.data as start.data") is True  # same bytes
+        assert hit(f"run:{holder.id}/other.data as start.data") is False  # other bytes
+
+
+def test_a_bad_run_reference_is_refused_before_lammps_starts(
+    root: Path, echo_lmp: str
+) -> None:
+    from foundation.tasks import run_lammps
+    from slab.errors import LammpsScriptError
+
+    with Workspace(root) as ws:
+        producer, _ = _md_twice(ws, echo_lmp)
+        for entry, message in (
+            ("run:nope", "not a run artifact reference"),
+            (f"run:{producer}/md-final.data as sub/start.data", "not a bare basename"),
+            (f"run:{producer}/md.dump as start.data", "no artifact named 'md.dump'"),
+            (f"run:{producer}/md-final.data as other.data", "never mentions"),
+        ):
+            with ws.start_run(name="bad"), pytest.raises(LammpsScriptError, match=message):
+                run_lammps(NEXT_SCRIPT, files=[entry], command=echo_lmp)
+    with pytest.raises(LammpsScriptError, match="only a traced call can read"):
+        run_lammps(NEXT_SCRIPT, files=[f"run:{producer}/md-final.data"], command=echo_lmp)
+
+
+def test_a_dry_run_stages_a_run_reference_from_the_real_workspace(
+    root: Path, tmp_path: Path, echo_lmp: str
+) -> None:
+    with Workspace(root) as ws:
+        producer, _ = _md_twice(ws, echo_lmp)
+        before = len(ws.runs.list_runs())
+    script = _write(
+        tmp_path,
+        "next.py",
+        "from foundation.tasks import run_lammps\n"
+        f"result, info = run_lammps({NEXT_SCRIPT!r}, "
+        f"files=['run:{producer}/md-final.data as start.data'], "
+        f"command={echo_lmp!r}, label='next')\n",
+    )
+    report = launch_script(root, script, dry_run=True)
+    assert report["reached_end"] is True, report["traceback"]
+    assert report["lammps"] == [{"label": "next", "outcome": "setup ok"}]
+    with Workspace(root) as ws:
+        assert len(ws.runs.list_runs()) == before  # the rehearsal wrote nothing here
+
+
+def test_read_artifact_by_hash_names_the_runs_that_reference_it(
+    root: Path, echo_lmp: str
+) -> None:
+    from foundation._ops import read_artifact
+    from foundation.errors import ArtifactNotFoundError
+
+    with Workspace(root) as ws:
+        producer, hit = _md_twice(ws, echo_lmp)
+        digest = ws.runs.get_artifact(producer, "md-final.data").hash
+        by_hash = read_artifact(ws, digest=digest[:8])
+        output = run_details(ws, hit)["tasks"][0]["outputs"]["return[0]"]
+        value = read_artifact(ws, digest=output[:10])
+        with pytest.raises(ValueError, match="not both"):
+            read_artifact(ws, run_id=hit, name="x", digest=digest)
+        with pytest.raises(ArtifactNotFoundError):
+            read_artifact(ws, digest="0123456789")
+        ws.artifacts.discard(digest)
+        with pytest.raises(ArtifactNotFoundError, match="retention reclaimed them"):
+            read_artifact(ws, digest=digest[:8])
+    assert by_hash.text == "Cu data v1\n" and by_hash.name == "md-final.data"
+    assert by_hash.head == [
+        f"sha256 {digest[:12]} ({by_hash.size_bytes} bytes)",
+        f"referenced by: run {producer[:10]} artifact md-final.data (intermediate)",
+    ]
+    assert value.head[1] == (
+        f"referenced by: run {producer[:10]} task 1 run_lammps output return[0]; "
+        f"run {hit[:10]} task 2 run_lammps output return[0]"
+    )
+    assert json.loads(value.text or "")["label"] == "md"  # the task's value, decoded
