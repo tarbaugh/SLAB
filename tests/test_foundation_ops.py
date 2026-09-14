@@ -783,7 +783,7 @@ def test_run_advance_reads_the_live_lammps_log_of_the_run(
         "variable n equal 50000\nrun ${n}\nrun 50000\n---\n"
         "keywords: ['Step', 'Temp', ]\ndata:\n  - [0, 300, ]\n  - [12000, 301.5, ]\n"
     )
-    assert _ops.run_advance(run).endswith("; LAMMPS at step 12000 of 50000")
+    assert _ops.run_advance(run).endswith("; the log shows step 12000 of 50000")
     other = Run(name="other", status="running")
     assert "LAMMPS" not in _ops.run_advance(other)
 

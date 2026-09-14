@@ -898,8 +898,10 @@ class Mason:
                         stop_reason="error_streak",
                         steps=step,
                     )
-            if not waited_on_run:
-                looked = all(call.name in LOOKING_TOOLS for call in calls)
+            looked = all(call.name in LOOKING_TOOLS for call in calls)
+            if not (looked and waited_on_run):
+                # A reply that only looked and waited holds the streak; one
+                # that also launched or wrote resets it as before.
                 self._looking_streak = self._looking_streak + 1 if looked else 0
         if cut_prefix is not None:
             # The budget ended before the continuation: the kept half is

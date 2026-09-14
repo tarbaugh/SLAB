@@ -1564,8 +1564,8 @@ def run_advance(run: Run, *, now: datetime | None = None) -> str:
         return f"{text}; the LAMMPS log holds no thermo row yet"
     step, target = progress["step"], progress["target"]
     if target is None:
-        return f"{text}; LAMMPS at step {step}"
-    return f"{text}; LAMMPS at step {step} of {target}"
+        return f"{text}; the log shows step {step}"
+    return f"{text}; the log shows step {step} of {target}"
 
 
 def wait_for_run(

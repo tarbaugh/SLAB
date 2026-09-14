@@ -459,6 +459,10 @@ def build_server(
         if waited["outcome"] in ("finished", "process_gone"):
             for finished in [waited["run"], *waited.get("also_finished", [])]:
                 _record_run_commands(finished.id, "wait_for_run")
+        elif waited["outcome"] == "none_running":
+            # A run that ended before the first read was never watched.
+            for finished in waited.get("runs", []):
+                _record_run_commands(finished.id, "wait_for_run")
         answer: dict[str, Any] = {"outcome": waited["outcome"], "note": waited["note"]}
         if "run" in waited:
             answer["run"] = _ops.run_summary(waited["run"]) | {"progress": waited["progress"]}

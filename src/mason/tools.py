@@ -1969,6 +1969,12 @@ def _add_workflow_tools(
         if outcome in ("finished", "process_gone"):
             for finished in [waited["run"], *waited.get("also_finished", [])]:
                 _record_run_commands(finished.id, "wait_for_run")
+        elif outcome == "none_running":
+            # A run that ended before the first read was never watched, and a
+            # background launch records nothing: ``recorded_runs`` keeps an
+            # earlier record from being replayed.
+            for finished in waited.get("runs", []):
+                _record_run_commands(finished.id, "wait_for_run")
         # An id-less wait returns on the first finish; the others follow it.
         others: list[str] = []
         if waited.get("also_finished"):

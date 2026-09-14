@@ -402,8 +402,8 @@ group of agent cards with per-specialist skills, described in
 
 `wait_for_run` is the way to wait on a run, however long the run is. One
 call blocks for up to 6 hours, so a 3-hour run needs one call. A longer
-timeout is cut to the cap, and the answer says so: `waited 21600 s, capped
-from the 43200 s asked`. The tool sleeps between reads of the run store
+timeout is cut to the cap, and the answer says so, as `waited 21600 s,
+capped from the 43200 s asked`. The tool sleeps between reads of the run store
 and makes no model call while it blocks. It reads the store after one
 second, then at doubling gaps up to 30 s, so a short run is collected at
 once. Without `run_id`, the call returns as soon as the first running run
@@ -411,8 +411,9 @@ of the session finishes, names it, and lists the rest as still running.
 A second call collects the next one, so a free slice does not wait behind
 a longer run. Pass `all=true` to wait until no run of the session is
 running. An answer that the run is still running adds the time since the
-run started and, while a `run_lammps` task runs, the step LAMMPS has
-reached and the step the current `run` command stops at. The answer ends
+run started and, while a `run_lammps` task runs, the last step its log
+shows and the step the current `run` command stops at. LAMMPS writes the
+log in blocks, so the shown step can trail the true one. The answer ends
 with the line `the run is alive and progressing; waiting again is the
 right call`.
 
@@ -424,8 +425,8 @@ steps and the harness can. Every call still executes, so polling a queue
 works, and a changed result resets the note silently. A `wait_for_run`
 whose run is still running never gets the note, because waiting again is
 the right call. A planner that read the note as a stall spent calls
-avoiding it, and a delegate stopped with three temperatures not launched. Mutating tools pass
-through an approval gate. Interactively, Mason asks, while `--auto` (or
+avoiding it, and a delegate stopped with three temperatures not
+launched. Mutating tools pass through an approval gate. Interactively, Mason asks, while `--auto` (or
 `[agent] approval = "auto"`) trusts them. `shell_allowlist` prefixes
 auto-approve at word boundaries, but a command that contains shell control
 operators (`;`, `|`, `&`, redirection, and so on) never auto-approves.
@@ -701,7 +702,8 @@ background=true` for one script and the same for a second. The first
 reserves cpus 0 and 1 and gpus 0 and 1, the second cpus 2 and 3 and gpus
 2 and 3, and each child sees only its own. A third such call is refused
 with the free amounts until one of them ends. `list_engines` reports the
-budget and what is free, and `wait_for_run` collects both.
+budget and what is free. `wait_for_run` collects them one at a time, or
+both at once with `all=true`.
 
 The machine's memory travels into the job. `--no-home` hides
 `~/.config`, so the render binds the memory directory read-write and
