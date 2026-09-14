@@ -1351,6 +1351,23 @@ def test_an_unsized_launch_in_a_gpu_budget_holds_one_plain_rank(store: SQLiteRun
     assert (first.threads, first.gpus, second.threads, second.gpus) == (7, ("0",), 8, ("1",))
 
 
+def test_an_unsized_launch_never_takes_more_than_one_gpu_share(store: SQLiteRunStore) -> None:
+    """A job with cpus-per-task equal to the node's cpus makes the default
+    thread count the whole node; an unsized launch still leaves the GPU
+    launches their shares."""
+    import os
+
+    node = {
+        "host": "n1", "holder_pid": os.getpid(),
+        "budget_cpus": range(36), "budget_gpus": ("0", "1", "2", "3"),
+        "default_ntasks": 1, "default_threads": 36,
+    }
+    wide = store.reserve(**node)
+    assert (wide.ntasks, wide.threads, wide.gpus) == (1, 9, ())
+    sized = store.reserve(gpus=1, **node)
+    assert (sized.threads, sized.gpus) == (6, ("0",))
+
+
 # -- the job a run started under ---------------------------------------------------
 
 

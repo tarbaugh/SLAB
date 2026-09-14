@@ -1509,10 +1509,12 @@ class SQLiteRunStore:
                     cpus = cpus[: count * width]
                 elif budget_gpus:
                     # A budget with gpus: the unsized launch is one rank of the
-                    # plain build and holds no gpu, so the cpus and gpus it
-                    # leaves stay free for the sized GPU launches.
+                    # plain build and holds no gpu. Its width is capped at one
+                    # gpu's share of the free cpus, so a wide default thread
+                    # count cannot take the whole node from the GPU launches.
                     count = 1
-                    width = max(1, min(default_threads, len(cpus)))
+                    share = len(cpus) // max(1, len(free_gpus))
+                    width = max(1, min(default_threads, share, len(cpus)))
                     cpus = cpus[:width]
                 else:
                     count = max(1, min(default_ntasks, len(cpus)))
