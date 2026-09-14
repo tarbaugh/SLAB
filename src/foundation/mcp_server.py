@@ -695,6 +695,7 @@ def build_server(
             {
                 "name": m.name,
                 "description": m.description,
+                "unverified": m.unverified,
                 "changed_since": m.drift(live) if m.against else [],
             }
             for _, m in sorted(known.items())
@@ -704,43 +705,82 @@ def build_server(
     @_surfaced
     def recall(name: str) -> dict[str, Any]:
         """Read one machine memory in full by name: the fact, who recorded it
-        and when, and which of the software it names has changed since it was
-        written (confirm the fact before building on it in that case)."""
+        and when, the evidence it cites and the state of those runs now,
+        whether it is unverified (test it before relying on it), which of the
+        software it names has changed since it was written (confirm the fact
+        before building on it in that case), and the previous version when a
+        later write changed the body."""
         known = memory_store.discover()
         found = known.get(name)
         if found is None:
             names = ", ".join(sorted(known)) or "none recorded yet"
             raise MemoryStoreError(f"no memory named {name!r}; memories on this machine: {names}")
-        return {
+        body = found.body().rstrip()
+        answer: dict[str, Any] = {
             "name": found.name,
+            "unverified": found.unverified,
             "description": found.description,
-            "body": found.body().rstrip(),
+            "body": body,
             "provenance": found.provenance(),
+            "evidence": found.evidence,
             "changed_since": found.drift(software_versions()) if found.against else [],
         }
+        if memory_store.run_ids(found.evidence):
+            with Workspace(root) as ws:
+                answer["evidence_runs"] = _ops.evidence_lines(ws, found.evidence)
+        earlier = memory_store.versions(name)
+        if earlier and earlier[0].body != body.strip():
+            answer["previous"] = {
+                "updated": earlier[0].updated,
+                "evidence": earlier[0].evidence,
+                "body": earlier[0].body,
+            }
+        return answer
 
     @server.tool()
     @_surfaced
-    def remember(name: str, description: str, body: str) -> dict[str, Any]:
+    def remember(
+        name: str,
+        description: str,
+        body: str,
+        evidence: str | None = None,
+        unverified: bool = False,
+    ) -> dict[str, Any]:
         """Record one confirmed fact about this machine or its software so
         later sessions start knowing it: a package that behaves unlike its
         documentation, a flag that matters, a workaround. name is
         lowercase-with-hyphens; description is the one line a future session
-        reads to decide whether the fact applies. Re-using a name replaces
-        that memory. Not for results (they belong to runs), project decisions
-        (the notebook), or credentials (nowhere)."""
+        reads to decide whether the fact applies. evidence is what confirmed
+        the fact: a run id and one line, a dry run, or a failure record. A
+        write without evidence is refused unless unverified is true, which
+        marks the memory as a claim every later session must test. Re-using
+        a name replaces that memory and keeps the old version. Not for
+        results (they belong to runs), project decisions (the notebook), or
+        credentials (nowhere)."""
         text = f"{name}\n{description}\n{body}"
         versions = software_versions()
         against = memory_store.stamp(text, versions)
         about_slab = memory_store.about_slab(text, _TOOL_NAMES)
         if about_slab and "slab-stack" in versions:
             against.setdefault("slab-stack", versions["slab-stack"])
-        written = memory_store.write(name, description, body, agent="mcp", against=against)
+        written = memory_store.write(
+            name,
+            description,
+            body,
+            agent="mcp",
+            against=against,
+            evidence=evidence,
+            unverified=unverified,
+        )
         answer: dict[str, Any] = {
             "name": written.name,
             "path": str(written.path),
             "against": dict(written.against),
+            "unverified": written.unverified,
         }
+        if memory_store.run_ids(written.evidence):
+            with Workspace(root) as ws:
+                answer["evidence_runs"] = _ops.evidence_lines(ws, written.evidence)
         if about_slab:
             answer["note"] = ABOUT_SLAB_NOTE.format(version=written.against.get("slab-stack", "?"))
         return answer

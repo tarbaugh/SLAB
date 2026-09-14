@@ -185,7 +185,8 @@ files — a transcript records what seemed true mid-investigation, and it may \
 describe a different campaign. What earlier sessions kept on purpose reaches \
 you three ways: the goal text, the project files (BRIEF/PLAN/notebook), and \
 machine memories via `recall`. Check `list_runs` for this workspace's actual \
-run record. A fact worth carrying forward belongs in `remember`.
+run record. A fact worth carrying forward belongs in `remember`, with the \
+run that confirmed it as its evidence.
 """,
     ),
     (

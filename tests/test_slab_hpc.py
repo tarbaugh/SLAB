@@ -864,7 +864,9 @@ def test_cli_hpc_cancel_settles_the_workspace(
         ws.runs.set_status(bystander.id, "running", pid=1, host="node7")
     from foundation import memory as memory_store
 
-    memory_store.write("qe-on-node7", "pw.x wants -nk 1 there", "One pool.")
+    memory_store.write(
+        "qe-on-node7", "pw.x wants -nk 1 there", "One pool.", evidence="checked by hand"
+    )
 
     result = runner.invoke(front_door, ["hpc", "cancel", "31337", "-w", str(root)])
     assert result.exit_code == 0, result.output

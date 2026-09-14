@@ -5,6 +5,25 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- A machine memory carries its evidence. `remember` (Mason and MCP) and
+  the new `slab memory add` take `evidence`: a run id with one line, a
+  dry run, or a failure record. The store refuses a write without it
+  unless the writer passes `unverified`, which stamps `unverified: true`.
+  A memory with no evidence reads as unverified, so every memory written
+  before this change is flagged. The catalog line ends with
+  `[unverified]`, and `recall` prints that word first. `recall` also
+  reads the state of each run the evidence cites. Re-using a name keeps
+  the replaced file under `.history/<name>/`, up to ten versions, and
+  `recall` shows the previous body with its date when the body changed.
+  A delegate result ends with a harness-built list of every memory the
+  delegate wrote, with its evidence and the state of each cited run. The
+  planner and PI cards tell the lead to read each entry and forget any
+  the evidence does not support. The new Mason `forget` tool undoes
+  only a write made in the same session: it removes a new memory, or
+  restores the version from before the session. `slab memory review`
+  lists the unverified memories and those whose software changed, and
+  `slab memory confirm <name> --evidence ...` records what a person
+  checked.
 - `slab mason read --live` follows a session as it works, like
   `tail -f`. The viewer shows the transcript, then each event the
   session appends, until Ctrl+C. It follows the transcripts of the

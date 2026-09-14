@@ -1697,7 +1697,9 @@ def test_cancel_job_settles_the_sessions_workspace(
     with Workspace(session.workspace_root) as ws:
         run = ws.runs.create(Run(name="md", job_id="4242"))
         ws.runs.set_status(run.id, "running", pid=1, host="node7")
-    memory_store.write("lammps-on-node7", "kokkos wants one rank per gpu", "Seen.")
+    memory_store.write(
+        "lammps-on-node7", "kokkos wants one rank per gpu", "Seen.", evidence="checked by hand"
+    )
 
     answer = build_toolbox(session).dispatch(_call("cancel_job", job_id="4242"))
 
@@ -1891,6 +1893,7 @@ def test_remember_says_when_a_memory_describes_slab_itself(
             name="run-lammps-shape",
             description="run_lammps returns thermo as the last row only.",
             body="Read the full rows through result['artifacts'].",
+            evidence="checked by hand",
         )
     )
     assert "stamped against slab-stack 0.3.0" in answer
@@ -1898,6 +1901,216 @@ def test_remember_says_when_a_memory_describes_slab_itself(
     assert "say so in your finish report so the skill gets fixed" in answer
     plain = box.dispatch(
         _call("remember", name="mpi-note", description="mpirun needs --bind-to none here.",
-              body="Otherwise ranks pile on one core.")
+              body="Otherwise ranks pile on one core.", evidence="checked by hand")
     )
     assert "describes SLAB itself" not in plain
+
+
+# -- machine memory: evidence, delegates' memories, forget -------------------
+
+
+@pytest.fixture()
+def memory_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A memory store of this test's own, on a machine that reports no software."""
+    import slab._ops
+
+    root = tmp_path / "memory"
+    monkeypatch.setenv("SLAB_MEMORY_DIR", str(root))
+    monkeypatch.setattr(slab._ops, "software_versions", lambda: {})
+    return root
+
+
+def _failed_run(tmp_path: Path, name: str, error: str) -> str:
+    from foundation.models import Run
+
+    with Workspace(tmp_path / ".slab") as ws:
+        run = ws.runs.create(Run(name=name))
+        ws.runs.set_status(run.id, "running", pid=1, host="a-machine")
+        ws.runs.set_status(run.id, "failed", error=error)
+    return run.id
+
+
+class _ScriptedClient:
+    """One scripted model for a lead and its delegate, consumed in order."""
+
+    def __init__(self, replies: list[object]) -> None:
+        self.replies = list(replies)
+        self.requests: list[list[dict[str, object]]] = []
+
+    def chat(self, messages: list[dict[str, object]], tools: object = None, **options: object):
+        self.requests.append([dict(m) for m in messages])
+        return self.replies.pop(0)
+
+
+def _reply(tool: str, /, **arguments: object) -> object:
+    from mason.client import ChatReply
+
+    return ChatReply(
+        content=None,
+        tool_calls=(
+            ToolCall(id=f"c_{tool}", name=tool, arguments=dict(arguments),
+                     arguments_raw=json.dumps(arguments)),
+        ),
+        prompt_tokens=100,
+        completion_tokens=10,
+    )
+
+
+def _text(text: str) -> object:
+    from mason.client import ChatReply
+
+    return ChatReply(content=text, prompt_tokens=100, completion_tokens=10)
+
+
+def test_remember_wants_evidence_or_says_unverified(tmp_path: Path, memory_root: Path) -> None:
+    from foundation import memory as memory_store
+
+    box = build_toolbox(_session(tmp_path))
+    fact = {"name": "fix-halt", "description": "fix halt has no error keyword.", "body": "So."}
+    refused = box.dispatch(_call("remember", **fact))
+    assert refused.startswith("not recorded: a memory needs evidence")
+    assert memory_store.discover(memory_root) == {}
+
+    claim = box.dispatch(_call("remember", **fact, unverified=True))
+    assert "it is marked unverified until a run confirms it" in claim
+    recalled = box.dispatch(_call("recall", name="fix-halt"))
+    assert recalled.startswith("unverified: no run confirmed this memory.")
+    assert "no evidence recorded]" in recalled
+
+
+def test_recall_shows_the_evidence_runs_and_the_previous_body(
+    tmp_path: Path, memory_root: Path
+) -> None:
+    run_id = _failed_run(tmp_path, "gpu-probe", "Kokkos::Cuda ERROR: device unavailable")
+    box = build_toolbox(_session(tmp_path))
+    box.dispatch(
+        _call("remember", name="gpu-build", description="The gpu build's command works.",
+              body="It started.", unverified=True)
+    )
+    answer = box.dispatch(
+        _call("remember", name="gpu-build", description="The gpu build needs a free device.",
+              body="It fails when another job holds the card.", evidence=f"run {run_id}")
+    )
+    assert f"the evidence runs now: {run_id}: gpu-probe, failed" in answer
+
+    recalled = box.dispatch(_call("recall", name="gpu-build"))
+    assert not recalled.startswith("unverified")
+    assert recalled.startswith("It fails when another job holds the card.")
+    assert f"[evidence runs now: {run_id}: gpu-probe, failed, quarantined, error: Kokkos" in (
+        recalled
+    )
+    assert "the version before it, from " in recalled
+    assert recalled.rstrip().endswith("said:]\nIt started.")
+
+
+def test_a_delegates_memories_reach_the_lead(tmp_path: Path, memory_root: Path) -> None:
+    """The lead reads every memory a delegate wrote, with its evidence, before
+    it briefs the next step, whether or not the delegate's report names it."""
+    from mason.loop import Mason
+
+    run_id = _failed_run(tmp_path, "newton-probe", "ERROR: probe file")
+    session = _session(tmp_path)
+    client = _ScriptedClient(
+        [
+            _reply("delegate", agent="md-expert", task="find the pair style order"),
+            _reply("remember", name="newton-before-read-data",
+                   description="newton on must precede read_data.",
+                   body="Otherwise the run fails.", evidence=f"run {run_id} failed without it"),
+            _reply("remember", name="masses-before-grace",
+                   description="masses must come before pair_style grace.",
+                   body="From a probe.", unverified=True),
+            _reply("finish", report="The order is settled."),
+            _text("done"),
+        ]
+    )
+    Mason(session, client=client).run_turn("settle the order")
+    tool_result = next(
+        m for m in client.requests[-1]
+        if m.get("role") == "tool" and m.get("tool_call_id") == "c_delegate"
+    )
+    content = str(tool_result["content"])
+    report, _, rest = content.partition(
+        "[memories written: read each one, and forget any its evidence does not support]"
+    )
+    assert "The order is settled." in report
+    lines = rest.strip().splitlines()
+    assert lines[0].startswith(
+        "- newton-before-read-data (md-expert): newton on must precede read_data. "
+        f"evidence: run {run_id} failed without it [runs now: {run_id}: newton-probe, failed"
+    )
+    assert lines[1] == (
+        "- masses-before-grace (md-expert): masses must come before pair_style grace. "
+        "evidence: none [unverified]"
+    )
+    assert lines[2:-1] == [""]  # the harness line follows, as for any report
+    assert lines[-1].startswith("[md-expert: finish after 3 step(s);")
+    assert [e["name"] for e in session.memories_written] == [
+        "newton-before-read-data", "masses-before-grace",
+    ]
+
+
+def test_a_delegate_that_wrote_nothing_adds_no_list(tmp_path: Path, memory_root: Path) -> None:
+    from mason.loop import Mason
+
+    client = _ScriptedClient(
+        [
+            _reply("delegate", agent="md-expert", task="look"),
+            _reply("finish", report="Nothing to note."),
+            _text("done"),
+        ]
+    )
+    Mason(_session(tmp_path), client=client).run_turn("look")
+    content = str(next(
+        m["content"] for m in client.requests[-1]
+        if m.get("role") == "tool" and m.get("tool_call_id") == "c_delegate"
+    ))
+    assert "Nothing to note." in content and "memories written" not in content
+
+
+def test_a_grandchilds_memory_reaches_every_lead(tmp_path: Path) -> None:
+    parent = _session(tmp_path)
+    child = parent.spawn("worker", MasonConfig.model_validate({}).agent)
+    grandchild = child.spawn("md-expert", MasonConfig.model_validate({}).agent)
+    grandchild.note_memory({"name": "a-fact", "before": None})
+    assert [e["name"] for e in child.memories_written] == ["a-fact"]
+    assert [e["name"] for e in parent.memories_written] == ["a-fact"]
+    assert parent.written_memory("a-fact") is grandchild.written_memory("a-fact")
+
+
+def test_forget_undoes_only_this_sessions_writes(tmp_path: Path, memory_root: Path) -> None:
+    from foundation import memory as memory_store
+
+    memory_store.write("older-fact", "From an earlier session.", "Kept.", evidence="e")
+    memory_store.write("fix-nph", "fix nph takes temp.", "The right body.", evidence="e")
+    lead = _session(tmp_path)
+    child = lead.spawn("md-expert", MasonConfig.model_validate({}).agent)
+    specialist = build_toolbox(child)
+    specialist.dispatch(
+        _call("remember", name="fix-nph", description="fix nph takes no temp.",
+              body="The wrong body.", unverified=True)
+    )
+    specialist.dispatch(
+        _call("remember", name="fix-nph", description="fix nph takes no temp, twice.",
+              body="Wrong again.", unverified=True)
+    )
+    specialist.dispatch(
+        _call("remember", name="halt-keyword", description="fix halt has no error keyword.",
+              body="So.", unverified=True)
+    )
+    box = build_toolbox(lead)
+
+    refused = box.dispatch(_call("forget", name="older-fact"))
+    assert refused.startswith("refused: 'older-fact' was not written in this session")
+    assert "Written in this session: fix-nph, halt-keyword" in refused
+    assert "older-fact" in memory_store.discover()
+
+    restored = box.dispatch(_call("forget", name="fix-nph"))
+    assert restored.startswith("restored 'fix-nph' to the version from before this session")
+    memory = memory_store.discover()["fix-nph"]
+    assert memory.body() == "The right body.\n" and memory.unverified is False
+    assert memory_store.versions("fix-nph")[0].body == "Wrong again."
+
+    assert box.dispatch(_call("forget", name="halt-keyword")).startswith("forgot 'halt-keyword'")
+    assert sorted(memory_store.discover()) == ["fix-nph", "older-fact"]
+    events = [json.loads(line) for line in lead.transcript_path.read_text().splitlines()]
+    assert [e["name"] for e in events if e["type"] == "forget"] == ["fix-nph", "halt-keyword"]

@@ -1064,6 +1064,7 @@ def test_memory_catalog_survives_context_compaction(
         "This box has no C compiler; skip Triton bmm overrides.",
         "Set TORCH_DISABLE_NATIVE_JIT=1 in every mace-driven job.",
         directory=memory_dir,
+        evidence="checked by hand",
     )
 
     session = _session(tmp_path, context_window=4_096, compact_at=0.5)

@@ -447,7 +447,12 @@ def test_machine_memory_round_trip(
     written = _call(
         server,
         "remember",
-        {"name": "vllm-cache", "description": "the vllm cache flag matters", "body": "Set it."},
+        {
+            "name": "vllm-cache",
+            "description": "the vllm cache flag matters",
+            "body": "Set it.",
+            "evidence": "checked by hand",
+        },
     )
     assert written["name"] == "vllm-cache" and Path(written["path"]).is_file()
     listed = _call(server, "list_memories")
@@ -456,7 +461,41 @@ def test_machine_memory_round_trip(
     assert recalled["body"] == "Set it." and "mcp" in recalled["provenance"]
     assert recalled["changed_since"] == []
     with pytest.raises(Exception, match="name"):
-        _call(server, "remember", {"name": "Bad Name", "description": "d", "body": "b"})
+        _call(
+            server,
+            "remember",
+            {"name": "Bad Name", "description": "d", "body": "b", "evidence": "e"},
+        )
+
+
+def test_remember_over_mcp_wants_evidence_or_says_unverified(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import slab._ops
+    from foundation.models import Run
+
+    monkeypatch.setenv("SLAB_MEMORY_DIR", str(tmp_path / "memory"))
+    monkeypatch.setattr(slab._ops, "software_versions", lambda: {})
+    server = build_server(root, project=tmp_path)
+    fact = {"name": "mpi-bind", "description": "mpirun needs --bind-to none.", "body": "Or else."}
+    with pytest.raises(Exception, match="a memory needs evidence"):
+        _call(server, "remember", fact)
+    assert _call(server, "list_memories") == []
+
+    claim = _call(server, "remember", {**fact, "unverified": True})
+    assert claim["unverified"] is True
+    assert _call(server, "list_memories")[0]["unverified"] is True
+    assert _call(server, "recall", {"name": "mpi-bind"})["unverified"] is True
+
+    with Workspace(root) as ws:
+        run = ws.runs.create(Run(name="bind-probe"))
+    checked = _call(server, "remember", {**fact, "body": "Ranks pile up.", "evidence": run.id})
+    assert checked["unverified"] is False
+    assert checked["evidence_runs"] == [f"{run.id}: bind-probe, pending, quarantined"]
+    recalled = _call(server, "recall", {"name": "mpi-bind"})
+    assert recalled["unverified"] is False and recalled["evidence"] == run.id
+    assert recalled["previous"]["body"] == "Or else."
+    assert recalled["previous"]["evidence"] is None
 
 
 def test_skills_are_cataloged_loaded_and_recorded(root: Path, tmp_path: Path) -> None:
@@ -775,7 +814,9 @@ def test_cancel_job_over_mcp_settles_the_workspace(
         )
         claimed = ws.runs.create(Run(name="sized", job_id="4242"))
         ws.runs.claim_reservation(held.id, claimed.id, host="node7", pid=1)
-    memory_store.write("qe-on-node7", "pw.x wants -nk 1 there", "One pool.")
+    memory_store.write(
+        "qe-on-node7", "pw.x wants -nk 1 there", "One pool.", evidence="checked by hand"
+    )
 
     server = build_server(root, project=tmp_path)
     summary = _call(server, "cancel_job", {"job_id": "4242"})
@@ -838,6 +879,7 @@ def test_remember_over_mcp_notes_a_memory_about_slab(
             "name": "show-run-shape",
             "description": "show_run folds finished tasks unless full is set.",
             "body": "Pass full=true to read every task.",
+            "evidence": "checked by hand",
         },
     )
     assert answer["against"] == {"slab-stack": "0.3.0"}
@@ -845,6 +887,11 @@ def test_remember_over_mcp_notes_a_memory_about_slab(
     plain = _call(
         server,
         "remember",
-        {"name": "mpi-bind", "description": "mpirun needs --bind-to none.", "body": "Or else."},
+        {
+            "name": "mpi-bind",
+            "description": "mpirun needs --bind-to none.",
+            "body": "Or else.",
+            "evidence": "checked by hand",
+        },
     )
     assert "note" not in plain

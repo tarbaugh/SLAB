@@ -88,6 +88,7 @@ TOOL_VOCABULARY = frozenset(
         "skill",
         "recall",
         "remember",
+        "forget",
         "delegate",
         "review",
         "finish",
@@ -2534,11 +2535,14 @@ def _add_delegate_tool(
                 "transcript": child_session.transcript_path.name,
                 "stop": result.stop_reason,
                 "steps": result.steps,
+                "memories": [e["name"] for e in child_session.memories_written],
             }
         )
         text = result.text
         if result.truncated:
             text = f"{text}\n\n{partial_outcome(child_session)}"
+        if child_session.memories_written:
+            text = f"{text}\n\n{memories_written_block(session, child_session.memories_written)}"
         return f"{text}\n\n{_harness_footer(name, result, child_session)}"
 
     box.add(
@@ -2929,14 +2933,33 @@ def _add_machine_memory_tools(box: Toolbox, session: MasonSession) -> None:
             known = ", ".join(sorted(memories)) or "none recorded yet"
             return f"no memory named {name!r}; memories on this machine: {known}"
         session.record({"type": "recall", "name": name})
-        answer = f"{found.body().rstrip()}\n\n[{found.provenance()}]"
+        parts = []
+        if found.unverified:
+            parts.append(
+                "unverified: no run confirmed this memory. Test it before you rely "
+                "on it, then remember it again with the run as its evidence."
+            )
+        parts.append(found.body().rstrip())
+        parts.append(f"[{found.provenance()}]")
+        checked = _evidence_lines(session, found.evidence)
+        if checked:
+            parts.append("[evidence runs now: " + "; ".join(checked) + "]")
+        earlier = memory_store.versions(name)
+        if earlier and earlier[0].body != found.body().strip():
+            prior = earlier[0]
+            parts.append(
+                f"[this memory was replaced on {found.updated or 'an unknown date'}; "
+                f"the version before it, from {prior.updated or 'an unknown date'} "
+                f"({'evidence: ' + prior.evidence if prior.evidence else 'no evidence'}), "
+                f"said:]\n{prior.body}"
+            )
         changed = found.drift(session.software_versions()) if found.against else []
         if changed:
-            answer += (
-                f"\n[changed since: {'; '.join(changed)}. Confirm the fact before "
+            parts.append(
+                f"[changed since: {'; '.join(changed)}. Confirm the fact before "
                 f"you build on it; remember it again once you have.]"
             )
-        return answer
+        return "\n\n".join(parts)
 
     box.add(
         Tool(
@@ -2944,7 +2967,8 @@ def _add_machine_memory_tools(box: Toolbox, session: MasonSession) -> None:
             description=(
                 "Read one memory in full by name. The catalog under '# Memory' "
                 "lists what this machine knows; each line is a summary, and this "
-                "returns the fact itself with who recorded it and when."
+                "returns the fact itself with who recorded it, when, and on what "
+                "evidence, and the previous version when a later write changed it."
             ),
             parameters=_schema({"name": {"type": "string"}}, ["name"]),
             handler=recall,
@@ -2955,6 +2979,8 @@ def _add_machine_memory_tools(box: Toolbox, session: MasonSession) -> None:
         name = str(arguments["name"])
         description = str(arguments["description"])
         body = str(arguments["body"])
+        evidence = arguments.get("evidence")
+        unverified = arguments.get("unverified") is True
         text = f"{name}\n{description}\n{body}"
         versions = session.software_versions()
         # Stamped with the software the text names, at today's versions,
@@ -2972,19 +2998,48 @@ def _add_machine_memory_tools(box: Toolbox, session: MasonSession) -> None:
                 agent=session.agent_name,
                 model=session.agent.model,
                 against=against,
+                evidence=str(evidence) if evidence is not None else None,
+                unverified=unverified,
             )
         except MemoryStoreError as e:
             # A refusal is an observation the model can act on, not a crash:
             # the message says which rule stopped the write.
             return f"not recorded: {e}"
-        session.record({"type": "remember", "name": name, "path": str(written.path)})
+        session.record(
+            {
+                "type": "remember",
+                "name": name,
+                "path": str(written.path),
+                "evidence": written.evidence,
+                "unverified": written.unverified,
+            }
+        )
+        first = session.written_memory(name)
+        session.note_memory(
+            {
+                "name": written.name,
+                "description": written.description,
+                "evidence": written.evidence,
+                "unverified": written.unverified,
+                "agent": session.agent_name,
+                # The version that stood before this session touched the
+                # memory: forget puts it back. A later write in the same
+                # session keeps the first write's answer.
+                "before": first["before"] if first else written.replaced,
+            }
+        )
         answer = (
             f"recorded as memory {written.name!r} in {written.path}; "
             f"every later session on this machine reads it"
         )
+        if written.unverified:
+            answer += "; it is marked unverified until a run confirms it"
         if written.against:
             stamped = ", ".join(f"{n} {v}" for n, v in written.against.items())
             answer += f" (stamped against {stamped})"
+        checked = _evidence_lines(session, written.evidence)
+        if checked:
+            answer += "; the evidence runs now: " + "; ".join(checked)
         if about_slab:
             answer += ABOUT_SLAB_NOTE.format(version=written.against.get("slab-stack", "?"))
         return answer
@@ -2995,11 +3050,15 @@ def _add_machine_memory_tools(box: Toolbox, session: MasonSession) -> None:
             description=(
                 "Record one confirmed fact about this machine or its software so "
                 "later sessions start knowing it: a package that behaves unlike "
-                "its documentation, a flag that matters, a workaround. Write the "
-                "description as the line a future session reads when deciding "
-                "whether the fact applies. Re-using a name replaces that memory, "
-                "which is how you consolidate. Not for results (they belong to "
-                "runs), project decisions (the notebook), or credentials (nowhere)."
+                "its documentation, a flag that matters, a workaround. Cite what "
+                "confirmed it in evidence: the run id, the dry run, or the failure "
+                "record. A write without evidence is refused unless you pass "
+                "unverified=true, which marks the memory as a claim every later "
+                "session must test. Write the description as the line a future "
+                "session reads when deciding whether the fact applies. Re-using a "
+                "name replaces that memory and keeps the old version. Not for "
+                "results (they belong to runs), project decisions (the notebook), "
+                "or credentials (nowhere)."
             ),
             parameters=_schema(
                 {
@@ -3012,6 +3071,17 @@ def _add_machine_memory_tools(box: Toolbox, session: MasonSession) -> None:
                         "description": "one line: the fact and when it applies",
                     },
                     "body": {"type": "string", "description": "the fact in full"},
+                    "evidence": {
+                        "type": "string",
+                        "description": (
+                            "what confirmed the fact: a run id and one line, a dry "
+                            "run, or a failure record"
+                        ),
+                    },
+                    "unverified": {
+                        "type": "boolean",
+                        "description": "true to record a claim no run has confirmed yet",
+                    },
                 },
                 ["name", "description", "body"],
             ),
@@ -3019,3 +3089,78 @@ def _add_machine_memory_tools(box: Toolbox, session: MasonSession) -> None:
             requires_approval=True,
         )
     )
+
+    def forget(arguments: dict[str, Any]) -> str:
+        name = str(arguments["name"])
+        entry = session.written_memory(name)
+        if entry is None:
+            written = sorted({e["name"] for e in session.memories_written})
+            return (
+                f"refused: {name!r} was not written in this session, so it is not "
+                f"yours to forget; the person removes it with 'slab memory forget "
+                f"{name}'. Written in this session: {', '.join(written) or 'none'}"
+            )
+        try:
+            if entry["before"] is None:
+                memory_store.delete(name)
+                outcome = f"forgot {name!r}; it did not exist before this session"
+            else:
+                restored = memory_store.restore(name, Path(entry["before"]))
+                outcome = (
+                    f"restored {name!r} to the version from before this session "
+                    f"({restored.updated or 'undated'}); the rejected version is kept "
+                    f"in its history"
+                )
+        except MemoryStoreError as e:
+            return f"not forgotten: {e}"
+        session.record({"type": "forget", "name": name})
+        return outcome
+
+    box.add(
+        Tool(
+            name="forget",
+            description=(
+                "Undo a memory written in this session, by you or by an agent you "
+                "briefed, when its evidence does not support it. A memory that is "
+                "new this session is removed; one that existed before goes back to "
+                "the version it had then. A memory from an earlier session is the "
+                "person's to remove, not yours."
+            ),
+            parameters=_schema({"name": {"type": "string"}}, ["name"]),
+            handler=forget,
+            requires_approval=True,
+        )
+    )
+
+
+def _evidence_lines(session: MasonSession, evidence: str | None) -> list[str]:
+    """The current state of each run *evidence* cites, or nothing when it cites none."""
+    if not memory_store.run_ids(evidence):
+        return []
+    try:
+        with _open_workspace(session) as ws:
+            return _ops.evidence_lines(ws, evidence)
+    except RunStoreUnavailable:
+        return []
+
+
+def memories_written_block(session: MasonSession, entries: list[dict[str, Any]]) -> str:
+    """The list a lead reads after a delegation: each memory the delegate wrote.
+
+    Built by the harness from the delegate's writes, not from its report,
+    so a memory the report leaves out still reaches the lead. Each entry
+    carries its evidence and the current state of the runs it cites.
+    """
+    lines = [
+        "[memories written: read each one, and forget any its evidence does not support]"
+    ]
+    for entry in entries:
+        evidence = entry["evidence"] or "none"
+        line = f"- {entry['name']} ({entry['agent']}): {entry['description']} evidence: {evidence}"
+        if entry["unverified"]:
+            line += " [unverified]"
+        checked = _evidence_lines(session, entry["evidence"])
+        if checked:
+            line += " [runs now: " + "; ".join(checked) + "]"
+        lines.append(line)
+    return "\n".join(lines)

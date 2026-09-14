@@ -26,6 +26,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+import sys
 from datetime import date
 from pathlib import Path
 from typing import Annotated, Any, NoReturn
@@ -358,6 +359,8 @@ def memory_list(
                         "agent": m.agent,
                         "model": m.model,
                         "against": m.against,
+                        "evidence": m.evidence,
+                        "unverified": m.unverified,
                         "changed": m.drift(live),
                         "about_slab": _about_slab(m),
                     }
@@ -377,6 +380,8 @@ def memory_list(
         note = f" [changed since: {'; '.join(changed)}]" if changed else ""
         if _about_slab(memory):
             note = " [about slab]" + note
+        if memory.unverified:
+            note = " [unverified]" + note
         typer.echo(f"{memory.name:<{width}}  {stamp}  {memory.agent or '-':<16}  "
                    f"{memory.description}{note}")
     typer.echo(f"{len(memories)} memory(s) in {memory_store.memory_dir()}")
@@ -389,6 +394,171 @@ def _about_slab(memory: memory_store.Memory) -> bool:
     except OSError:
         body = ""
     return memory_store.about_slab(f"{memory.name}\n{memory.description}\n{body}")
+
+
+def _live_versions(memories: dict[str, memory_store.Memory]) -> dict[str, str]:
+    """The software present now, probed only when some memory carries a stamp."""
+    if not any(m.against for m in memories.values()):
+        return {}
+    from slab._ops import software_versions
+
+    return software_versions()
+
+
+def _stamp_for(text: str) -> dict[str, str]:
+    """The version stamp for a memory a person writes, as the agents stamp theirs."""
+    from slab._ops import software_versions
+
+    versions = software_versions()
+    against = memory_store.stamp(text, versions)
+    if memory_store.about_slab(text) and "slab-stack" in versions:
+        against.setdefault("slab-stack", versions["slab-stack"])
+    return against
+
+
+@memory_app.command("add")
+def memory_add(
+    name: Annotated[str, typer.Argument(help="The memory's name, lowercase-with-hyphens.")],
+    description: Annotated[
+        str, typer.Argument(help="One line: the fact and when it applies.")
+    ],
+    body: Annotated[
+        str, typer.Argument(help="The fact in full. '-' reads it from standard input.")
+    ],
+    evidence: Annotated[
+        str | None,
+        typer.Option(
+            "--evidence",
+            help="What confirmed the fact: a run id and one line, a dry run, or a "
+            "failure record.",
+        ),
+    ] = None,
+    unverified: Annotated[
+        bool,
+        typer.Option(
+            "--unverified",
+            help="Record a claim no run has confirmed. Recall flags it and "
+            "'slab memory review' lists it.",
+        ),
+    ] = False,
+) -> None:
+    """Record one fact about this machine, as an agent's remember does.
+
+    A memory needs evidence. Without --evidence the command refuses,
+    unless --unverified says the fact is a claim. Re-using a name replaces
+    that memory and keeps the old version in its history.
+    """
+    if not (evidence or "").strip() and not unverified:
+        _fail(
+            "a memory needs evidence: the run id, the dry run, or the failure record "
+            "that confirmed the fact. Pass --evidence, or pass --unverified to record "
+            "it as a claim that recall flags and 'slab memory review' lists"
+        )
+    text = sys.stdin.read() if body == "-" else body
+    try:
+        written = memory_store.write(
+            name,
+            description,
+            text,
+            agent="cli",
+            against=_stamp_for(f"{name}\n{description}\n{text}"),
+            evidence=evidence,
+            unverified=unverified,
+        )
+    except FoundationError as e:
+        _fail(str(e))
+    verb = "replaced" if written.replaced else "recorded"
+    mark = " (unverified)" if written.unverified else ""
+    typer.echo(f"{verb} {written.name}{mark} in {written.path}")
+
+
+@memory_app.command("review")
+def memory_review(
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit the listing as JSON.")
+    ] = False,
+) -> None:
+    """List the memories a person should confirm or forget.
+
+    A memory is listed when it is unverified, which includes every memory
+    written without evidence, or when software it is stamped against has
+    changed since it was written. Test the fact, then run 'slab memory
+    confirm <name> --evidence ...' or 'slab memory forget <name>'.
+    """
+    try:
+        memories = memory_store.discover()
+    except FoundationError as e:
+        _fail(str(e))
+    listed = memory_store.needs_review(memories, _live_versions(memories))
+    if as_json:
+        typer.echo(
+            json.dumps(
+                [
+                    {
+                        "name": m.name,
+                        "description": m.description,
+                        "reasons": reasons,
+                        "evidence": m.evidence,
+                        "agent": m.agent,
+                        "updated": m.updated or m.created,
+                    }
+                    for m, reasons in listed
+                ],
+                indent=2,
+            )
+        )
+        return
+    if not listed:
+        typer.echo(f"nothing to review ({len(memories)} memory(s), all verified and current)")
+        return
+    width = max(len(m.name) for m, _ in listed)
+    for memory, reasons in listed:
+        stamp = memory.updated or memory.created or "-"
+        typer.echo(
+            f"{memory.name:<{width}}  {stamp}  {memory.agent or '-':<16}  "
+            f"{memory.description} [{'; '.join(reasons)}]"
+        )
+    typer.echo(
+        f"{len(listed)} of {len(memories)} memory(s) to review: 'slab memory confirm "
+        f"<name> --evidence ...' or 'slab memory forget <name>'"
+    )
+
+
+@memory_app.command("confirm")
+def memory_confirm(
+    name: Annotated[str, typer.Argument(help="The memory's name.")],
+    evidence: Annotated[
+        str,
+        typer.Option(
+            "--evidence",
+            help="What confirmed the fact: a run id and one line, or what you checked.",
+        ),
+    ],
+) -> None:
+    """Mark a memory as confirmed, with the evidence you checked it against.
+
+    The body stays as it is. The memory gets the evidence, loses the
+    unverified mark, and is stamped against the software present now, so
+    a drift note clears too. The version it replaces is kept.
+    """
+    try:
+        found = memory_store.discover().get(name)
+        if found is None:
+            known = ", ".join(memory_store.discover()) or "none"
+            _fail(f"no memory named {name!r} (memories here: {known})")
+        body = found.body()
+        written = memory_store.write(
+            name,
+            found.description,
+            body,
+            agent=found.agent,
+            model=found.model,
+            against=_stamp_for(f"{name}\n{found.description}\n{body}"),
+            evidence=evidence,
+        )
+    except FoundationError as e:
+        _fail(str(e))
+    typer.echo(f"confirmed {written.name}: evidence {written.evidence}")
 
 
 @memory_app.command("show")
