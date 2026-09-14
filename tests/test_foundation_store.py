@@ -891,6 +891,18 @@ def test_find_cached_task_prefers_latest_completed(store: SQLiteRunStore) -> Non
     assert hit.outputs == {"return": "22" * 32}  # latest wins, across runs
 
 
+def test_producing_task_skips_hits(store: SQLiteRunStore) -> None:
+    key = "cc" * 32
+    producer = store.create(Run())
+    hit = store.create(Run())
+    ran = store.add_task(_task_record(producer.id, cache_key=key))
+    hit_record = store.add_task(_task_record(hit.id, cache_key=key, cache_hit=True))
+    assert store.find_cached_task(key).run_id == hit.id  # the latest is the hit
+    found = store.producing_task(hit_record)
+    assert found is not None and found.run_id == producer.id
+    assert store.producing_task(ran) is None
+
+
 def test_find_cached_task_ignores_failures(store: SQLiteRunStore) -> None:
     key = "bb" * 32
     run = store.create(Run())

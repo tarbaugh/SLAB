@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 
 from foundation import _ops
 from foundation import memory as memory_store
+from foundation import project as project_files
 from foundation._ops import NO_DRY_RUN_WARNING
 from foundation.errors import FoundationError, MemoryStoreError
 from foundation.memory import ABOUT_SLAB_NOTE
@@ -52,6 +53,7 @@ from foundation.project import plan_write
 from foundation.runtime import describe_liveness
 from mason.client import ToolCall
 from mason.mechanisms import enabled
+from mason.prior import prior_result_check, resolve_artifact_refs
 from mason.session import MasonSession
 from mason.skills import Skill, discover_skills, listing, visible_catalog
 from slab.errors import SlabError
@@ -3124,6 +3126,10 @@ def _add_delegate_tool(
         task = str(arguments["task"])
         context = arguments.get("context")
         brief = task if not context else f"{task}\n\nContext from {spec.name}:\n{context}"
+        # A reference to a cache-hit run's file is sent as one to the run
+        # that holds it; a reference nothing answers is sent as written,
+        # and the lead reads why below the report.
+        brief, notes, errors = resolve_artifact_refs(session.workspace_root, brief)
         result, child_session = _run_child(session, roster, skills, parent_client, target, brief)
         session.record(
             {
@@ -3138,7 +3144,9 @@ def _add_delegate_tool(
         text = result.text
         if result.truncated:
             text = f"{text}\n\n{partial_outcome(child_session)}"
-        return f"{text}\n\n{_harness_footer(name, result, child_session)}"
+        refs = "".join(f"\n[harness] brief: {note}" for note in notes)
+        refs += "".join(f"\n[harness] brief reference not found: {error}" for error in errors)
+        return f"{text}\n\n{_harness_footer(name, result, child_session)}{refs}"
 
     box.add(
         Tool(
@@ -3489,10 +3497,26 @@ def _add_memory_tools(box: Toolbox, session: MasonSession) -> None:
         )
     )
 
+    # What the notebook held when this box was built is the prior record: a
+    # result this session notes later is its own, not one to cite as prior.
+    notebook = project_files.notebook_path(session.cwd)
+    prior_end = len(notebook.read_text(encoding="utf-8")) if notebook.exists() else 0
+
     def plan(arguments: dict[str, Any]) -> str:
         content = str(arguments["content"]).rstrip() + "\n"
+        prior = [e for e in project_files.notebook_entries(session.cwd) if e.offset < prior_end]
+        refusal, warning = prior_result_check(content, prior)
+        content, notes, errors = resolve_artifact_refs(session.workspace_root, content)
+        refusals = ([refusal] if refusal else []) + [
+            f"plan not written: the artifact reference {error}. Name a run that keeps the "
+            f"file (show_run lists a run's artifacts), then call plan again."
+            for error in errors
+        ]
+        if refusals:
+            return "\n".join(refusals)
         plan_write(session.cwd, content)
-        return f"PLAN.md updated:\n{content}"
+        tail = "".join(f"\n[note] {note}" for note in notes)
+        return f"PLAN.md updated:\n{content}{tail}{warning}"
 
     box.add(
         Tool(
@@ -3500,7 +3524,11 @@ def _add_memory_tools(box: Toolbox, session: MasonSession) -> None:
             description=(
                 "Rewrite the living plan (PLAN.md): goal, steps with status, open "
                 "questions. Keep it current — it is re-read at session start and "
-                "after compaction."
+                "after compaction. A plan whose Goal names a quantity the notebook "
+                "already reports needs a line 'prior result: ...' stating it. Name "
+                "an artifact as run:<id>/<name>; each reference is checked against "
+                "the run store, and one to a cache-hit run is rewritten to the run "
+                "that produced the file."
             ),
             parameters=_schema({"content": {"type": "string"}}, ["content"]),
             handler=plan,

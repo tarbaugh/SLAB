@@ -39,7 +39,9 @@ questions, in this order, and quote the text you judge.
    check from run ids alone: a number, a unit, a tolerance, and the
    check that gates verification? Convergence must be measured, not
    assumed; a step that produces a number without a check produces a
-   rumor.
+   rumor. Every numeric gate names its source: a skill's stated bound, a
+   calibration run id, or the word "estimate" with the fallback action.
+   A gate without one is an advisory finding.
 4. The structure. Is each step small enough for one agent turn? Does
    the order respect the dependencies? What is the most likely failure
    of each step, and does the plan say what happens then? Is anything

@@ -13,6 +13,8 @@ them the same way.
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -70,6 +72,52 @@ def notebook_tail(project: Path, max_chars: int = 3_000) -> str:
     if len(text) <= max_chars:
         return text
     return f"[... earlier notebook entries omitted ...]\n{text[-max_chars:]}"
+
+
+@dataclass(frozen=True)
+class NotebookEntry:
+    """One ``## `` entry of the notebook: its heading line, its text, where it starts."""
+
+    heading: str  # the heading line without the '## ' marker: stamp, title, author
+    body: str
+    offset: int  # the character offset of the heading line in the file
+
+    @property
+    def title(self) -> str:
+        """The heading after its date stamp, author label kept; the whole heading if unstamped."""
+        match = _STAMPED.match(self.heading)
+        return match.group(2).strip() if match else self.heading
+
+
+#: A heading as notebook_append writes it: the stamp, then an optional title.
+_STAMPED = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC)(?: — )?(.*)$")
+
+
+def notebook_entries(project: Path) -> list[NotebookEntry]:
+    """The notebook's entries in file order; empty when there is no notebook.
+
+    An entry is a ``## `` heading line and the text up to the next one.
+    Text before the first heading (the ``# Lab notebook`` title) is no entry.
+
+    Examples:
+        >>> import tempfile
+        >>> project = Path(tempfile.mkdtemp())
+        >>> _ = notebook_append(project, "a = 3.60 Å (run ab12cd)", heading="Cu lattice")
+        >>> _ = notebook_append(project, "converged", author="dft-expert")
+        >>> [(e.title, e.body) for e in notebook_entries(project)]
+        [('Cu lattice', 'a = 3.60 Å (run ab12cd)'), ('[dft-expert]', 'converged')]
+    """
+    path = notebook_path(project)
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    starts = [m.start() for m in re.finditer(r"^## ", text, flags=re.MULTILINE)]
+    entries = []
+    for index, start in enumerate(starts):
+        end = starts[index + 1] if index + 1 < len(starts) else len(text)
+        heading, _, body = text[start + 3 : end].partition("\n")
+        entries.append(NotebookEntry(heading=heading.strip(), body=body.strip(), offset=start))
+    return entries
 
 
 def plan_read(project: Path) -> str:

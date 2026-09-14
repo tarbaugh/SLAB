@@ -5,6 +5,24 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- The planner reads evidence, sizes for the machine, and inherits the
+  notebook. The planner card keeps `read_artifact` and `read_file`, so
+  it reads a run's averages table itself. It still launches nothing.
+  Each request it receives ends with the free cpus and gpus at that
+  step. The card and the environment's resource line state the wave
+  rule, so a wave has as many concurrent launches as free GPUs and one
+  wait. A card that writes the plan sees the notebook's earlier
+  entries for this project with their dates (`mason.prior`), and the
+  `plan` tool refuses a plan whose Goal names a quantity the notebook
+  reports until it carries a line `prior result: ...`. A match by one
+  shared word is a note, not a refusal. Every numeric gate in a brief
+  names its source, and the critic lists a gate without one as an
+  advisory finding. The `plan` tool checks each `run:<id>/<name>`
+  reference against the run store and rewrites one to a cache-hit run
+  to the run that produced the file (`foundation._ops.artifact_holder`,
+  `RunStore.find_producing_task`). `delegate` rewrites a brief the same
+  way.
+
 - Tool results stop carrying environment dumps and session-wide
   listings. `list_engines` shows each LAMMPS build's setup block as one
   line with its line count and sha256 prefix, and keeps every build's

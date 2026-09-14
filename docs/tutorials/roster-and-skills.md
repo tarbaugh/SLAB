@@ -465,7 +465,26 @@ steps to cheaper agents:
 
 The rule that the planner runs nothing is code. Its tool allowlist has
 no `shell`, no `launch_workflow`, and no file edits, so the card cannot
-drift into doing the work itself at planner prices. A planner started
+drift into doing the work itself at planner prices. The planner does read
+evidence. It keeps `read_artifact` and `read_file`, so a check that two
+lines of a run's averages table settle costs two calls and not a
+delegation.
+
+Four rules tie the planner's briefs to the record:
+
+| rule | what the harness does |
+|---|---|
+| Size a wave to the free budget | Each request the planner receives ends with the free cpus and gpus at that step. The card and the environment's resource line state the rule. A wave has as many concurrent launches as free GPUs (or free CPU slices), the planner waits once on the wave, and the next wave starts when the first finishes. |
+| Start from the prior result | The environment shows the notebook's earlier entries for this project with their dates (below). The `plan` tool refuses a plan whose Goal names a quantity the notebook reports, until the plan has a line `prior result: ...`. |
+| Name the source of every gate | Every numeric gate in a brief names a skill's stated bound, a calibration run id, or the word "estimate" with the fallback action. The critic lists a gate without a source as an advisory finding. |
+| Name a file as `run:<id>/<name>` | The `plan` tool checks each reference against the run store. A reference to a cache-hit run is rewritten to the run that produced the file, because a cache hit runs nothing and keeps none of the files its task wrote. A reference that no run answers refuses the plan. `delegate` rewrites a brief the same way and names the rewrite below the report. |
+
+The prior-result check reads the notebook as it was when the session
+started, so a result the session records itself does not trip it. A
+measured line (a number with a unit) that repeats a quantity phrase of
+the Goal, such as "melting point", or a result key such as `t_melt`,
+refuses the plan. A line that shares only one word with the Goal adds a
+note to the tool result and the plan is written. A planner started
 with `[agent] delegation = false`, or on a roster where every other card
 delegates, is refused before the model is called, because it would have
 the tools of a reader and nobody to brief.
