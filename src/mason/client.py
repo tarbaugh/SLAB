@@ -5,7 +5,9 @@ so Mason targets exactly that and nothing else: ``POST /chat/completions``
 and ``GET /models`` under a configurable base URL, plain ``urllib``, no SDK
 dependency. The deliberate omissions follow the least common denominator of
 the servers we support: no ``tool_choice`` (Ollama ignores it), no ``n``,
-no ``logit_bias``, no streaming (an agent loop consumes whole turns).
+no ``logit_bias``. A call streams only when the loop hands it a reasoning
+watch: the loop still consumes whole turns, and the stream exists so a
+reasoning loop can be cut before it runs to the reply-token ceiling.
 
 The response contract is defensive where open-model serving is loose:
 
@@ -30,7 +32,8 @@ import re
 import time
 import urllib.error
 import urllib.request
-from typing import Any
+from collections.abc import Callable, Iterator
+from typing import Any, Protocol, TypeVar, overload
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -107,6 +110,26 @@ class ToolCall(BaseModel):
     arguments_error: str | None = None
 
 
+#: The finish reason of a reply the loop's reasoning watch cut short. It
+#: is not a server's word: the client closed the stream at the watch's
+#: signal, so no usage arrived and the completion count is an estimate.
+REASONING_LOOP = "reasoning_loop"
+_CHARS_PER_TOKEN = 4
+
+
+class ReasoningWatch(Protocol):
+    """What a streamed call reports its reasoning to, piece by piece.
+
+    ``feed`` takes each new piece of reasoning text and answers True to
+    stop the reply there. ``reset`` starts over, for a request retried
+    after a transport failure.
+    """
+
+    def feed(self, chunk: str) -> bool: ...
+
+    def reset(self) -> None: ...
+
+
 class ChatReply(BaseModel):
     """One assistant turn, plus the token accounting the server reported."""
 
@@ -159,6 +182,9 @@ class ChatClient:
             tell which case a server is.
     """
 
+    #: ``chat`` takes a reasoning watch and streams when given one.
+    accepts_watch = True
+
     def __init__(
         self,
         endpoint: str,
@@ -185,6 +211,7 @@ class ChatClient:
         *,
         effort: str | None = None,
         max_tokens: int | None = None,
+        watch: ReasoningWatch | None = None,
     ) -> ChatReply:
         """One chat-completions round trip; retries transport-level failures.
 
@@ -196,6 +223,11 @@ class ChatClient:
         *effort* and *max_tokens* override the instance's settings for this
         one call: the compaction summarizer is a model call that should
         think little and answer short, whatever the session's dial says.
+
+        With a *watch*, the call streams and each piece of reasoning goes to
+        it. When the watch says stop, the client closes the stream and the
+        reply ends there with the finish reason :data:`REASONING_LOOP`. A
+        server that ignores ``stream`` and answers whole is read as usual.
         """
         body: dict[str, Any] = {
             "model": self.model,
@@ -210,7 +242,21 @@ class ChatClient:
         wanted = self.effort if effort is None else effort
         if wanted is not None:
             body["reasoning_effort"] = _REASONING_EFFORT.get(wanted, wanted)
-        payload = self._request("/chat/completions", body)
+        if watch is None:
+            payload = self._request("/chat/completions", body)
+        else:
+            body["stream"] = True
+            body["stream_options"] = {"include_usage": True}
+            url = f"{self.endpoint}/chat/completions"
+            payload = request_json(
+                url,
+                headers=self._headers(),
+                body=body,
+                timeout_s=self.timeout_s,
+                unreachable_hint=_UNREACHABLE_HINT,
+                read=lambda response: _read_chat_stream(response, url, watch),
+                before_attempt=watch.reset,
+            )
         return _parse_reply(payload)
 
     def model_names(self) -> list[str]:
@@ -221,20 +267,53 @@ class ChatClient:
             raise LlmError(f"{self.endpoint}/models answered without a 'data' list")
         return [str(item.get("id")) for item in data if isinstance(item, dict)]
 
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+
     def _request(self, path: str, body: dict[str, Any] | None) -> dict[str, Any]:
         return request_json(
             f"{self.endpoint}{path}",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
-            },
+            headers=self._headers(),
             body=body,
             timeout_s=self.timeout_s,
-            unreachable_hint=(
-                "is the model server running? "
-                "(vLLM: 'vllm serve MODEL'; Ollama: 'ollama serve')"
-            ),
+            unreachable_hint=_UNREACHABLE_HINT,
         )
+
+
+_UNREACHABLE_HINT = (
+    "is the model server running? (vLLM: 'vllm serve MODEL'; Ollama: 'ollama serve')"
+)
+
+_T = TypeVar("_T")
+
+
+@overload
+def request_json(
+    url: str,
+    *,
+    headers: dict[str, str],
+    body: dict[str, Any] | None,
+    timeout_s: float,
+    unreachable_hint: str,
+    read: None = None,
+    before_attempt: Callable[[], None] | None = None,
+) -> dict[str, Any]: ...
+
+
+@overload
+def request_json(
+    url: str,
+    *,
+    headers: dict[str, str],
+    body: dict[str, Any] | None,
+    timeout_s: float,
+    unreachable_hint: str,
+    read: Callable[[Any], _T],
+    before_attempt: Callable[[], None] | None = None,
+) -> _T: ...
 
 
 def request_json(
@@ -244,13 +323,20 @@ def request_json(
     body: dict[str, Any] | None,
     timeout_s: float,
     unreachable_hint: str,
-) -> dict[str, Any]:
+    read: Callable[[Any], Any] | None = None,
+    before_attempt: Callable[[], None] | None = None,
+) -> Any:
     """One JSON round trip with the retry discipline both providers share.
 
     GET when *body* is None, POST otherwise. A 5xx answer is retried up to
     5 attempts with exponential backoff, a connection failure 3 attempts
     with short waits; 4xx answers are the server telling us something and
     are never retried.
+
+    *read* turns the open response into the result (a streamed reply is
+    read event by event); by default the body is decoded as one JSON
+    object. *before_attempt* runs before every attempt, so a reader's
+    state starts clean on a retry.
     """
     data = None if body is None else json.dumps(body).encode()
     last_error: LlmError | None = None
@@ -259,8 +345,12 @@ def request_json(
         request = urllib.request.Request(
             url, data=data, headers=headers, method="GET" if body is None else "POST"
         )
+        if before_attempt is not None:
+            before_attempt()
         try:
             with urllib.request.urlopen(request, timeout=timeout_s) as response:
+                if read is not None:
+                    return read(response)
                 return _decode_json(response.read(), url)
         except urllib.error.HTTPError as e:
             parsed = _http_error(e, url)
@@ -298,6 +388,114 @@ def request_json(
         _sleep(_backoff_s(attempt, server_error=server_error))
     assert last_error is not None
     raise last_error
+
+
+def is_event_stream(response: Any) -> bool:
+    """True when the server answered a stream of server-sent events."""
+    return bool(response.headers.get_content_type() == "text/event-stream")
+
+
+def sse_events(response: Any, url: str) -> Iterator[dict[str, Any]]:
+    """The JSON data of each server-sent event, in order, until ``[DONE]``.
+
+    The ``event:`` lines are ignored: both providers repeat the event's
+    type inside its data. A data line that is not a JSON object is a
+    server fault and is raised as one.
+    """
+    lines: list[str] = []
+    for raw in response:
+        line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+        if line.startswith("data:"):
+            lines.append(line[5:].lstrip())
+            continue
+        if line or not lines:
+            continue
+        data = "\n".join(lines)
+        lines = []
+        if data == "[DONE]":
+            return
+        event = _decode_json(data.encode(), url)
+        error = event.get("error")
+        if error is not None:
+            message = error.get("message") if isinstance(error, dict) else error
+            raise LlmError(f"{url} failed mid-stream: {message}")
+        yield event
+    if lines and lines != ["[DONE]"]:
+        yield _decode_json("\n".join(lines).encode(), url)
+
+
+def _read_chat_stream(response: Any, url: str, watch: ReasoningWatch) -> dict[str, Any]:
+    """A streamed chat completion, assembled into the shape of a whole one.
+
+    Each reasoning piece goes to *watch*. When it says stop, the stream is
+    left unread (the caller closes it, and the server stops generating),
+    and the reply holds the reasoning so far and nothing else: a partial
+    text or call from the same reply is not an answer.
+    """
+    if not is_event_stream(response):
+        return _decode_json(response.read(), url)
+    content: list[str] = []
+    reasoning: list[str] = []
+    calls: dict[int, dict[str, Any]] = {}
+    finish_reason: object = None
+    usage: object = None
+    for event in sse_events(response, url):
+        if event.get("usage"):
+            usage = event["usage"]
+        choices = event.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            continue
+        choice = choices[0]
+        finish_reason = choice.get("finish_reason") or finish_reason
+        delta = choice.get("delta")
+        if not isinstance(delta, dict):
+            continue
+        if delta.get("content"):
+            content.append(str(delta["content"]))
+        for item in delta.get("tool_calls") or ():
+            if not isinstance(item, dict):
+                continue
+            slot = calls.setdefault(int(item.get("index") or 0), {"function": {}})
+            if item.get("id"):
+                slot["id"] = item["id"]
+            function = item.get("function")
+            if isinstance(function, dict):
+                if function.get("name"):
+                    slot["function"]["name"] = function["name"]
+                piece = function.get("arguments")
+                if piece:
+                    slot["function"]["arguments"] = (
+                        slot["function"].get("arguments", "") + str(piece)
+                    )
+        piece = delta.get("reasoning_content") or delta.get("reasoning")
+        if piece:
+            reasoning.append(str(piece))
+            if watch.feed(str(piece)):
+                text = "".join(reasoning)
+                return {
+                    "choices": [
+                        {
+                            "message": {"content": "", "reasoning_content": text},
+                            "finish_reason": REASONING_LOOP,
+                        }
+                    ],
+                    "usage": {"completion_tokens": len(text) // _CHARS_PER_TOKEN},
+                }
+    if finish_reason is None:
+        # A stream that closes without a finish reason ended upstream, in a
+        # bridge or a proxy: its half-built reply is not an answer.
+        raise LlmError(f"{url}: the stream ended before the reply finished")
+    message: dict[str, Any] = {"content": "".join(content) if content else None}
+    if reasoning:
+        message["reasoning_content"] = "".join(reasoning)
+    if calls:
+        message["tool_calls"] = [calls[index] for index in sorted(calls)]
+    payload: dict[str, Any] = {
+        "choices": [{"message": message, "finish_reason": finish_reason}]
+    }
+    if isinstance(usage, dict):
+        payload["usage"] = usage
+    return payload
 
 
 def _decode_json(raw: bytes, url: str) -> dict[str, Any]:

@@ -937,8 +937,11 @@ under version control, readable by humans:
   turn from a finished one. A reply with no text and no tool call is a
   fault, not an answer: the loop asks once more. The loop reads a reply
   the server cut at the reply-token ceiling before it answers. For a cut
-  with no text, the loop asks once more at low effort, with a request
-  for a short answer. For a cut mid-text, the text stays in the history,
+  with no text, the loop shows the model its reasoning for one call and
+  asks it to write the design decisions into the notebook. After that
+  call, the loop asks for a short answer at low effort. A card without
+  the notebook, or a cut with no reasoning, gets the short-answer request
+  at once. For a cut mid-text, the text stays in the history,
   and the model rewrites the unfinished last line and continues. For a
   cut inside a tool call's arguments, the loop names the tool, asks for
   shorter arguments or a file in parts, and runs no call from that
@@ -1063,8 +1066,33 @@ that held text or a tool call is continued instead, because the text
 was most of an answer or a script. One planner briefed the same
 specialist three times because the brevity nudge discarded such replies,
 and lost about thirty minutes and 470,000 tokens. A second cut is marked.
-And after
-fifteen consecutive steps made only of reading and listing tools, with
+
+A cut reply with no text is most often reasoning that reached a design
+and ran out before it wrote a line. The reasoning never returns to the
+history, so the loop shows it to the model for one call and asks for
+the design decisions in the notebook first. The request begins:
+
+> [harness] your reasoning was cut; write the design decisions you
+> reached so far into the notebook in one call, then continue.
+
+The request for a short answer follows the notebook call, so the next
+script starts from the recorded design. The design call and that request
+both run at low effort. One delegate took the short-answer
+request at once, dropped the design it had reasoned out (`Pdamp 1.0`,
+static groups, zero-argument checks), and paid ten failed dry runs for
+it. A long reasoning is shown by its first and last 12,000 characters.
+
+The loop also watches the reasoning while the reply streams. When one
+200-character passage appears three times, the loop closes the stream
+there, and the reply is cut early with the same request. The model sees
+its reasoning up to the point where the repetition began. The `cut`
+event records the first line of the repeated passage as `loop`, and
+`slab mason read` prints it. That delegate had spent four minutes of one
+call re-deriving `fix nph` syntax before the ceiling cut it. With the
+`continue-cut-reply` switch on, every model call streams. Inside a
+sandbox, the bridge passes a streamed answer on as it arrives.
+
+After fifteen consecutive steps made only of reading and listing tools, with
 nothing launched, planned, noted, briefed, or finished, the per-step
 budget line tells the model to step back, and says so again every five
 steps. A step that waited on a run that is still running does not count

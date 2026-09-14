@@ -784,7 +784,11 @@ def test_read_renders_cut_and_edit_events(capsys: pytest.CaptureFixture[str]) ->
     _render_event({"at": at, "type": "cut", "case": 2, "continued": True}, False)
     _render_event({"at": at, "type": "cut", "case": 3, "continued": False}, False)
     _render_event({"at": at, "type": "edit", "tool": "write_file", "path": "/p/a.py"}, False)
+    loop = {"case": 1, "continued": False, "design": True, "loop": "fix 1 all nph"}
+    _render_event({"at": at, "type": "cut", **loop}, False)
     out = capsys.readouterr().out
+    assert "reply cut early, in a reasoning loop (no text and no call); asked for the " in out
+    assert "repeated: fix 1 all nph" in out
     assert "reply cut at the ceiling (mid-text); continued" in out
     assert "reply cut at the ceiling (inside a tool call); nudged for brevity" in out
     assert "write_file wrote /p/a.py" in out

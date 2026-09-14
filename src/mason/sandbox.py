@@ -604,7 +604,7 @@ def _forwarder(
             if body is not None:
                 headers["Content-Length"] = str(len(body))
             try:
-                status, reason, answer, payload = self._issue(method, path, headers, body)
+                connection, response = self._issue(method, path, headers, body)
             except (OSError, http.client.HTTPException) as e:
                 # A transport failure (or a reply that is not HTTP at all: a
                 # front end's outage banner) has no status of its own. Say so as one
@@ -618,13 +618,46 @@ def _forwarder(
                 )
                 self._answer_error(f"the bridge could not reach the gateway: {e}{hint}")
                 return
-            self.send_response(status, reason)
-            for name, value in answer:
+            try:
+                if response.getheader("Content-Type", "").startswith("text/event-stream"):
+                    self._relay_stream(response)
+                    return
+                try:
+                    payload = response.read()
+                except (OSError, http.client.HTTPException) as e:
+                    self._answer_error(f"the bridge lost the gateway mid-answer: {e}")
+                    return
+                self._send_head(response)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+            finally:
+                connection.close()
+
+        def _send_head(self, response: http.client.HTTPResponse) -> None:
+            self.send_response(response.status, response.reason or "")
+            for name, value in response.getheaders():
                 if name.lower() not in _DROPPED_RESPONSE_HEADERS:
                     self.send_header(name, value)
-            self.send_header("Content-Length", str(len(payload)))
+
+        def _relay_stream(self, response: http.client.HTTPResponse) -> None:
+            """Pass a streamed answer on as it arrives, piece by piece.
+
+            A buffered stream would reach the agent's client only once the
+            model had finished, and its reasoning watch could cut nothing
+            short. HTTP/1.0 ends the body when the connection closes, so no
+            length is sent. When the client closes first (the watch's cut),
+            the write fails, and closing the upstream connection tells the
+            gateway to stop generating.
+            """
+            self._send_head(response)
             self.end_headers()
-            self.wfile.write(payload)
+            try:
+                while piece := response.read1(65_536):
+                    self.wfile.write(piece)
+                    self.wfile.flush()
+            except (OSError, http.client.HTTPException):
+                return
 
         def _body_length(self) -> int | None:
             """The request body length to read, or None if it is unusable.
@@ -647,13 +680,14 @@ def _forwarder(
 
         def _issue(
             self, method: str, path: str, headers: dict[str, str], body: bytes | None
-        ) -> tuple[int, str, list[tuple[str, str]], bytes]:
-            """One upstream round trip, returning its status, headers, body.
+        ) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
+            """One upstream request, returning the open connection and response.
 
-            http.client decodes a chunked response transparently, so the
-            body here is the real one and the caller reframes its length.
-            Relaying the upstream's own framing headers would describe a
-            body that no longer exists.
+            The caller reads the body and closes the connection. http.client
+            decodes a chunked response transparently, so the body read is
+            the real one and the caller reframes its length. Relaying the
+            upstream's own framing headers would describe a body that no
+            longer exists.
             """
             connection: http.client.HTTPConnection
             if parts.scheme == "https":
@@ -676,15 +710,10 @@ def _forwarder(
                 if connection.sock is not None:
                     connection.sock.settimeout(None)
                 connection.request(method, path, body=body, headers=headers)
-                response = connection.getresponse()
-                return (
-                    response.status,
-                    response.reason or "",
-                    response.getheaders(),
-                    response.read(),
-                )
-            finally:
+                return connection, connection.getresponse()
+            except BaseException:
                 connection.close()
+                raise
 
         def _answer_error(
             self, message: str, *, status: int = 502, reason: str = "Bad Gateway"

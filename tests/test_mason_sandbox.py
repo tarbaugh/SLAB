@@ -1016,6 +1016,50 @@ def test_forwarder_reframes_a_chunked_answer(gateway: tuple[str, type[_Gateway]]
     assert headers["Content-Type"] == "application/json"
 
 
+def test_forwarder_relays_a_streamed_answer_as_it_arrives() -> None:
+    """A streamed answer crosses the bridge piece by piece. Buffered, it
+    would reach the agent's client only once the model had finished, and
+    the client's reasoning watch could cut nothing short. The stub holds
+    its second event until the client has read the first through the
+    bridge, so a buffering bridge fails this test by timing out."""
+    from http.server import HTTPServer
+
+    first_read = threading.Event()
+
+    class _Streaming(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            for text, wait in ((b"data: one\n\n", True), (b"data: two\n\n", False)):
+                self.wfile.write(b"%x\r\n%s\r\n" % (len(text), text))
+                self.wfile.flush()
+                if wait:
+                    first_read.wait(timeout=10)
+            self.wfile.write(b"0\r\n\r\n")
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), _Streaming)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = _bridged_gateway(f"http://127.0.0.1:{server.server_address[1]}/v1")
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        data=b'{"stream": true}',
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        assert response.headers.get_content_type() == "text/event-stream"
+        assert "Content-Length" not in response.headers
+        assert response.readline() == b"data: one\n"
+        first_read.set()
+        assert response.read() == b"\ndata: two\n\n"
+    server.shutdown()
+
+
 def test_forwarder_passes_a_gateway_refusal_through(
     gateway: tuple[str, type[_Gateway]],
 ) -> None:

@@ -136,13 +136,19 @@ MECHANISMS: tuple[Mechanism, ...] = (
         "Text with no tool call stays in the history and the model continues "
         "from its last complete line, joined on return. A cut inside a tool "
         "call's arguments names the tool and asks for the file in parts, and "
-        "the partial call never runs. A delegate whose turn ends cut hands "
-        "back the files it wrote and the runs it launched. Off, every cut "
-        "reply gets the brevity nudge.",
+        "the partial call never runs. A cut with no text and no call shows "
+        "the model its reasoning once and asks for the design decisions in "
+        "the notebook before the brevity nudge. Reasoning that repeats one "
+        "200-character passage three times is cut there, not at the ceiling. "
+        "A delegate whose turn ends cut hands back the files it wrote and the "
+        "runs it launched. Off, every cut reply gets the brevity nudge.",
         "One campaign on 2026-09-10 briefed the same specialist three times "
         "because its replies were cut two thirds of the way through a script "
         "and the brevity nudge discarded them. About thirty minutes and "
-        "470,000 tokens were lost.",
+        "470,000 tokens were lost. One delegate spent a four-minute call "
+        "re-deriving fix nph syntax until the ceiling cut it, then took the "
+        "brevity nudge, dropped the design it had reasoned out, and paid ten "
+        "failed dry runs for it.",
     ),
 )
 

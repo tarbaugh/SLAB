@@ -6,11 +6,13 @@ import pytest
 
 from conftest import LlmScript
 from mason.client import (
+    REASONING_LOOP,
     ChatClient,
     ContextOverflowError,
     LlmError,
     parse_fenced_calls,
 )
+from mason.loop import ReasoningLoopWatch
 
 
 def _reply(message: dict[str, Any], usage: dict[str, int] | None = None) -> dict[str, Any]:
@@ -352,3 +354,92 @@ def test_a_call_may_override_effort_and_reply_budget(llm_server: tuple[str, LlmS
     assert script.requests[0]["max_tokens"] == 16_000
     assert script.requests[1]["reasoning_effort"] == "low"
     assert script.requests[1]["max_tokens"] == 4_096
+
+
+# -- streaming under a reasoning watch ----------------------------------------
+
+
+class _Never:
+    """A watch that never stops a reply, and keeps what it was fed."""
+
+    def __init__(self) -> None:
+        self.fed: list[str] = []
+        self.resets = 0
+
+    def feed(self, chunk: str) -> bool:
+        self.fed.append(chunk)
+        return False
+
+    def reset(self) -> None:
+        self.resets += 1
+
+
+def _delta(finish: str | None = None, **delta: Any) -> dict[str, Any]:
+    return {"choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+
+
+def test_a_streamed_reply_is_assembled_like_a_whole_one(
+    llm_server: tuple[str, LlmScript],
+) -> None:
+    """With a watch the call streams. Reasoning, text, and a call's argument
+    pieces are put back together, and the watch sees each reasoning piece."""
+    url, script = llm_server
+    events = [
+        _delta(role="assistant", reasoning_content="think "),
+        _delta(reasoning_content="more"),
+        _delta(content="Listing "),
+        _delta(content="it."),
+        _delta(tool_calls=[{"index": 0, "id": "c1", "function": {"name": "list_dir"}}]),
+        _delta(tool_calls=[{"index": 0, "function": {"arguments": '{"path"'}}]),
+        _delta(tool_calls=[{"index": 0, "function": {"arguments": ': "."}'}}]),
+        _delta(finish="tool_calls"),
+        {"choices": [], "usage": {"prompt_tokens": 50, "completion_tokens": 9}},
+    ]
+    script.responses.append((200, {"_sse": events}))
+    watch = _Never()
+    reply = ChatClient(url, "m").chat([{"role": "user", "content": "go"}], watch=watch)
+    sent = script.requests[0]
+    assert sent["stream"] is True and sent["stream_options"] == {"include_usage": True}
+    assert reply.reasoning == "think more" and reply.content == "Listing it."
+    (call,) = reply.tool_calls
+    assert (call.id, call.name, call.arguments) == ("c1", "list_dir", {"path": "."})
+    assert reply.finish_reason == "tool_calls"
+    assert (reply.prompt_tokens, reply.completion_tokens) == (50, 9)
+    assert watch.fed == ["think ", "more"] and watch.resets == 1
+
+
+def test_the_watch_cuts_a_streamed_reply_where_the_reasoning_loops(
+    llm_server: tuple[str, LlmScript],
+) -> None:
+    """The reply ends at the third copy of a 200-character passage: the
+    rest of the stream is never read, and the reply holds the reasoning so
+    far with no text and no call."""
+    url, script = llm_server
+    passage = "fix 1 all nph iso 0.0 0.0 1.0 needs Pdamp in time units; " * 4
+    assert len(passage) > 200
+    pieces = ["First, the barostat. "] + [passage] * 8
+    events = [_delta(reasoning_content=piece) for piece in pieces]
+    events += [_delta(content="never read"), _delta(finish="stop")]
+    script.responses.append((200, {"_sse": events}))
+    watch = ReasoningLoopWatch()
+    reply = ChatClient(url, "m").chat([{"role": "user", "content": "go"}], watch=watch)
+    assert reply.finish_reason == REASONING_LOOP
+    assert reply.content == "" and reply.tool_calls == ()
+    assert reply.reasoning is not None and reply.reasoning.count(passage) == 3
+    assert reply.completion_tokens == len(reply.reasoning) // 4  # estimated, no usage
+    assert watch.passage is not None and watch.passage in passage + passage
+
+
+def test_a_server_that_ignores_stream_is_read_whole(llm_server: tuple[str, LlmScript]) -> None:
+    url, script = llm_server
+    script.responses.append((200, _reply({"content": "whole", "reasoning_content": "r"})))
+    reply = ChatClient(url, "m").chat([{"role": "user", "content": "go"}], watch=_Never())
+    assert reply.content == "whole" and reply.reasoning == "r"
+
+
+def test_an_error_event_mid_stream_is_a_loud_error(llm_server: tuple[str, LlmScript]) -> None:
+    url, script = llm_server
+    events = [_delta(reasoning_content="a"), {"error": {"message": "engine died"}}]
+    script.responses.append((200, {"_sse": events}))
+    with pytest.raises(LlmError, match="failed mid-stream: engine died"):
+        ChatClient(url, "m").chat([{"role": "user", "content": "go"}], watch=_Never())

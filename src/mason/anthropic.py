@@ -35,7 +35,16 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from mason.client import ChatReply, LlmError, ToolCall, request_json
+from mason.client import (
+    REASONING_LOOP,
+    ChatReply,
+    LlmError,
+    ReasoningWatch,
+    ToolCall,
+    is_event_stream,
+    request_json,
+    sse_events,
+)
 
 ANTHROPIC_ENDPOINT = "https://api.anthropic.com/v1"
 ANTHROPIC_VERSION = "2023-06-01"
@@ -69,6 +78,9 @@ class AnthropicClient:
         timeout_s: Per-request timeout.
     """
 
+    #: ``chat`` takes a reasoning watch and streams when given one.
+    accepts_watch = True
+
     def __init__(
         self,
         model: str,
@@ -101,11 +113,14 @@ class AnthropicClient:
         *,
         effort: str | None = None,
         max_tokens: int | None = None,
+        watch: ReasoningWatch | None = None,
     ) -> ChatReply:
         """One Messages round trip, translated in both directions.
 
         *effort* and *max_tokens* override the instance's settings for this
         one call (the compaction summarizer thinks little and answers short).
+        With a *watch*, the call streams and each thinking piece goes to it;
+        when it says stop, the reply ends there (see :mod:`mason.client`).
         """
         system, turns = translate_messages(messages)
         body: dict[str, Any] = {
@@ -125,14 +140,30 @@ class AnthropicClient:
         wanted = self.effort if effort is None else effort
         if wanted is not None:
             body["output_config"] = {"effort": _EFFORT.get(wanted, wanted)}
-        payload = request_json(
-            f"{self.endpoint}/messages",
-            headers=self._headers,
-            body=body,
-            timeout_s=self.timeout_s,
-            unreachable_hint="check network access to api.anthropic.com "
-            "(HPC compute nodes are often firewalled — the open-model path works there)",
+        url = f"{self.endpoint}/messages"
+        hint = (
+            "check network access to api.anthropic.com "
+            "(HPC compute nodes are often firewalled — the open-model path works there)"
         )
+        if watch is None:
+            payload = request_json(
+                url,
+                headers=self._headers,
+                body=body,
+                timeout_s=self.timeout_s,
+                unreachable_hint=hint,
+            )
+        else:
+            body["stream"] = True
+            payload = request_json(
+                url,
+                headers=self._headers,
+                body=body,
+                timeout_s=self.timeout_s,
+                unreachable_hint=hint,
+                read=lambda response: _read_message_stream(response, url, watch),
+                before_attempt=watch.reset,
+            )
         return parse_reply(payload)
 
     def model_names(self) -> list[str]:
@@ -286,6 +317,81 @@ def _text_of(content: object) -> str:
     return str(content)
 
 
+def _read_message_stream(response: Any, url: str, watch: ReasoningWatch) -> dict[str, Any]:
+    """A streamed Messages reply, assembled into the shape of a whole one.
+
+    Each thinking piece goes to *watch*. When it says stop, the reply holds
+    the thinking so far and nothing else, with the stop reason
+    :data:`~mason.client.REASONING_LOOP` and the output count estimated.
+    A tool call's input arrives as JSON pieces; input that never closes
+    (a cut) is kept raw so the reply marks the call as unparsed.
+    """
+    if not is_event_stream(response):
+        whole: object = json.loads(response.read())
+        return whole if isinstance(whole, dict) else {}
+    blocks: dict[int, dict[str, Any]] = {}
+    pieces: dict[int, list[str]] = {}
+    usage: dict[str, Any] = {}
+    stop_reason: object = None
+    details: object = None
+    thinking: list[str] = []
+    for event in sse_events(response, url):
+        kind = event.get("type")
+        index = event.get("index")
+        if kind == "message_start":
+            message = event.get("message")
+            if isinstance(message, dict) and isinstance(message.get("usage"), dict):
+                usage.update(message["usage"])
+        elif kind == "content_block_start" and isinstance(index, int):
+            block = event.get("content_block")
+            blocks[index] = dict(block) if isinstance(block, dict) else {}
+        elif kind == "content_block_delta" and isinstance(index, int):
+            delta = event.get("delta")
+            block = blocks.setdefault(index, {})
+            if not isinstance(delta, dict):
+                continue
+            if delta.get("type") == "text_delta":
+                block["text"] = str(block.get("text") or "") + str(delta.get("text") or "")
+            elif delta.get("type") == "thinking_delta":
+                piece = str(delta.get("thinking") or "")
+                block["thinking"] = str(block.get("thinking") or "") + piece
+                thinking.append(piece)
+                if piece and watch.feed(piece):
+                    text = "".join(thinking)
+                    return {
+                        "content": [{"type": "thinking", "thinking": text}],
+                        "stop_reason": REASONING_LOOP,
+                        "usage": {**usage, "output_tokens": len(text) // 4},
+                    }
+            elif delta.get("type") == "input_json_delta":
+                pieces.setdefault(index, []).append(str(delta.get("partial_json") or ""))
+        elif kind == "message_delta":
+            delta = event.get("delta")
+            if isinstance(delta, dict) and delta.get("stop_reason"):
+                stop_reason = delta["stop_reason"]
+            if isinstance(delta, dict) and delta.get("stop_details"):
+                details = delta["stop_details"]
+            if isinstance(event.get("usage"), dict):
+                usage.update(event["usage"])
+    if stop_reason is None:
+        raise LlmError(f"{url}: the stream ended before the reply finished")
+    for index, parts in pieces.items():
+        raw = "".join(parts)
+        try:
+            blocks[index]["input"] = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            blocks[index]["input"] = {}
+            blocks[index]["_unparsed"] = raw
+    payload: dict[str, Any] = {
+        "content": [blocks[index] for index in sorted(blocks)],
+        "stop_reason": stop_reason,
+        "usage": usage,
+    }
+    if details is not None:
+        payload["stop_details"] = details
+    return payload
+
+
 def parse_reply(payload: dict[str, Any]) -> ChatReply:
     """Messages response -> :class:`ChatReply`, refusals raised, usage summed.
 
@@ -321,12 +427,18 @@ def parse_reply(payload: dict[str, Any]) -> ChatReply:
         elif kind == "tool_use":
             arguments = block.get("input")
             arguments = arguments if isinstance(arguments, dict) else {}
+            unparsed = block.get("_unparsed")
             calls.append(
                 ToolCall(
                     id=str(block.get("id") or f"toolu_{position}"),
                     name=str(block.get("name") or ""),
                     arguments=arguments,
                     arguments_raw=json.dumps(arguments),
+                    # A streamed input cut before it closed: the loop reads
+                    # the call as cut inside its arguments.
+                    arguments_error=(
+                        None if unparsed is None else "the input JSON never closed"
+                    ),
                 )
             )
     usage_raw = payload.get("usage")

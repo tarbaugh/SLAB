@@ -40,6 +40,7 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from mason.client import (
+    REASONING_LOOP,
     ChatClient,
     ChatReply,
     ContextOverflowError,
@@ -151,6 +152,45 @@ _CUT_UNFINISHED_MARK = (
     "\n\n[truncated: the reply was cut at the reply-token ceiling and the "
     "continuation added nothing; the operator can raise [agent] max_reply_tokens]"
 )
+#: A cut reply with no text and no call is most often a think block that
+#: reached a design and ran out before it wrote a line. Reasoning never
+#: re-enters the history, so the model is shown its reasoning for one call
+#: and asked to put the decisions in the notebook; the brevity nudge
+#: follows that call. One delegate took the brevity nudge straight away,
+#: wrote a rushed script that dropped the design it had reasoned out
+#: (Pdamp 1.0, static groups, zero-argument checks), and paid ten failed
+#: dry runs for it.
+_CUT_DESIGN_NUDGE = (
+    "[harness] your reasoning was cut; write the design decisions you reached so "
+    "far into the notebook in one call, then continue. Your reasoning does not stay "
+    "in the history, so that entry is its only record: name each value, group, and "
+    "check you settled on."
+)
+_CUT_LOOP_NOTE = (
+    " Your reasoning was cut early because it repeated one passage three times, "
+    "starting {line!r}. Do not derive that part again."
+)
+#: The reasoning before the cut, shown once with the call that writes the
+#: design down and never kept in the history. A long one keeps its head,
+#: where the derivation is, and its tail, where the latest decisions are.
+_CUT_REASONING_QUOTE = "[harness] your reasoning before the cut, shown for this one call:\n\n{text}"
+_QUOTE_HEAD_CHARS = 12_000
+_QUOTE_TAIL_CHARS = 12_000
+#: What follows the design's notebook call: the brevity nudge, with the
+#: design now in the history for the model to act on.
+_DESIGN_KEPT_NUDGE = (
+    "[harness] the design decisions are in the notebook entry above. Do not "
+    "deliberate further: act on them now with a tool call, or call finish with a "
+    "short report."
+)
+#: A reasoning loop: one window of this many characters seen this many
+#: times in one call's reasoning. The four-minute call behind the design
+#: nudge re-derived the same fix syntax until the ceiling cut it.
+_LOOP_WINDOW_CHARS = 200
+_LOOP_REPEATS = 3
+#: Copies farther apart than this many windows are drafts, not a loop: a
+#: script written three times with one preamble, pages apart, is work.
+_LOOP_MAX_GAP_WINDOWS = 20
 #: A cut inside a tool call's arguments: no call in that reply runs, and
 #: the model is told which tool and how to fit the call in the ceiling.
 _CUT_CALL_NUDGE = (
@@ -288,6 +328,140 @@ def _retry_effort(configured: str | None) -> str:
         ('low', 'low', 'none')
     """
     return "none" if configured == "none" else "low"
+
+
+class ReasoningLoopWatch:
+    """Watches one call's reasoning as it streams, and says stop at a loop.
+
+    A loop is one window of *window* characters seen *repeats* times. A
+    copy counts only when it starts at or past the end of the copy counted
+    before it, so text that overlaps itself (a run of one character) counts
+    once per window length, and only when it starts within *max_gap*
+    characters of that copy, so a passage repeated pages apart (a script
+    drafted three times) starts a new count. Windows are keyed by their
+    hash, and only the last ``window - 1`` characters are kept between
+    pieces.
+
+    Examples:
+        >>> watch = ReasoningLoopWatch(window=4, repeats=3)
+        >>> watch.feed("abcd-"), watch.feed("abcd-"), watch.feed("abc")
+        (False, False, False)
+        >>> watch.feed("d")
+        True
+        >>> watch.passage, watch.loop_start
+        ('abcd', 5)
+        >>> watch = ReasoningLoopWatch(window=8, repeats=2)
+        >>> watch.feed("--ab.\\nfix 1\\n"), watch.feed("++ab.\\nfix 1\\n")
+        (False, True)
+        >>> watch.passage, watch.first_line
+        ('ab.\\nfix ', 'fix')
+
+        >>> ReasoningLoopWatch(window=4, repeats=3).feed("aaaaaaaaaaa")
+        False
+        >>> ReasoningLoopWatch(window=4, repeats=3).feed("aaaaaaaaaaaa")
+        True
+        >>> far = ReasoningLoopWatch(window=4, repeats=3, max_gap=8)
+        >>> far.feed("abcd0123456789ABCDEFGHIJabcdKLMNOPQRSTUVWXYZklmnabcd")
+        False
+    """
+
+    def __init__(
+        self,
+        window: int = _LOOP_WINDOW_CHARS,
+        repeats: int = _LOOP_REPEATS,
+        max_gap: int | None = None,
+    ) -> None:
+        self.window = window
+        self.repeats = repeats
+        self.max_gap = window * _LOOP_MAX_GAP_WINDOWS if max_gap is None else max_gap
+        self.reset()
+
+    def reset(self) -> None:
+        """Start over: a retried request streams its reasoning from the top."""
+        self._tail = ""
+        # The character before the tail: the start of the text counts as
+        # the start of a line.
+        self._before_tail = "\n"
+        self._fed = 0
+        # hash -> [start of the second counted copy, start of the last, count]
+        self._seen: dict[int, list[int]] = {}
+        #: The repeated window, once a loop is found.
+        self.passage: str | None = None
+        #: Where the second copy starts: the reasoning before it holds the
+        #: derivation once, and the rest repeats it.
+        self.loop_start: int | None = None
+        #: The character before the repeated window, so a reader of the
+        #: transcript is shown a whole line and not the tail of one.
+        self._lead = "\n"
+
+    @property
+    def first_line(self) -> str | None:
+        """The repeated window's first complete, non-blank line."""
+        if self.passage is None:
+            return None
+        lines = self.passage.splitlines()
+        if self._lead != "\n" and len(lines) > 1:
+            lines = lines[1:]  # the window began mid-line
+        for line in lines:
+            if line.strip():
+                return line.strip()
+        return self.passage.strip()
+
+    def feed(self, chunk: str) -> bool:
+        """Take the next piece of reasoning; True once a loop is found."""
+        if self.passage is not None:
+            return True
+        text = self._tail + chunk
+        base = self._fed - len(self._tail)
+        self._fed += len(chunk)
+        width = self.window
+        for offset in range(len(text) - width + 1):
+            passage = text[offset : offset + width]
+            start = base + offset
+            entry = self._seen.get(hash(passage))
+            if entry is None:
+                self._seen[hash(passage)] = [-1, start, 1]
+                continue
+            if start < entry[1] + width:
+                continue
+            if start - entry[1] > self.max_gap:
+                # Too far from the last copy to be a loop: count afresh.
+                entry[:] = [-1, start, 1]
+                continue
+            entry[1] = start
+            entry[2] += 1
+            if entry[0] < 0:
+                entry[0] = start
+            if entry[2] >= self.repeats:
+                self.passage = passage
+                self.loop_start = entry[0]
+                self._lead = text[offset - 1] if offset else self._before_tail
+                return True
+        keep = width - 1
+        if len(text) > keep:
+            self._before_tail = text[-keep - 1]
+        self._tail = text[-keep:] if keep else ""
+        return False
+
+
+def _reasoning_quote(reasoning: str) -> str:
+    """The reasoning as shown to the design call: whole, or head and tail.
+
+    Examples:
+        >>> _reasoning_quote("short")
+        'short'
+        >>> quoted = _reasoning_quote("h" * 12_000 + "#" * 5 + "t" * 12_000)
+        >>> "[... 5 characters omitted ...]" in quoted and "#" not in quoted
+        True
+    """
+    if len(reasoning) <= _QUOTE_HEAD_CHARS + _QUOTE_TAIL_CHARS:
+        return reasoning
+    omitted = len(reasoning) - _QUOTE_HEAD_CHARS - _QUOTE_TAIL_CHARS
+    return (
+        reasoning[:_QUOTE_HEAD_CHARS]
+        + f"\n\n[... {omitted} characters omitted ...]\n\n"
+        + reasoning[-_QUOTE_TAIL_CHARS:]
+    )
 
 
 class TurnResult(BaseModel):
@@ -714,6 +888,15 @@ class Mason:
         # continuation arrives (case 2 of the cut-reply cases).
         cut_prefix: str | None = None
         continue_cut = enabled(self.session.agent, "continue-cut-reply")
+        # The design path of a case-1 cut: asked once per turn; pending
+        # until the reply after it, whose notebook call earns the brevity
+        # nudge; the reasoning is shown to that one call only.
+        design_asked = False
+        design_pending = False
+        design_quote: str | None = None
+        # A client that streams gets a reasoning watch, so a loop is cut
+        # where it starts and not at the ceiling.
+        watches = continue_cut and bool(getattr(self.client, "accepts_watch", False))
         max_turns = self.session.agent.max_turns
         for step in range(1, max_turns + 1):
             self.steps_taken = step
@@ -728,12 +911,21 @@ class Mason:
             )
             if self._sizes_briefs:
                 hint = " ".join(part for part in (hint, free_hint(self.session)) if part)
-            reply = self._call_model(hint=hint or None)
-            cut = reply.finish_reason == "max_tokens"
+            if design_quote is not None:
+                hint = f"{design_quote}\n\n{hint}" if hint else design_quote
+                design_quote = None
+            watch = ReasoningLoopWatch() if watches else None
+            reply = self._call_model(hint=hint or None, watch=watch)
+            looped = reply.finish_reason == REASONING_LOOP
+            cut = reply.finish_reason == "max_tokens" or looped
             if not cut:
                 # A complete reply read everything before it. A cut one read
                 # nothing the model can act on, so its results stay unread.
                 self._unread_from = len(self.messages)
+            if cut and reply.content is None and not reply.tool_calls:
+                # A message with null content and no tool_calls is refused
+                # by OpenAI-style servers; the history keeps an empty string.
+                reply = reply.model_copy(update={"content": ""})
             cut_call = self._cut_call_name(reply) if cut else None
             if cut_call is not None and continue_cut and not cut_nudged:
                 # Case 3: the cut fell inside a tool call's arguments. The
@@ -765,9 +957,43 @@ class Mason:
             self._observe_step(reply, interim=bool(calls) and not from_text)
             if not calls:
                 text = reply.content or ""
+                case = 3 if cut_call is not None else 2 if text.strip() else 1
+                loop_line = watch.first_line if looped and watch is not None else None
+                if (
+                    cut
+                    and case == 1
+                    and continue_cut
+                    and not design_asked
+                    and "notebook" in self.toolbox.tools
+                    and (reply.reasoning or "").strip()
+                ):
+                    # Case 1 with reasoning: the design it reached goes to
+                    # the notebook first. The model reads its reasoning for
+                    # this one call, up to where a loop began repeating.
+                    design_asked = True
+                    design_pending = True
+                    reasoning = reply.reasoning or ""
+                    if watch is not None and watch.loop_start is not None:
+                        reasoning = reasoning[: watch.loop_start]
+                    design_quote = _CUT_REASONING_QUOTE.format(text=_reasoning_quote(reasoning))
+                    event: dict[str, Any] = {
+                        "type": "cut",
+                        "case": 1,
+                        "continued": False,
+                        "design": True,
+                    }
+                    nudge = _CUT_DESIGN_NUDGE
+                    if loop_line is not None:
+                        event["loop"] = loop_line
+                        nudge += _CUT_LOOP_NOTE.format(line=loop_line)
+                    self.session.record(event)
+                    self._append({"role": "user", "content": nudge})
+                    if enabled(self.session.agent, "adaptive-effort"):
+                        self._effort_override = _retry_effort(self.session.agent.effort)
+                    continue
                 if cut and not cut_nudged:
                     cut_nudged = True
-                    case = 3 if cut_call is not None else 2 if text.strip() else 1
+                    design_pending = False
                     if case == 2 and continue_cut:
                         # Case 2: the cut fell mid-text. The text stands in
                         # the history; the model resumes it, and the join
@@ -779,8 +1005,12 @@ class Mason:
                     # Case 1: the budget went to the think block and no text
                     # arrived. Ask once for a short answer at low effort; a
                     # second cut ends the turn below. With the switch off,
-                    # every cut reply takes this path.
-                    self.session.record({"type": "cut", "case": case, "continued": False})
+                    # every cut reply takes this path, and so does a card
+                    # without the notebook or a reply with no reasoning.
+                    brevity: dict[str, Any] = {"type": "cut", "case": case, "continued": False}
+                    if loop_line is not None:
+                        brevity["loop"] = loop_line
+                    self.session.record(brevity)
                     self._append({"role": "user", "content": _CUT_REPLY_NUDGE})
                     if enabled(self.session.agent, "adaptive-effort"):
                         self._effort_override = _retry_effort(self.session.agent.effort)
@@ -796,7 +1026,7 @@ class Mason:
                     return TurnResult(text=text, stop_reason="answer", steps=step, truncated=True)
                 if cut_prefix is not None:
                     text = _join_cut(cut_prefix, text)
-                if not text.strip() and not empty_nudged and reply.finish_reason != "max_tokens":
+                if not text.strip() and not empty_nudged and not cut:
                     # No text and no call is a fault, not an answer. Ask once;
                     # a second empty reply ends the turn below.
                     empty_nudged = True
@@ -816,6 +1046,7 @@ class Mason:
             # A step that waited on a run still running holds the looking
             # streak: waiting on a long run is not reading around.
             waited_on_run = False
+            noted = False
             for position, call in enumerate(calls):
                 if call.name == "finish" and call.arguments_error is None:
                     if len(calls) > 1:
@@ -899,6 +1130,7 @@ class Mason:
                 if enabled(self.session.agent, "identical-result-annotation"):
                     result = self._note_repetition(call, result)
                 self._append_tool_result(call, result, as_text=from_text)
+                noted = noted or (call.name == "notebook" and ok)
                 if (
                     call.name == "plan"
                     and result.startswith("PLAN.md updated:")
@@ -917,6 +1149,14 @@ class Mason:
                         stop_reason="error_streak",
                         steps=step,
                     )
+            if design_pending:
+                # The reply after the design nudge. A notebook call kept the
+                # design, so the brevity nudge is safe to apply now.
+                design_pending = False
+                if noted:
+                    self._append({"role": "user", "content": _DESIGN_KEPT_NUDGE})
+                    if enabled(self.session.agent, "adaptive-effort"):
+                        self._effort_override = _retry_effort(self.session.agent.effort)
             looked = all(call.name in LOOKING_TOOLS for call in calls)
             if not (looked and waited_on_run):
                 # A reply that only looked and waited holds the streak; one
@@ -1142,7 +1382,9 @@ class Mason:
             text += _WRITE_IN_PARTS
         return text
 
-    def _call_model(self, *, hint: str | None = None) -> ChatReply:
+    def _call_model(
+        self, *, hint: str | None = None, watch: ReasoningLoopWatch | None = None
+    ) -> ChatReply:
         tools = None if self.fenced else self.toolbox.specs()
         # An ephemeral user message tacked onto the end each turn — the
         # step-of-budget line, and stricter guidance near the ceiling.
@@ -1156,6 +1398,8 @@ class Mason:
         # A one-call effort override, set by the cut-reply retry and consumed
         # here, so the next ordinary step runs at the configured effort.
         options: dict[str, Any] = {"max_tokens": self._reply_budget()}
+        if watch is not None:
+            options["watch"] = watch
         if self._effort_override is not None:
             options["effort"] = self._effort_override
             self._effort_override = None

@@ -95,7 +95,11 @@ def vanished_pid() -> int:
 
 
 class LlmScript:
-    """What the fake OpenAI-compatible server should answer, and what it saw."""
+    """What the fake OpenAI-compatible server should answer, and what it saw.
+
+    A response payload with an ``_sse`` list is answered as server-sent
+    events, one event per item.
+    """
 
     def __init__(self) -> None:
         self.responses: list[tuple[int, dict[str, Any]]] = []
@@ -121,12 +125,29 @@ class _LlmHandler(BaseHTTPRequestHandler):
         self._answer(*self.script.get_response)
 
     def _answer(self, status: int, payload: dict[str, Any]) -> None:
+        if "_sse" in payload:
+            self._stream(status, payload["_sse"])
+            return
         raw = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
+
+    def _stream(self, status: int, events: list[dict[str, Any]]) -> None:
+        """Answer as server-sent events, one ``data:`` line each, then
+        ``[DONE]``; HTTP/1.0 ends the body when the connection closes."""
+        self.send_response(status)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        try:
+            for event in events:
+                self.wfile.write(b"data: " + json.dumps(event).encode() + b"\n\n")
+                self.wfile.flush()
+            self.wfile.write(b"data: [DONE]\n\n")
+        except OSError:  # the client closed the stream early
+            pass
 
     def log_message(self, *args: object) -> None:  # keep test output quiet
         pass
