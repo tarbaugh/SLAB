@@ -1142,7 +1142,23 @@ class Mason:
             if hint is not None:
                 messages = [*messages, {"role": "user", "content": hint}]
             options["max_tokens"] = self._reply_budget()
-            reply = self.client.chat(messages, tools, **options)
+            try:
+                reply = self.client.chat(messages, tools, **options)
+            except ContextOverflowError as again:
+                # The fold that spared the unread results was not enough:
+                # fold them too, once, before giving up.
+                if not self._compact(spare_unread=False):
+                    raise ContextOverflowError(
+                        f"{again} — and there is nothing left to compact: the system "
+                        f"prompt, plan, notebook tail, and current goal already exceed "
+                        f"the model's window. Shorten PLAN.md/AGENTS.md, or serve a "
+                        f"larger context."
+                    ) from again
+                messages = self.messages
+                if hint is not None:
+                    messages = [*messages, {"role": "user", "content": hint}]
+                options["max_tokens"] = self._reply_budget()
+                reply = self.client.chat(messages, tools, **options)
         self.session.count_usage(
             reply.prompt_tokens, reply.completion_tokens, reply.cached_prompt_tokens
         )
