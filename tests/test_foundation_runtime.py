@@ -873,3 +873,66 @@ def test_settle_ended_jobs_asks_only_the_scheduler(
     assert [r.id for r in forced] == [lost.id]
     assert "10" not in asked
     assert ws.runs.get(lost.id).error == "job 10 ended; marked failed by the test"
+
+
+# -- evidence on a failed check ---------------------------------------------------
+
+
+def test_a_bare_false_records_the_check_source_and_the_keys_it_read(ws: Workspace) -> None:
+    """'returned False' alone made a delegate re-read artifacts by hand: the
+    record now carries the check's text and the keys of the result it read."""
+    result = {"rows": [{"Temp": 300.0}], "steps": 0}
+    with ws.start_run() as run:
+
+        @check
+        def enough_steps():
+            return result["steps"] > 10
+
+    (record,) = ws.runs.list_check_results(run.id)
+    assert (record.passed, record.message, record.observed) == (False, "returned False", None)
+    assert record.evidence is not None
+    assert record.evidence["source"].startswith("@check\ndef enough_steps():")
+    assert record.evidence["keys"] == {"result": ["rows", "steps"]}
+    assert "raised" not in record.evidence
+
+
+def test_a_raising_check_records_the_exception_and_the_line(ws: Workspace) -> None:
+    result = {"rows": [], "steps": 1000}
+    with ws.start_run() as run:
+
+        @check
+        def fcc_fraction():
+            return result["n_fcc"] / result["steps"] > 0.9
+
+    (record,) = ws.runs.list_check_results(run.id)
+    assert record.kind == "error"
+    assert record.evidence is not None
+    assert record.evidence["raised"] == "KeyError: 'n_fcc'"
+    line = record.evidence["line"]
+    assert line.startswith("test_foundation_runtime.py:")
+    assert line.endswith('return result["n_fcc"] / result["steps"] > 0.9')
+    assert record.evidence["keys"] == {"result": ["rows", "steps"]}
+
+
+def test_a_check_that_says_what_it_saw_records_no_evidence(ws: Workspace) -> None:
+    with ws.start_run() as run:
+        run.check(lambda: (False, 0.42, 0.9), name="fraction")
+        run.check(lambda: True, name="fine")
+    by_name = {r.name: r for r in ws.runs.list_check_results(run.id)}
+    assert by_name["fraction"].observed == 0.42
+    assert by_name["fraction"].evidence is None
+    assert by_name["fine"].evidence is None
+
+
+def test_the_source_in_the_evidence_stops_at_forty_lines(tmp_path: Path) -> None:
+    import runpy
+
+    from foundation.runtime import EVIDENCE_SOURCE_LINES, check_evidence
+
+    body = "\n".join(f"    x{i} = {i}" for i in range(50))
+    module = tmp_path / "long_check.py"
+    module.write_text(f"def long_check():\n{body}\n    return False\n")
+    fn = runpy.run_path(str(module))["long_check"]
+    lines = check_evidence(fn)["source"].splitlines()
+    assert len(lines) == EVIDENCE_SOURCE_LINES + 1
+    assert lines[-1] == "... (12 more lines)"

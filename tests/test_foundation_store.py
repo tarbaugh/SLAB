@@ -467,6 +467,8 @@ def test_migrates_v1_database_in_place(db_path: Path) -> None:
     conn.execute("ALTER TABLE tasks DROP COLUMN failure")
     conn.execute("DROP INDEX ix_runs_session")
     conn.execute("ALTER TABLE runs DROP COLUMN session")
+    conn.execute("ALTER TABLE checks DROP COLUMN pass_no")
+    conn.execute("ALTER TABLE checks DROP COLUMN evidence")
     conn.execute("PRAGMA user_version = 1")
     conn.close()
 
@@ -501,6 +503,8 @@ def test_migrates_v2_database_in_place(db_path: Path) -> None:
     conn.execute("ALTER TABLE runs DROP COLUMN host")
     conn.execute("DROP INDEX ix_runs_session")
     conn.execute("ALTER TABLE runs DROP COLUMN session")
+    conn.execute("ALTER TABLE checks DROP COLUMN pass_no")
+    conn.execute("ALTER TABLE checks DROP COLUMN evidence")
     conn.execute("PRAGMA user_version = 2")
     conn.close()
 
@@ -534,6 +538,8 @@ def test_migrates_v3_database_in_place(db_path: Path) -> None:
     conn.execute("ALTER TABLE runs DROP COLUMN resources")
     conn.execute("ALTER TABLE runs DROP COLUMN pid")
     conn.execute("ALTER TABLE runs DROP COLUMN host")
+    conn.execute("ALTER TABLE checks DROP COLUMN pass_no")
+    conn.execute("ALTER TABLE checks DROP COLUMN evidence")
     conn.execute("PRAGMA user_version = 3")
     conn.close()
 
@@ -562,6 +568,8 @@ def test_migrates_v4_database_in_place(db_path: Path) -> None:
     conn.execute("ALTER TABLE runs DROP COLUMN job_id")
     conn.execute("DROP TABLE reservations")
     conn.execute("ALTER TABLE runs DROP COLUMN resources")
+    conn.execute("ALTER TABLE checks DROP COLUMN pass_no")
+    conn.execute("ALTER TABLE checks DROP COLUMN evidence")
     conn.execute("PRAGMA user_version = 4")
     conn.close()
 
@@ -1312,6 +1320,8 @@ def test_migrates_v5_database_in_place(db_path: Path) -> None:
     conn.execute("DROP INDEX IF EXISTS ix_runs_job_id")
     conn.execute("ALTER TABLE runs DROP COLUMN job_id")
     conn.execute("ALTER TABLE reservations DROP COLUMN job_id")
+    conn.execute("ALTER TABLE checks DROP COLUMN pass_no")
+    conn.execute("ALTER TABLE checks DROP COLUMN evidence")
     conn.execute("PRAGMA user_version = 5")
     conn.close()
 
@@ -1371,6 +1381,8 @@ def test_migrates_v6_database_in_place(db_path: Path) -> None:
         held = s1.reserve(host="n1", holder_pid=os.getpid(), budget_cpus=range(2), budget_gpus=())
     conn = sqlite3.connect(db_path)
     conn.execute("ALTER TABLE reservations DROP COLUMN job_id")
+    conn.execute("ALTER TABLE checks DROP COLUMN pass_no")
+    conn.execute("ALTER TABLE checks DROP COLUMN evidence")
     conn.execute("PRAGMA user_version = 6")
     conn.close()
 
@@ -1385,6 +1397,33 @@ def test_migrates_v6_database_in_place(db_path: Path) -> None:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         conn.close()
 
+
+
+def test_migrates_v7_database_in_place(db_path: Path) -> None:
+    """A workspace from before verification passes (schema v7) opens
+    cleanly: its check rows read back as pass 1 without evidence."""
+    with SQLiteRunStore(db_path) as s1:
+        run = s1.create(Run(name="pre-pass"))
+        s1.add_check_results(run.id, [CheckResult(run_id=run.id, name="old", passed=False)])
+    conn = sqlite3.connect(db_path)
+    conn.execute("ALTER TABLE checks DROP COLUMN pass_no")
+    conn.execute("ALTER TABLE checks DROP COLUMN evidence")
+    conn.execute("PRAGMA user_version = 7")
+    conn.close()
+
+    with SQLiteRunStore(db_path) as s2:
+        (old,) = s2.list_check_results(run.id)
+        assert (old.pass_no, old.evidence) == (1, None)
+        s2.add_check_results(
+            run.id,
+            [CheckResult(run_id=run.id, name="old", passed=True, pass_no=2, evidence={"a": 1})],
+        )
+        (latest,) = s2.list_check_results(run.id)
+        assert (latest.pass_no, latest.evidence) == (2, {"a": 1})
+        assert len(s2.list_check_results(run.id, all_passes=True)) == 2
+        conn = sqlite3.connect(db_path)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        conn.close()
 
 def test_a_reservation_of_another_job_holds_none_of_this_budget(store: SQLiteRunStore) -> None:
     """Same host, same pid, different jobs: a sandbox job has its own PID

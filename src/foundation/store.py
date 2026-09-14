@@ -57,7 +57,7 @@ from foundation.models import (
 )
 from slab.scratch import process_alive
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -135,7 +135,9 @@ CREATE TABLE IF NOT EXISTS checks (
     message   TEXT NOT NULL DEFAULT '',
     observed  TEXT NOT NULL DEFAULT 'null',
     expected  TEXT NOT NULL DEFAULT 'null',
-    at        TEXT NOT NULL
+    at        TEXT NOT NULL,
+    pass_no   INTEGER NOT NULL DEFAULT 1,
+    evidence  TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_checks_run_id ON checks(run_id);
 CREATE TABLE IF NOT EXISTS reservations (
@@ -189,6 +191,10 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
     ),
     7: (  # the job an unclaimed reservation was made under: a budget is one allocation
         "ALTER TABLE reservations ADD COLUMN job_id TEXT",
+    ),
+    8: (  # verification passes on one run, and the evidence of a failed check
+        "ALTER TABLE checks ADD COLUMN pass_no INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE checks ADD COLUMN evidence TEXT",
     ),
 }
 
@@ -426,8 +432,8 @@ class RunStore(Protocol):
         """Record verification results on a run."""
         ...
 
-    def list_check_results(self, run_id: str) -> list[CheckResult]:
-        """List a run's verification results, oldest first."""
+    def list_check_results(self, run_id: str, *, all_passes: bool = False) -> list[CheckResult]:
+        """List a run's verification results of its latest pass, oldest first."""
         ...
 
     def add_artifact(
@@ -1037,7 +1043,7 @@ class SQLiteRunStore:
             for result in stamped:
                 conn.execute(
                     "INSERT INTO checks (run_id, name, kind, passed, message, observed,"
-                    " expected, at) VALUES (?,?,?,?,?,?,?,?)",
+                    " expected, at, pass_no, evidence) VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (
                         rid,
                         result.name,
@@ -1047,6 +1053,10 @@ class SQLiteRunStore:
                         json.dumps(result.observed, sort_keys=True, default=repr),
                         json.dumps(result.expected, sort_keys=True, default=repr),
                         result.at.isoformat(),
+                        result.pass_no,
+                        None
+                        if result.evidence is None
+                        else json.dumps(result.evidence, sort_keys=True, default=repr),
                     ),
                 )
         return stamped
@@ -1089,21 +1099,42 @@ class SQLiteRunStore:
             ).fetchone()
         return None if row is None else _row_to_task(row)
 
-    def list_check_results(self, run_id: str) -> list[CheckResult]:
+    def list_check_results(self, run_id: str, *, all_passes: bool = False) -> list[CheckResult]:
         """List a run's verification results, oldest first.
+
+        A run is verified once at completion, and again by each
+        :func:`foundation._ops.reverify_run`. Each verification is a pass
+        with its own ``pass_no``, and the store keeps every pass. The list
+        holds the latest pass only, because that pass decided the run's
+        state; *all_passes* lists every pass.
 
         Examples:
             >>> store = SQLiteRunStore(":memory:")
             >>> r = store.create(Run())
             >>> store.list_check_results(r.id)
             []
+            >>> first = CheckResult(run_id=r.id, name="a", passed=False)
+            >>> _ = store.add_check_results(r.id, [first])
+            >>> _ = store.add_check_results(r.id, [first.model_copy(update={"passed": True,
+            ...                                                              "pass_no": 2})])
+            >>> [(c.pass_no, c.passed) for c in store.list_check_results(r.id)]
+            [(2, True)]
+            >>> [c.pass_no for c in store.list_check_results(r.id, all_passes=True)]
+            [1, 2]
             >>> store.close()
         """
         with self._lock:
             rid = self._resolve(run_id)
-            rows = self._conn.execute(
-                "SELECT * FROM checks WHERE run_id = ? ORDER BY seq", (rid,)
-            ).fetchall()
+            if all_passes:
+                rows = self._conn.execute(
+                    "SELECT * FROM checks WHERE run_id = ? ORDER BY seq", (rid,)
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM checks WHERE run_id = ? AND pass_no = (SELECT"
+                    " MAX(pass_no) FROM checks WHERE run_id = ?) ORDER BY seq",
+                    (rid, rid),
+                ).fetchall()
         return [
             CheckResult(
                 run_id=row["run_id"],
@@ -1114,6 +1145,8 @@ class SQLiteRunStore:
                 observed=json.loads(row["observed"]),
                 expected=json.loads(row["expected"]),
                 at=datetime.fromisoformat(row["at"]),
+                pass_no=row["pass_no"],
+                evidence=None if row["evidence"] is None else json.loads(row["evidence"]),
             )
             for row in rows
         ]

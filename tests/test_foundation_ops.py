@@ -7,14 +7,23 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from foundation import DEFAULT_POLICY, FoundationError, Run, Workspace
+from foundation import (
+    DEFAULT_POLICY,
+    FoundationError,
+    ReplayError,
+    Run,
+    RunStateError,
+    Workspace,
+)
 from foundation._ops import (
+    dry_run_clean,
     launch_script,
     load_policy,
     parse_duration_days,
     promote_session,
     resolve_root,
     retire_session,
+    reverify_run,
     run_commands,
     run_details,
     run_summary,
@@ -144,12 +153,14 @@ def test_run_details_shape(root: Path) -> None:
                 "message": "returned True",
                 "observed": None,
                 "expected": None,
+                "pass_no": 1,
             }
         ]
         (artifact,) = details["artifacts"]
         assert artifact["role"] == "terminal"
         assert artifact["bytes_available"] is True
         assert details["history"][0]["to"] == "verified"
+        assert details["earlier_passes"] == []
 
         ws.artifacts.discard(artifact["hash"])
         assert run_details(ws, run.id)["artifacts"][0]["bytes_available"] is False
@@ -1033,8 +1044,10 @@ def test_dry_run_touches_no_store_and_removes_the_throwaway(
     assert report["reached_end"] is True
     assert report["traceback"] is None
     assert report["lammps"] == []
-    assert report["checks"] == [{"name": "sane", "passed": True, "message": "returned True"}]
-    assert "LAMMPS integrated no steps" in report["checks_note"]
+    assert report["checks"] == [
+        {"name": "sane", "passed": True, "message": "returned True", "reading": "passed"}
+    ]
+    assert report["from_run"] is None
     assert report["outputs"] == []
     assert "run_id" not in report
     (line,) = [ln for ln in report["output"].splitlines() if ln.startswith("workspace ")]
@@ -1099,3 +1112,188 @@ def test_launch_child_dry_run_returns_the_report_and_releases_the_reservation(
     with Workspace(root) as ws:
         assert ws.runs.list_runs() == []
         assert ws.runs.list_reservations() == []
+
+
+# -- re-verify and the dry run from a run --------------------------------------------
+
+# The task stands for an MD leg: it writes one line to calls.log each time it
+# executes, so a test can tell a replay (no line) from a computation.
+MD_SCRIPT = """\
+from pathlib import Path
+from foundation import check, task
+
+CALLS = Path(__file__).with_name("calls.log")
+
+@task
+def simulate(script):
+    with CALLS.open("a") as handle:
+        handle.write("ran\\n")
+    return {{"rows": [{{"Temp": 300.0}}, {{"Temp": 302.0}}], "steps": 1000}}
+
+result = simulate({lammps_input!r})
+
+@check
+def thermostat_held():
+    rows = result["rows"]
+    return abs(rows[-1]["Temp"] - rows[0]["Temp"]) < {tolerance}
+"""
+
+
+def _md(tmp_path: Path, name: str, *, tolerance: float, lammps_input: str = "run 1000") -> Path:
+    return _write(
+        tmp_path, name, MD_SCRIPT.format(tolerance=tolerance, lammps_input=lammps_input)
+    )
+
+
+def _quarantined_by_a_wrong_check(root: Path, tmp_path: Path) -> str:
+    """A run whose drift of 2 K failed a 1 K gate: the physics is fine, the gate is not."""
+    launched = launch_script(root, _md(tmp_path, "md.py", tolerance=1.0))
+    assert (launched["state"], launched["checks_passed"]) == ("quarantined", 0)
+    return str(launched["run_id"])
+
+
+def test_reverify_verifies_a_run_quarantined_by_a_wrong_check(
+    root: Path, tmp_path: Path
+) -> None:
+    run_id = _quarantined_by_a_wrong_check(root, tmp_path)
+    before = _store_counts(root)[0]
+    with Workspace(root) as ws:
+        (first,) = ws.runs.list_check_results(run_id)
+        assert first.evidence is not None and "< 1.0" in first.evidence["source"]
+        answer = reverify_run(ws, run_id, _md(tmp_path, "md_fixed.py", tolerance=5.0))
+        assert answer["state"] == "verified"
+        assert (answer["pass_no"], answer["checks_passed"], answer["checks_total"]) == (2, 1, 1)
+        assert answer["earlier_passes"] == [{"pass_no": 1, "passed": 0, "total": 1}]
+        assert answer["tasks_replayed"] == 1
+        assert answer["script"] == "reverify-2-md_fixed.py"
+        assert ws.runs.get(run_id).state.value == "verified"
+        assert [c.pass_no for c in ws.runs.list_check_results(run_id, all_passes=True)] == [1, 2]
+        assert ws.runs.history(run_id)[-1].actor == "reverify"
+        assert ws.runs.get_artifact(run_id, "reverify-2-md_fixed.py") is not None
+        details = run_details(ws, run_id)
+        assert details["earlier_passes"] == [{"pass_no": 1, "passed": 0, "total": 1}]
+        assert details["checks"][0]["pass_no"] == 2
+    # No new run record, and the MD leg ran once: at the launch.
+    assert _store_counts(root)[0] == before
+    assert (tmp_path / "calls.log").read_text() == "ran\n"
+
+
+def test_reverify_refuses_a_changed_lammps_input_and_names_the_task(
+    root: Path, tmp_path: Path
+) -> None:
+    run_id = _quarantined_by_a_wrong_check(root, tmp_path)
+    changed = _md(tmp_path, "md_longer.py", tolerance=5.0, lammps_input="run 2000")
+    with Workspace(root) as ws:
+        with pytest.raises(ReplayError, match=r"task simulate \(call 1\) differs") as caught:
+            reverify_run(ws, run_id, changed)
+        assert "its input script changed" in str(caught.value)
+        assert ws.runs.get(run_id).state.value == "quarantined"
+        assert len(ws.runs.list_check_results(run_id, all_passes=True)) == 1
+    assert (tmp_path / "calls.log").read_text() == "ran\n"
+
+
+def test_reverify_refuses_a_run_that_is_not_quarantined(root: Path, tmp_path: Path) -> None:
+    launched = launch_script(root, _md(tmp_path, "md.py", tolerance=5.0))
+    with Workspace(root) as ws, pytest.raises(RunStateError, match="re-verify"):
+        reverify_run(ws, launched["run_id"], tmp_path / "md.py")
+
+
+# A check with a shape bug: the two-row table leaves a zero denominator.
+SHAPE_BUG_SCRIPT = """\
+from pathlib import Path
+from foundation import check, task
+
+CALLS = Path(__file__).with_name("calls.log")
+
+@task
+def simulate(script):
+    with CALLS.open("a") as handle:
+        handle.write("ran\\n")
+    return {"rows": [{"Temp": 300.0}, {"Temp": 302.0}], "steps": 1000}
+
+result = simulate("run 1000")
+
+@check
+def per_interior_row():
+    return result["steps"] / (len(result["rows"]) - 2) > 0
+
+@check
+def thermostat_held():
+    return abs(result["rows"][-1]["Temp"] - result["rows"][0]["Temp"]) < 5.0
+"""
+
+
+def test_dry_run_from_run_executes_the_checks_on_the_cached_result(
+    root: Path, tmp_path: Path
+) -> None:
+    run_id = _quarantined_by_a_wrong_check(root, tmp_path)
+    before = _store_counts(root)
+    script = _write(tmp_path, "md_checks.py", SHAPE_BUG_SCRIPT)
+    report = launch_script(root, script, dry_run=True, from_run=run_id[:8])
+    assert report["from_run"] == run_id
+    assert report["reached_end"] is True
+    by_name = {check["name"]: check for check in report["checks"]}
+    raised = by_name["per_interior_row"]
+    assert raised["reading"] == "check raised ZeroDivisionError: division by zero"
+    assert by_name["thermostat_held"]["reading"] == f"passed on the cached result of run {run_id}"
+    assert _store_counts(root) == before
+    assert (tmp_path / "calls.log").read_text() == "ran\n"
+
+
+def test_dry_run_from_run_refuses_a_task_the_run_has_no_result_for(
+    root: Path, tmp_path: Path
+) -> None:
+    run_id = _quarantined_by_a_wrong_check(root, tmp_path)
+    extended = SHAPE_BUG_SCRIPT + "\n@task\ndef analyse(x):\n    return x\n\nanalyse(1)\n"
+    script = _write(tmp_path, "md_more.py", extended)
+    with pytest.raises(ReplayError, match=r"has no result for task analyse \(call 1\)"):
+        launch_script(root, script, dry_run=True, from_run=run_id)
+    with pytest.raises(FoundationError, match="pass it with dry_run"):
+        launch_script(root, script, from_run=run_id)
+
+
+# A task named run_lammps stands for a rehearsed LAMMPS call: its result is empty.
+EMPTY_REHEARSAL_SCRIPT = """\
+from foundation import check, task
+
+@task(name="run_lammps")
+def rehearse(label="md"):
+    return {"rows": [], "steps": 0}
+
+result = rehearse()
+
+@check
+def mean_temperature():
+    return sum(r["Temp"] for r in result["rows"]) / len(result["rows"]) > 0
+
+@check
+def ran_some_steps():
+    return result["steps"] > 0
+
+@check
+def not_negative():
+    return result["steps"] >= 0
+"""
+
+
+def test_a_dry_run_reads_each_check_honestly(root: Path, tmp_path: Path) -> None:
+    """A check that raised is a bug in the check, never an expected failure;
+    a check that passed on the empty result is not evidence."""
+    report = launch_script(
+        root, _write(tmp_path, "rehearse.py", EMPTY_REHEARSAL_SCRIPT), dry_run=True
+    )
+    readings = {check["name"]: check["reading"] for check in report["checks"]}
+    assert readings == {
+        "mean_temperature": "check raised ZeroDivisionError: division by zero",
+        "ran_some_steps": "expected in a dry run: LAMMPS integrated no steps",
+        "not_negative": "passed on no data; not evidence",
+    }
+    raised, failed, _ = report["checks"]
+    assert raised["evidence"]["keys"] == {"result": ["rows", "steps"]}
+    assert raised["evidence"]["line"].startswith("rehearse.py:11: return sum(")
+    assert "evidence" not in failed
+    # A check that raised is a finding; one that failed on no data is not.
+    assert dry_run_clean(report) is False
+    report["checks"] = [failed]
+    assert dry_run_clean(report) is True
+

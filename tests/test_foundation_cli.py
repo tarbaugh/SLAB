@@ -918,7 +918,9 @@ def test_run_dry_run_prints_the_report_and_touches_no_store(root: Path, tmp_path
     assert "dry run:\n" in result.output
     report = _report(result.output)
     assert report["reached_end"] is True and report["lammps"] == []
-    assert report["checks"] == [{"name": "sane", "passed": True, "message": "returned True"}]
+    assert report["checks"] == [
+        {"name": "sane", "passed": True, "message": "returned True", "reading": "passed"}
+    ]
     assert not root.exists()
 
 

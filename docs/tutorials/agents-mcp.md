@@ -25,14 +25,15 @@ The workspace is resolved exactly as for the CLI: `-w/--workspace` flag > `$SLAB
 
 ## The toolbox
 
-Twenty-five tools, each a thin wrapper over the operations layer, and three more on a cluster:
+Twenty-six tools, each a thin wrapper over the operations layer, and three more on a cluster:
 
 | Tool | What it does |
 | --- | --- |
-| `launch_workflow` | Execute a plain-Python workflow script in a fresh traced run that carries this server's session id. `ntasks`, `threads`, and `gpus` size the run. The server reserves the slice, the run takes it as an affinity mask plus `CUDA_VISIBLE_DEVICES`, and a slice that does not fit what is free is refused with the free amounts. `dry_run=True` rehearses the script in a throwaway workspace with LAMMPS set up and no step integrated; a real launch of a script text never dry-run in the session carries a `warning` field. |
+| `launch_workflow` | Execute a plain-Python workflow script in a fresh traced run that carries this server's session id. `ntasks`, `threads`, and `gpus` size the run. The server reserves the slice, the run takes it as an affinity mask plus `CUDA_VISIBLE_DEVICES`, and a slice that does not fit what is free is refused with the free amounts. `dry_run=True` rehearses the script in a throwaway workspace with LAMMPS set up and no step integrated, and gives each check a `reading` of what its outcome is worth; with `from_run`, every task call takes that run's cached result, so the checks run on real data. A real launch of a script text never dry-run in the session carries a `warning` field. |
+| `reverify_run` | Run a script's checks again on a quarantined run's stored results. No engine starts and no new run is recorded; the checks become a new verification pass on the run, which moves to verified when all pass. A task whose inputs changed is refused, naming the task. |
 | `wait_for_run` | Block until a run finishes or the timeout passes. Takes an id, a prefix, or a run name. Without one, it returns when the first running run of this session finishes, names it in `run`, and lists the rest under `running`; `all=true` waits until none is running. `timeout_s` is 900 by default and capped at 21600 (6 hours), and `capped` says when the cap applied. An MCP client with its own request timeout ends a long call before the server does, so set the client timeout above the wait. A `still_running` answer carries `note_running`, which says that waiting again is the right call, and each entry carries `advance`: the time since the run started and the LAMMPS step against the end of the current `run`. A run whose recorded process on this host is gone is marked failed and answered at once with outcome `process_gone`. |
 | `list_runs` | Runs newest first, filterable by lifecycle `state`, execution `status`, and the `session` that created them. Marks failed every running run whose recorded process on this host is gone before it lists. |
-| `show_run` | Everything about one run: checks, tasks, artifacts, history, failure evidence. |
+| `show_run` | Everything about one run: checks, tasks, artifacts, history, failure evidence. A failed check that named no observed value carries `evidence`: its source, the keys of the dicts it read, and the line that raised. |
 | `promote_run` | Make a run permanent (`verified -> promoted`), with a recorded reason. |
 | `list_sessions` | The client sessions that created runs, with run counts and state breakdowns. |
 | `promote_session` | Promote every run one session created, reporting each outcome. |
@@ -179,7 +180,7 @@ print("scored:", record["passed"], record["engine_class"], record["engines"], re
 ```
 
 ```text
-25 tools: describe_task, expire_runs, free_resources, gc, get_material, launch_workflow, list_engines, list_memories, list_runs, list_sessions, list_skills, list_tasks, notebook, plan, promote_run, promote_session, query_materials, recall, remember, report_results, retire_session, search_materials, show_run, skill, wait_for_run
+26 tools: describe_task, expire_runs, free_resources, gc, get_material, launch_workflow, list_engines, list_memories, list_runs, list_sessions, list_skills, list_tasks, notebook, plan, promote_run, promote_session, query_materials, recall, remember, report_results, retire_session, reverify_run, search_materials, show_run, skill, wait_for_run
 skill: equation-of-state files: ['SKILL.md', 'assets/eos_scan.py', 'scripts/fit_eos.py']
 verified 1/1 checks passed; a0 = 3.5907 Å
 reported for session mcp-demo -> mcp-demo.jsonl

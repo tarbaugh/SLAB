@@ -319,6 +319,266 @@ with more steps or a tighter optimizer, without re-reading the workflow.
     [expires with the run](lifecycle-and-retention.md). Nothing accumulates
     forever unless you promote it.
 
+## A check failed on good physics
+
+A check can be wrong while the physics is right. A tolerance can be too
+tight, a key name can be wrong, or a denominator can be zero on a short
+table. The run then stays quarantined, but its results are correct. Do
+not relaunch it. Fix the check, rehearse the fix on the run's cached
+results, and re-verify the run.
+
+The script below runs an NVT leg of solid argon. Its check compares the
+last thermo row with the first against 5 K. That gate is wrong, because
+`velocity create` sets the first row, and the temperature of 108 atoms
+fluctuates by more than 5 K about the setpoint.
+
+<!-- no-verify -->
+```python
+from ase.build import bulk
+
+from foundation import check
+from foundation.tasks import run_lammps
+
+atoms = bulk("Ar", "fcc", a=5.26, cubic=True) * (3, 3, 3)
+script = """\
+units metal
+atom_style atomic
+boundary p p p
+read_data structure.data
+pair_style lj/cut 8.5
+pair_coeff 1 1 0.0104 3.40
+velocity all create 300.0 4928459 mom yes rot yes dist gaussian
+timestep 0.002
+fix integrate all nvt temp 300.0 300.0 0.2
+thermo 50
+thermo_style custom step temp pe ke etotal press vol
+thermo_modify line yaml
+run 5000
+"""
+result, info = run_lammps(script, atoms=atoms, label="ar")
+table = result["tables"][-1]
+
+
+@check
+def the_temperature_held():
+    return abs(table["last"]["Temp"] - table["first"]["Temp"]) < 5.0
+```
+
+Executed for real, on a laptop, against a LAMMPS build from 22 Jul 2025:
+
+<!-- no-verify -->
+```text
+$ slab run md_drift.py
+run 01m2gewkw90b6jvkvydk58dj74  md_drift  state=quarantined status=completed checks=0/1 tasks=1
+```
+
+The check returned a bare `False`, so its record holds no observed
+value. The record carries evidence instead:
+
+- the check's source, at most 40 lines;
+- the top-level keys of each dict the check reads by name;
+- for a check that raised, the exception and the line that raised it.
+
+`slab show` prints the evidence under the check:
+
+<!-- no-verify -->
+```text
+$ slab show 01m2gew
+run 01m2gewkw90b6jvkvydk58dj74  md_drift
+  state:   quarantined    status: completed
+  created: 2026-09-14T17:19:27.625586+00:00
+  checks:  0/1 passed
+    [x] the_temperature_held: returned False
+        keys of table: columns, first, last, n_rows, loop, tail
+        source:
+          @check
+          def the_temperature_held():
+              return abs(table["last"]["Temp"] - table["first"]["Temp"]) < 5.0
+  tasks:
+    1. run_lammps  completed  0.21s
+  artifacts:
+    md_drift.py  input  705B  bytes  124162050842
+    ar.in  intermediate  337B  bytes  e3a110597f92
+    ar.log  intermediate  14190B  bytes  3dda24727933
+    ar-thermo.json  intermediate  15204B  bytes  10af76b77b19
+    ar-averages.json  intermediate  2B  bytes  44136fa355b3
+    ar-structure.data  intermediate  9174B  bytes  65f2fa9dc231
+    ar.screen  intermediate  13947B  bytes  34ad1d8802d9
+```
+
+A check that returns `(passed, observed, expected)` needs no evidence,
+because its record states the value it judged. Write the fixed check
+that way. It judges the tail mean against the setpoint:
+
+<!-- no-verify -->
+```python
+@check
+def the_temperature_held():
+    mean = table["tail"]["mean"]["Temp"]
+    return abs(mean - 300.0) < 15.0, round(mean, 1), "300 +/- 15 K"
+```
+
+### Rehearse the fix on the cached result
+
+A zero-step dry run cannot test a check on real data, because each of
+its tables holds one row. `slab run --dry-run --from-run <run>` answers
+every task call from the named run's cached result instead of running
+LAMMPS. So the Python after each call and every check run on the real
+result, and no engine starts:
+
+<!-- no-verify -->
+```text
+$ slab run --dry-run --from-run 01m2gew md_drift_fixed.py
+dry run:
+{
+  "dry_run": true,
+  "from_run": "01m2gewkw90b6jvkvydk58dj74",
+  "reached_end": true,
+  "traceback": null,
+  "lammps": [
+    {
+      "label": "ar",
+      "outcome": "replayed from run 01m2gewkw90b6jvkvydk58dj74"
+    }
+  ],
+  "checks": [
+    {
+      "name": "the_temperature_held",
+      "passed": true,
+      "message": "returned True; observed 301.8, expected '300 +/- 15 K'",
+      "reading": "passed on the cached result of run 01m2gewkw90b6jvkvydk58dj74"
+    }
+  ],
+  "outputs": []
+}
+```
+
+A shape bug shows the same way, before any compute. This version of the
+check reads a `rows` key, which a table does not have:
+
+<!-- no-verify -->
+```python
+@check
+def the_temperature_held():
+    temps = [row["Temp"] for row in table["rows"][len(table["rows"]) // 2 :]]
+    mean = sum(temps) / len(temps)
+    return abs(mean - 300.0) < 15.0, round(mean, 1), "300 +/- 15 K"
+```
+
+<!-- no-verify -->
+```text
+$ slab run --dry-run --from-run 01m2gew md_drift_rows.py
+dry run:
+{
+  "dry_run": true,
+  "from_run": "01m2gewkw90b6jvkvydk58dj74",
+  "reached_end": true,
+  "traceback": null,
+  "lammps": [
+    {
+      "label": "ar",
+      "outcome": "replayed from run 01m2gewkw90b6jvkvydk58dj74"
+    }
+  ],
+  "checks": [
+    {
+      "name": "the_temperature_held",
+      "passed": false,
+      "message": "check raised KeyError: 'rows'",
+      "reading": "check raised KeyError: 'rows'",
+      "evidence": {
+        "line": "md_drift_rows.py:28: temps = [row[\"Temp\"] for row in table[\"rows\"][len(table[\"rows\"]) // 2 :]]",
+        "keys": {
+          "table": [
+            "columns",
+            "first",
+            "last",
+            "loop",
+            "n_rows",
+            "tail"
+          ]
+        }
+      }
+    }
+  ],
+  "outputs": []
+}
+```
+
+A check that raised is a bug in the check, whatever the data was, so
+its reading is the exception and the command exits 1. The evidence
+names the line that raised and the keys the table holds. A named run
+that has no result for a task call refuses the rehearsal and names the
+task.
+
+### Re-verify the run
+
+`slab runs reverify <run> <script>` runs the script's checks on the
+run's stored results, the same way. It records the outcome as a new
+verification pass on the same run, and the run moves to verified when
+every check of the pass passes. No engine starts, and no new run is
+recorded:
+
+<!-- no-verify -->
+```text
+$ slab runs reverify 01m2gew md_drift_fixed.py
+run 01m2gewkw90b6jvkvydk58dj74: pass 2 verified, 1/1 checks passed, 1 task result(s) replayed
+earlier: pass 1 0/1
+  the_temperature_held passed: returned True; observed 301.8, expected '300 +/- 15 K'
+```
+
+The earlier pass stays in the store. `slab show` prints the latest
+pass, a tally of each earlier pass, and the transition by `reverify`.
+The run keeps the fixed script as `reverify-2-md_drift_fixed.py`:
+
+<!-- no-verify -->
+```text
+$ slab show 01m2gew
+run 01m2gewkw90b6jvkvydk58dj74  md_drift
+  state:   verified    status: completed
+  created: 2026-09-14T17:19:27.625586+00:00
+  checks:  1/1 passed (pass 2)
+    [+] the_temperature_held: returned True; observed 301.8, expected '300 +/- 15 K'
+    earlier pass 1: 0/1
+  tasks:
+    1. run_lammps  completed  0.21s
+  artifacts:
+    md_drift.py  input  705B  bytes  124162050842
+    ar.in  intermediate  337B  bytes  e3a110597f92
+    ar.log  intermediate  14190B  bytes  3dda24727933
+    ar-thermo.json  intermediate  15204B  bytes  10af76b77b19
+    ar-averages.json  intermediate  2B  bytes  44136fa355b3
+    ar-structure.data  intermediate  9174B  bytes  65f2fa9dc231
+    ar.screen  intermediate  13947B  bytes  34ad1d8802d9
+    reverify-2-md_drift_fixed.py  input  745B  bytes  826fa96063bd
+  history:
+    quarantined -> verified  by reverify: pass 2: 1/1 assertions passed
+```
+
+Change only the checks. A re-verify answers each task call from the
+run's own results, so a task whose inputs changed has no result to
+take, and the verb refuses and names the task. Here the fixed script
+also asks for 10000 steps instead of 5000:
+
+<!-- no-verify -->
+```text
+$ slab runs reverify 01m2gew md_drift_longer.py
+error: task run_lammps 'ar' (call 1) differs from run 01m2gewkw90b6jvkvydk58dj74's: its input script changed; a replay answers every task call from the run's own results and starts no engine; relaunch the script to compute the changed task
+```
+
+A re-verify takes a quarantined run whose status is completed. A
+verified run needs no second pass, and a failed run has no complete
+result, so relaunch it instead. Its finished tasks cache-hit.
+
+The same operations exist on every surface:
+
+| Surface | Re-verify | Rehearse on a run's results |
+| --- | --- | --- |
+| CLI | `slab runs reverify <run> <script>` | `slab run --dry-run --from-run <run> <script>` |
+| Mason | the `reverify_run` tool | `launch_workflow` with `dry_run=true` and `from_run` |
+| MCP | the `reverify_run` tool | `launch_workflow` with `dry_run=True` and `from_run` |
+| Python | `foundation._ops.reverify_run(ws, run_id, script)` | `launch_script(root, script, dry_run=True, from_run=run_id)` |
+
 ## A run stuck at running
 
 A process that dies without a chance to record anything, under a SIGKILL,
@@ -445,8 +705,9 @@ run 01m0m5gza60x903wjk1dpkg1g4  cu-relax
 ```
 
 `slab show <id> --json` emits the same details in machine-readable form,
-with `failure` keys on the run and on each task, and `observed` and
-`expected` on each check. Agents get identical structures without the CLI,
+with `failure` keys on the run and on each task, `observed` and
+`expected` on each check, `evidence` on a failed check that named no
+observed value, and `earlier_passes` for a re-verified run. Agents get identical structures without the CLI,
 because the MCP `show_run` tool returns this JSON, and `launch_workflow`
 returns the `failure` record directly in its result when a launched script
 fails. See [Agents over MCP](agents-mcp.md). The philosophy behind the whole
