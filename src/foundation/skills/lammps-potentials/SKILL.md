@@ -73,9 +73,13 @@ before any run that costs compute:
    about 20 % of the element's cohesive energy (W: -8.9 eV/atom, Cu:
    -3.5 eV/atom, Al: -3.4 eV/atom). A positive value or a value of
    thousands of eV means a misread file.
-3. Run 500 steps of NVT at 300 K on a 3x3x3 supercell with a 1 fs
-   timestep. The temperature must stay near 300 K and the energy must
-   not drift by more than a few meV/atom.
+3. On a 3x3x3 supercell with a 1 fs timestep, start the velocities at
+   600 K and run 2000 steps of NVE. The temperature must settle near
+   300 K, because half the kinetic energy of a perfect crystal moves
+   into the potential energy. The means of `etotal` over the first and
+   the last 1000 steps must agree within a few meV/atom. Under NVT,
+   `etotal` is not conserved, so check `econserve` there instead
+   (lammps-scripting skill, section 8), and never `etotal`.
 
 Record the smoke test's log as an artifact of the run that uses the
 potential, and name the potential file and its `pair_style` in the run's
