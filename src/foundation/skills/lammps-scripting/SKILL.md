@@ -116,12 +116,12 @@ to be remembered or guessed:
 ```python
 {'label': 'ar-nvt',
  'thermo': {'Step': 2000,
-            'Temp': 287.34524,
-            'PotEng': -5.2415743,
-            'KinEng': 3.9742248,
-            'TotEng': -1.2673495,
-            'Press': 7799.2977,
-            'Volume': 3929.3526},
+            'Temp': 287.345244092785,
+            'PotEng': -5.24157434830304,
+            'KinEng': 3.97422480706483,
+            'TotEng': -1.26734954123821,
+            'Press': 7799.29773036118,
+            'Volume': 3929.352552},
  'tables': [{'columns': ['Step',
                          'Temp',
                          'PotEng',
@@ -130,39 +130,41 @@ to be remembered or guessed:
                          'Press',
                          'Volume'],
              'first': {'Step': 0,
-                       'Temp': 300,
-                       'PotEng': -8.3818426,
-                       'KinEng': 4.1492507,
-                       'TotEng': -4.2325919,
-                       'Press': 1276.3849,
-                       'Volume': 3929.3526},
+                       'Temp': 300.0,
+                       'PotEng': -8.38184257086567,
+                       'KinEng': 4.1492506545,
+                       'TotEng': -4.23259191636567,
+                       'Press': 1276.38487889604,
+                       'Volume': 3929.352552},
              'last': {'Step': 2000,
-                      'Temp': 287.34524,
-                      'PotEng': -5.2415743,
-                      'KinEng': 3.9742248,
-                      'TotEng': -1.2673495,
-                      'Press': 7799.2977,
-                      'Volume': 3929.3526},
+                      'Temp': 287.345244092785,
+                      'PotEng': -5.24157434830304,
+                      'KinEng': 3.97422480706483,
+                      'TotEng': -1.26734954123821,
+                      'Press': 7799.29773036118,
+                      'Volume': 3929.352552},
              'n_rows': 21,
-             'loop': {'seconds': 0.0471725,
+             'loop': {'seconds': 0.0508606,
                       'procs': 1,
                       'steps': 2000,
                       'atoms': 108},
              'tail': {'n_rows': 11,
                       'mean': {'Step': 1500.0,
-                               'Temp': 303.1883590909091,
-                               'PotEng': -4.8320841727272725,
-                               'KinEng': 4.193348318181818,
-                               'TotEng': -0.6387358388181817,
-                               'Press': 8675.960354545454,
-                               'Volume': 3929.3525999999997},
+                               'Temp': 303.18835919711404,
+                               'PotEng': -4.832084171690268,
+                               'KinEng': 4.193348326118022,
+                               'TotEng': -0.6387358455722469,
+                               'Press': 8675.960361582156,
+                               'Volume': 3929.3525519999994},
                       'std': {'Step': 316.22776601683796,
-                              'Temp': 17.687067925615477,
-                              'PotEng': 0.26138224059907544,
-                              'KinEng': 0.2446269188014934,
-                              'TotEng': 0.3973099484859172,
-                              'Press': 540.569720729633,
-                              'Volume': 4.547473508864641e-13}}}],
+                              'Temp': 17.687067018341363,
+                              'PotEng': 0.2613822502436971,
+                              'KinEng': 0.2446269146734603,
+                              'TotEng': 0.3973099564860584,
+                              'Press': 540.5697092554622,
+                              'Volume': 4.547473508864641e-13}},
+             'series': 'series(result, 0)',
+             'minimize': False}],
  'averages': {'ar-nvt-avg.dat': {'columns': ['TimeStep',
                                              'c_thermo_temp',
                                              'c_thermo_press'],
@@ -180,14 +182,15 @@ to be remembered or guessed:
                                                    'c_thermo_press': 8786.126999999999},
                                           'std': {'TimeStep': 287.22813232690146,
                                                   'c_thermo_temp': 19.127423411426857,
-                                                  'c_thermo_press': 414.93737997558117}}}},
+                                                  'c_thermo_press': 414.93737997558117}},
+                                 'series': "series(result, 'ar-nvt-avg.dat')"}},
  'steps': 2000,
- 'seconds': 0.0471725,
+ 'seconds': 0.0508606,
  'atoms': 108,
- 'rate': {'steps_per_s': 42397.58333774975,
-          'atom_steps_per_s': 4578939.000476973},
+ 'rate': {'steps_per_s': 39323.16960476282,
+          'atom_steps_per_s': 4246902.3173143845},
  'wall_time': '0:00:00',
- 'artifacts': {'thermo': '19cdefe1a3645216199442cb8e2dcf5b5004fb694261c9c76ba1d7fac4de7198',
+ 'artifacts': {'thermo': 'ac53367275c2cca4f336493f03ae8b4dba88d4a95fdfbf713ecc5bc74ba9af6f',
                'averages': 'a2def63b38479acf9e5230b36857ab7cdb8af641698d1e0e2df7e801c517cbba'}}
 ```
 
@@ -195,15 +198,28 @@ to be remembered or guessed:
   lines; `wall_time` is LAMMPS's own text, for the report, never for
   arithmetic. `n_rows` is a count; the rows themselves are not in
   `result`.
-- `result["averages"]` holds every `fix ave/time` file the script wrote,
-  parsed, keyed by basename, in the same shape as a thermo table, with
-  `loop` None. The full parse is the `{label}-averages.json` artifact.
+- `result["averages"]` holds a summary of every `fix ave/time` file the
+  script wrote, keyed by basename, in the same shape as a thermo table,
+  with `loop` None. The file's rows come back through
+  `series(result, "<file>")`; `result["averages"]` holds only its
+  summary. The full parse is the `{label}-averages.json` artifact.
+- Every entry of `result["tables"]` and `result["averages"]` is a
+  summary. Its `series` key is the call that reads its rows. Reading
+  `rows`, `data`, or `values` from it raises a `KeyError` that names
+  that call, so a check never judges an empty list by mistake.
+- `minimize` is True on a table that a `minimize` command printed. Its
+  rows are minimizer iterations, and `result["steps"]` counts those
+  iterations with the time steps.
 - `series(result, 0)` or `series(result, "ar-nvt-avg.dat")` from
   `foundation.tasks` gives the full rows of a thermo table by index or
   of an averages file by basename, one dict per row keyed by column,
   read from the parsed artifacts (a cache hit still resolves them). It
   is the one way to a time series. Never write your own parser for a
   log, a `-thermo.json`, or a `.dat` file.
+- `series(result, "production")` gives the production table. It takes
+  the table the last `run` printed and returns the longest table, never
+  a minimize one, whose Step range covers it. A trailing `run 0` after
+  the production run therefore resolves to the production run.
 - Every output the script names (`dump`, `write_data`, `write_restart`,
   `restart`, `fix ... file`) is a bare basename, so the run keeps it.
   A path with a directory component is refused before LAMMPS starts,
@@ -322,9 +338,9 @@ write_data w-nvt-final.data
   a frame every few hundred steps is usual.
 - `fix ID all ave/time Nevery Nrepeat Nfreq c_thermo_temp c_thermo_press
   file averages.dat` writes running averages of any compute or variable
-  to a file the task keeps, and the file comes back parsed under
-  `result["averages"]["averages.dat"]` with its full rows through
-  `series(result, "averages.dat")`. `compute msd all msd` and
+  to a file the task keeps. The file's rows come back through
+  `series(result, "averages.dat")`; `result["averages"]` holds only its
+  summary. `compute msd all msd` and
   `compute rdf all rdf 100` feed it: `c_msd[4]` is the total
   mean-squared displacement, and `c_rdf[*]` with `mode vector` writes
   the histogram, which comes back as the artifact only (`mode:
@@ -437,11 +453,20 @@ only the checks: a task whose inputs changed is refused, because it
 needs a new computation.
 
 A slope, a fit, or any number that needs more than the ends and the
-tail reads the rows through `series(result, -1)` for the last thermo
-table or `series(result, "msd.dat")` for an averages file, one dict per
-row keyed by column. Do not parse the log, the `-thermo.json`, or a
-`.dat` file yourself; a hand-written parser is what crashed the
-analysis of a finished MD leg in one real campaign.
+tail reads the rows through `series(result, "production")` for the
+production table or `series(result, "msd.dat")` for an averages file,
+one dict per row keyed by column. Do not parse the log, the
+`-thermo.json`, or a `.dat` file yourself; a hand-written parser is
+what crashed the analysis of a finished MD leg in one real campaign.
+Do not read rows from `result["averages"]`. It holds summaries only,
+and a check that did so once quarantined two three-hour runs.
+
+`series` returns every row. The summary's `tail` covers the last half
+of the rows, and at least one row. The slice is
+`rows[max(1, len(rows) // 2):]` when there is more than one row, so
+slice the rows that way to reproduce the tail.
+Prefer `"production"` to `-1` when the script minimizes first or ends
+with `run 0`, because each of those prints a table of its own.
 
 Then measure the equilibration from the full table:
 
@@ -477,6 +502,7 @@ and the run id. A number without a run id is a rumor.
 | `Illegal ... command` | syntax | read the context line the failure record carries; it is the command that died |
 | `WARNING: One or more atoms are time integrated more than once` | two integrators on one group | keep one |
 | `KeyError: 0` or `KeyError: 'rows'` on `result["tables"][i]` in your own script | `n_rows` is a count; the summary holds no rows | `series(result, i)` for the rows |
+| `KeyError: "rows live in the ...-averages.json artifact; call series(...)"` | the check read rows from a summary in `result["averages"]` | make the call the message names |
 | `TypeError: unsupported operand ... 'str'` on `result["wall_time"]` in your own script | `wall_time` is LAMMPS's text | `result["seconds"]` or `result["rate"]` for arithmetic |
 
 The failure record carries the `ERROR` line and the line before it,

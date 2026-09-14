@@ -462,7 +462,10 @@ def lammps_thermo(text: str) -> list[dict[str, Any]]:
     so a log that switches to YAML between two runs parses fully, and a
     YAML document is never read as a text table. The ``Loop time`` line
     that follows a table is attached to it as ``loop`` (seconds, procs,
-    steps, atoms). In a YAML table the step is an int and every other
+    steps, atoms). ``minimize`` is True for a table a ``minimize``
+    command printed, which LAMMPS marks with a ``Minimization stats:``
+    block after the loop line; its rows and its loop steps count
+    minimizer iterations, not time steps. In a YAML table the step is an int and every other
     value a float; in a text table integers stay integers (the step) and
     everything else is a float.
 
@@ -474,8 +477,8 @@ def lammps_thermo(text: str) -> list[dict[str, Any]]:
         >>> tables = lammps_thermo(log)
         >>> tables[0]["columns"], tables[0]["rows"][-1]
         (['Step', 'Temp', 'PotEng'], [100, 298.2, -3.49])
-        >>> tables[0]["loop"]
-        {'seconds': 0.5, 'procs': 1, 'steps': 100, 'atoms': 32}
+        >>> tables[0]["loop"], tables[0]["minimize"]
+        ({'seconds': 0.5, 'procs': 1, 'steps': 100, 'atoms': 32}, False)
         >>> lammps_thermo("no table here\\n")
         []
         >>> mixed = log + (
@@ -639,7 +642,7 @@ def _scan_thermo(text: str) -> list[_ThermoScan]:
         if line == _LMP_YAML_OPEN:
             document = []
         elif _LMP_THERMO_HEAD.match(line):
-            current = {"columns": stripped.split(), "rows": [], "loop": None}
+            current = {"columns": stripped.split(), "rows": [], "loop": None, "minimize": False}
         elif (m := _LMP_LOOP.match(line)) and tables and tables[-1][1]["loop"] is None:
             tables[-1][1]["loop"] = {
                 "seconds": float(m.group(1)),
@@ -647,6 +650,8 @@ def _scan_thermo(text: str) -> list[_ThermoScan]:
                 "steps": int(m.group(3)),
                 "atoms": int(m.group(4)),
             }
+        elif stripped == "Minimization stats:" and tables and tables[-1][1]["loop"] is not None:
+            tables[-1][1]["minimize"] = True
     close_document()
     if current is not None:
         tables.append(("text", current, texts))
@@ -670,7 +675,7 @@ def _yaml_table(lines: list[str]) -> dict[str, Any] | None:
         rows.append(
             [int(v) if name == "Step" else float(v) for name, v in zip(columns, row, strict=True)]
         )
-    return {"columns": columns, "rows": rows, "loop": None}
+    return {"columns": columns, "rows": rows, "loop": None, "minimize": False}
 
 
 def _number(token: str) -> int | float:

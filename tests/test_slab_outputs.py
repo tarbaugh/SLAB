@@ -255,6 +255,7 @@ def test_lammps_thermo_reads_a_minimize_yaml_log() -> None:
     (table,) = lammps_thermo(text)
     assert table["columns"] == ["Step", "Temp", "PotEng", "Press"]
     assert len(table["rows"]) == 2 and table["loop"]["steps"] == 1
+    assert table["minimize"] is True  # the Minimization stats block marks it
 
 
 def test_lammps_yaml_thermo_survives_an_unclosed_document_and_odd_values() -> None:
