@@ -660,8 +660,8 @@ def failure_evidence(
 def screen_tail(screen: str, limit: int = _EVIDENCE_LIMIT) -> list[str]:
     """The last *limit* non-empty lines of the screen, cut to fit a failure record.
 
-    A failure record clips its message at 2000 characters from the end,
-    so a long banner would push the cause out. Each line is cut at
+    A failure record keeps the first 2000 characters of its message, so
+    the tail is budgeted to fit under the lines before it. Each line is cut at
     :data:`_TAIL_LINE_CHARS`, and the oldest lines are dropped until the
     tail fits in :data:`_TAIL_CHARS`, so the last line always survives.
 
@@ -769,10 +769,20 @@ def is_error_line(line: str) -> bool:
         True
         >>> is_error_line("[warn] Epoll MOD(1) on fd 14 failed. Old events were 6; ERROR")
         False
+        >>> is_error_line("Kokkos::OpenMP::initialize WARNING: OMP_PROC_BIND environment variable not set")
+        False
+        >>> is_error_line("# neigh_modify one 4000 avoids a Segmentation fault")
+        False
         >>> is_error_line("Step Temp PotEng")
         False
     """
     if line.startswith(_NOISE_PREFIXES):
+        return False
+    if line.startswith("#"):
+        # LAMMPS echoes the input to the log, comments included.
+        return False
+    if line.startswith("Kokkos::") and "WARNING" in line:
+        # Kokkos::OpenMP::initialize WARNING: OMP_PROC_BIND ... is advice.
         return False
     return line.startswith(_ERROR_PREFIXES) or any(part in line for part in _ERROR_FRAGMENTS)
 

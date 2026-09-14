@@ -230,7 +230,7 @@ some causes reach the screen alone. These lines count as error lines:
 | A line that | Comes from |
 |---|---|
 | starts with `ERROR` or `Last command:` | LAMMPS |
-| starts with `Kokkos::` or `Kokkos ERROR` | a Kokkos abort |
+| starts with `Kokkos::` without `WARNING`, or with `Kokkos ERROR` | a Kokkos abort |
 | starts with `terminate called` or `what():` | a C++ exception that ended the process |
 | contains `cudaError` or `CUDA error` | the CUDA runtime |
 | contains `error while loading shared libraries` | the dynamic loader |

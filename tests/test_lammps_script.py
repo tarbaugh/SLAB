@@ -322,8 +322,17 @@ def test_each_cause_is_an_error_line(line: str) -> None:
     assert failure_evidence("LAMMPS (22 Jul 2025)", f"banner\n{line}", exit_code=1)[-1] == line
 
 
-def test_epoll_noise_is_not_an_error_line() -> None:
-    noise = "[warn] Epoll MOD(1) on fd 14 failed. Old events were 6; read change was 0 (none)"
+@pytest.mark.parametrize(
+    "noise",
+    [
+        "[warn] Epoll MOD(1) on fd 14 failed. Old events were 6; read change was 0 (none)",
+        "Kokkos::OpenMP::initialize WARNING: OMP_PROC_BIND environment variable not set",
+        "Kokkos::OpenMP::initialize WARNING: You are likely oversubscribing your CPU cores.",
+        "# neigh_modify one 4000 avoids a Segmentation fault",
+    ],
+)
+def test_noise_is_not_an_error_line(noise: str) -> None:
+    """A Kokkos warning, an echoed comment, and the epoll complaint name no cause."""
     assert error_lines(f"banner\n{noise}") == ["banner", noise]
     assert failure_evidence("", f"banner\n{noise}", exit_code=1)[0] == "screen tail:"
 
