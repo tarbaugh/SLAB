@@ -359,7 +359,7 @@ def test_the_planner_spends_no_compute_before_the_critic_approves(tmp_path: Path
     first, second = _tool_results(client, "c_delegate")
     assert first.startswith("refused: the plan has not been approved by the critic")
     assert "review" in first
-    assert "a = 3.6 Å (run ab12cd)" in second and "[worker: finish" in second
+    assert "a = 3.6 Å (run ab12cd)" in second and "[worker-2: finish" in second
     # The worker ran only after the approval: its request is the fifth.
     assert "worker of a SLAB research group" in client.requests[4][0]["content"]
 

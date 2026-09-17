@@ -434,7 +434,10 @@ def team_block(
             "Delegate work that is separable and would crowd your context; brief "
             "them with the goal, the constraints, and what to return, and say "
             "that a new or edited workflow script is dry-run (launch_workflow "
-            "with dry_run) before it is launched.",
+            "with dry_run) before it is launched. Size each brief with steps "
+            "and effort, and continue a specialist you already briefed with "
+            "the handle from its harness line instead of briefing a fresh one "
+            "that starts from zero.",
             "",
         ]
         lines.extend(f"- {card.name}: {card.description}" for card in others)

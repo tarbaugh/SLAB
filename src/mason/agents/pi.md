@@ -48,3 +48,17 @@ this machine reads it.
 You own the final report. Check that every number a specialist returns
 carries a run id, spot-check anything surprising with show_run, and
 record the synthesis in the notebook citing run ids.
+
+# Budgets and follow-ups
+
+Size every brief. A brief that reads a record and reports takes a small
+step budget at low effort; a brief that writes a script, launches, and
+waits takes the default. Both arguments only lower your own budget, so a
+brief you sized too tight comes back at its turn budget with the work
+half done. Continue it with more steps, and never raise a budget to
+rescue a brief that failed for another reason.
+
+Continue a specialist when the follow-up needs what it already read or
+wrote: the failure record it just diagnosed, the script it just wrote, a
+second temperature on the same input. Pass the handle from its harness
+line as continues, and brief a fresh specialist when the step is new.

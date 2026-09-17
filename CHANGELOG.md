@@ -5,6 +5,25 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- A lead continues a specialist it already briefed, and sizes each brief.
+  `delegate` takes `continues`, the handle from an earlier report's
+  harness line, and gives that specialist another turn with its messages
+  intact, so the follow-up costs the reading once. The handle is the
+  agent name and the ordinal of the brief that made it, and a specialist
+  keeps one transcript across its turns, each marked with a `turn` event.
+  A continue rebuilds the specialist's system message first, so the
+  notebook the lead wrote between the briefs is in the prompt; after
+  `slab mason chat --resume` it replays the specialist's transcript
+  instead. An unknown handle, a handle of another agent, and a critic's
+  handle are refused, the first with the handles that exist. `delegate`
+  also takes `steps` and `effort`, the budget of one brief. Both only
+  lower the agent's own budget, a CLI flag outranks both with a harness
+  note, and the harness line says which budget stopped the turn, `turn
+  budget (8, set by the brief)` against `turn budget (60)`. `slab mason
+  report` gives a continued specialist one row with its turn count and
+  counts the briefs stopped at a budget the lead set. The `pi` and
+  `planner` cards gained the doctrine for both.
+
 - A cut reply keeps its design. When a reply is cut with no text and no
   call, the loop shows the model its reasoning for one call and asks for
   the design decisions in the notebook. The design call and the request

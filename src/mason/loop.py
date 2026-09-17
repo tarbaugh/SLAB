@@ -687,6 +687,11 @@ class Mason:
         depth: Delegation depth. At 0 the card's ``delegates`` flag can grant
             the ``delegate`` tool; below that it never does, and ``plan`` is
             withheld — the plan belongs to the turn owner.
+        resume_in_place: The replayed messages already sit in this session's
+            transcript, so they are not written into it again. A lead's
+            resume writes a new file and must copy them; a specialist a
+            lead continues after a resume writes on into its own file,
+            which would otherwise hold each message twice.
     """
 
     def __init__(
@@ -700,6 +705,7 @@ class Mason:
         roster: dict[str, AgentSpec] | None = None,
         depth: int = 0,
         expected_results: dict[str, str] | None = None,
+        resume_in_place: bool = False,
     ) -> None:
         self.session = session
         #: The result names the goal asks finish to carry, each with its
@@ -837,7 +843,10 @@ class Mason:
             # must not amputate everything before the previous resume.
             self.session.record({"type": "resume", "messages": len(resume_from)})
             for message in resume_from:
-                self._append(message)
+                if resume_in_place:
+                    self.messages.append(message)
+                else:
+                    self._append(message)
             self._unread_from = len(self.messages)
 
     def _apply_roster_override(self) -> None:
@@ -859,6 +868,29 @@ class Mason:
         session.agent = effective
         pinned = session.endpoint if session.endpoint_origin == "--endpoint" else None
         session.resolve_endpoint(pinned)
+
+    def refresh_system(self) -> None:
+        """Rebuild the system message so the next turn reads current state.
+
+        A specialist a lead continues has been idle while the lead worked:
+        the notebook has grown, the plan may have been rewritten, and the
+        free amounts have moved. The rebuild is the one compaction already
+        does, applied without folding anything, so the messages the turn
+        carries stay exactly as they were.
+        """
+        rebuilt = system_messages(
+            self.session,
+            self.spec,
+            self._catalog,
+            skills=self.skills,
+            team=self._team,
+            review=self._shows_review,
+            inherit=self._inherits,
+            absent_tools=self._absent_tools(),
+        )
+        self._unread_from += len(rebuilt) - 1
+        self.messages[:1] = rebuilt
+        self._last_prompt_tokens = None
 
     # -- the loop -------------------------------------------------------------
 

@@ -2646,7 +2646,7 @@ def test_a_delegates_memories_reach_the_lead(tmp_path: Path, memory_root: Path) 
         "evidence: none [unverified]"
     )
     assert lines[2:-1] == [""]  # the harness line follows, as for any report
-    assert lines[-1].startswith("[md-expert: finish after 3 step(s);")
+    assert lines[-1].startswith("[md-expert-1: finish after 3 step(s);")
     assert [e["name"] for e in session.memories_written] == [
         "newton-before-read-data", "masses-before-grace",
     ]

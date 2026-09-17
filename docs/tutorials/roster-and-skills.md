@@ -53,9 +53,9 @@ An unknown name fails and lists the roster.
 ## Delegation
 
 The PI has one tool the specialists lack: `delegate(agent, task,
-context?)`. It runs the named specialist's own tool loop against the
-shared workspace and returns the specialist's final report. The rules are
-code, not prompt text:
+context?, continues?, steps?, effort?)`. It runs the named specialist's
+own tool loop against the shared workspace and returns the specialist's
+final report. The rules are code, not prompt text:
 
 - Delegation goes one level down. A delegated agent never has the
   `delegate` tool, whatever its card says.
@@ -104,7 +104,7 @@ The secret word is "perovskite".
 ```
 
 The harness line is honest. When a specialist stops at its turn budget,
-an error streak, or a server failure, the PI reads `max_turns`,
+an error streak, or a server failure, the PI reads `turn budget`,
 `error_streak`, or `error` there, not a confident report. The PI card's
 doctrine is to read that line before trusting the text above it.
 
@@ -116,6 +116,60 @@ Delegation quality is the served model's quality. The capture above is
 explicit briefs; it also fails some attempts, so expect retries. Larger
 served models handle larger briefs. The single loop remains the default
 experience, and nothing requires you to delegate.
+
+### Continuing a specialist
+
+The harness line captured above was recorded before handles existed. A
+line today names the specialist by its handle, `analysis-expert-1`, and ends
+with `continue with continues="analysis-expert-1"`. The handle is the
+agent name and the ordinal of the brief that created it, and it is also
+the tail of the specialist's transcript name. Pass it back as `continues`
+to give that same specialist another turn.
+
+A continued specialist keeps the messages of its earlier turns, so it
+still holds the failure record it read, the script it wrote, and the run
+it launched. The lead pays for that reading once. Continue a specialist
+when the follow-up needs what it already read or wrote, and brief a fresh
+one when the step is new.
+
+- The handle is unique in the conversation. An unknown handle is refused
+  and the refusal lists the ones that exist.
+- The `agent` must match the handle. A critic is never continued, because
+  a review is a fresh reading of the text as it stands now.
+- Each turn rebuilds the specialist's system message, so a notebook entry
+  the lead wrote between the two briefs is in the second turn's prompt.
+- The specialist writes on into its own transcript, which marks each turn
+  with a `turn` event. The partial outcome and the memories-written list
+  under a report cover that turn alone.
+- The live specialists die with the process. After `slab mason chat
+  --resume`, a continue replays the specialist's transcript into a fresh
+  loop and records the resume in it. That reaches the specialists of the
+  conversation that was resumed, one hop back.
+
+### Sizing a brief
+
+`steps` is the model-call budget of one brief, and `effort` its reasoning
+dial. A brief that reads a record and reports needs few calls at low
+effort; a brief that writes a script, launches, and waits takes the
+agent's default. Both only lower what the agent already runs under:
+
+| Where the value comes from | Wins over |
+|---|---|
+| `[agent]` and `[agent.roster.<name>]` | nothing |
+| the CLI flags `--max-turns` and `--effort` | the config |
+| the brief's `steps` and `effort` | the config, and only downward |
+
+`steps` above the agent's cap is refused naming the cap, and `effort`
+above the agent's effort is refused the same way (the ladder is none,
+low, medium, high, xhigh, max, and an unset effort counts as xhigh). A
+flag outranks the brief: when `--max-turns` or `--effort` is set, the
+flag's value stands and the report carries one harness note saying the
+brief's was ignored.
+
+The specialist's own budget hint reads `model call 1 of 8` under a brief
+of eight steps, and the harness line says which budget stopped it: `turn
+budget (8, set by the brief)` against `turn budget (60)`. The first is a
+brief to continue with more steps. The second is a task to cut down.
 
 ## A critic before compute
 

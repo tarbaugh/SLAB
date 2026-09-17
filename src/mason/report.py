@@ -70,6 +70,9 @@ def _tally(transcript: Path) -> dict[str, Any]:
     steps = prompt_tokens = completion_tokens = cached_prompt_tokens = 0
     peak_prompt_tokens = 0
     malformed = compactions = clearings = resumes = refusals = errored = 0
+    # A specialist's transcript marks each turn its lead gave it; a lead's
+    # transcript records each brief and the budget the brief set.
+    turns = briefs = brief_budget_stops = 0
     started: str | None = None
     ended: str | None = None
     tools: Counter[str] = Counter()
@@ -157,6 +160,12 @@ def _tally(transcript: Path) -> dict[str, Any]:
             retire = {k: v for k, v in event.items() if k not in ("at", "type")}
         elif kind == "command":
             commands[str(event.get("kind") or "?")] += 1
+        elif kind == "turn":
+            turns += 1
+        elif kind == "delegate":
+            briefs += 1
+            if event.get("stop") == "max_turns" and event.get("steps_budget"):
+                brief_budget_stops += 1
 
     return {
         "model": header.get("model"),
@@ -187,6 +196,11 @@ def _tally(transcript: Path) -> dict[str, Any]:
         "warnings": warnings,
         "compactions": compactions,
         "resumes": resumes,
+        # A transcript written before turns were marked has none; it held
+        # exactly one turn, which is what a lead reading it should see.
+        "turns": turns or 1,
+        "briefs": briefs,
+        "brief_budget_stops": brief_budget_stops,
         "malformed_lines": malformed,
         "first_launch_step": first_launch_step,
         "finish": {
@@ -231,7 +245,9 @@ def summarize(
         delegations.append(
             {
                 "agent": _delegation_agent(transcript.stem, sibling),
+                "handle": sibling.stem.removeprefix(f"{transcript.stem}-"),
                 "transcript": str(sibling),
+                "turns": child["turns"],
                 "steps": child["steps"],
                 "prompt_tokens": child["prompt_tokens"],
                 "completion_tokens": child["completion_tokens"],

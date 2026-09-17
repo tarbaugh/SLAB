@@ -84,7 +84,8 @@ def test_the_report_reaches_the_pi_with_a_harness_footer(tmp_path: Path) -> None
     )
     content = str(tool_result["content"])
     assert "MSD says solid (run ab12cd)" in content
-    assert "[md-expert: finish after 1 step(s);" in content
+    assert "[md-expert-1: finish after 1 step(s);" in content
+    assert 'continue with continues="md-expert-1"' in content
     assert "transcript" in content
 
 
@@ -170,7 +171,7 @@ def test_a_child_killed_by_the_server_returns_a_result_with_its_steps(tmp_path: 
     text = str(tool_result["content"])
     assert text.startswith("stopped: the model server failed mid-turn after step 1")
     assert "the server went away" in text
-    assert "[md-expert: error after 1 step(s);" in text
+    assert "[md-expert-1: error after 1 step(s);" in text
 
 
 def test_unknown_and_self_targets_answer_with_the_team(tmp_path: Path) -> None:
@@ -386,7 +387,7 @@ def test_a_child_cut_at_its_ceiling_hands_back_its_partial_outcome(tmp_path: Pat
     assert "[truncated:" in handed
     assert "[partial outcome:" in handed
     assert f"files it wrote: {tmp_path / 'md.py'}" in handed
-    assert "[md-expert: answer after" in handed
+    assert "[md-expert-1: answer after" in handed
 
 
 def test_a_child_that_ends_whole_hands_back_no_partial_outcome(tmp_path: Path) -> None:
@@ -422,3 +423,373 @@ def test_a_brief_naming_a_cache_hit_file_is_sent_to_the_producer(tmp_path: Path)
         m for m in client.requests[-1] if m.get("tool_call_id") == "c_delegate"
     )["content"]
     assert f"[harness] brief: run:{hit}/averages.json rewritten to run:{producer}/" in footer
+
+
+# -- continuing a specialist ---------------------------------------------------
+
+
+def _delegate_results(client: FakeClient) -> list[str]:
+    """Every delegate result the lead saw this turn, in order.
+
+    Each request carries the whole conversation, so the last one that
+    holds any delegate result holds them all.
+    """
+    for request in reversed(client.requests):
+        results = [
+            str(m["content"])
+            for m in request
+            if m.get("role") == "tool" and m.get("tool_call_id") == "c_delegate"
+        ]
+        if results:
+            return results
+    return []
+
+
+def _continued_pair(tmp_path: Path, **agent: object) -> tuple[Mason, FakeClient]:
+    """One specialist briefed, then continued once on the same handle."""
+    session = _session(tmp_path, **agent)
+    client = FakeClient(
+        [
+            _call("delegate", agent="md-expert", task="read the failure record"),
+            _call("finish", report="the run died at step 40"),
+            _call(
+                "delegate",
+                agent="md-expert",
+                task="now fix the timestep and relaunch",
+                continues="md-expert-1",
+            ),
+            _call("finish", report="relaunched as run ef99"),
+            _text("md-expert relaunched it (run ef99)"),
+        ]
+    )
+    mason = Mason(session, client=client)
+    mason.run_turn("why did it die?")
+    return mason, client
+
+
+def test_a_continued_specialist_keeps_the_messages_of_its_first_turn(tmp_path: Path) -> None:
+    """The second brief lands in the same conversation: the specialist reads
+    its own first brief and its own first answer, so the lead pays for the
+    reading once."""
+    mason, client = _continued_pair(tmp_path)
+    first, second = client.requests[1], client.requests[3]
+    early = [m["content"] for m in first if m["role"] == "user"]
+    assert "read the failure record" in early
+    later = [m["content"] for m in second if m["role"] == "user"]
+    assert "read the failure record" in later
+    assert "now fix the timestep and relaunch" in later
+    assert len(second) > len(first)
+    # One specialist, one transcript: no second child was spawned.
+    stem = mason.session.transcript_path.stem
+    siblings = sorted(p.name for p in mason.session.sessions_dir.glob(f"{stem}-*.jsonl"))
+    assert siblings == [f"{stem}-md-expert-1.jsonl"]
+
+
+def test_the_footer_names_the_handle_that_continues_the_specialist(tmp_path: Path) -> None:
+    mason, client = _continued_pair(tmp_path)
+    handed = _delegate_results(client)
+    stem = mason.session.transcript_path.stem
+    for text in handed:
+        assert 'continue with continues="md-expert-1"' in text
+        assert f"transcript {stem}-md-expert-1.jsonl" in text
+    assert "[md-expert-1: finish after 1 step(s);" in handed[0]
+
+
+def test_each_turn_of_a_continued_specialist_is_marked_in_its_transcript(
+    tmp_path: Path,
+) -> None:
+    mason, _client = _continued_pair(tmp_path)
+    stem = mason.session.transcript_path.stem
+    child = mason.session.sessions_dir / f"{stem}-md-expert-1.jsonl"
+    turns = [
+        json.loads(line)
+        for line in child.read_text().splitlines()
+        if json.loads(line)["type"] == "turn"
+    ]
+    assert [event["n"] for event in turns] == [1, 2]
+    events = [json.loads(line) for line in mason.session.transcript_path.read_text().splitlines()]
+    briefs = [e for e in events if e["type"] == "delegate"]
+    assert [e["turn"] for e in briefs] == [1, 2]
+    assert "continues" not in briefs[0]
+    assert briefs[1]["continues"] == "md-expert-1"
+
+
+def test_a_continue_rebuilds_the_system_message_from_current_state(tmp_path: Path) -> None:
+    """The lead wrote the notebook between the two briefs; the specialist's
+    second turn reads the entry, because the system message is rebuilt."""
+    session = _session(tmp_path)
+    client = FakeClient(
+        [
+            _call("delegate", agent="md-expert", task="first"),
+            _call("finish", report="one"),
+            _call("notebook", entry="the timestep must be 0.5 fs for this potential"),
+            _call("delegate", agent="md-expert", task="second", continues="md-expert-1"),
+            _call("finish", report="two"),
+            _text("done"),
+        ]
+    )
+    Mason(session, client=client).run_turn("go")
+    first_system = str(client.requests[1][0]["content"])
+    second_system = str(client.requests[4][0]["content"])
+    assert "0.5 fs for this potential" not in first_system
+    assert "0.5 fs for this potential" in second_system
+
+
+def test_an_unknown_handle_is_refused_with_the_handles_that_exist(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    client = FakeClient(
+        [
+            _call("delegate", agent="md-expert", task="x", continues="md-expert-3"),
+            _call("delegate", agent="md-expert", task="x"),
+            _call("finish", report="done"),
+            _call("delegate", agent="md-expert", task="y", continues="md-expert-3"),
+            _text("ok"),
+        ]
+    )
+    Mason(session, client=client).run_turn("go")
+    refusals = _delegate_results(client)
+    assert refusals[0] == "no specialist md-expert-3 in this conversation; live: none"
+    assert refusals[2] == (
+        "no specialist md-expert-3 in this conversation; live: md-expert-1"
+    )
+
+
+def test_a_handle_of_another_agent_and_a_critics_handle_are_refused(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    session.sessions_dir.mkdir(parents=True, exist_ok=True)
+    stem = session.transcript_path.stem
+    (session.sessions_dir / f"{stem}-critic-1.jsonl").write_text("")
+    client = FakeClient(
+        [
+            _call("delegate", agent="md-expert", task="x"),
+            _call("finish", report="done"),
+            _call("delegate", agent="dft-expert", task="y", continues="md-expert-1"),
+            _call("delegate", agent="md-expert", task="z", continues="critic-1"),
+            _text("ok"),
+        ]
+    )
+    Mason(session, client=client).run_turn("go")
+    refusals = _delegate_results(client)
+    assert refusals[1].startswith("md-expert-1 is md-expert, not dft-expert;")
+    assert refusals[2].startswith("critic-1 is a critic, and a review is not continued;")
+
+
+def test_a_cut_turn_hands_back_only_what_that_turn_left_behind(tmp_path: Path) -> None:
+    """The partial outcome is sliced by turn: the second brief's report names
+    the file the second turn wrote, not the first turn's."""
+    session = _session(tmp_path)
+    cut = ChatReply(content="half a script", finish_reason="max_tokens", prompt_tokens=100)
+    client = FakeClient(
+        [
+            _call("delegate", agent="md-expert", task="write the first script"),
+            _call("write_file", path="one.py", content="print(1)\n"),
+            cut,
+            cut,
+            _call("delegate", agent="md-expert", task="and the second", continues="md-expert-1"),
+            _call("write_file", path="two.py", content="print(2)\n"),
+            cut,
+            cut,
+            _text("both cut"),
+        ]
+    )
+    Mason(session, client=client).run_turn("go")
+    handed = _delegate_results(client)
+    assert f"files it wrote: {tmp_path / 'one.py'}" in handed[0]
+    assert f"files it wrote: {tmp_path / 'two.py'}" in handed[1]
+    assert "one.py" not in handed[1]
+
+
+def test_a_continue_after_a_resume_replays_the_childs_transcript(tmp_path: Path) -> None:
+    """The lead's process is gone and its live children with it. The handle
+    still resolves: the specialist's own transcript is replayed, the resume
+    is recorded in it, and its earlier messages are in the next request."""
+    first = _session(tmp_path)
+    Mason(
+        first,
+        client=FakeClient(
+            [
+                _call("delegate", agent="md-expert", task="read the record"),
+                _call("finish", report="step 40"),
+                _text("ok"),
+            ]
+        ),
+    ).run_turn("go")
+    first.release_session_lock()
+    child_path = first.sessions_dir / f"{first.transcript_path.stem}-md-expert-1.jsonl"
+    assert child_path.is_file()
+
+    resumed = _session(tmp_path)
+    resumed.resume_from_transcript(first.transcript_path)
+    client = FakeClient(
+        [
+            _call("delegate", agent="md-expert", task="now relaunch", continues="md-expert-1"),
+            _call("finish", report="relaunched"),
+            _text("done"),
+        ]
+    )
+    replayed = resumed.load_messages(first.transcript_path)
+    Mason(resumed, client=client, resume_from=replayed).run_turn("carry on")
+    briefed = [m["content"] for m in client.requests[1] if m["role"] == "user"]
+    assert "read the record" in briefed
+    assert "now relaunch" in briefed
+    events = [json.loads(line) for line in child_path.read_text().splitlines()]
+    assert [e["type"] for e in events].count("resume") == 1
+    assert [e["n"] for e in events if e["type"] == "turn"] == [1, 2]
+    # The replayed messages were already in the file: they are not doubled.
+    assert len([e for e in events if e["type"] == "message"]) == len(
+        {json.dumps(e["message"], sort_keys=True) + str(i)
+         for i, e in enumerate(e for e in events if e["type"] == "message")}
+    )
+
+
+# -- per-brief budgets ---------------------------------------------------------
+
+
+def test_a_brief_may_lower_the_budget_and_the_footer_names_it(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    client = FakeClient(
+        [
+            _call("delegate", agent="md-expert", task="look around", steps=3),
+            _call("list_dir"),
+            _call("list_dir"),
+            _call("list_dir"),
+            _text("the specialist ran out of its three calls"),
+        ]
+    )
+    Mason(session, client=client).run_turn("go")
+    handed = next(
+        m["content"]
+        for m in client.requests[-1]
+        if m.get("role") == "tool" and m.get("tool_call_id") == "c_delegate"
+    )
+    assert "[md-expert-1: turn budget (3, set by the brief) after 3 step(s);" in str(handed)
+    events = [json.loads(line) for line in session.transcript_path.read_text().splitlines()]
+    (brief,) = [e for e in events if e["type"] == "delegate"]
+    assert brief["steps_budget"] == 3
+    # The specialist read its own budget, not the card's sixty.
+    assert "model call 1 of 3" in str(client.requests[1][-1]["content"])
+
+
+def test_the_cards_own_budget_names_itself_in_the_footer(tmp_path: Path) -> None:
+    session = _session(tmp_path, max_turns=2)
+    client = FakeClient(
+        [
+            _call("delegate", agent="md-expert", task="look around"),
+            _call("list_dir"),
+            _call("list_dir"),
+            _text("the specialist ran out of the card's two calls"),
+        ]
+    )
+    Mason(session, client=client).run_turn("go")
+    events = [json.loads(line) for line in session.transcript_path.read_text().splitlines()]
+    (brief,) = [e for e in events if e["type"] == "delegate"]
+    assert "steps_budget" not in brief
+    assert brief["stop"] == "max_turns"
+
+
+def test_a_brief_may_not_raise_the_step_cap_or_the_effort(tmp_path: Path) -> None:
+    session = _session(tmp_path, max_turns=10, effort="medium")
+    client = FakeClient(
+        [
+            _call("delegate", agent="md-expert", task="x", steps=80),
+            _call("delegate", agent="md-expert", task="x", effort="max"),
+            _call("delegate", agent="md-expert", task="x", steps=0),
+            _text("ok"),
+        ]
+    )
+    Mason(session, client=client).run_turn("go")
+    refusals = _delegate_results(client)
+    assert refusals[0] == (
+        "steps 80 exceeds this agent's cap of 10; a brief may lower the cap, never raise it"
+    )
+    assert refusals[1] == (
+        "effort max exceeds this agent's effort of medium; "
+        "a brief may lower the effort, never raise it"
+    )
+    assert refusals[2] == "steps must be at least 1 model call"
+    # Nothing ran: three refusals and no child transcript.
+    stem = session.transcript_path.stem
+    assert not list(session.sessions_dir.glob(f"{stem}-*.jsonl"))
+
+
+def test_a_flag_outranks_the_brief_and_the_lead_is_told(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    session.flag_updates = {"max_turns": 2}
+    session.agent = MasonConfig.model_validate(
+        {"agent": {"model": "fake", "max_turns": 2}}
+    ).agent
+    client = FakeClient(
+        [
+            _call("delegate", agent="md-expert", task="look", steps=1),
+            _call("list_dir"),
+            _call("list_dir"),
+            _text("ok"),
+        ]
+    )
+    Mason(session, client=client).run_turn("go")
+    handed = next(
+        m["content"]
+        for m in client.requests[-1]
+        if m.get("role") == "tool" and m.get("tool_call_id") == "c_delegate"
+    )
+    text = str(handed)
+    assert "[harness] the --max-turns flag pins 2 call(s); the brief's steps=1 is ignored" in text
+    assert "turn budget (2)" in text
+
+
+def test_a_brief_at_lower_effort_builds_its_own_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Effort is baked into the client, so a brief that lowers it gets a
+    client of its own, at the dial the brief asked for."""
+    built: list[str | None] = []
+
+    def fake_builder(agent: Any, keys: object = None) -> FakeClient:
+        built.append(agent.effort)
+        return FakeClient([_call("finish", report="a quick look")])
+
+    monkeypatch.setattr("mason.loop.client_from_config", fake_builder)
+    session = _session(tmp_path, effort="high")
+    client = FakeClient(
+        [
+            _call("delegate", agent="md-expert", task="read the record", effort="low"),
+            _text("ok"),
+        ]
+    )
+    Mason(session, client=client).run_turn("go")
+    assert built == ["low"]
+    events = [json.loads(line) for line in session.transcript_path.read_text().splitlines()]
+    (brief,) = [e for e in events if e["type"] == "delegate"]
+    assert brief["effort"] == "low"
+
+
+def test_a_resumed_lead_never_reuses_a_handle_of_the_conversation_it_replays(
+    tmp_path: Path,
+) -> None:
+    """A fresh brief after a resume takes the next ordinal, so the earlier
+    specialist stays reachable by its own handle."""
+    first = _session(tmp_path)
+    Mason(
+        first,
+        client=FakeClient(
+            [
+                _call("delegate", agent="md-expert", task="one"),
+                _call("finish", report="done"),
+                _text("ok"),
+            ]
+        ),
+    ).run_turn("go")
+    first.release_session_lock()
+
+    resumed = _session(tmp_path)
+    resumed.resume_from_transcript(first.transcript_path)
+    client = FakeClient(
+        [
+            _call("delegate", agent="md-expert", task="two"),
+            _call("finish", report="done"),
+            _text("ok"),
+        ]
+    )
+    Mason(resumed, client=client).run_turn("carry on")
+    handed = _delegate_results(client)[0]
+    assert 'continue with continues="md-expert-2"' in handed

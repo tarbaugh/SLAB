@@ -382,6 +382,22 @@ class MasonSession:
         self.ablated: tuple[str, ...] = ()
         self._parent: MasonSession | None = None
         self._children_spawned = 0
+        # This session's handle when it is a delegated child: the agent name
+        # and the ordinal its parent gave it, which is also the tail of its
+        # transcript name. A lead's own session has none.
+        self.handle: str | None = None
+        # The conversation transcript this session replayed at start, when
+        # it was resumed. The specialists of that conversation write beside
+        # it, so a continue after a resume finds them there and not beside
+        # this session's own new file. One hop back: a specialist reaches
+        # the conversation that was resumed, not the one before it.
+        self.resumed_from: Path | None = None
+        # The specialists this session briefed, by handle, still holding
+        # their messages: a lead continues one instead of briefing a fresh
+        # one that would start from zero. Values are mason.loop.Mason
+        # objects, typed loosely because session must not import the loop.
+        # They live as long as the process; nothing is kept for a critic.
+        self.children: dict[str, Any] = {}
         # Unset compute_profile derives from the machine: a config that declares
         # SLURM partitions is a cluster, anything else is treated as a laptop —
         # the conservative guess, since over-sizing a calculation wastes hours
@@ -562,7 +578,9 @@ class MasonSession:
 
     # -- delegation -----------------------------------------------------------
 
-    def spawn(self, agent_name: str, agent: AgentConfig) -> MasonSession:
+    def spawn(
+        self, agent_name: str, agent: AgentConfig, *, handle: str | None = None
+    ) -> MasonSession:
         """A delegated child session: shared gate and memory, its own transcript.
 
         The child shares the project directory, the workspace, the ``[hpc]``
@@ -573,7 +591,10 @@ class MasonSession:
         read-files staleness guard (a specialist must read a file before
         editing it even when the parent read it), and the transcript, named
         after the parent's with the agent and an ordinal so ``--resume``
-        can tell conversations from delegations apart.
+        can tell conversations from delegations apart. That tail is the
+        child's handle. Pass *handle* to take an existing one instead of a
+        new ordinal, which is how a specialist continued in a later process
+        writes on into its own transcript.
         """
         child = MasonSession(
             self.cwd,
@@ -592,11 +613,30 @@ class MasonSession:
         # A flag outranks config for everyone: the child's loop re-asserts
         # these over its own [agent.roster] table exactly as the parent did.
         child.flag_updates = dict(self.flag_updates)
-        self._children_spawned += 1
+        if handle is None:
+            self._children_spawned += 1
+            handle = f"{agent_name}-{self._children_spawned}"
+        child.handle = handle
         child.transcript_path = self.transcript_path.with_name(
-            f"{self.transcript_path.stem}-{agent_name}-{self._children_spawned}.jsonl"
+            f"{self.transcript_path.stem}-{handle}.jsonl"
         )
         return child
+
+    def resume_from_transcript(self, transcript: Path) -> None:
+        """Note the conversation this session replays, and adopt its handles.
+
+        The specialists of that conversation keep their transcripts and
+        their handles, so a brief with ``continues`` reaches them. This
+        session's next child takes the next ordinal after the highest they
+        used, and never shadows one.
+        """
+        self.resumed_from = transcript
+        highest = 0
+        for path in transcript.parent.glob(f"{transcript.stem}-*.jsonl"):
+            ordinal = path.stem.rpartition("-")[2]
+            if ordinal.isdigit():
+                highest = max(highest, int(ordinal))
+        self._children_spawned = max(self._children_spawned, highest)
 
     @property
     def session_id(self) -> str:

@@ -405,7 +405,7 @@ more than model choice.
 | `notebook`, `plan` | the memory instruments (below). `plan` refuses a plan whose Goal names a quantity the notebook already reports, until it has a line `prior result: ...`, and it checks each `run:<id>/<name>` reference against the run store. A reference to a cache-hit run is rewritten to the run that produced the file |
 | `recall`, `remember`, `forget` | the machine's memory across sessions, described in [Memory](memory.md); `remember` takes the evidence that confirmed the fact, and `forget` undoes only a memory written in this session |
 | `skill` | load a skill: its instructions, root path, and bundled files; the catalog is per-agent |
-| `delegate` | hand one scoped task to a specialist's own loop; the PI only, one level deep, sequential; the result lists every machine memory the specialist wrote, with its evidence |
+| `delegate` | hand one scoped task to a specialist's own loop; the PI only, one level deep, sequential; the result lists every machine memory the specialist wrote, with its evidence. `continues` takes the handle from an earlier report's harness line and gives that same specialist another turn, with everything it already read still in its context. `steps` and `effort` size one brief, and only downward from the agent's own budget |
 | `review` | hand the plan or a file to the read-only critic before compute is spent; the leads only; the findings persist as a review record |
 | `finish` | end the task with a report citing run ids; honored only as the sole call of its reply, and only with a report. When the caller named the expected result keys (`slab mason run --expect t_melt:K`, or a benchmark question), a finish whose `results` names differ is not honored either. The tool result names the keys and units the goal asks for, and the agent calls finish again. The cited runs are the keep decision: the harness promotes the verified ones and expires the session's other runs, so the agent cites every run a number rests on, anchors from earlier sessions included |
 
@@ -963,7 +963,9 @@ under version control, readable by humans:
   delegations, and it names the transcript each time the output moves
   to another one. A delegation that started before the viewer shows
   only its new events. Press Ctrl+C to stop, and the viewer prints the
-  token totals.
+  token totals. A specialist the lead briefed more than once has one
+  transcript, not one per brief, and a `turn` event marks where each
+  brief starts. The report gives it one row with its turn count.
 * **`AGENTS.md`** is the cross-tool conventions standard, and if the project
   has one, it enters the system prompt every session.
 

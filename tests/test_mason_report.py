@@ -132,7 +132,9 @@ def test_delegations_roll_into_the_totals(tmp_path: Path) -> None:
     assert summary["delegations"] == [
         {
             "agent": "dft-expert",
+            "handle": "dft-expert-1",
             "transcript": str(sibling),
+            "turns": 1,
             "steps": 1,
             "prompt_tokens": 50,
             "completion_tokens": 5,
@@ -233,7 +235,7 @@ def test_cli_reports_the_newest_conversation_and_its_runs(tmp_path: Path) -> Non
     result = runner.invoke(app, ["report", "-w", str(root)])
     assert result.exit_code == 0, result.output
     assert "session 20260831-100000-11 — 4 step(s)" in result.output
-    assert "delegation md-expert: 1 step(s)" in result.output
+    assert "delegation md-expert-1: 1 turn(s), 1 step(s)" in result.output
     assert "nb-a0" in result.output
     assert "refusals: 1 (read_file x1)" in result.output
     assert "errored calls: 1 (list_runs x1)" in result.output
@@ -416,3 +418,37 @@ def test_a_json_line_that_is_not_an_object_is_counted_as_malformed(tmp_path: Pat
     summary = summarize(transcript)
     assert summary["steps"] == 1
     assert summary["malformed_lines"] == 2
+
+
+def test_a_continued_specialist_is_one_row_with_its_turn_count(tmp_path: Path) -> None:
+    """A lead that continued one specialist twice reads one row, not three,
+    and the briefs it sized too tight are counted apart from the card's cap."""
+    transcript = _write(
+        tmp_path / "20260901-090000-11.jsonl",
+        [
+            {"at": "2026-09-01T09:00:00+00:00", "type": "delegate", "agent": "dft-expert",
+             "stop": "finish", "steps": 9, "turn": 1},
+            {"at": "2026-09-01T09:10:00+00:00", "type": "delegate", "agent": "dft-expert",
+             "stop": "max_turns", "steps": 6, "turn": 2, "continues": "dft-expert-1",
+             "steps_budget": 6},
+            {"at": "2026-09-01T09:20:00+00:00", "type": "delegate", "agent": "dft-expert",
+             "stop": "finish", "steps": 6, "turn": 3, "continues": "dft-expert-1"},
+        ],
+    )
+    sibling = _write(
+        tmp_path / "20260901-090000-11-dft-expert-1.jsonl",
+        [
+            {"at": "2026-09-01T09:00:00+00:00", "type": "turn", "n": 1},
+            _usage("2026-09-01T09:01:00+00:00"),
+            {"at": "2026-09-01T09:10:00+00:00", "type": "turn", "n": 2},
+            _usage("2026-09-01T09:11:00+00:00"),
+            {"at": "2026-09-01T09:20:00+00:00", "type": "turn", "n": 3},
+            _usage("2026-09-01T09:21:00+00:00"),
+        ],
+    )
+    summary = summarize(transcript, [sibling])
+    (row,) = summary["delegations"]
+    assert row["handle"] == "dft-expert-1"
+    assert (row["turns"], row["steps"]) == (3, 3)
+    assert summary["briefs"] == 3
+    assert summary["brief_budget_stops"] == 1

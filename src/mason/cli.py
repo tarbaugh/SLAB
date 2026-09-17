@@ -339,6 +339,9 @@ def mason_chat(
             if latest is None:
                 _fail("nothing to resume: no session transcripts in this workspace")
             resume_from = session.load_messages(latest)
+            # The specialists of that conversation sit beside it; a brief
+            # with continues= reaches them there.
+            session.resume_from_transcript(latest)
             typer.echo(f"resuming {latest.name} ({len(resume_from)} messages)")
         mason = Mason(session, resume_from=resume_from, spec=spec, roster=roster)
     except (MasonError, FoundationError, SlabError) as e:
@@ -903,6 +906,11 @@ def _render_event(event: dict[str, Any], full: bool) -> None:
         typer.secho(f"[{stamp}] reply cut {where} ({case}); {how}", fg=typer.colors.YELLOW)
         if event.get("loop") is not None:
             typer.secho(f"  repeated: {event['loop']}", dim=True)
+    elif kind == "turn":
+        # The first turn opens the file, so only a continue is marked: it is
+        # where a specialist's lead briefed it again.
+        if int(event.get("n") or 1) > 1:
+            typer.secho(f"\n=== turn {event.get('n')} @ {stamp} " + "=" * 42, bold=True)
     elif kind == "edit":
         typer.secho(f"[{stamp}] {event.get('tool')} wrote {event.get('path')}", dim=True)
     elif kind == "dry_run":
@@ -1291,9 +1299,15 @@ def mason_report(
     )
     for warning in summary["warnings"]:
         typer.secho(f"  warning: {warning}", fg=typer.colors.YELLOW)
+    if summary["briefs"]:
+        line = f"  delegations: {summary['briefs']}"
+        if summary["brief_budget_stops"]:
+            line += f"; stopped at brief budget: {summary['brief_budget_stops']}"
+        typer.echo(line)
     for child in summary["delegations"]:
         typer.echo(
-            f"  delegation {child['agent']}: {child['steps']} step(s), "
+            f"  delegation {child['handle']}: {child['turns']} turn(s), "
+            f"{child['steps']} step(s), "
             f"tokens {child['prompt_tokens']}+{child['completion_tokens']}"
         )
     runs = summary["runs"]

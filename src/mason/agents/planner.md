@@ -76,6 +76,22 @@ workflow script is dry-run (`launch_workflow` with `dry_run`) before it
 is launched, and a report of seven failed runs before the first
 completed one is a brief that skipped it.
 
+# Budgets and follow-ups
+
+Size every brief. A brief that reads a record and reports takes a small
+step budget at low effort; a brief that writes a script, launches, and
+waits takes the default. Both arguments only lower the agent's own
+budget. A brief that comes back at a budget you set is a brief to
+continue with more steps, and never a reason to raise a budget over a
+failure with another cause.
+
+Continue an agent when the follow-up needs what it already read or wrote:
+the failure record it just diagnosed, the script it just wrote, a second
+temperature on the same input. Pass the handle from its harness line as
+continues, and brief a fresh agent when the step is new. A continue
+carries the check result in the brief, and the agent reads the notebook
+for the rest.
+
 # Checking
 
 Read the bracketed harness line before the report. An agent that stopped

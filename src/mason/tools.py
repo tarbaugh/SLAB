@@ -2859,6 +2859,302 @@ def _add_hpc_tools(box: Toolbox, session: MasonSession) -> None:
 # -- delegation ---------------------------------------------------------------
 
 
+#: The reasoning dials, weakest first. A brief may lower the one its agent
+#: runs at, never raise it.
+EFFORT_LADDER = ("none", "low", "medium", "high", "xhigh", "max")
+
+#: What an unset effort counts as when a brief asks for a different one.
+_UNSET_EFFORT = "xhigh"
+
+
+def brief_budget(
+    agent: Any,
+    flag_updates: dict[str, object],
+    steps: Any,
+    effort: Any,
+) -> tuple[dict[str, object], list[str], str | None]:
+    """One brief's budget: the config updates, the harness notes, a refusal.
+
+    The order of precedence is config, the card's roster table, the CLI
+    flags, then the brief, and the brief only lowers: a lead may size a
+    read-and-report brief down to six calls at low effort, and may not buy
+    itself a bigger budget than the card was given. A flag outranks
+    everyone, so ``--max-turns`` or ``--effort`` pins the value and the
+    brief's is ignored with a note the lead reads under the report.
+
+    Examples:
+        >>> from mason.config import AgentConfig
+        >>> agent = AgentConfig(max_turns=60, effort="high")
+        >>> brief_budget(agent, {}, 8, "low")[0]
+        {'max_turns': 8, 'effort': 'low'}
+        >>> print(brief_budget(agent, {}, 80, None)[2])
+        steps 80 exceeds this agent's cap of 60; a brief may lower the cap, never raise it
+        >>> print(brief_budget(agent, {}, None, "max")[2])
+        effort max exceeds this agent's effort of high; a brief may lower the effort, never raise it
+        >>> updates, notes, _ = brief_budget(agent, {"max_turns": 60}, 8, None)
+        >>> updates, notes
+        ({}, ["the --max-turns flag pins 60 call(s); the brief's steps=8 is ignored"])
+    """
+    updates: dict[str, object] = {}
+    notes: list[str] = []
+    if steps is not None:
+        try:
+            wanted = int(steps)
+        except (TypeError, ValueError):
+            return {}, [], f"steps must be a whole number of model calls, not {steps!r}"
+        if wanted < 1:
+            return {}, [], "steps must be at least 1 model call"
+        if "max_turns" in flag_updates:
+            notes.append(
+                f"the --max-turns flag pins {agent.max_turns} call(s); "
+                f"the brief's steps={wanted} is ignored"
+            )
+        elif wanted > agent.max_turns:
+            return (
+                {},
+                [],
+                f"steps {wanted} exceeds this agent's cap of {agent.max_turns}; "
+                f"a brief may lower the cap, never raise it",
+            )
+        else:
+            updates["max_turns"] = wanted
+    if effort is not None:
+        wanted_effort = str(effort)
+        if wanted_effort not in EFFORT_LADDER:
+            return {}, [], f"effort {wanted_effort!r} is not one of {', '.join(EFFORT_LADDER)}"
+        current = agent.effort
+        if "effort" in flag_updates:
+            notes.append(
+                f"the --effort flag pins {current}; "
+                f"the brief's effort={wanted_effort} is ignored"
+            )
+        elif EFFORT_LADDER.index(wanted_effort) > EFFORT_LADDER.index(current or _UNSET_EFFORT):
+            named = current if current else f"{_UNSET_EFFORT} (the unset default)"
+            return (
+                {},
+                [],
+                f"effort {wanted_effort} exceeds this agent's effort of {named}; "
+                f"a brief may lower the effort, never raise it",
+            )
+        elif wanted_effort != (current or _UNSET_EFFORT):
+            updates["effort"] = wanted_effort
+    return updates, notes, None
+
+
+def _child_config(session: MasonSession, target: AgentSpec) -> Any:
+    """The configuration a specialist of *session* runs under.
+
+    Derived from the *base* config so the lead's own ``[agent.roster]``
+    table never leaks into it; CLI flags are re-asserted on top because a
+    flag outranks config for everyone. The brief's own budget lands later,
+    on the built loop, so this stays the baseline a brief that sets nothing
+    runs at.
+    """
+    from mason.config import override_agent, roster_agent_config
+
+    effective = roster_agent_config(session.base_agent, target.name)
+    if session.flag_updates:
+        effective = override_agent(effective, dict(session.flag_updates))
+    return effective
+
+
+def _child_client(
+    session: MasonSession, child_session: MasonSession, parent_client: Any | None
+) -> Any:
+    """The parent's client when the two agents connect the same way, else a new one."""
+    from mason.loop import client_from_config, connection_profile
+
+    if parent_client is not None and connection_profile(child_session.agent) == connection_profile(
+        session.agent
+    ):
+        return parent_client
+    return client_from_config(child_session.agent, child_session.api_keys)
+
+
+def _fresh_child(
+    session: MasonSession,
+    roster: dict[str, AgentSpec],
+    skills: dict[str, Skill],
+    parent_client: Any | None,
+    target: AgentSpec,
+    *,
+    keep: bool,
+) -> Any:
+    """A specialist's loop, built at depth 1 and ready for its first brief.
+
+    With *keep* the loop is remembered on the lead's session under its
+    handle, so a later brief can continue it with its messages intact.
+    Nothing is kept for a critic: a review is a fresh reading each time.
+    """
+    # Local import: tools must not import the loop at module scope (the
+    # loop imports tools).
+    from mason.loop import Mason
+
+    child_session = session.spawn(target.name, _child_config(session, target))
+    child = Mason(
+        child_session,
+        client=_child_client(session, child_session, parent_client),
+        skills=skills,
+        spec=target,
+        roster=roster,
+        depth=1,
+    )
+    if keep and child_session.handle is not None:
+        session.children[child_session.handle] = child
+    return child
+
+
+def _revive_child(
+    session: MasonSession,
+    roster: dict[str, AgentSpec],
+    skills: dict[str, Skill],
+    parent_client: Any | None,
+    target: AgentSpec,
+    handle: str,
+) -> Any:
+    """A specialist of an earlier process, replayed from its own transcript.
+
+    A lead's live children die with its process, so a continue after
+    ``--resume`` rebuilds one: the same handle, the same transcript, the
+    messages the file holds, and a system message built fresh. A compacted
+    child replays its pre-compaction messages and compacts again on its
+    own, which is what ``--resume`` does for a lead.
+    """
+    from mason.loop import Mason
+
+    child_session = session.spawn(target.name, _child_config(session, target), handle=handle)
+    # A resumed lead's own transcript is new; the specialist keeps writing
+    # into the file it already has.
+    found = child_transcript(session, handle)
+    if found is not None:
+        child_session.transcript_path = found
+    messages = session.load_messages(child_session.transcript_path)
+    return Mason(
+        child_session,
+        client=_child_client(session, child_session, parent_client),
+        skills=skills,
+        spec=target,
+        roster=roster,
+        depth=1,
+        resume_from=messages,
+        resume_in_place=True,
+    )
+
+
+def _apply_budget(child: Any, budget: dict[str, object]) -> None:
+    """Put this brief's step and effort budget on *child*, for this turn.
+
+    The baseline is the specialist's own configuration, so a brief that
+    sizes nothing runs at the card's budget however the brief before it
+    was sized. A budget that changes what the client bakes in (the effort
+    dial) builds that turn its own client.
+    """
+    from mason.config import override_agent
+    from mason.loop import client_from_config, connection_profile
+
+    session = child.session
+    before = session.agent
+    after = override_agent(session.base_agent, budget) if budget else session.base_agent
+    if after == before:
+        return
+    session.agent = after
+    if connection_profile(after) != connection_profile(before):
+        child.client = client_from_config(after, session.api_keys)
+
+
+def _child_turn(child: Any, brief: str) -> Any:
+    """One turn of a specialist's loop, with the transport failure caught."""
+    from mason.client import LlmError
+    from mason.loop import TurnResult
+
+    try:
+        return child.run_turn(brief)
+    except LlmError as e:
+        # The server failed the child mid-turn, after the client's own
+        # retries. The steps it took are in its transcript, so the parent
+        # gets a result that says so instead of an exception that discards
+        # them: one real critic lost five steps and twenty minutes to a
+        # gateway 502, and the lead paid for the review twice.
+        return TurnResult(
+            text=(
+                f"stopped: the model server failed mid-turn after step "
+                f"{child.steps_taken} ({e}); the transcript holds the steps taken"
+            ),
+            stop_reason="error",
+            steps=child.steps_taken,
+        )
+
+
+def _turn_number(child_session: MasonSession) -> int:
+    """Which turn of this specialist the next one is, counted from its transcript."""
+    return len(child_session.recorded("turn")) + 1
+
+
+def _conversations(session: MasonSession) -> list[Path]:
+    """The transcripts this session's specialists write beside: its own, and
+    the one it resumed from, because a resumed lead writes a new file while
+    its earlier specialists keep their own."""
+    paths = [session.transcript_path]
+    if session.resumed_from is not None and session.resumed_from != session.transcript_path:
+        paths.append(session.resumed_from)
+    return paths
+
+
+def child_transcript(session: MasonSession, handle: str) -> Path | None:
+    """The transcript of the specialist *handle* names, or None."""
+    for conversation in _conversations(session):
+        path = conversation.with_name(f"{conversation.stem}-{handle}.jsonl")
+        if path.is_file():
+            return path
+    return None
+
+
+def live_handles(session: MasonSession) -> list[str]:
+    """The specialists of this conversation a continue can reach, by handle.
+
+    The live ones first, in the order they were briefed, then the ones a
+    transcript holds: after ``--resume`` the objects are gone and the
+    files are all there is.
+    """
+    handles = list(session.children)
+    for conversation in _conversations(session):
+        stem = conversation.stem
+        for path in sorted(conversation.parent.glob(f"{stem}-*.jsonl")):
+            handle = path.stem[len(stem) + 1 :]
+            if handle and handle not in handles:
+                handles.append(handle)
+    return handles
+
+
+def handle_refusal(
+    session: MasonSession, roster: dict[str, AgentSpec], handle: str, name: str
+) -> str | None:
+    """Why this handle cannot be continued as *name*, or None when it can.
+
+    A handle is an agent name and the ordinal its lead gave it, which is
+    also the tail of its transcript name.
+    """
+    known = live_handles(session)
+    if handle not in known:
+        return (
+            f"no specialist {handle} in this conversation; "
+            f"live: {', '.join(known) if known else 'none'}"
+        )
+    agent_name = handle.rpartition("-")[0]
+    card = roster.get(agent_name)
+    if card is not None and card.reviews:
+        return (
+            f"{handle} is a critic, and a review is not continued; "
+            f"call review again with the subject to judge"
+        )
+    if agent_name != name:
+        return (
+            f"{handle} is {agent_name}, not {name}; pass agent='{agent_name}' to continue "
+            f"it, or brief {name} without continues"
+        )
+    return None
+
+
 def _run_child(
     session: MasonSession,
     roster: dict[str, AgentSpec],
@@ -2869,49 +3165,13 @@ def _run_child(
 ) -> tuple[Any, MasonSession]:
     """Run *target*'s own loop on *brief*, one level down; (result, child session).
 
-    The one place a tool spins a loop of its own, shared by ``delegate``
-    and ``review``. The child derives from the *base* config so the entry
-    agent's own [agent.roster] table never leaks into it; CLI flags are
-    re-asserted on top because a flag outranks config for everyone.
+    The one place a tool spins a loop of its own, used by ``review`` and by
+    the first brief of a ``delegate``. The child is not kept for a later
+    continue here; ``delegate`` keeps its own.
     """
-    # Local imports: tools must not import the loop at module scope (the
-    # loop imports tools).
-    from mason.client import LlmError
-    from mason.config import override_agent, roster_agent_config
-    from mason.loop import Mason, TurnResult, client_from_config, connection_profile
-
-    effective = roster_agent_config(session.base_agent, target.name)
-    if session.flag_updates:
-        effective = override_agent(effective, dict(session.flag_updates))
-    child_session = session.spawn(target.name, effective)
-    reuse = parent_client is not None and connection_profile(
-        child_session.agent
-    ) == connection_profile(session.agent)
-    client = (
-        parent_client
-        if reuse
-        else client_from_config(child_session.agent, child_session.api_keys)
-    )
-    child = Mason(
-        child_session, client=client, skills=skills, spec=target, roster=roster, depth=1
-    )
-    try:
-        result = child.run_turn(brief)
-    except LlmError as e:
-        # The server failed the child mid-turn, after the client's own
-        # retries. The steps it took are in its transcript, so the parent
-        # gets a result that says so instead of an exception that discards
-        # them: one real critic lost five steps and twenty minutes to a
-        # gateway 502, and the lead paid for the review twice.
-        result = TurnResult(
-            text=(
-                f"stopped: the model server failed mid-turn after step "
-                f"{child.steps_taken} ({e}); the transcript holds the steps taken"
-            ),
-            stop_reason="error",
-            steps=child.steps_taken,
-        )
-    return result, child_session
+    child = _fresh_child(session, roster, skills, parent_client, target, keep=False)
+    child.session.record({"type": "turn", "n": _turn_number(child.session)})
+    return _child_turn(child, brief), child.session
 
 
 def _json_tables(text: str) -> dict[str, dict[str, Any]] | None:
@@ -3049,7 +3309,7 @@ def _digest_unless_raw(arguments: dict[str, Any], name: str, text: str, n_lines:
     return f"{digested}\n[digest of {n_lines} lines; pass raw=true, or offset/limit, for the text]"
 
 
-def partial_outcome(child_session: MasonSession) -> str:
+def partial_outcome(child_session: MasonSession, turn: int | None = None) -> str:
     """What a child whose turn ended cut left behind: the files it wrote and
     the runs it launched, read from its transcript, for the parent to
     re-brief from instead of from zero.
@@ -3057,7 +3317,8 @@ def partial_outcome(child_session: MasonSession) -> str:
     Files come from the child's ``edit`` events and runs from its
     ``command`` events that carry a run id (a finished foreground launch;
     a background launch has no id until it starts). Order is kept and
-    repeats are folded.
+    repeats are folded. With *turn*, only what that turn left behind is
+    named: a specialist the lead continues reports one turn at a time.
     """
     files: list[str] = []
     runs: list[str] = []
@@ -3065,6 +3326,7 @@ def partial_outcome(child_session: MasonSession) -> str:
         lines = child_session.transcript_path.read_text(encoding="utf-8").splitlines()
     except OSError:
         lines = []
+    counting = turn is None
     for line in lines:
         try:
             event = json.loads(line)
@@ -3073,6 +3335,11 @@ def partial_outcome(child_session: MasonSession) -> str:
         if not isinstance(event, dict):
             continue
         kind = event.get("type")
+        if kind == "turn" and turn is not None:
+            counting = event.get("n") == turn
+            continue
+        if not counting:
+            continue
         if kind == "edit" and event.get("path") and str(event["path"]) not in files:
             files.append(str(event["path"]))
         elif kind == "command" and event.get("run_id") and str(event["run_id"]) not in runs:
@@ -3089,13 +3356,52 @@ def partial_outcome(child_session: MasonSession) -> str:
     )
 
 
-def _harness_footer(name: str, result: Any, child_session: MasonSession) -> str:
-    """The bracketed line a lead reads before trusting a child's report."""
-    return (
-        f"[{name}: {result.stop_reason} after {result.steps} step(s); "
+def stop_text(result: Any, agent: Any, brief_steps: int | None) -> str:
+    """How a child's turn stopped, naming the budget when a budget stopped it.
+
+    A lead that sized the brief must read which cap it hit: its own eight
+    calls, or the card's sixty. The first is a brief to continue with more
+    steps, the second a task to cut down.
+
+    Examples:
+        >>> import types
+        >>> ended = types.SimpleNamespace(stop_reason="max_turns")
+        >>> stop_text(ended, types.SimpleNamespace(max_turns=8), 8)
+        'turn budget (8, set by the brief)'
+        >>> stop_text(ended, types.SimpleNamespace(max_turns=60), None)
+        'turn budget (60)'
+        >>> stop_text(types.SimpleNamespace(stop_reason="finish"), None, None)
+        'finish'
+    """
+    if result.stop_reason != "max_turns":
+        return str(result.stop_reason)
+    if brief_steps is not None:
+        return f"turn budget ({brief_steps}, set by the brief)"
+    return f"turn budget ({agent.max_turns})"
+
+
+def _harness_footer(
+    name: str,
+    result: Any,
+    child_session: MasonSession,
+    *,
+    stop: str | None = None,
+    continues: str | None = None,
+) -> str:
+    """The bracketed line a lead reads before trusting a child's report.
+
+    *continues* names the handle the lead passes to brief this same
+    specialist again, with everything it has already read still in its
+    context. A critic gets no handle: a review is not continued.
+    """
+    line = (
+        f"[{name}: {stop or result.stop_reason} after {result.steps} step(s); "
         f"tokens {child_session.prompt_tokens}+{child_session.completion_tokens}; "
-        f"transcript {child_session.transcript_path.name}]"
+        f"transcript {child_session.transcript_path.name}"
     )
+    if continues is not None:
+        line += f'; continue with continues="{continues}"'
+    return line + "]"
 
 
 def _add_delegate_tool(
@@ -3107,11 +3413,16 @@ def _add_delegate_tool(
     parent_client: Any | None,
 ) -> None:
     def delegate(arguments: dict[str, Any]) -> str:
+        from mason.errors import MasonError
         from mason.roster import hands
 
         name = str(arguments["agent"])
         team = hands(spec, roster)
         others = ", ".join(team)
+        raw_handle = arguments.get("continues")
+        handle = str(raw_handle).strip() if raw_handle else ""
+        if handle and (refusal := handle_refusal(session, roster, handle, name)):
+            return refusal
         if name == spec.name:
             return f"you cannot delegate to yourself; your team: {others}"
         target = team.get(name)
@@ -3124,6 +3435,14 @@ def _add_delegate_tool(
             if name in roster:
                 return f"{name} leads a group of its own and takes no briefs; your team: {others}"
             return f"no agent named {name!r}; your team: {others}"
+        budget, budget_notes, budget_refusal = brief_budget(
+            _child_config(session, target),
+            session.flag_updates,
+            arguments.get("steps"),
+            arguments.get("effort"),
+        )
+        if budget_refusal is not None:
+            return budget_refusal
         task = str(arguments["task"])
         context = arguments.get("context")
         brief = task if not context else f"{task}\n\nContext from {spec.name}:\n{context}"
@@ -3131,26 +3450,62 @@ def _add_delegate_tool(
         # that holds it; a reference nothing answers is sent as written,
         # and the lead reads why below the report.
         brief, notes, errors = resolve_artifact_refs(session.workspace_root, brief)
-        result, child_session = _run_child(session, roster, skills, parent_client, target, brief)
-        session.record(
-            {
-                "type": "delegate",
-                "agent": name,
-                "task": task,
-                "transcript": child_session.transcript_path.name,
-                "stop": result.stop_reason,
-                "steps": result.steps,
-                "memories": [e["name"] for e in child_session.memories_written],
-            }
-        )
+        if handle:
+            child = session.children.get(handle)
+            if child is None:
+                try:
+                    child = _revive_child(session, roster, skills, parent_client, target, handle)
+                except MasonError as e:
+                    return f"cannot continue {handle}: {e}"
+                session.children[handle] = child
+            else:
+                # The specialist has been idle while the lead worked: the
+                # notebook has grown and the plan may have been rewritten.
+                child.refresh_system()
+        else:
+            child = _fresh_child(session, roster, skills, parent_client, target, keep=True)
+        _apply_budget(child, budget)
+        child_session = child.session
+        # This turn's own slices: the outcome and the memories the lead
+        # reads back are what THIS brief produced, not the whole errand's.
+        turn = _turn_number(child_session)
+        seen_memories = len(child_session.memories_written)
+        child_session.record({"type": "turn", "n": turn})
+        result = _child_turn(child, brief)
+        written = child_session.memories_written[seen_memories:]
+        event: dict[str, Any] = {
+            "type": "delegate",
+            "agent": name,
+            "task": task,
+            "transcript": child_session.transcript_path.name,
+            "stop": result.stop_reason,
+            "steps": result.steps,
+            "memories": [e["name"] for e in written],
+            "turn": turn,
+        }
+        if handle:
+            event["continues"] = handle
+        if "max_turns" in budget:
+            event["steps_budget"] = budget["max_turns"]
+        if "effort" in budget:
+            event["effort"] = budget["effort"]
+        session.record(event)
         text = result.text
         if result.truncated:
-            text = f"{text}\n\n{partial_outcome(child_session)}"
-        if child_session.memories_written:
-            text = f"{text}\n\n{memories_written_block(session, child_session.memories_written)}"
-        refs = "".join(f"\n[harness] brief: {note}" for note in notes)
+            text = f"{text}\n\n{partial_outcome(child_session, turn)}"
+        if written:
+            text = f"{text}\n\n{memories_written_block(session, written)}"
+        footer = _harness_footer(
+            child_session.handle or name,
+            result,
+            child_session,
+            stop=stop_text(result, child_session.agent, budget.get("max_turns")),  # type: ignore[arg-type]
+            continues=child_session.handle,
+        )
+        refs = "".join(f"\n[harness] {note}" for note in budget_notes)
+        refs += "".join(f"\n[harness] brief: {note}" for note in notes)
         refs += "".join(f"\n[harness] brief reference not found: {error}" for error in errors)
-        return f"{text}\n\n{_harness_footer(name, result, child_session)}{refs}"
+        return f"{text}\n\n{footer}{refs}"
 
     box.add(
         Tool(
@@ -3161,7 +3516,12 @@ def _add_delegate_tool(
                 "and notebook, and you receive its final report. Brief it with "
                 "the goal, the constraints (engine, protocol, budget), and what "
                 "to return; its report ends with a bracketed harness line "
-                "stating how it stopped."
+                "stating how it stopped and the handle that continues it. Pass "
+                "that handle as continues= when the follow-up needs what the "
+                "specialist already read or wrote, and brief a fresh one when "
+                "the step is new. Size the brief with steps= and effort=: a "
+                "read-and-report brief needs few calls at low effort, and both "
+                "may only lower this agent's own budget."
             ),
             parameters=_schema(
                 {
@@ -3173,6 +3533,24 @@ def _add_delegate_tool(
                     "context": {
                         "type": "string",
                         "description": "optional background the task needs",
+                    },
+                    "continues": {
+                        "type": "string",
+                        "description": (
+                            "optional: the handle of a specialist you already briefed, "
+                            "from its harness line, to continue it with its context"
+                        ),
+                    },
+                    "steps": {
+                        "type": "integer",
+                        "description": "optional: model calls this brief may take",
+                    },
+                    "effort": {
+                        "type": "string",
+                        "description": (
+                            "optional: reasoning effort for this brief "
+                            "(none, low, medium, high, xhigh, max)"
+                        ),
                     },
                 },
                 ["agent", "task"],
