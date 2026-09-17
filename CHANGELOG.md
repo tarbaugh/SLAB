@@ -66,6 +66,43 @@ All notable changes to SLAB, newest first. Dates are commit dates on
   moves an outage's expiry a week out, or to `--expires`. `slab memory
   review` finds the workspace as every other command does.
 
+- The two-phase-melting skill states what a hot crystal reads. A new
+  section names the deficit: a crystal near T_m classifies a large share
+  of its atoms as unknown under an instantaneous order parameter, by an
+  amount no one can predict, so a gate against a cold count condemns a
+  crystal that is intact. The skill prescribes time-averaged positions
+  before `compute cna/atom`, or `compute ptm/atom`, with a crystal and a
+  liquid baseline from the pure-phase legs at the run's own temperature,
+  and it restates every gate as the calibrated fraction against those
+  two baselines. The opening now puts the NPH plateau route first for a
+  cell under ten thousand atoms, three starting enthalpies with one run
+  each. The velocity ladder stays the route for a large cell and for a
+  v(T) table. A table gives each route its cell size, its runs, and its
+  steps, so a lead can size a wave against the time a job has left. The
+  build recipe gained the traps the last campaign hit. Assemble each
+  phase from its own equilibrated leg, and minimise with the crystal
+  frozen after the soft-repulsion push-off. Leave no gap at the periodic
+  wrap. Write `dilate all`, because a group dilate crashes under KOKKOS.
+  Never barostat z to zero pressure on a cell with a free liquid
+  surface. The new script `coexistence_fraction.py` enforces the
+  cross-section bound. It refuses a cross section under eight unit cells
+  unless `--small-cell` is passed, which prints the finite-size caveat
+  line the report must carry. Its `--plateau` mode reads a NPH run's
+  thermo YAML and its fraction series. It prints the primary window mean
+  and the means of the window's two disjoint halves, each with its block
+  standard error, then the drift across the primary window with the
+  error of the fitted slope, and the two-phase verdict. The halves agree
+  only within two combined errors. The script also repeats the block
+  error over 16, 8, and 4 blocks and calls it converged only when the
+  last ratio is under 1.2. An error that still grows is a lower bound,
+  and the drift in errors is then an upper bound. One real run of a
+  5120-atom coexistence cell is bundled with it, read at 70 ps and the
+  same run continued to 200 ps. Neither window passes the drift gate,
+  and their means agree at 1442.6 and 1440.4 K. The skill reads that
+  pair as the finite-size wander it is.
+  The `md-expert` and `planner` cards point at the new section, and a
+  brief for a melting step now names the route and the order parameter.
+
 - A lead continues a specialist it already briefed, and sizes each brief.
   `delegate` takes `continues`, the handle from an earlier report's
   harness line, and gives that specialist another turn with its messages

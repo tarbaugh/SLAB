@@ -349,7 +349,7 @@ nucleation-cnt             built-in  analysis-expert md-expert    1 script(s)
 radial-distribution        built-in  analysis-expert md-expert    1 script(s)
 surface-energy             built-in  dft-expert                   0 script(s)
 thermal-response           built-in  analysis-expert md-expert    1 script(s)
-two-phase-melting          built-in  md-expert                    1 script(s)
+two-phase-melting          built-in  md-expert                    2 script(s)
 ```
 
 The catalog covers structure building (the atomsk skills: crystals and
@@ -361,7 +361,8 @@ files, their pair styles, and the KOKKOS switches (lammps-potentials),
 LAMMPS input scripts run whole (lammps-scripting), the
 static side (equations of state, convergence, surfaces, elastic
 constants, interface adhesion), and the dynamic side (melt-quench
-glasses, thermal response, two-phase melting, NEMD transport, diffusion,
+glasses, thermal response, two-phase melting by either the NPH plateau
+or the interface-velocity ladder, NEMD transport, diffusion,
 nucleation), with the fits and unit conversions in tested scripts.
 
 The third column is the categorization: which agent cards see the skill.
@@ -387,7 +388,7 @@ nemd-transport             built-in  analysis-expert md-expert    1 script(s)
 nucleation-cnt             built-in  analysis-expert md-expert    1 script(s)
 radial-distribution        built-in  analysis-expert md-expert    1 script(s)
 thermal-response           built-in  analysis-expert md-expert    1 script(s)
-two-phase-melting          built-in  md-expert                    1 script(s)
+two-phase-melting          built-in  md-expert                    2 script(s)
 ```
 
 Skills load progressively. The system prompt carries one line per

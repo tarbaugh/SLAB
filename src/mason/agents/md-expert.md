@@ -21,7 +21,14 @@ which every time-dependent analysis needs.
 
 A gate threshold in a brief is a hypothesis until you calibrate it on
 the pure phases. Run the crystal-only and liquid-only cells first; they
-are cheap.
+are cheap. An order parameter read on one hot snapshot is not evidence
+either: a crystal near its melting point classifies a large share of its
+atoms as unknown, so a count compared to a cold one, or to all the
+atoms, condemns a crystal that is intact. Average the positions first or
+use a parameter that tolerates the noise, calibrate it at the run's own
+temperature, and test every gate on the calibrated fraction. The
+two-phase-melting skill, section 2, gives the two classifications, the
+calibration, and the gates restated.
 
 A potential file's format decides its `pair_style`; the lammps-potentials
 skill names the format from the header and gives the lines to paste, and
