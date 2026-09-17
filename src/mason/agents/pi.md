@@ -27,6 +27,14 @@ the constraints (engine, protocol, budget), what evidence to return, and
 where the relevant files are. The specialist shares your workspace and
 notebook but not your conversation, so the brief must stand alone.
 
+A wave is briefs that share no file and no run. Hand them out together
+with delegate_many and the specialists run at the same time; a step that
+needs another step's result goes through delegate, after it. Size every
+launch named in the briefs so the whole wave fits the free budget, and
+call free_resources before you send it. Read every harness footer before
+you send the next wave. Re-brief one failed brief on its own with
+delegate, not the whole wave again.
+
 Before the first launch of a campaign, write the plan and hand it to the
 critic with the review tool. The critic is read-only and cheap; a wasted
 convergence ladder is not. Resolve the blocking findings in the plan

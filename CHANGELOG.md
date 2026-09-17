@@ -5,6 +5,30 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- A lead hands out a wave of independent briefs. The new Mason tool
+  `delegate_many(briefs)` takes two or more `{agent, task, context?}`
+  briefs and runs each specialist's loop at the same time, in threads
+  inside the lead's process and under the lead's session lock. Every
+  child session is created before the first thread starts, so the
+  ordinals and the transcript names follow brief order. The result
+  carries one section per brief, each with the report, the memories that
+  brief wrote, and the same bracketed harness line `delegate` returns,
+  and a last line stating the wave's wall-clock against what the briefs
+  would have cost in sequence. Each brief keeps its own share of the
+  tool-result cap, so no section is dropped whole. One brief that fails
+  leaves its siblings' reports intact. `delegate` is unchanged and is where a dependent step
+  goes. `[agent] parallel_delegations` caps a wave and defaults to 3;
+  1 removes the tool, as does the new `parallel-delegation` mechanism
+  switch. The token counters, the memory list, the setup digests, the
+  notebook, the approval prompt, and the terminal output are each
+  guarded by a lock on the session tree, so a wave writes them one
+  writer at a time. A person's interrupt stops every child at its next
+  step, and the wave is recorded with what came back. Each `delegate`
+  event of a wave carries `wave`, `parallel`, and the two spans, and
+  `slab mason report` counts the waves and the wall-clock saved. The PI
+  and planner cards gained the rule: a wave is briefs that share no file
+  and no run, sized together to what is free.
+
 - A cut reply keeps its design. When a reply is cut with no text and no
   call, the loop shows the model its reasoning for one call and asks for
   the design decisions in the notebook. The design call and the request

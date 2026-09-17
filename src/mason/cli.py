@@ -1296,6 +1296,11 @@ def mason_report(
             f"  delegation {child['agent']}: {child['steps']} step(s), "
             f"tokens {child['prompt_tokens']}+{child['completion_tokens']}"
         )
+    if summary["waves"]:
+        typer.echo(
+            f"  {summary['parallel_briefs']} in {summary['waves']} wave(s), "
+            f"{summary['wave_saved_s']:.0f} s of wall-clock saved"
+        )
     runs = summary["runs"]
     if runs is None:
         typer.echo("runs: workspace record unavailable")

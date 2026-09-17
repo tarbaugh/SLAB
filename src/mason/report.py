@@ -85,6 +85,11 @@ def _tally(transcript: Path) -> dict[str, Any]:
     finished = False
     retire: dict[str, Any] | None = None
     commands: Counter[str] = Counter()
+    # Waves of parallel briefs: the wall-clock each wave took, by wave
+    # number, and the seconds its specialists spent between them.
+    wave_wall: dict[int, float] = {}
+    wave_spent: Counter[int] = Counter()
+    parallel_briefs = 0
     header: dict[str, Any] = {}
     # Tool results carry no name, but they answer the most recent
     # assistant message's calls in order.
@@ -157,6 +162,14 @@ def _tally(transcript: Path) -> dict[str, Any]:
             retire = {k: v for k, v in event.items() if k not in ("at", "type")}
         elif kind == "command":
             commands[str(event.get("kind") or "?")] += 1
+        elif kind == "delegate" and event.get("parallel"):
+            try:
+                wave = int(event["wave"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            parallel_briefs += 1
+            wave_wall[wave] = float(event.get("wave_s") or 0.0)
+            wave_spent[wave] += float(event.get("elapsed_s") or 0.0)
 
     return {
         "model": header.get("model"),
@@ -198,6 +211,11 @@ def _tally(transcript: Path) -> dict[str, Any]:
         },
         "retire": retire,
         "commands": dict(commands),
+        "waves": len(wave_wall),
+        "parallel_briefs": parallel_briefs,
+        # What running the waves side by side saved: what the specialists
+        # spent between them, less the wall-clock the waves took.
+        "wave_saved_s": round(sum(wave_spent.values()) - sum(wave_wall.values()), 1),
     }
 
 
