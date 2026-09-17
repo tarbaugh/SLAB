@@ -29,9 +29,14 @@ All notable changes to SLAB, newest first. Dates are commit dates on
   carry. Its `--plateau` mode reads a NPH run's thermo YAML and its
   fraction series and prints the primary and the secondary window means
   with their block standard errors, the drift across the primary window
-  with the error of the fitted slope, and the two-phase verdict. The
-  bundled 70 ps log of a 5120-atom coexistence cell is a real run, and
-  its verdict is that 70 ps in a cell that small is not yet a plateau.
+  with the error of the fitted slope, and the two-phase verdict. It also
+  repeats the block error over half as many blocks, twice as long, and
+  warns when the error still grows with the block length, because the
+  error is then a lower bound and the drift in errors an upper bound.
+  Two real runs of a 5120-atom coexistence cell are bundled with it, one
+  of 70 ps and one of 200 ps. Neither passes the drift gate, their means
+  agree at 1442.6 and 1440.4 K, and the skill reads that pair as the
+  finite-size wander it is.
   The `md-expert` and `planner` cards point at the new section, and a
   brief for a melting step now names the route and the order parameter.
 

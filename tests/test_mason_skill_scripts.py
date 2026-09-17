@@ -1532,8 +1532,11 @@ def test_interface_velocity_classifies_a_perfect_crystal_and_refuses_bad_flags(
 COEXISTENCE = SKILLS / "two-phase-melting" / "scripts" / "coexistence_fraction.py"
 #: A real 70 ps NPH leg on a 5120-atom Lennard-Jones coexistence cell, eight
 #: unit cells across, with the solid-like count written by ``fix ave/time``.
-COEX_LOG = DATA / "lammps-lj-coex-nph-yaml.log"
-COEX_FRACTION = DATA / "lammps-lj-coex-fraction.dat"
+COEX_LOG = DATA / "lammps-lj-coex-nph-70ps-yaml.log"
+COEX_FRACTION = DATA / "lammps-lj-coex-70ps-fraction.dat"
+#: The same cell released for 200 ps, the run the skill sets beside it.
+COEX_LOG_LONG = DATA / "lammps-lj-coex-nph-200ps-yaml.log"
+COEX_FRACTION_LONG = DATA / "lammps-lj-coex-200ps-fraction.dat"
 #: The pure-phase legs of the same system at the same temperature.
 COEX_BASELINES = ("--crystal-baseline", "1.00", "--liquid-baseline", "0.045")
 
@@ -1605,6 +1608,10 @@ def test_coexistence_fraction_reads_the_plateau_of_the_bundled_nph_log(
     assert abs(plateau["primary"]["mean"] - 1442.6) < 0.5
     assert abs(plateau["secondary"]["mean"] - 1433.5) < 0.5
     assert abs(plateau["primary"]["block_error"] - 5.0) < 0.5
+    # Half as many blocks, twice as long, give a wider error, so the series
+    # still correlates over one block and the error is a lower bound.
+    assert abs(plateau["primary"]["block_error_half"] - 9.1) < 0.5
+    assert plateau["primary"]["error_converged"] is False
     # The cell wanders: the temperature falls 29 K over the primary window,
     # far wider than the block error, so 70 ps is not yet a plateau here.
     assert abs(plateau["primary"]["change"] + 29.1) < 0.5
@@ -1623,7 +1630,8 @@ def test_coexistence_fraction_reads_the_plateau_of_the_bundled_nph_log(
     assert fraction["rows"] == 350
     assert 0.50 < fraction["window_mean"] < 0.65
     assert fraction["both_phases"] is True
-    assert result["warnings"] == []
+    assert any("the block error has not converged" in w for w in result["warnings"])
+    assert any("the drift in errors is an upper bound" in w for w in result["warnings"])
 
     code, out, _ = _run_err(
         COEXISTENCE, str(COEX_LOG), "--cells", "8", "--plateau", "--timestep-fs", "2",
@@ -1636,6 +1644,38 @@ def test_coexistence_fraction_reads_the_plateau_of_the_bundled_nph_log(
     assert "drift         -29.07 +/- 4.07" in out and "(-5.8 block errors)" in out
     assert "verdict: not a plateau; T_m = 1442.6 +/- 5.0" in out
     assert "because the temperature drifts" in out
+    assert "half as many blocks, twice as long, give 9.08 against 5.01" in out
+
+
+def test_coexistence_fraction_shows_the_same_cell_wandering_over_200_ps(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The skill says the cell wanders rather than trends, and that neither run
+    passes the drift gate. Both readings hold that claim up."""
+    code, out, _ = _run_err(
+        COEXISTENCE, str(COEX_LOG_LONG), "--cells", "8", "--plateau", "--timestep-fs", "2",
+        "--fraction", str(COEX_FRACTION_LONG), "--natoms", "5120", *COEX_BASELINES,
+        "--json", monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    long_run = json.loads(out)
+    plateau = long_run["plateau"]
+    assert long_run["rows"] == 1001
+    assert plateau["primary"]["ps"] == [100.2, 200.0]
+    assert abs(plateau["primary"]["mean"] - 1440.4) < 0.5
+    assert abs(plateau["secondary"]["mean"] - 1445.9) < 0.5
+    # The drift changed sign against the 70 ps run, and this time the block
+    # error has converged, so the ratio is not an artefact of a short block.
+    assert abs(plateau["primary"]["change"] - 20.2) < 0.5
+    assert plateau["primary"]["drift_in_errors"] > 3.0
+    assert plateau["primary"]["error_converged"] is True
+    assert not any("block error has not converged" in w for w in long_run["warnings"])
+    # Neither run passes the gate, and the two window means agree, which is
+    # the wander the skill describes.
+    assert long_run["verdict"] == "not a plateau"
+    assert plateau["windows_agree"] is True
+    assert long_run["fraction"]["both_phases"] is True
+    assert abs(plateau["primary"]["mean"] - 1442.58) < 2.0 + plateau["primary"]["block_error"]
 
 
 def test_coexistence_fraction_holds_the_gates_to_the_calibrated_baselines(

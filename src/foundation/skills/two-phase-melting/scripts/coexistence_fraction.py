@@ -165,9 +165,20 @@ def block_error(values: np.ndarray, blocks: int) -> float:
 
 
 def window_stats(steps: np.ndarray, values: np.ndarray, blocks: int) -> dict[str, Any]:
-    """Mean, block error, and the drift across the window with the slope's error."""
+    """Mean, block error, and the drift across the window with the slope's error.
+
+    The block error is an error of the mean only where the block is longer
+    than the series correlates. ``block_error_half`` repeats it over half as
+    many blocks, twice as long; an error that still grows with the block
+    length says the series correlates over the block, so the reported error
+    is a lower bound and every ratio against it is an upper bound.
+    """
     mean = float(values.mean())
     error = block_error(values, blocks)
+    half = block_error(values, max(2, blocks // 2))
+    converged = bool(
+        np.isfinite(error) and np.isfinite(half) and error > 0 and half <= 1.5 * error
+    )
     span = float(steps[-1] - steps[0])
     if len(values) > 3 and span != 0.0:
         (slope, _), cov = np.polyfit(steps, values, 1, cov=True)
@@ -181,6 +192,8 @@ def window_stats(steps: np.ndarray, values: np.ndarray, blocks: int) -> dict[str
         "mean": mean,
         "std": float(values.std(ddof=1)) if len(values) > 1 else 0.0,
         "block_error": error,
+        "block_error_half": half,
+        "error_converged": converged,
         "change": change,
         "change_error": change_error,
         "drift_in_errors": (
@@ -417,6 +430,14 @@ def main(argv: list[str] | None = None) -> int:
             reasons.append(
                 f"the temperature drifts {stats['primary']['change']:+.1f} over the window, "
                 f"{abs(stats['primary']['drift_in_errors']):.1f} block errors"
+            )
+        if not stats["primary"]["error_converged"]:
+            result["warnings"].append(
+                f"the block error has not converged: half as many blocks, twice as long, give "
+                f"{stats['primary']['block_error_half']:.2f} against "
+                f"{stats['primary']['block_error']:.2f}. The series correlates over the block, "
+                "so the error is a lower bound and the drift in errors is an upper bound. "
+                "Lengthen the run, and settle it against the other enthalpies' plateaus"
             )
         if not stats["windows_agree"]:
             reasons.append(

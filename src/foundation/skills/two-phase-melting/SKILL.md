@@ -50,11 +50,11 @@ instantaneous order parameter. Thermal displacements break the
 neighbour signature, so `compute cna/atom` on one snapshot classifies a
 large share of the atoms as unknown. How large depends on the potential,
 the temperature, and the cutoff, and it is not predictable. The
-Lennard-Jones crystal of the bundled log reads 0.53 fcc a few kelvin
+Lennard-Jones crystal of the bundled cell reads 0.53 fcc a few kelvin
 below its own T_m, range 0.44 to 0.61 over 10 ps, at the cutoff taken
-from its own a(T), while its liquid reads zero.
-One tungsten campaign read 0.31 down to 0.13 fcc between 1250 and
-1450 K. Both are intact crystals. A gate that compares either number to
+from its own a(T), while its liquid reads zero. One tungsten campaign
+read 0.31 down to 0.13 fcc between 1250 and 1450 K. Both are intact
+crystals. A gate that compares either number to
 a cold count, or to one, fails on a crystal that is working, and that
 campaign diagnosed a failed freeze twice when the freeze had worked.
 Measure the number, never assume it.
@@ -83,7 +83,7 @@ classifying atoms. `compute q6 all orientorder/atom components 6 nnn
 NULL cutoff <first shell>`, `compute conn all coord/atom orientorder q6
 0.5`, and `variable iscrystal atom "c_conn >= 6"` mark an atom whose q6
 vector aligns with six or more neighbours. The count tolerates thermal
-noise for the same reason PTM does, and the bundled log uses it.
+noise for the same reason PTM does, and the bundled runs use it.
 
 Calibrate the classification you chose at every temperature you report.
 Run the crystal-only cell and the liquid-only cell at that temperature
@@ -193,6 +193,11 @@ The barostat needs care on a two-phase cell.
   The verdict is a plateau only when the drift stays inside three block
   errors, the two windows agree, and the calibrated fraction stays off
   both baselines.
+- Read the block error before you read the drift. The script repeats the
+  error over half as many blocks, twice as long, and warns when the
+  error still grows with the block length. It then is a lower bound, the
+  drift in errors is an upper bound, and the run is too short for either
+  to settle the question.
 - Repeat at three starting enthalpies, set by three preparation
   temperatures 30 K apart, each from its own seed. T_m is the mean of
   the three plateaus, and its error is their spread, not one run's block
@@ -202,32 +207,56 @@ The barostat needs care on a two-phase cell.
   the enthalpy at the plateau temperature the run reached and release
   again.
 
-The bundled 70 ps log is one such run, a 5120-atom Lennard-Jones
+The bundled 70 ps log is one such run, on a 5120-atom Lennard-Jones
 coexistence cell eight unit cells across, with the baselines measured on
-its own pure phases at the same temperature:
+that cell's own pure phases at the same temperature:
 
     python <skill root>/scripts/coexistence_fraction.py \
-        lammps-lj-coex-nph-yaml.log --cells 8 --plateau --timestep-fs 2 \
-        --fraction lammps-lj-coex-fraction.dat --natoms 5120 \
+        lammps-lj-coex-nph-70ps-yaml.log --cells 8 --plateau --timestep-fs 2 \
+        --fraction lammps-lj-coex-70ps-fraction.dat --natoms 5120 \
         --crystal-baseline 1.00 --liquid-baseline 0.045
 
 ```text
-lammps-lj-coex-nph-yaml.log: 3 thermo table(s), 351 rows in the one read; cross section 8.0 unit cells
+lammps-lj-coex-nph-70ps-yaml.log: 3 thermo table(s), 351 rows in the one read; cross section 8.0 unit cells
 primary      1442.58 +/- 5.01 (176 rows, 35.0 to 70.0 ps)
 secondary    1433.50 +/- 2.81 (88 rows, 52.6 to 70.0 ps)
 drift         -29.07 +/- 4.07 across the primary window (-5.8 block errors)
 fraction        0.57 calibrated over the window (0.53 to 0.61, baselines 0.04 and 1.00)
 verdict: not a plateau; T_m = 1442.6 +/- 5.0
   because the temperature drifts -29.1 over the window, 5.8 block errors
+warning: the block error has not converged: half as many blocks, twice as long, give 9.08 against 5.01. The series correlates over the block, so the error is a lower bound and the drift in errors is an upper bound. Lengthen the run, and settle it against the other enthalpies' plateaus
 ```
 
 Read that verdict as it stands. Both phases survived the whole window,
 and the two window means agree, so the cell is in coexistence near
 1440 K. The temperature still wanders 30 K over 35 ps, because the
-latent-heat reservoir of 5120 atoms is small, and that is why the route
-asks for 200 ps and three enthalpies. This log is 70 ps of one of them,
-so it is not yet a plateau. The answer is the rest of the route, not a
-narrower window. Do not report a plateau the script refused.
+latent-heat reservoir of 5120 atoms is small, and the warning says the
+block error has not converged, so the drift of 5.8 errors is an upper
+bound on how bad the drift is.
+
+The same cell run to 200 ps is bundled beside it, and it drifts the
+other way:
+
+```text
+lammps-lj-coex-nph-200ps-yaml.log: 3 thermo table(s), 1001 rows in the one read; cross section 8.0 unit cells
+primary      1440.39 +/- 4.14 (500 rows, 100.2 to 200.0 ps)
+secondary    1445.86 +/- 3.28 (250 rows, 150.2 to 200.0 ps)
+drift         +20.16 +/- 2.60 across the primary window (+4.9 block errors)
+fraction        0.58 calibrated over the window (0.52 to 0.62, baselines 0.04 and 1.00)
+verdict: not a plateau; T_m = 1440.4 +/- 4.1
+  because the temperature drifts +20.2 over the window, 4.9 block errors
+```
+
+The drift changed sign, its block error has converged, and the window
+mean is 1440.4 +/- 4.1 K against the shorter run's 1442.6 +/- 5.0 K. The
+two agree. The cell wanders on the timescale of the run rather than
+trending, and neither run of this cell passes the drift gate. T_m comes
+from the agreement of the three enthalpies' means, and the reported
+error is their spread. A wider gate is not the fix. More atoms are,
+because the wander is a finite-size fluctuation, and a cell of ten
+thousand atoms or more settles where this one cannot. Do not report a
+plateau the script refused, and do not narrow the window until it
+passes.
 
 Interface pinning, a harmonic bias on the crystalline order parameter,
 gives the chemical-potential difference at each temperature and is the
@@ -277,12 +306,13 @@ precise modern method. It is the route when the two above disagree.
 
 ## 6. Track the interface
 
-Inside LAMMPS, `compute ncrystal all reduce sum v_iscrystal` counts the
-atoms the section 2 classification marked, whichever of the three wrote
-`v_iscrystal`, and `fix frac all ave/time 10 10 100 c_ncrystal file
-fraction.dat` writes the series. The file's rows come
-back through `series(result, "fraction.dat")` from `foundation.tasks`,
-keyed by column, for the slope fit. `result["averages"]` holds only its
+Name the per-atom mask of section 2 `v_iscrystal`, whichever of the
+three classifications produced it, so one name carries the concept
+through the script and the report. Inside LAMMPS, `compute ncrystal all
+reduce sum v_iscrystal` counts the marked atoms and `fix frac all
+ave/time 10 10 100 c_ncrystal file fraction.dat` writes the series. The
+file's rows come back through `series(result, "fraction.dat")` from
+`foundation.tasks`, keyed by column, for the slope fit. `result["averages"]` holds only its
 summary, and reading `rows` from that summary raises a `KeyError`. Never
 parse the `.dat` file yourself. `coexistence_fraction.py --fraction`
 reads the same file from disk when you want the calibrated series
