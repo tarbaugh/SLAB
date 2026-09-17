@@ -245,6 +245,11 @@ class AgentConfig(BaseModel):
     # mason.md for the container recipe when a real boundary is wanted.
     file_scope: Literal["project", "anywhere"] = "project"
     session_lock: bool = True
+    # How often this session says it is still working. The lease it holds
+    # over its runs is stamped every beat, and a reader that finds a lease
+    # silent settles its runs, so the beat must stay well inside
+    # [workspace] lease_silence_s; the session clamps it to a tenth of that.
+    lease_beat_s: float = Field(default=60.0, ge=1.0)
     serve: ServeConfig = ServeConfig()
     sandbox: SandboxConfig = SandboxConfig()
     # The roster: whether the entry agent may delegate at all, and per-agent

@@ -1617,3 +1617,36 @@ def test_an_exclusion_expires_with_its_job(
         assert len(ws.runs.list_excluded_gpus()) == 3  # a dry run changes nothing
         ws.settle_ended_jobs(caller="t", ended=["9"])
         assert [(r.gpu, r.job_id) for r in ws.runs.list_excluded_gpus()] == [("0", "8")]
+
+
+def test_migrates_v9_database_in_place(db_path: Path) -> None:
+    """A workspace from before session leases (schema v9) opens cleanly and
+    holds one."""
+    with SQLiteRunStore(db_path):
+        pass
+    conn = sqlite3.connect(db_path)
+    conn.execute("DROP TABLE sessions")
+    conn.execute("PRAGMA user_version = 9")
+    conn.close()
+    with SQLiteRunStore(db_path) as s2:
+        assert s2.list_leases() == []
+        s2.open_lease("s1", host="n1", pid=7, job_id="42")
+        assert [lease.id for lease in s2.list_leases(job_id="42")] == ["s1"]
+        conn = sqlite3.connect(db_path)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        conn.close()
+
+
+def test_a_lease_replaces_its_own_row_and_ends_once(store: SQLiteRunStore) -> None:
+    """A session that starts again under its own id replaces its lease, and
+    the first close is the one that describes the death."""
+    first = store.open_lease("s1", host="n1", pid=7, agent="pi")
+    again = store.open_lease("s1", host="n1", pid=8, agent="planner")
+    assert len(store.list_leases()) == 1
+    assert (again.pid, again.agent) == (8, "planner")
+    assert first.pid == 7
+    assert store.end_lease("s1", reason="finish").end_reason == "finish"
+    assert store.end_lease("s1", reason="time limit").end_reason == "finish"
+    # A beat lands on nothing once the lease is closed.
+    beaten = store.beat_lease("s1")
+    assert beaten is not None and beaten.heartbeat_at == again.heartbeat_at

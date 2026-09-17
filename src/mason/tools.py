@@ -2414,7 +2414,7 @@ def _add_workflow_tools(
         outcome = waited["outcome"]
         # Only the runs that finished during this wait: a run recorded
         # earlier, or one another wait collected, is not replayed.
-        if outcome in ("finished", "process_gone"):
+        if outcome in ("finished", "process_gone", "settled"):
             for finished in [waited["run"], *waited.get("also_finished", [])]:
                 _record_run_commands(finished.id, "wait_for_run")
         elif outcome == "none_running":
@@ -2437,6 +2437,13 @@ def _add_workflow_tools(
             ]
             others.append("wait_for_run again collects the next one to finish")
         rest = "".join(f"\n{line}" for line in others)
+        if outcome == "settled":
+            run = waited["run"]
+            return (
+                f"{note}this run is over: {waited['liveness']}, so run {run.id} was "
+                f"settled; launch again if the work is still wanted. "
+                f"{waited['progress']}; read it with show_run{rest}"
+            )
         if outcome == "process_gone":
             run = waited["run"]
             return (
@@ -2478,6 +2485,10 @@ def _add_workflow_tools(
         head = f"still running after {waited_s:.0f}s"
         if asked > waited_s:
             head = f"still running: waited {waited_s:.0f} s, capped from the {asked:.0f} s asked"
+        if waited.get("capped_by"):
+            head += f" (capped at {waited['capped_by']})"
+        if waited.get("owner"):
+            head += f"; {waited['owner']}"
         if not waited["running"]:
             # A timeout shorter than the grace: the launch has not registered.
             return f"{note}{head}:\n(none registered yet; a launch takes a few seconds)"

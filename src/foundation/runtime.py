@@ -32,6 +32,7 @@ import traceback
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
+from datetime import UTC, datetime
 from pathlib import Path
 from types import EllipsisType
 from typing import TYPE_CHECKING, Any, overload
@@ -55,6 +56,7 @@ from foundation.models import (
     CheckResult,
     Reservation,
     Run,
+    SessionLease,
     TaskRecord,
 )
 from foundation.retention import (
@@ -73,8 +75,6 @@ from slab.hpc import JobState, SchedulerError, job_state
 from slab.scratch import RUN_ENV, process_alive
 
 if TYPE_CHECKING:
-    from datetime import datetime
-
     from slab.resources import Budget
 
 _CURRENT: ContextVar[ActiveRun | None] = ContextVar("slab_active_run", default=None)
@@ -705,12 +705,166 @@ def this_job() -> str | None:
     return os.environ.get("SLURM_JOB_ID") or None
 
 
+#: The environment variable the sandbox script exports with the moment the
+#: job ends, in epoch seconds. The scheduler's own ``SLURM_JOB_END_TIME`` is
+#: read when it is absent, so a session outside a container finds its
+#: deadline too.
+JOB_END_ENV = "SLAB_JOB_END"
+
+#: How long before its job ends a batch script is signalled, so the session
+#: can close its lease and settle its runs while the job still exists.
+JOB_SIGNAL_GRACE_S = 180
+
+#: How long a lease may go without a beat before its runs are taken as dead.
+#: The default is ten minutes, ten times the default beat.
+DEFAULT_LEASE_SILENCE_S = 600.0
+
+
+def job_deadline(env: Mapping[str, str] | None = None) -> datetime | None:
+    """When this process's job ends, or None outside a job.
+
+    ``$SLAB_JOB_END`` is read first, because the sandbox script computes it
+    on the host and carries it into a container that ``--cleanenv`` strips.
+    ``$SLURM_JOB_END_TIME`` answers where the scheduler sets it. Only an
+    integer epoch (digits) is accepted, and anything else is read as no
+    deadline. A naive stamp is never taken as UTC: a site clock that is not
+    UTC would put the deadline hours wrong, and the session's own reap
+    would settle its own live runs.
+
+    Examples:
+        >>> job_deadline({"SLAB_JOB_END": "1789000000"}).year
+        2026
+        >>> job_deadline({"SLURM_JOB_END_TIME": "2026-09-17T07:31:00"}) is None
+        True
+        >>> job_deadline({"SLAB_JOB_END": "Unknown"}) is None
+        True
+        >>> job_deadline({}) is None
+        True
+    """
+    source = env if env is not None else os.environ
+    for name in (JOB_END_ENV, "SLURM_JOB_END_TIME"):
+        raw = (source.get(name) or "").strip()
+        if not raw.isdigit():
+            continue
+        try:
+            return datetime.fromtimestamp(int(raw), tz=UTC)
+        except (ValueError, OverflowError, OSError):
+            continue
+    return None
+
+
+def lease_verdict(
+    lease: SessionLease,
+    *,
+    now: datetime | None = None,
+    silence_s: float = DEFAULT_LEASE_SILENCE_S,
+) -> str | None:
+    """What the lease says about its session, or None while it is alive.
+
+    One of ``session-ended`` (the session closed the lease, however it
+    ended), ``deadline-passed`` (the job that held it is over), or
+    ``session-silent`` (no beat for *silence_s*). None means the session
+    is still working, and its runs are left to the verdicts that judge a
+    process.
+
+    Examples:
+        >>> from datetime import timedelta
+        >>> from foundation.models import SessionLease, utcnow
+        >>> live = SessionLease(id="s1", host="n1", pid=7)
+        >>> lease_verdict(live) is None
+        True
+        >>> lease_verdict(live.model_copy(update={"ended_at": utcnow()}))
+        'session-ended'
+        >>> past = utcnow() - timedelta(minutes=5)
+        >>> lease_verdict(live.model_copy(update={"deadline_at": past}))
+        'deadline-passed'
+        >>> lease_verdict(live.model_copy(update={"heartbeat_at": past}), silence_s=60)
+        'session-silent'
+    """
+    moment = now or datetime.now(UTC)
+    if lease.ended_at is not None:
+        return "session-ended"
+    if lease.deadline_at is not None and lease.deadline_at <= moment:
+        return "deadline-passed"
+    if (moment - lease.heartbeat_at).total_seconds() > silence_s:
+        return "session-silent"
+    return None
+
+
+def describe_lease(lease: SessionLease, verdict: str) -> str:
+    """One phrase for a lease verdict: what ended the session, and when.
+
+    Examples:
+        >>> from datetime import datetime, UTC
+        >>> from foundation.models import SessionLease
+        >>> at = datetime(2026, 9, 17, 7, 31, tzinfo=UTC)
+        >>> lease = SessionLease(id="s1", host="n1", pid=7, heartbeat_at=at)
+        >>> describe_lease(lease.model_copy(
+        ...     update={"ended_at": at, "end_reason": "time limit"}), "session-ended")
+        'session s1 ended (time limit) at 07:31 UTC'
+        >>> describe_lease(lease.model_copy(update={"deadline_at": at}), "deadline-passed")
+        "session s1's job ended at 07:31 UTC; the process died with it"
+        >>> describe_lease(lease, "session-silent")
+        'session s1 last beat at 07:31 UTC; it is gone'
+    """
+    def clock(moment: datetime | None) -> str:
+        return moment.astimezone(UTC).strftime("%H:%M UTC") if moment else "an unknown time"
+
+    if verdict == "session-ended":
+        reason = lease.end_reason or "no reason given"
+        return f"session {lease.id} ended ({reason}) at {clock(lease.ended_at)}"
+    if verdict == "deadline-passed":
+        return (
+            f"session {lease.id}'s job ended at {clock(lease.deadline_at)}; "
+            f"the process died with it"
+        )
+    return f"session {lease.id} last beat at {clock(lease.heartbeat_at)}; it is gone"
+
+
+def stop_process_group(run: Run, *, grace_s: float = 5.0) -> bool:
+    """End a running run's process group here: TERM, then KILL after *grace_s*.
+
+    The run's engine legs are its children, so the group is signalled and
+    not the pid alone. A run recorded on another host, a run with no pid,
+    and a process that is already gone are left alone, and the answer is
+    False. A process this user may not signal counts as stopped, because
+    nothing here can do more about it.
+
+    Examples:
+        >>> stop_process_group(Run(status="running", pid=1, host="another-node"))
+        False
+        >>> stop_process_group(Run(status="running"))
+        False
+    """
+    import signal
+    import time
+
+    if run.pid is None or run.host != this_host() or not process_alive(run.pid):
+        return False
+    try:
+        group = os.getpgid(run.pid)
+    except (ProcessLookupError, PermissionError):
+        return False
+    with suppress(ProcessLookupError, PermissionError):
+        os.killpg(group, signal.SIGTERM)
+    deadline = time.monotonic() + max(grace_s, 0.0)
+    while process_alive(run.pid) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    if process_alive(run.pid):
+        with suppress(ProcessLookupError, PermissionError):
+            os.killpg(group, signal.SIGKILL)
+    return True
+
+
 def run_liveness(
     run: Run,
     *,
     host: str | None = None,
     job: str | EllipsisType | None = ...,
     job_states: Mapping[str, JobState] | None = None,
+    leases: Mapping[str, SessionLease] | None = None,
+    now: datetime | None = None,
+    silence_s: float = DEFAULT_LEASE_SILENCE_S,
 ) -> str:
     """Where a running run's process stands, as seen from *host* (this one
     by default) inside *job* (this process's job by default).
@@ -725,6 +879,17 @@ def run_liveness(
     ``unrecorded`` (the run predates the pid stamp, or is not running).
     *job_states* maps job ids to the scheduler's answer, resolved once
     per sweep by the caller; without it ``job-ended`` is never returned.
+
+    *leases* maps session ids to the lease each session holds, read once
+    per sweep like *job_states*. A run whose session's lease is closed,
+    past its job's end, or silent for *silence_s* seconds is
+    ``session-ended``, ``deadline-passed``, or ``session-silent``: the
+    owner is gone, wherever it ran and whatever pid it had. The scheduler
+    outranks the lease, because a lease cannot beat from a job the
+    scheduler calls ended. A beating lease says nothing on its own, so the
+    run falls through to the verdicts that judge a process, and a run with
+    no lease row (one launched before leases, or with no session) is
+    judged exactly as it was.
 
     Examples:
         >>> run_liveness(Run(status="running", pid=os.getpid(), host=this_host()), job=None)
@@ -748,6 +913,14 @@ def run_liveness(
         'job-ended'
         >>> run_liveness(stamped, job="7", job_states={"7": JobState.RUNNING})
         'alive'
+        >>> from foundation.models import SessionLease, utcnow
+        >>> owned = Run(status="running", pid=1, host="n1", job_id="7", session="s1")
+        >>> lease = SessionLease(id="s1", host="n1", pid=9, job_id="7")
+        >>> run_liveness(owned, job=None, leases={"s1": lease})
+        'other-job'
+        >>> ended = lease.model_copy(update={"ended_at": utcnow(), "end_reason": "finish"})
+        >>> run_liveness(owned, job=None, leases={"s1": ended})
+        'session-ended'
     """
     if run.status is not ExecutionStatus.RUNNING:
         return "unrecorded"
@@ -755,6 +928,12 @@ def run_liveness(
         state = (job_states or {}).get(run.job_id)
         if state is not None and state.is_terminal:
             return "job-ended"
+    lease = (leases or {}).get(run.session or "")
+    if lease is not None:
+        verdict = lease_verdict(lease, now=now, silence_s=silence_s)
+        if verdict is not None:
+            return verdict
+    if run.job_id is not None:
         here_job = this_job() if job is ... else job
         if run.job_id != here_job:
             return "other-job"
@@ -766,12 +945,19 @@ def run_liveness(
     return "alive" if process_alive(run.pid) else "gone"
 
 
+#: The verdicts a lease decides, phrased by :func:`describe_lease`.
+_LEASE_VERDICTS = frozenset({"session-ended", "deadline-passed", "session-silent"})
+
+
 def describe_liveness(
     run: Run,
     *,
     host: str | None = None,
     job: str | EllipsisType | None = ...,
     job_states: Mapping[str, JobState] | None = None,
+    leases: Mapping[str, SessionLease] | None = None,
+    now: datetime | None = None,
+    silence_s: float = DEFAULT_LEASE_SILENCE_S,
 ) -> str:
     """One phrase for a listing: what :func:`run_liveness` found and why.
 
@@ -785,8 +971,24 @@ def describe_liveness(
         'process 7 on n1 belongs to job 7, not this job (8); liveness not checked from here'
         >>> describe_liveness(stamped, host="n1", job=None, job_states={"7": JobState.TIMEOUT})
         'job 7 is timeout; the process died with it'
+        >>> from foundation.models import SessionLease, utcnow
+        >>> owned = Run(status="running", pid=7, host="n1", session="s1")
+        >>> gone = SessionLease(id="s1", host="n1", pid=9, ended_at=utcnow(),
+        ...                     end_reason="time limit")
+        >>> describe_liveness(owned, host="n1", leases={"s1": gone}).split(" at ")[0]
+        'session s1 ended (time limit)'
     """
-    verdict = run_liveness(run, host=host, job=job, job_states=job_states)
+    verdict = run_liveness(
+        run,
+        host=host,
+        job=job,
+        job_states=job_states,
+        leases=leases,
+        now=now,
+        silence_s=silence_s,
+    )
+    if verdict in _LEASE_VERDICTS:
+        return describe_lease((leases or {})[str(run.session)], verdict)
     where = f"process {run.pid} on {run.host}"
     if run.job_id is not None:
         where += f" (job {run.job_id})"
@@ -875,6 +1077,9 @@ class Workspace:
     def __init__(self, root: str | os.PathLike[str] = ".slab") -> None:
         self.root = Path(root).expanduser()
         self.runs = SQLiteRunStore(self.root / "runs.db")
+        # The silence a lease may keep before its runs are settled, read from
+        # [workspace] the first time a sweep asks and kept for this handle.
+        self._lease_silence: float | None = None
         try:
             self.artifacts = ArtifactStore(self.root / "cas")
         except BaseException:
@@ -1144,6 +1349,104 @@ class Workspace:
             ],
         }
 
+    # -- session leases -------------------------------------------------------
+
+    def open_lease(
+        self,
+        session_id: str,
+        *,
+        harness: str = "mason",
+        agent: str | None = None,
+        cwd: str | os.PathLike[str] | None = None,
+        deadline_at: datetime | EllipsisType | None = ...,
+    ) -> SessionLease:
+        """Claim this session's runs for as long as this process lives.
+
+        The host, the pid, and the job are this process's own, and the
+        deadline is when its job ends (:func:`job_deadline`) unless the
+        caller names one. Every reader of an active run settles the runs
+        of a lease that ended, passed its deadline, or fell silent, so a
+        session that dies with its job never leaves a run at ``running``.
+
+        Examples:
+            >>> import tempfile
+            >>> ws = Workspace(tempfile.mkdtemp())
+            >>> ws.open_lease("s1", agent="pi").agent
+            'pi'
+            >>> ws.end_lease("s1", reason="finish").end_reason
+            'finish'
+            >>> ws.close()
+        """
+        deadline = job_deadline() if deadline_at is ... else deadline_at
+        return self.runs.open_lease(
+            session_id,
+            host=this_host(),
+            pid=os.getpid(),
+            cwd=str(cwd if cwd is not None else Path.cwd()),
+            harness=harness,
+            agent=agent,
+            job_id=this_job(),
+            deadline_at=deadline,
+        )
+
+    def beat_lease(self, session_id: str) -> SessionLease | None:
+        """Say this session is still working; return the lease, or None."""
+        return self.runs.beat_lease(session_id)
+
+    def end_lease(self, session_id: str, *, reason: str) -> SessionLease | None:
+        """Close this session's lease with the reason it ended."""
+        return self.runs.end_lease(session_id, reason=reason)
+
+    def lease_silence_s(self) -> float:
+        """How long a lease may go without a beat here (``[workspace] lease_silence_s``)."""
+        if self._lease_silence is None:
+            from foundation.config import lease_silence_s
+
+            self._lease_silence = lease_silence_s()
+        return self._lease_silence
+
+    def end_session(
+        self, session_id: str, *, reason: str, grace_s: float = 5.0
+    ) -> tuple[SessionLease | None, list[Run]]:
+        """Close one session's lease and end the runs it was still executing.
+
+        Each running run of the session gets a TERM to its process group,
+        a KILL after *grace_s* seconds, and the error line ``session <id>
+        ended (<reason>) while the run was running``. A run on another
+        host is failed without a signal, because nothing here can reach
+        it. A session never leaves a run running behind it, so a later
+        reader never has to guess. Returns the lease and the runs failed.
+
+        Examples:
+            >>> import tempfile
+            >>> from foundation.models import Run
+            >>> ws = Workspace(tempfile.mkdtemp())
+            >>> _ = ws.open_lease("s1")
+            >>> run = ws.runs.create(Run(name="left", session="s1"))
+            >>> _ = ws.runs.set_status(run.id, "running", pid=1, host="another-node")
+            >>> lease, ended = ws.end_session("s1", reason="time limit")
+            >>> ended[0].error
+            'session s1 ended (time limit) while the run was running'
+            >>> ws.close()
+        """
+        from foundation.errors import SessionNotFoundError
+
+        lease = self.runs.end_lease(session_id, reason=reason)
+        error = f"session {session_id} ended ({reason}) while the run was running"
+        ended: list[Run] = []
+        try:
+            left = self.runs.list_runs(status=ExecutionStatus.RUNNING, session=session_id)
+        except SessionNotFoundError:
+            left = []  # a session that launched nothing leaves nothing behind
+        for run in left:
+            stop_process_group(run, grace_s=grace_s)
+            with suppress(IllegalStatusChangeError):  # it may finish under us; fine
+                ended.append(self.runs.set_status(run.id, ExecutionStatus.FAILED, error=error))
+        self.release_dead()
+        if ended:
+            sweep_scratch(self, only=[run.id for run in ended])
+        return lease, ended
+
     def release_dead(self) -> list[Reservation]:
         """Release every reservation on this host that no live process holds.
 
@@ -1156,8 +1459,19 @@ class Workspace:
         """
         return self.runs.release_dead(this_host(), this_job())
 
-    def reap_dead(self, *, caller: str) -> list[Run]:
-        """Mark failed every running run whose process is gone, or whose job ended.
+    def reap_dead(self, *, caller: str, silence_s: float | None = None) -> list[Run]:
+        """Mark failed every running run whose owner is gone.
+
+        An owner is a session, a job, or a process, and this is the one
+        sweep every reader of an active run calls, so no report is built
+        on a record that outlived its owner.
+
+        The lease decides first (:func:`lease_verdict`): a run whose
+        session closed its lease, passed its job's end, or stopped beating
+        for *silence_s* seconds (``[workspace] lease_silence_s`` when the
+        caller names none) is failed from any host, with no pid and no
+        scheduler. A run whose session still beats falls through to the
+        verdicts below, and so does a run with no lease row.
 
         A hard-killed process (SIGKILL, OOM, a node reboot) leaves its run at
         status ``running`` forever, and a reader of the record cannot tell it
@@ -1203,8 +1517,13 @@ class Workspace:
         reaped: list[Run] = []
         running = self.runs.list_runs(status=ExecutionStatus.RUNNING)
         states = job_states_for(running)
+        leases = self.runs.leases()
+        silence = self.lease_silence_s() if silence_s is None else silence_s
+        ended_jobs = {job for job, state in states.items() if state.is_terminal}
         for run in running:
-            verdict = run_liveness(run, job_states=states)
+            verdict = run_liveness(
+                run, job_states=states, leases=leases, silence_s=silence
+            )
             if verdict == "gone":
                 error = f"process {run.pid} on {run.host} is gone; marked failed by {caller}"
             elif verdict == "job-ended":
@@ -1212,17 +1531,67 @@ class Workspace:
                     f"job {run.job_id} is {states[str(run.job_id)].value}; "
                     f"marked failed by {caller}"
                 )
+            elif verdict in _LEASE_VERDICTS:
+                phrase = describe_lease(leases[str(run.session)], verdict)
+                error = f"{phrase}; marked failed by {caller}"
+                if run.job_id is not None and verdict != "session-silent":
+                    # The job is over as well: its gpu exclusions go with it.
+                    ended_jobs.add(run.job_id)
             else:
                 continue
             with suppress(IllegalStatusChangeError):  # it may finish under us; fine
                 reaped.append(self.runs.set_status(run.id, ExecutionStatus.FAILED, error=error))
-        self.runs.expire_excluded_gpus(
-            job for job, state in states.items() if state.is_terminal
-        )
+        self.runs.expire_excluded_gpus(ended_jobs)
         self.release_dead()
         if reaped:
             sweep_scratch(self, only=[run.id for run in reaped])
         return reaped
+
+    def settle_ended_leases(
+        self, *, caller: str, dry_run: bool = False, silence_s: float | None = None
+    ) -> list[Run]:
+        """Mark failed every running run whose session's lease is over.
+
+        The lease alone is read, so the answer is the same from any host
+        and needs no scheduler: a session that ended, passed its job's
+        end, or fell silent owns nothing any more. This is the sweep
+        ``slab purge`` runs beside :meth:`settle_ended_jobs`, where a pid
+        must not be trusted. With *dry_run* nothing changes, and the runs
+        that would be failed are returned as they stand.
+
+        Examples:
+            >>> import tempfile
+            >>> from foundation.models import Run
+            >>> ws = Workspace(tempfile.mkdtemp())
+            >>> _ = ws.runs.open_lease("s1", host="n1", pid=1)
+            >>> _ = ws.runs.end_lease("s1", reason="time limit")
+            >>> left = ws.runs.create(Run(name="left", session="s1"))
+            >>> _ = ws.runs.set_status(left.id, "running", pid=1, host="n1")
+            >>> [r.name for r in ws.settle_ended_leases(caller="t")]
+            ['left']
+            >>> ws.runs.get(left.id).error.split(";")[1].strip()
+            'marked failed by t'
+            >>> ws.close()
+        """
+        leases = self.runs.leases()
+        silence = self.lease_silence_s() if silence_s is None else silence_s
+        settled: list[Run] = []
+        for run in self.runs.list_runs(status=ExecutionStatus.RUNNING):
+            lease = leases.get(run.session or "")
+            if lease is None:
+                continue
+            verdict = lease_verdict(lease, silence_s=silence)
+            if verdict is None:
+                continue
+            if dry_run:
+                settled.append(run)
+                continue
+            error = f"{describe_lease(lease, verdict)}; marked failed by {caller}"
+            with suppress(IllegalStatusChangeError):  # it may finish under us; fine
+                settled.append(self.runs.set_status(run.id, ExecutionStatus.FAILED, error=error))
+        if settled and not dry_run:
+            sweep_scratch(self, only=[run.id for run in settled])
+        return settled
 
     def settle_ended_jobs(
         self, *, caller: str, ended: Iterable[str] = (), dry_run: bool = False

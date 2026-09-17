@@ -406,3 +406,40 @@ class GpuExclusion(BaseModel):
     reason: str
     at: datetime = Field(default_factory=utcnow)
     run_id: str | None = None
+
+
+class SessionLease(BaseModel):
+    """One session's claim on the runs it starts, held for as long as it lives.
+
+    A run carries a session id, a job id, a pid, and a host, and none of
+    them tells a later reader whether the owner is still working. The
+    lease does: the session writes a row when it starts, beats it while it
+    runs, and closes it when it ends. A reader that finds a lease ended,
+    past its deadline, or silent knows the runs of that session are dead
+    without asking the scheduler, without a pid, and from any host.
+
+    ``id`` is the session id the runs carry. ``deadline_at`` is the moment
+    the session's job ends, known from the job's environment; a session
+    with no job has none. ``ended_at`` and ``end_reason`` are written once,
+    by whoever closed the lease.
+
+    Examples:
+        >>> lease = SessionLease(id="20260917-120000-7", host="n1", pid=7)
+        >>> (lease.harness, lease.ended_at, lease.deadline_at)
+        ('mason', None, None)
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    id: str
+    cwd: str = ""
+    harness: str = "mason"
+    agent: str | None = None
+    host: str
+    pid: int
+    job_id: str | None = None
+    started_at: datetime = Field(default_factory=utcnow)
+    heartbeat_at: datetime = Field(default_factory=utcnow)
+    deadline_at: datetime | None = None
+    ended_at: datetime | None = None
+    end_reason: str | None = None

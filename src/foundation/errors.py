@@ -251,7 +251,7 @@ class SessionNotFoundError(FoundationError):
         self.session = session
         super().__init__(
             f"no run carries session {session!r}; list the known ones with "
-            f"'slab sessions'"
+            f"'slab sessions list'"
         )
 
 

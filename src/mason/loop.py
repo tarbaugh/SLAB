@@ -35,7 +35,9 @@ import hashlib
 import json
 import os
 import threading
+import weakref
 from collections.abc import Sequence
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -750,6 +752,58 @@ def _retire_at_finish(session: MasonSession, run_ids: tuple[str, ...]) -> None:
     session.record({"type": "retire", **report})
 
 
+#: The sessions whose leases the signal handlers close, weakly, so a
+#: session nobody closed is still collectable and the handler that
+#: outlives it does nothing. A session leaves the list when it closes, so
+#: a later signal in the same process (a benchmark runs many sessions)
+#: closes only the sessions still open.
+_OPEN_SESSIONS: list[weakref.ref[MasonSession]] = []
+_HANDLERS_INSTALLED: set[int] = set()
+
+
+def _end_session_on_signal(session: MasonSession) -> None:
+    """Close the lease and settle this session's runs when the job ends it.
+
+    A batch job that reaches its time limit signals its processes before it
+    kills them. The session uses that window to close its lease and fail
+    the runs it was still executing, so the next session reads them as
+    over instead of waiting on work that died two days earlier. SIGINT is
+    left alone in an interactive session, where Ctrl-C ends one turn and
+    not the session, and the handlers are skipped outside the main thread
+    (a delegated wave runs in threads, where signals cannot be installed).
+    """
+    import signal
+
+    ref = weakref.ref(session)
+    _OPEN_SESSIONS.append(ref)
+
+    def forget() -> None:
+        with suppress(ValueError):
+            _OPEN_SESSIONS.remove(ref)
+
+    session._close_hooks.append(forget)
+
+    def handler(signum: int, _frame: Any) -> None:
+        name = "SIGTERM" if signum == signal.SIGTERM else "SIGINT"
+        for ref in list(_OPEN_SESSIONS):
+            live = ref()
+            if live is not None:
+                live.close(f"terminated ({name})")
+        signal.signal(signum, previous.get(signum, signal.SIG_DFL))
+        os.kill(os.getpid(), signum)
+
+    previous: dict[int, Any] = {}
+    wanted = [signal.SIGTERM] if session.interactive else [signal.SIGTERM, signal.SIGINT]
+    for signum in wanted:
+        if signum in _HANDLERS_INSTALLED:
+            continue
+        try:
+            previous[signum] = signal.signal(signum, handler)
+        except ValueError:  # not the main thread: the parent installed them
+            return
+        _HANDLERS_INSTALLED.add(signum)
+
+
 class Mason:
     """One conversation with one agent of the roster (the PI by default).
 
@@ -817,6 +871,10 @@ class Mason:
             _check_review_first(spec, session.agent, self.roster)
             # One running loop per workspace; children run inside this lock.
             session.acquire_session_lock()
+            # The lease that owns this session's runs until it ends, and the
+            # handler that closes it when the job ends the session.
+            session.open_lease()
+            _end_session_on_signal(session)
             # A run left at status running by a hard-killed process is
             # marked failed before the first turn, so the record the agent
             # reads never carries a dead run as a live one.
@@ -1045,6 +1103,9 @@ class Mason:
                     steps=self.steps_taken,
                 )
             self.steps_taken = step
+            # One stamp per step: a session working through long tool calls
+            # is never read as silent, whatever the heartbeat thread meets.
+            self.session.beat_lease()
             self._clear_tool_results()
             self._maybe_compact()
             hint = _turn_hint(

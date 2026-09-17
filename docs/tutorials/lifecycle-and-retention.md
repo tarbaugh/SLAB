@@ -204,6 +204,64 @@ Two safety valves follow the same logic:
 - Blobs that no run references are orphans: the residue of a task that failed before its row was written, or of a process killed mid-write. `gc` keeps an orphan younger than the policy's `orphan_ttl_days` (default 1 day), because it may belong to a run that is about to record it, and reports it under `orphans`. Older than that, `gc` drops it and reports it under `orphans_dropped`. Set `orphan_ttl_days` to `null` in the policy file to keep orphans forever.
 - Runs at status `running` are never swept by default. A hard-killed process leaves its run at `running` forever, so `expire --include-running` (or `include_running=True`) exists for when you know those processes are dead. Such runs are marked failed first, then expired. To retire one such run without a sweep, use `slab runs reap` or `slab runs fail`. `slab hpc cancel` marks a cancelled job's running runs failed and touches no lifecycle state. See [A run stuck at running](debugging-failures.md#a-run-stuck-at-running).
 
+## Session leases: who owns a run while it runs
+
+A run records the session that started it, the job, the pid, and the host.
+None of those says whether the owner is still working, and a session that
+dies with its job leaves its runs at `running` for good. The next session
+then reads them as live work. It waits on them, counts their slices as
+held, and cites them.
+
+A lease closes that gap. Every Mason session and every MCP server writes
+one row when it starts, stamps it every minute while it works, and closes
+it when it ends, whatever ended it. The row carries the harness, the
+agent, the job, and the moment the job ends. A reader draws one of three
+verdicts from it:
+
+| verdict | what it means |
+|---|---|
+| `session-ended` | the session closed its lease, and named why |
+| `deadline-passed` | the job that held the lease is over |
+| `session-silent` | no beat for `[workspace] lease_silence_s` (default 600 s) |
+
+Every reader of an active run settles those runs first, so no report is
+built on a record that outlived its owner. The verdict needs no pid, no
+scheduler, and no particular host, so it works from inside a container
+and from a login node alike. A session that cannot write its beat logs
+the fault once and carries on, and after ten missed beats a reader
+judges the lease silent and settles its runs.
+
+List the leases:
+
+```bash
+slab sessions list
+```
+
+```text
+SESSION                    HARNESS AGENT           JOB START  BEAT      ENDS RUNS  STATE
+20260917-093000-2201       mason   planner        1001   25m   20s         -    1  alive
+20260917-071500-31904      mason   pi             1002    2h    2h 21:32 UTC    1  deadline-passed
+```
+
+`RUNS` is how many runs that session still has at `running`. A row that
+is not `alive` with a count above zero is work nobody owns. Settle it:
+
+```bash
+slab sessions sweep
+```
+
+```text
+failed  01m2rvp6jwzz6rfvw171bav29q  w-melt-quench  session 20260917-071500-31904's job ended at 21:32 UTC; the process died with it; marked failed by slab sessions sweep
+1 run(s) settled
+```
+
+`slab sessions end <id>` closes one lease by hand and ends its runs with
+it, and `slab sessions end --job <id>` closes every lease of one job,
+which is what a sandbox job runs for itself when the scheduler signals it.
+`slab doctor` reports the same condition as a `leases` row, and
+`slab purge` settles the runs of ended leases as it settles the runs of
+ended jobs.
+
 ## Promote a whole session
 
 One conversation with the agent produces several runs. A convergence study is a smoke test and three ladders. Every run records the session that created it, so you can promote the whole conversation without collecting run ids.
@@ -250,13 +308,19 @@ nb-smoke          verified     session=20260828-013504-48123
 List the sessions in the workspace to find the id:
 
 ```bash
-slab sessions
+slab sessions list
 ```
 
 ```text
-SESSION                    RUNS   AGE  STATES
-20260828-013504-48123         4    4s  3 verified, 1 quarantined
+no leases
+
+SESSION (no lease)         RUNS   AGE  STATES
+20260828-013504-48123         4    0s  3 verified, 1 quarantined
 ```
+
+These runs were created by the library, which holds no lease, so they
+appear under the second heading. A session run by Mason or by the MCP
+server holds one, and the first table is where it shows.
 
 Then promote the session. A full id works, and so does a unique prefix:
 
@@ -302,7 +366,7 @@ The table states what a session promote does with each run:
 
 A failed run never becomes permanent this way. A bulk command must not sweep failures into permanence, so promote such a run by its own id, where you can read what failed first.
 
-Two limits are worth knowing. Runs created before session stamping carry no session, and `slab sessions` counts them in a trailing line. Promote those by id, because `slab promote` takes several ids at once:
+Two limits are worth knowing. Runs created before session stamping carry no session, and `slab sessions list` counts them in a trailing line. Promote those by id, because `slab promote` takes several ids at once:
 
 ```bash
 slab promote 01m13035ys 01m12zww7j 01m12ztp0f

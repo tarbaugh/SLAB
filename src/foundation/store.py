@@ -51,6 +51,7 @@ from foundation.models import (
     GpuExclusion,
     Reservation,
     Run,
+    SessionLease,
     SessionSummary,
     TaskRecord,
     Transition,
@@ -58,7 +59,7 @@ from foundation.models import (
 )
 from slab.scratch import process_alive
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -164,6 +165,21 @@ CREATE TABLE IF NOT EXISTS excluded_gpus (
     run_id      TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_excluded_gpus_host ON excluded_gpus(host);
+CREATE TABLE IF NOT EXISTS sessions (
+    id           TEXT PRIMARY KEY,
+    cwd          TEXT NOT NULL DEFAULT '',
+    harness      TEXT NOT NULL,
+    agent        TEXT,
+    host         TEXT NOT NULL,
+    pid          INTEGER NOT NULL,
+    job_id       TEXT,
+    started_at   TEXT NOT NULL,
+    heartbeat_at TEXT NOT NULL,
+    deadline_at  TEXT,
+    ended_at     TEXT,
+    end_reason   TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_sessions_job_id ON sessions(job_id);
 """
 
 # Statements upgrading an existing database from (version - 1) to version.
@@ -218,6 +234,23 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
             run_id      TEXT
         )""",
         "CREATE INDEX IF NOT EXISTS ix_excluded_gpus_host ON excluded_gpus(host)",
+    ),
+    10: (  # the lease a session holds over its runs for as long as it lives
+        """CREATE TABLE IF NOT EXISTS sessions (
+            id           TEXT PRIMARY KEY,
+            cwd          TEXT NOT NULL DEFAULT '',
+            harness      TEXT NOT NULL,
+            agent        TEXT,
+            host         TEXT NOT NULL,
+            pid          INTEGER NOT NULL,
+            job_id       TEXT,
+            started_at   TEXT NOT NULL,
+            heartbeat_at TEXT NOT NULL,
+            deadline_at  TEXT,
+            ended_at     TEXT,
+            end_reason   TEXT
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_sessions_job_id ON sessions(job_id)",
     ),
 }
 
@@ -543,6 +576,43 @@ class RunStore(Protocol):
 
     def run_for_reservation(self, reservation_id: str) -> Run | None:
         """The run that claimed a reservation, or None."""
+        ...
+
+    # -- session leases -------------------------------------------------------
+
+    def open_lease(
+        self,
+        session_id: str,
+        *,
+        host: str,
+        pid: int,
+        cwd: str = "",
+        harness: str = "mason",
+        agent: str | None = None,
+        job_id: str | None = None,
+        deadline_at: datetime | None = None,
+    ) -> SessionLease:
+        """Claim the runs of *session_id* while this process lives; return the lease."""
+        ...
+
+    def beat_lease(self, session_id: str, *, at: datetime | None = None) -> SessionLease | None:
+        """Stamp the lease as still alive; return it, or None when there is none."""
+        ...
+
+    def end_lease(self, session_id: str, *, reason: str) -> SessionLease | None:
+        """Close one lease with the reason it ended; return it, or None."""
+        ...
+
+    def get_lease(self, session_id: str) -> SessionLease | None:
+        """One lease by session id, or None when the session never held one."""
+        ...
+
+    def list_leases(self, *, job_id: str | None = None) -> list[SessionLease]:
+        """Every lease, newest first, optionally only one job's."""
+        ...
+
+    def leases(self) -> dict[str, SessionLease]:
+        """Every lease by session id, for one sweep's worth of verdicts."""
         ...
 
     def exclude_gpu(
@@ -1951,6 +2021,144 @@ class SQLiteRunStore:
 
     # -- excluded gpus ----------------------------------------------------------------
 
+    # -- session leases -------------------------------------------------------
+
+    def open_lease(
+        self,
+        session_id: str,
+        *,
+        host: str,
+        pid: int,
+        cwd: str = "",
+        harness: str = "mason",
+        agent: str | None = None,
+        job_id: str | None = None,
+        deadline_at: datetime | None = None,
+    ) -> SessionLease:
+        """Claim the runs of *session_id* for as long as this process lives.
+
+        A session that starts again under the same id replaces its own
+        row, so a restarted server does not read its earlier lease as a
+        dead one.
+
+        Examples:
+            >>> store = SQLiteRunStore(":memory:")
+            >>> lease = store.open_lease("s1", host="n1", pid=7, job_id="42")
+            >>> (lease.job_id, store.get_lease("s1").harness)
+            ('42', 'mason')
+            >>> store.close()
+        """
+        lease = SessionLease(
+            id=session_id,
+            cwd=cwd,
+            harness=harness,
+            agent=agent,
+            host=host,
+            pid=pid,
+            job_id=job_id,
+            deadline_at=deadline_at,
+        )
+        with self._txn() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO sessions (id, cwd, harness, agent, host, pid,"
+                " job_id, started_at, heartbeat_at, deadline_at, ended_at, end_reason)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,NULL,NULL)",
+                (
+                    lease.id,
+                    lease.cwd,
+                    lease.harness,
+                    lease.agent,
+                    lease.host,
+                    lease.pid,
+                    lease.job_id,
+                    lease.started_at.isoformat(),
+                    lease.heartbeat_at.isoformat(),
+                    lease.deadline_at.isoformat() if lease.deadline_at else None,
+                ),
+            )
+        return lease
+
+    def beat_lease(self, session_id: str, *, at: datetime | None = None) -> SessionLease | None:
+        """Stamp the lease as still alive; return it, or None when there is none.
+
+        A lease that has already ended is not revived: the beat lands on
+        nothing, because whoever closed it settled its runs.
+
+        Examples:
+            >>> store = SQLiteRunStore(":memory:")
+            >>> _ = store.open_lease("s1", host="n1", pid=7)
+            >>> store.beat_lease("s1") is not None
+            True
+            >>> store.beat_lease("absent") is None
+            True
+            >>> store.close()
+        """
+        moment = (at or utcnow()).isoformat()
+        with self._txn() as conn:
+            conn.execute(
+                "UPDATE sessions SET heartbeat_at = ? WHERE id = ? AND ended_at IS NULL",
+                (moment, session_id),
+            )
+            row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        return _row_to_lease(row) if row is not None else None
+
+    def end_lease(self, session_id: str, *, reason: str) -> SessionLease | None:
+        """Close one lease with the reason it ended; return it, or None.
+
+        The first close wins: a lease already ended keeps its first reason,
+        because that is the one that described the death.
+
+        Examples:
+            >>> store = SQLiteRunStore(":memory:")
+            >>> _ = store.open_lease("s1", host="n1", pid=7)
+            >>> store.end_lease("s1", reason="finish").end_reason
+            'finish'
+            >>> store.end_lease("s1", reason="time limit").end_reason
+            'finish'
+            >>> store.close()
+        """
+        with self._txn() as conn:
+            conn.execute(
+                "UPDATE sessions SET ended_at = ?, end_reason = ? WHERE id = ?"
+                " AND ended_at IS NULL",
+                (utcnow().isoformat(), reason, session_id),
+            )
+            row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        return _row_to_lease(row) if row is not None else None
+
+    def get_lease(self, session_id: str) -> SessionLease | None:
+        """One lease by session id, or None when the session never held one."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+        return _row_to_lease(row) if row is not None else None
+
+    def list_leases(self, *, job_id: str | None = None) -> list[SessionLease]:
+        """Every lease, newest first, optionally only one job's.
+
+        Examples:
+            >>> store = SQLiteRunStore(":memory:")
+            >>> _ = store.open_lease("s1", host="n1", pid=7, job_id="42")
+            >>> _ = store.open_lease("s2", host="n1", pid=8)
+            >>> [lease.id for lease in store.list_leases(job_id="42")]
+            ['s1']
+            >>> store.close()
+        """
+        sql = "SELECT * FROM sessions"
+        params: list[object] = []
+        if job_id is not None:
+            sql += " WHERE job_id = ?"
+            params.append(job_id)
+        sql += " ORDER BY started_at DESC, id"
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [_row_to_lease(row) for row in rows]
+
+    def leases(self) -> dict[str, SessionLease]:
+        """Every lease by session id, for one sweep's worth of verdicts."""
+        return {lease.id: lease for lease in self.list_leases()}
+
     def exclude_gpu(
         self,
         gpu: str,
@@ -2243,6 +2451,27 @@ def _claimable(row: sqlite3.Row | None, reservation_id: str, host: str) -> Reser
             f"not {host!r}; a slice of one host cannot be claimed from another"
         )
     return reservation
+
+
+def _row_to_lease(row: sqlite3.Row) -> SessionLease:
+    def when(field: str) -> datetime | None:
+        value = row[field]
+        return datetime.fromisoformat(value) if value else None
+
+    return SessionLease(
+        id=row["id"],
+        cwd=row["cwd"],
+        harness=row["harness"],
+        agent=row["agent"],
+        host=row["host"],
+        pid=int(row["pid"]),
+        job_id=row["job_id"],
+        started_at=datetime.fromisoformat(row["started_at"]),
+        heartbeat_at=datetime.fromisoformat(row["heartbeat_at"]),
+        deadline_at=when("deadline_at"),
+        ended_at=when("ended_at"),
+        end_reason=row["end_reason"],
+    )
 
 
 def _row_to_exclusion(row: sqlite3.Row) -> GpuExclusion:

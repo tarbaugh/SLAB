@@ -144,6 +144,7 @@ def render_sbatch(
     use_launcher: bool = True,
     include_global_setup: bool = True,
     size: JobSize | None = None,
+    extra_directives: Iterable[str] = (),
 ) -> str:
     """A complete sbatch script for *command* on the given partition.
 
@@ -180,6 +181,9 @@ def render_sbatch(
     renders no gres. A size past the partition's own declared fields is
     refused by :func:`slab.resources.check_size` before anything renders.
     Without a size the output is what it always was.
+
+    *extra_directives* are ``#SBATCH`` lines the caller adds after the
+    partition's own, without the ``#SBATCH`` prefix (``--signal=B:TERM@180``).
 
     A partition that names ``exclude_gpus`` gets an ``export
     SLAB_GPU_EXCLUDE=...`` line after its setup lines, so the budget of
@@ -263,6 +267,7 @@ def render_sbatch(
     directive("constraint", spec.constraint)
     directive("reservation", spec.reservation)
     lines.extend(f"#SBATCH {extra}" for extra in spec.sbatch_extra)
+    lines.extend(f"#SBATCH {extra}" for extra in extra_directives)
 
     body = ["", "set -euo pipefail", ""]
     if include_global_setup:

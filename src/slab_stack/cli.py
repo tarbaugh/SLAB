@@ -1445,6 +1445,7 @@ for _group, _name in (
 
 app.add_typer(mason_app, name="mason", rich_help_panel=_PANEL_AGENT)
 app.add_typer(foundation_cli.runs_app, name="runs", rich_help_panel=_PANEL_LIFECYCLE)
+app.add_typer(foundation_cli.sessions_app, name="sessions", rich_help_panel=_PANEL_LIFECYCLE)
 
 
 for _info in foundation_cli.app.registered_commands:

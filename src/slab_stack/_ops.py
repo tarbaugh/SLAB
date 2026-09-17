@@ -225,7 +225,9 @@ def purge_inventory(
     are marked failed first
     (:meth:`~foundation.runtime.Workspace.settle_ended_jobs`), so a
     harness record whose only running run was among them is stale in the
-    same pass, and their scratch goes with them.
+    same pass, and their scratch goes with them. The running runs of
+    sessions whose lease is over go the same way
+    (:meth:`~foundation.runtime.Workspace.settle_ended_leases`).
     """
     root = Path(root)
     groups = transcript_groups(root, include_orphans=True)
@@ -294,6 +296,12 @@ def purge_inventory(
         settled = [
             f"{run.id}  {run.name}  job {run.job_id}".rstrip()
             for run in ws.settle_ended_jobs(caller="slab purge", ended=ended, dry_run=dry_run)
+        ]
+        # A session whose lease is over owns nothing either, and that
+        # answer needs no scheduler and no pid.
+        settled += [
+            f"{run.id}  {run.name}  session {run.session}".rstrip()
+            for run in ws.settle_ended_leases(caller="slab purge", dry_run=dry_run)
         ]
         records = [
             r.path for r in stale_records(root, runs=ws.runs, keep_newest=not all_sessions)

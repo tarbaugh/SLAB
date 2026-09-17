@@ -151,7 +151,7 @@ The verbs, in full:
 | `slab show <id> [--json]` | One run: state, intent, checks, tasks, artifacts, history. Ids accept unique prefixes, git-style. |
 | `slab promote <id>... [--reason ...] [--force]` | Make runs permanent. `--force` promotes an unverified run and is recorded as forced. |
 | `slab promote --session <id> [--force]` | Promote every run one agent session created, reporting each outcome. Failed runs are never promoted this way. |
-| `slab sessions` | List the sessions that created runs, with run counts and state breakdowns. |
+| `slab sessions list` | List the session leases and the sessions that created runs, with run counts and state breakdowns. |
 | `slab runs reap` | Mark failed every run at status `running` whose recorded process on this host is gone or whose scheduler job ended. Mason does the same reap at session start and on every `list_runs` and `wait_for_run` call. |
 | `slab runs reverify <id> <script>` | Run a fixed script's checks on a quarantined run's stored results, as a new verification pass. No engine starts and no new run is recorded. `slab run --dry-run --from-run <id> <script>` rehearses the same on the run's cached results. |
 | `slab runs fail <id> --reason TEXT` | Retire one running run by hand, for a run started on another host or before the process stamp. Refused while the run's process is alive on this host. |

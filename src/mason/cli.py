@@ -137,6 +137,9 @@ def _mason_session(
         approver=_ask_approval if interactive else None,
         auto_approve=auto,
     )
+    # Ctrl-C ends one turn where a person is watching, and the session
+    # where nobody is: the loop installs its signal handlers from this.
+    session.interactive = interactive
     updates: dict[str, object] = {}
     if model is not None:
         updates["model"] = model
@@ -351,6 +354,18 @@ def mason_chat(
         f"{session.endpoint} [{session.endpoint_origin}]"
     )
     typer.echo(f"workspace {session.workspace_root}; notebook {session.notebook_path}")
+    try:
+        _chat_loop(mason, session)
+    finally:
+        # The lease closes with the session, and the runs it was still
+        # executing are ended with it.
+        ended = session.close("the session ended")
+        if ended:
+            typer.echo(f"[{len(ended)} run(s) of this session ended with it]", err=True)
+
+
+def _chat_loop(mason: Any, session: MasonSession) -> None:
+    """Read a goal, run a turn, print the report, until the person leaves."""
     while True:
         try:
             text = input("\nmason> ").strip()
@@ -429,8 +444,10 @@ def mason_run(
         mason = Mason(session, spec=spec, roster=roster, expected_results=expected_results)
         try:
             result = mason.run_turn(goal)
-        finally:
-            session.release_session_lock()
+        except BaseException:
+            session.close("the session failed")
+            raise
+        session.close(f"the session stopped: {result.stop_reason}")
     except (MasonError, FoundationError, SlabError) as e:
         _fail(str(e))
     typer.echo(result.text)
@@ -868,6 +885,13 @@ def _render_event(event: dict[str, Any], full: bool) -> None:
     elif kind == "finish":
         typer.secho(f"\n=== final report @ {stamp} " + "=" * 39, bold=True)
         typer.echo(_clip(str(event.get("report", "")), full))
+    elif kind == "session_end":
+        runs = [str(r) for r in (event.get("runs_ended") or [])]
+        with_it = f"; ended {len(runs)} run(s)" if runs else ""
+        typer.secho(
+            f"[{stamp}] session ended: {event.get('reason')}{with_it}",
+            fg=typer.colors.MAGENTA,
+        )
     elif kind == "retire":
         typer.secho(f"[{stamp}] {_retire_line(event)}", fg=typer.colors.MAGENTA)
     elif kind == "command":
@@ -1398,6 +1422,16 @@ def mason_report(
         typer.echo(f"finish reported{head}")
     else:
         typer.echo("no finish report (halted, interrupted, or still running)")
+    if summary.get("session_end"):
+        ended = summary["session_end"]
+        ended_runs = [str(run) for run in ended["runs_ended"]]
+        with_it = (
+            f"; {len(ended_runs)} run(s) ended with it: "
+            + ", ".join(run[:10] for run in ended_runs)
+            if ended_runs
+            else ""
+        )
+        typer.echo(f"session ended: {ended['reason']}{with_it}")
     if summary.get("retire"):
         typer.echo(_retire_line(summary["retire"]))
     commands = summary.get("commands") or {}

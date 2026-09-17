@@ -24,7 +24,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from slab.config import ConfigError, ExpandedPath, gpu_id_list, load_merged, validate
 from slab.resources import GPU_EXCLUDE_ENV
@@ -38,12 +38,19 @@ class WorkspaceConfig(BaseModel):
         True
         >>> WorkspaceConfig(exclude_gpus=[0]).exclude_gpus
         ('0',)
+        >>> WorkspaceConfig().lease_silence_s
+        600.0
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     root: ExpandedPath | None = None
     exclude_gpus: tuple[str, ...] = ()
+    # How long a session's lease may go without a beat before a reader
+    # takes its runs as dead. A session beats ten times inside this
+    # window, so a slow filesystem or a long model call never settles a
+    # working session's runs.
+    lease_silence_s: float = Field(default=600.0, ge=60.0)
 
     @field_validator("exclude_gpus", mode="before")
     @classmethod
@@ -126,3 +133,23 @@ def apply_gpu_exclusion(cwd: str | os.PathLike[str] | None = None) -> str | None
         return None
     os.environ[GPU_EXCLUDE_ENV] = ",".join(ids)
     return os.environ[GPU_EXCLUDE_ENV]
+
+
+def lease_silence_s(cwd: str | os.PathLike[str] | None = None) -> float:
+    """``[workspace] lease_silence_s`` here, or the default when nothing says.
+
+    A configuration this process cannot read must not shorten the silence
+    a lease is allowed, so a broken file answers with the default and the
+    tools that read the config report the fault.
+
+    Examples:
+        >>> import tempfile
+        >>> lease_silence_s(tempfile.mkdtemp())
+        600.0
+    """
+    from foundation.runtime import DEFAULT_LEASE_SILENCE_S
+
+    try:
+        return load_config(cwd).workspace.lease_silence_s
+    except (ConfigError, OSError):
+        return DEFAULT_LEASE_SILENCE_S

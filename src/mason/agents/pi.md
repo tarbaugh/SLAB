@@ -73,6 +73,12 @@ brief you sized too tight comes back at its turn budget with the work
 half done. Continue it with more steps, and never raise a budget to
 rescue a brief that failed for another reason.
 
+Size the last wave to the time left. The environment block says when
+this job ends, and each step's harness line repeats the minutes left
+under an hour. Brief no launch that cannot finish before the job ends,
+because the job takes its runs with it. Spend the last of the time on
+the notebook and the report.
+
 Continue a specialist when the follow-up needs what it already read or
 wrote: the failure record it just diagnosed, the script it just wrote, a
 second temperature on the same input. Pass the handle from its harness

@@ -27,7 +27,7 @@ from foundation import _ops
 from foundation import memory as memory_store
 from foundation.errors import FoundationError
 from foundation.retention import MARKER_GRACE_S, sweep_scratch
-from foundation.runtime import Workspace
+from foundation.runtime import Workspace, lease_verdict
 from mason import doctor as mason_doctor
 from mason.errors import MasonError
 from mason.session import stale_locks, transcript_groups
@@ -144,6 +144,44 @@ def _leftovers_row(workspace: Path | None) -> tuple[str, str] | None:
         f"leftovers: {scratch_count} scratch dir(s) ({scratch_bytes} bytes), "
         f"{orphans} orphan transcript(s), {locks} stale lock(s)",
     )
+
+
+def _leases_row(workspace: Path | None) -> tuple[str, str] | None:
+    """Sessions that are over but still hold runs at ``running``.
+
+    An ``=`` row when a lease that ended, passed its job's end, or fell
+    silent still has runs in flight: the next reader settles them, and
+    ``slab sessions sweep`` settles them now. A ``+`` row when every
+    running run belongs to a session that is still working.
+    """
+    try:
+        root = _ops.resolve_root(workspace)
+        if not Path(root).exists():
+            return None
+        with Workspace(root) as ws:
+            leases = ws.runs.leases()
+            silence = ws.lease_silence_s()
+            stranded = 0
+            sessions = set()
+            for run in ws.runs.list_runs(status="running"):
+                lease = leases.get(run.session or "")
+                if lease is not None and lease_verdict(lease, silence_s=silence) is not None:
+                    stranded += 1
+                    sessions.add(lease.id)
+            live = sum(
+                1
+                for lease in leases.values()
+                if lease_verdict(lease, silence_s=silence) is None
+            )
+    except _ERRORS as e:
+        return ("x", f"leases: {e}")
+    if stranded:
+        return (
+            "=",
+            f"leases: {len(sessions)} session(s) over with {stranded} run(s) still "
+            f"running; 'slab sessions sweep' settles them",
+        )
+    return ("+", f"leases: {live} session(s) working, no run left by a session that is over")
 
 
 def _memory_row() -> tuple[str, str]:
@@ -732,6 +770,9 @@ def run(
     leftovers_row = _leftovers_row(workspace)
     if leftovers_row is not None:
         rows.append(leftovers_row)
+    leases_row = _leases_row(workspace)
+    if leases_row is not None:
+        rows.append(leases_row)
     rows.append(_memory_row())
     engine_rows, checkpoint_ids = _engines_rows()
     rows.extend(engine_rows)

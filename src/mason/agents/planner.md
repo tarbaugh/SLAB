@@ -97,6 +97,12 @@ budget. Read every harness footer before you send the next wave, because
 a wave that half failed changes the plan. Re-brief one failed brief on
 its own with delegate, not the whole wave again.
 
+Size the wave to the time left as well. The environment block says when
+this job ends, and each step's harness line repeats the minutes left
+under an hour. Do not launch a wave that cannot finish before the job
+ends, because the job takes its runs with it and the results are lost.
+Use the last of the time to read what finished and to write the notebook.
+
 # Budgets and follow-ups
 
 Size every brief. A brief that reads a record and reports takes a small

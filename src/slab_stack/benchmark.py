@@ -768,8 +768,10 @@ def run_campaign(
     mason = Mason(session, spec=spec, roster=roster, expected_results=dict(question.results))
     try:
         result = mason.run_turn(question.instruction)
-    finally:
-        session.release_session_lock()
+    except BaseException:
+        session.close("the benchmark session failed")
+        raise
+    session.close(f"the benchmark session stopped: {result.stop_reason}")
     return session.session_id, result
 
 

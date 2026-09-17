@@ -88,6 +88,8 @@ def _tally(transcript: Path) -> dict[str, Any]:
     finish_unverified = False
     finished = False
     retire: dict[str, Any] | None = None
+    # How the session ended, and the runs that ended with it.
+    session_end: dict[str, Any] | None = None
     commands: Counter[str] = Counter()
     # Replies the reply-token ceiling cut: how many, what the ones whose
     # text was discarded cost in completion tokens, and the tool each one
@@ -168,6 +170,11 @@ def _tally(transcript: Path) -> dict[str, Any]:
             raw_ids = event.get("run_ids")
             finish_run_ids = [str(r) for r in raw_ids] if isinstance(raw_ids, list) else []
             finish_unverified = bool(event.get("unverified"))
+        elif kind == "session_end":
+            session_end = {
+                "reason": str(event.get("reason") or ""),
+                "runs_ended": [str(r) for r in (event.get("runs_ended") or [])],
+            }
         elif kind == "retire":
             retire = {k: v for k, v in event.items() if k not in ("at", "type")}
         elif kind == "command":
@@ -239,6 +246,7 @@ def _tally(transcript: Path) -> dict[str, Any]:
             "unverified": finish_unverified,
         },
         "retire": retire,
+        "session_end": session_end,
         "commands": dict(commands),
         "cuts": cuts,
         "cut_tokens": cut_tokens,

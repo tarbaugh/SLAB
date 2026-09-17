@@ -27,6 +27,7 @@ from __future__ import annotations
 import functools
 import os
 import sqlite3
+import sys
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
@@ -64,6 +65,25 @@ _F = TypeVar("_F", bound=Callable[..., Any])
 #: The names of the tools this server exposes, filled as they are declared;
 #: a memory that names one describes SLAB itself.
 _TOOL_NAMES: list[str] = []
+
+
+#: How often the server says it is still there, in seconds, and never
+#: slower than a tenth of ``[workspace] lease_silence_s`` (see
+#: :func:`lease_beat_s`), so a reader never judges a working server silent.
+_LEASE_BEAT_S = 60.0
+
+
+def lease_beat_s(project: Path | None = None) -> float:
+    """How often the server beats: the default, or a tenth of the silence.
+
+    Examples:
+        >>> import tempfile
+        >>> lease_beat_s(tempfile.mkdtemp())
+        60.0
+    """
+    from foundation.config import lease_silence_s
+
+    return min(_LEASE_BEAT_S, lease_silence_s(project) / 10)
 
 
 def _surfaced(fn: _F) -> _F:
@@ -147,6 +167,11 @@ def build_server(
     project_dir = Path(project if project is not None else Path.cwd()).resolve()
     session_id = session or new_session_id("mcp")
     record = SessionRecord(root, session_id, client="mcp")
+    # The lease that owns this server's runs. A client that dies without
+    # closing it leaves it silent, and the next reader settles its runs
+    # instead of reading them as active.
+    with suppress(FoundationError, sqlite3.Error, OSError), Workspace(root) as ws:
+        ws.open_lease(session_id, harness="mcp", cwd=project_dir)
     hpc = load_slab_config(project_dir).hpc
     versions: dict[str, dict[str, str]] = {}
     from slab._ops import setup_digest
@@ -546,8 +571,10 @@ def build_server(
         The wait costs nothing while it blocks. 'outcome' is finished (with
         the run and its task tally), process_gone (this call found the run's
         recorded process dead on this host and marked the run failed;
-        nothing to wait for), still_running ('note_running' says waiting
-        again is the right call; each entry says whether its process is
+        nothing to wait for), settled (the session that started the run is
+        gone, so the run was failed with it; 'liveness' says how that
+        session ended, and the work needs launching again), still_running
+        ('note_running' says waiting again is the right call; each entry says whether its process is
         alive here or runs on another host, the time since it started, and
         the LAMMPS step against the run's end when a run_lammps task is
         running), none_running (the session's finished runs), or no_runs."""
@@ -559,7 +586,7 @@ def build_server(
             all_runs=all,
         )
         # Only the runs that finished during this wait are recorded.
-        if waited["outcome"] in ("finished", "process_gone"):
+        if waited["outcome"] in ("finished", "process_gone", "settled"):
             for finished in [waited["run"], *waited.get("also_finished", [])]:
                 _record_run_commands(finished.id, "wait_for_run")
         elif waited["outcome"] == "none_running":
@@ -579,8 +606,13 @@ def build_server(
                 | {"progress": progress, "liveness": liveness, "advance": advance}
                 for r, progress, liveness, advance in waited["running"]
             ]
+        if waited["outcome"] == "settled":
+            answer["liveness"] = waited["liveness"]
         if waited["outcome"] == "still_running":
             answer["waited_s"] = waited["timeout_s"]
+            for key in ("capped_by", "owner"):
+                if waited.get(key):
+                    answer[key] = waited[key]
             if timeout_s > waited["timeout_s"]:
                 answer["capped"] = (
                     f"waited {waited['timeout_s']:.0f} s, capped from the {timeout_s:.0f} s asked"
@@ -1071,7 +1103,39 @@ def serve(root: Path, *, project: Path | None = None) -> None:  # pragma: no cov
     (:func:`foundation.config.apply_gpu_exclusion`), so the server's budget
     and every launch it starts leave a broken device out.
     """
+    import threading
+
     from foundation.config import apply_gpu_exclusion
 
     apply_gpu_exclusion(project)
-    build_server(root, project=project).run()
+    session_id = new_session_id("mcp")
+    server = build_server(root, project=project, session=session_id)
+    stop = threading.Event()
+    interval = lease_beat_s(project)
+    warned = False
+
+    def beat() -> None:
+        nonlocal warned
+        while not stop.wait(interval):
+            try:
+                with Workspace(root) as ws:
+                    ws.beat_lease(session_id)
+            except (FoundationError, sqlite3.Error, OSError) as e:
+                # A beat that fails for ten intervals leaves a silent lease,
+                # and the next reader settles this server's runs: say so
+                # once, on stderr, where the client's log keeps it.
+                if not warned:
+                    warned = True
+                    print(
+                        f"slab mcp: this session's lease could not be written ({e}); "
+                        f"a lease silent for ten beats has its runs settled by the next reader",
+                        file=sys.stderr,
+                    )
+
+    threading.Thread(target=beat, name="mcp-lease", daemon=True).start()
+    try:
+        server.run()
+    finally:
+        stop.set()
+        with suppress(FoundationError, sqlite3.Error, OSError), Workspace(root) as ws:
+            ws.end_session(session_id, reason="the server stopped")
