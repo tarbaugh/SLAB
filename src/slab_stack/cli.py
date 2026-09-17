@@ -364,6 +364,7 @@ def memory_list(
                         "kind": m.kind,
                         "expires_at": m.expires_at,
                         "where": m.where,
+                        "confirmed": m.confirmed,
                         "expired": m.expired(),
                         "changed": m.drift(live),
                         "about_slab": _about_slab(m),
@@ -419,14 +420,21 @@ def _evidence_doubts(
     The rule that evidence is a run that completed arrived after these
     files were written, so the judgement is made here rather than stored.
     A memory nobody marked verified is already listed, and a workspace
-    that cannot be opened leaves every memory as it stands.
+    that cannot be opened leaves every memory as it stands. A memory whose
+    last write is a person's confirmation is not judged: the person
+    checked it by hand, and no run need name what they checked.
 
     The runs live in a workspace, and this command reads the machine. It
-    judges against the workspace it is pointed at, or the one in the
-    current directory when that exists, and never creates one.
+    judges against the workspace that ``--workspace``, ``$SLAB_WORKSPACE``,
+    or ``[workspace] root`` names, else ``./.slab`` when that exists, and
+    never creates one.
     """
-    candidates = {name: m.evidence for name, m in memories.items() if not m.unverified}
-    root = Path(workspace) if workspace is not None else Path(".slab")
+    candidates = {
+        name: m.evidence
+        for name, m in memories.items()
+        if not m.unverified and m.confirmed is None
+    }
+    root = _ops.resolve_root(workspace)
     if not candidates or not (root / "runs.db").is_file():
         return {}
     doubts: dict[str, str] = {}
@@ -503,8 +511,9 @@ def memory_add(
     """
     if not (evidence or "").strip() and not unverified:
         _fail(
-            "a memory needs evidence: the run id, the dry run, or the failure record "
-            "that confirmed the fact. Pass --evidence, or pass --unverified to record "
+            "a memory needs evidence: the id of a run that completed, and one line "
+            "saying what it showed. A dry-run id or a failure record may be cited, and "
+            "neither verifies the fact. Pass --evidence, or pass --unverified to record "
             "it as a claim that recall flags and 'slab memory review' lists"
         )
     text = sys.stdin.read() if body == "-" else body
@@ -573,6 +582,7 @@ def memory_review(
                         "agent": m.agent,
                         "kind": m.kind,
                         "expires_at": m.expires_at,
+                        "confirmed": m.confirmed,
                         "updated": m.updated or m.created,
                     }
                     for m, reasons in listed
@@ -607,12 +617,27 @@ def memory_confirm(
             help="What confirmed the fact: a run id and one line, or what you checked.",
         ),
     ],
+    expires: Annotated[
+        str | None,
+        typer.Option(
+            "--expires",
+            help="For an outage: the day it stops being read, YYYY-MM-DD. "
+            "Default: a week from today.",
+        ),
+    ] = None,
+    workspace: _WorkspaceOpt = None,
 ) -> None:
     """Mark a memory as confirmed, with the evidence you checked it against.
 
     The body stays as it is. The memory gets the evidence, loses the
-    unverified mark, and is stamped against the software present now, so
-    a drift note clears too. The version it replaces is kept.
+    unverified mark, records today as the day a person confirmed it, and
+    is stamped against the software present now, so a drift note clears
+    too. An outage's expiry moves to a week from today, or to --expires.
+    The version it replaces is kept.
+
+    'slab memory review' does not re-judge a confirmed memory's evidence
+    against the workspace's runs, because you checked the fact yourself.
+    When the evidence names no completed run, the command says so.
     """
     try:
         found = memory_store.discover().get(name)
@@ -629,12 +654,40 @@ def memory_confirm(
             against=_stamp_for(f"{name}\n{found.description}\n{body}"),
             evidence=evidence,
             kind=found.kind,
-            expires_at=found.expires_at,
+            expires_at=expires,
             where=found.where,
+            confirmed=date.today(),
         )
     except FoundationError as e:
         _fail(str(e))
     typer.echo(f"confirmed {written.name}: evidence {written.evidence}")
+    if written.kind == "outage":
+        typer.echo(written.outage_note())
+    doubt = _confirm_doubt(workspace, written.evidence)
+    if doubt is not None:
+        typer.echo(f"warning: {doubt}")
+
+
+def _confirm_doubt(workspace: Path | None, evidence: str | None) -> str | None:
+    """Why a confirmation's evidence names no completed run, or None when it does.
+
+    The memory stands either way: a person confirmed it. The line tells
+    the person that the store holds their word and no run's.
+    """
+    stands = "the memory stands on your check alone"
+    if not memory_store.run_ids(evidence):
+        return f"the evidence names no run id; {stands}"
+    root = _ops.resolve_root(workspace)
+    if not (root / "runs.db").is_file():
+        return f"no workspace at {root} holds the cited run(s); {stands}"
+    try:
+        with Workspace(root) as ws:
+            rows = _ops.evidence_rows(ws, evidence)
+    except FoundationError as e:
+        return f"cannot read the workspace at {root} ({e}); {stands}"
+    if any(row["counts"] for row in rows):
+        return None
+    return f"no completed run confirms it ({_ops.evidence_note(rows)}); {stands}"
 
 
 @memory_app.command("show")

@@ -13,8 +13,9 @@ All notable changes to SLAB, newest first. Dates are commit dates on
   which cited ids counted and which did not. `remember` also takes
   `kind`: `build` for how this machine's software behaves, `resource` for
   what its hardware does, and `outage` for something that is broken now.
-  An outage carries `where`, the host its evidence ran on, and
-  `expires_at`, a week out by default. `recall` puts that line in front
+  An outage carries `where`, the host its evidence ran on, taken from
+  the first completed run cited or else the first cited run with a host
+  stamp, and `expires_at`, a week out by default. `recall` puts that line in front
   of the fact, the prompt catalog drops an outage after its day, and
   `slab memory review` lists it for deletion. Nothing deletes a memory
   except the person. A memory that restates what a bundled skill
@@ -28,7 +29,12 @@ All notable changes to SLAB, newest first. Dates are commit dates on
   against a workspace's runs, which is how the rule reaches the memories
   written before it, and a memory with no kind reads as `build`. The
   same rules reach the MCP `remember` and `recall`, and `slab memory add`
-  gained `--kind`, `--where`, and `--expires`.
+  gained `--kind`, `--where`, and `--expires`. `slab memory confirm`
+  stamps the memory with `confirmed`, the day a person checked it, so
+  the review does not judge that memory's evidence against the runs
+  again; it warns when the evidence names no completed run, and it
+  moves an outage's expiry a week out, or to `--expires`. `slab memory
+  review` finds the workspace as every other command does.
 
 - A lead continues a specialist it already briefed, and sizes each brief.
   `delegate` takes `continues`, the handle from an earlier report's

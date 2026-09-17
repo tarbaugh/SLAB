@@ -184,19 +184,21 @@ the next reader wants to see it. It counts for nothing. The reply says
 which cited ids counted and which did not:
 
 ```text
-recorded as memory 'device-init-fails' in /Users/you/.config/slab/memory/device-init-fails.md; every later session on this machine reads it; recorded as an outage (outage recorded 2026-09-17; expires 2026-09-24); it is marked unverified until a completed run confirms it, because a memory rests on a run that finished; evidence: 01m2rpcscn9w9h8r4g847xhv1s does not (running, so it has not confirmed anything); the evidence runs now: 01m2rpcscn9w9h8r4g847xhv1s: melt-1500K, running, quarantined
+recorded as memory 'device-init-fails' in /Users/you/.config/slab/memory/device-init-fails.md; every later session on this machine reads it; recorded as an outage (outage recorded 2026-09-17 on n1; expires 2026-09-24); it is marked unverified until a completed run confirms it, because a memory rests on a run that finished; evidence: 01m2rv8ghj574k7s8f2gv3vs5g does not (running, so it has not confirmed anything); the evidence runs now: 01m2rv8ghj574k7s8f2gv3vs5g: melt-1500K, running, quarantined
 ```
 
 The same call once the run has finished:
 
 ```text
-recorded as memory 'device-init-fails' in /Users/you/.config/slab/memory/device-init-fails.md; every later session on this machine reads it; recorded as an outage (outage recorded 2026-09-17 on n1; expires 2026-09-24); evidence: 01m2rpcscn9w9h8r4g847xhv1s counts (completed); the evidence runs now: 01m2rpcscn9w9h8r4g847xhv1s: melt-1500K, completed, quarantined
+recorded as memory 'device-init-fails' in /Users/you/.config/slab/memory/device-init-fails.md; every later session on this machine reads it; recorded as an outage (outage recorded 2026-09-17 on n1; expires 2026-09-24); evidence: 01m2rv8ghj574k7s8f2gv3vs5g counts (completed); the evidence runs now: 01m2rv8ghj574k7s8f2gv3vs5g: melt-1500K, completed, quarantined
 ```
 
-Without evidence the write is refused:
+Without evidence the write is refused. The refusal says what evidence
+is, and that a dry-run id or a failure record may be cited but does not
+verify the fact:
 
 ```text
-not recorded: a memory needs evidence: the run id, the dry run, or the failure record that confirmed the fact. Pass evidence, or pass unverified=true to record it as an unverified claim that recall flags and 'slab memory review' lists
+not recorded: a memory needs evidence: the id of a run that completed, and one line saying what it showed. A dry-run id or a failure record may be cited, and neither verifies the fact. Pass evidence, or pass unverified=true to record it as an unverified claim that recall flags and 'slab memory review' lists
 ```
 
 An agent that has a lead worth keeping but no confirmation passes
@@ -235,12 +237,15 @@ differently:
 `build` is the default, and a memory whose file names no kind is a
 `build` memory.
 
-An outage is the dangerous kind. A node that would not initialise its
-GPUs this morning is fixed by lunchtime, and a memory that says otherwise
-sends every later session around a machine that works. So an outage
-carries two more fields. `where` is the host its evidence ran on, taken
-from the evidence run's host stamp, and `expires_at` is the day it stops
-being read:
+An outage is temporary. A node whose GPUs fail to initialise is
+repaired, and a memory that outlives the repair steers every later
+session away from a working node. So an outage carries two more fields.
+`where` is the host its evidence ran on, and `expires_at` is the day it
+stops being read. The host comes from the cited runs. The store takes
+the first completed run's host stamp, or else the first cited run's that
+carries one. The host is the provenance of the citation, not its
+verification, so an outage whose evidence is the run that died on the
+node still names that node while the memory stays unverified:
 
 ```text
 ---
@@ -250,8 +255,8 @@ updated: 2026-09-17
 kind: outage
 expires_at: 2026-09-24
 where: n1
-agent: md-expert
-evidence: run 01m2rpcscn9w9h8r4g847xhv1s died at once on that node
+agent: pi
+evidence: run 01m2rv8ghj574k7s8f2gv3vs5g died at once on that node
 ---
 Every launch on it dies before the first step, with a Kokkos abort.
 ```
@@ -264,9 +269,9 @@ outage recorded 2026-09-17 on n1; expires 2026-09-24
 
 Every launch on it dies before the first step, with a Kokkos abort.
 
-[recorded by md-expert on 2026-09-17, evidence: run 01m2rpcscn9w9h8r4g847xhv1s died at once on that node]
+[recorded by pi on 2026-09-17, evidence: run 01m2rv8ghj574k7s8f2gv3vs5g died at once on that node]
 
-[evidence runs now: 01m2rpcscn9w9h8r4g847xhv1s: melt-1500K, completed, quarantined]
+[evidence runs now: 01m2rv8ghj574k7s8f2gv3vs5g: melt-1500K, completed, quarantined]
 ```
 
 After the expiry date the catalog stops carrying the memory, so no later
@@ -278,7 +283,7 @@ lists it for deletion. Nothing deletes a memory except the person.
 What a LAMMPS command does everywhere is not a fact about this machine.
 The skills already carry that material, and a memory that restates it
 costs every later session prompt space and, when the restatement is
-wrong, sends that session down a wrong path.
+wrong, misleads that session.
 
 So the store refuses a memory that restates what a bundled skill
 documents, and the refusal names the section that holds the real answer:
@@ -317,10 +322,10 @@ forget without calling `recall`:
 The order is settled: masses, then pair_style grace.
 
 [memories written: read each one, and forget any its evidence does not support]
-- masses-before-grace (md-expert, build): masses must come before pair_style grace in this build. evidence: run 01m2rpetbjgdnb6y8sqyrj69xj [unverified] [runs now: 01m2rpetbjgdnb6y8sqyrj69xj: grace-order-probe, failed, quarantined, error: ERROR: Invalid atom type in probe.data]
-- device-init-fails (md-expert, outage): A node refuses to initialise its GPUs. evidence: run 01m2rpetbkt904jm9q02xzb7hn died at once on that node [on n1, expires 2026-09-24] [runs now: 01m2rpetbkt904jm9q02xzb7hn: device-probe, completed, quarantined]
+- masses-before-grace (md-expert, build): masses must come before pair_style grace in this build. evidence: run 01m2rv8gjssxwn7e1byw7f0xbx [unverified] [runs now: 01m2rv8gjssxwn7e1byw7f0xbx: grace-order-probe, failed, quarantined, error: ERROR: Invalid atom type in probe.data]
+- device-init-fails (md-expert, outage): A node refuses to initialise its GPUs. evidence: run 01m2rv8gjt5psj83ymxbcyffcr died at once on that node [on n1, expires 2026-09-24] [runs now: 01m2rv8gjt5psj83ymxbcyffcr: device-probe, completed, quarantined]
 
-[md-expert: finish after 3 step(s); tokens 300+30; transcript 20260914-172013-40505-md-expert-1.jsonl]
+[md-expert-1: finish after 3 step(s); tokens 300+30; transcript 20260917-232935-45458-md-expert-1.jsonl; continue with continues="md-expert-1"]
 ```
 
 The planner and the PI cards tell the lead to read each entry before the
@@ -458,22 +463,29 @@ device-init-fails  2026-09-17  md-expert         A node refuses to initialise it
 The command also re-judges the evidence of every memory that is marked
 verified, under the rule that evidence is a run that completed. That is
 how the rule reaches the memories written before it. The runs live in a
-workspace, so point the command at one with `--workspace`, or run it
-where the workspace is. A memory whose cited run never completed is
-listed with what each cited id is now:
+workspace. The command reads the one that `--workspace`,
+`$SLAB_WORKSPACE`, or `[workspace] root` in `slab.toml` names, as every
+other command does, or `./.slab` when you run it where the workspace
+is. A memory whose cited run never completed is listed with what each
+cited id is now:
 
 ```text
 device-init-fails  2026-09-17  md-expert         A node refuses to initialise its GPUs. [no completed run confirms it (evidence: 01m2rpft646ry89qphzy710p03 does not (running, so it has not confirmed anything))]
 ```
 
 The command reads a workspace and never creates one. Where there is no
-workspace, the evidence is left as it stands.
+workspace, the evidence is left as it stands. A memory you confirmed by
+hand is not judged against the runs, because no run need name what you
+checked.
 
 Test each fact, then take one of two actions:
 
 - If the fact holds, run `slab memory confirm <name> --evidence ...`.
   The body stays as it is. The memory gets the evidence, loses the
-  unverified mark, and is stamped against the software present now.
+  unverified mark, records today as the day a person confirmed it, and
+  is stamped against the software present now. When the evidence names
+  no completed run, the command says so in a warning line, and the
+  memory stands on your check alone.
 - If the fact does not hold, run `slab memory forget <name>`.
 
 ```bash
@@ -482,7 +494,15 @@ slab memory confirm mace-model-inside-the-fence --evidence "a relax with the mod
 
 ```text
 confirmed mace-model-inside-the-fence: evidence a relax with the model under the project dir completed; the ~/.cache path failed
+warning: the evidence names no run id; the memory stands on your check alone
 ```
+
+The file then carries `confirmed: 2026-09-17`. A later write by an agent
+drops the stamp, so the review judges that write's evidence again.
+
+Confirming an outage moves its expiry to a week from today, or to the
+day `--expires` names, because a confirmed outage is one that is still
+broken now.
 
 `slab memory add <name> <description> <body>` writes a memory yourself,
 under the same rules as `remember`. Give `--evidence`, or `--unverified`
@@ -493,7 +513,7 @@ slab memory add srun-in-sandbox "srun cannot reach the controller inside the san
 ```
 
 ```text
-Error: a memory needs evidence: the run id, the dry run, or the failure record that confirmed the fact. Pass --evidence, or pass --unverified to record it as a claim that recall flags and 'slab memory review' lists
+error: a memory needs evidence: the id of a run that completed, and one line saying what it showed. A dry-run id or a failure record may be cited, and neither verifies the fact. Pass --evidence, or pass --unverified to record it as a claim that recall flags and 'slab memory review' lists
 ```
 
 `--kind` says what sort of fact it is. An outage takes `--where` for the

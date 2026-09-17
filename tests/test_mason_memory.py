@@ -472,6 +472,57 @@ def test_the_memories_written_block_carries_the_kind_and_the_evidence_states(
     block = memories_written_block(session, session.memories_written)
     (_, line) = block.splitlines()
     assert line.startswith("- device-init-fails (pi, outage): A node refuses")
-    assert "[on an unrecorded host, expires " in line
+    # The host is the provenance of the citation, not its verification: a
+    # run that has not finished still says where it is going wrong.
+    assert "[on n1, expires " in line
     assert "[unverified]" in line
     assert f"[runs now: {run_id}: melt, running," in line
+
+
+def test_an_outage_takes_its_host_from_the_failed_run_that_showed_it(
+    tmp_path: Path, memory_root: Path
+) -> None:
+    """The plan's own case: CUDA fails to initialise, the run dies, and the
+    outage must still name the node the run died on."""
+    from mason.tools import memories_written_block
+
+    session = _session(tmp_path, auto_approve=True)
+    run_id = _run(session, "device-probe", "failed", host="n1")
+    answer = build_toolbox(session).dispatch(
+        _call(
+            "remember",
+            name="device-init-fails",
+            description="A node refuses to initialise its GPUs.",
+            body="Every launch there dies before the first step.",
+            evidence=f"run {run_id} died at once on that node",
+            kind="outage",
+        )
+    )
+    assert "recorded as an outage (outage recorded " in answer
+    assert " on n1; expires " in answer
+    assert "it is marked unverified until a completed run confirms it" in answer
+    assert f"{run_id} does not (failed, so it has not confirmed anything)" in answer
+    written = memory_store.discover(memory_root)["device-init-fails"]
+    assert written.where == "n1" and written.unverified is True
+    (_, line) = memories_written_block(session, session.memories_written).splitlines()
+    assert "[on n1, expires " in line and "[unverified]" in line
+
+
+def test_an_outage_without_a_host_stamp_says_so(tmp_path: Path, memory_root: Path) -> None:
+    from mason.tools import memories_written_block
+
+    session = _session(tmp_path, auto_approve=True)
+    run_id = _run(session, "device-probe", "completed")
+    build_toolbox(session).dispatch(
+        _call(
+            "remember",
+            name="device-init-fails",
+            description="A node refuses to initialise its GPUs.",
+            body="Every launch there dies before the first step.",
+            evidence=f"run {run_id} showed it",
+            kind="outage",
+        )
+    )
+    assert memory_store.discover(memory_root)["device-init-fails"].where is None
+    (_, line) = memories_written_block(session, session.memories_written).splitlines()
+    assert "[on an unrecorded host, expires " in line

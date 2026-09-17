@@ -42,15 +42,21 @@ versions present when it was written. A later session compares the stamp
 with the machine it runs on and flags the memories whose software changed,
 so the agent re-checks those and trusts the rest without probing.
 
-``evidence`` is what confirmed the fact: a run id, a dry run, or a failure
-record. A write without it is refused unless the writer says the fact is
-unverified, which stamps ``unverified: true``. A memory with no evidence
+``evidence`` is what confirmed the fact: the id of a run that completed, and
+one line saying what it showed. A dry-run id or a failure record may be
+cited, and neither verifies the fact. A write without evidence is refused
+unless the writer says the fact is unverified, which stamps
+``unverified: true``. A memory with no evidence
 reads as unverified whatever its frontmatter says, so a file written before
 this rule, or by hand, is flagged for review rather than trusted. The store
 records the evidence the writer gives; whether it counts is judged where a
 run store is open, by :func:`foundation._ops.evidence_rows`, which the
 ``remember`` tools and ``slab memory review`` call. Only a run in a completed
 status counts, because a run that is still going has not shown anything yet.
+A person who checks a fact by hand confirms it with ``slab memory confirm``,
+which stamps ``confirmed`` with the day; review does not re-judge a memory
+whose last write is that confirmation, because no run may name what the
+person checked.
 
 ``kind`` says what sort of fact this is, and the sorts age differently. A
 ``build`` memory describes how this machine's software behaves, a
@@ -118,8 +124,9 @@ HISTORY_DIR = ".history"
 
 #: What a refused write says: the rule and the two ways past it.
 EVIDENCE_REQUIRED = (
-    "a memory needs evidence: the run id, the dry run, or the failure record that "
-    "confirmed the fact. Pass evidence, or pass unverified=true to record it as an "
+    "a memory needs evidence: the id of a run that completed, and one line saying "
+    "what it showed. A dry-run id or a failure record may be cited, and neither "
+    "verifies the fact. Pass evidence, or pass unverified=true to record it as an "
     "unverified claim that recall flags and 'slab memory review' lists"
 )
 
@@ -181,6 +188,10 @@ class Memory:
     #: The host the evidence came from, for a fact about one machine in a
     #: pool. None when nobody recorded it.
     where: str | None = None
+    #: The day a person confirmed the fact by hand, as ``YYYY-MM-DD``. Set
+    #: by ``slab memory confirm`` and dropped by any later write, so it is
+    #: present only while the last write is that confirmation.
+    confirmed: str | None = None
     #: Set by :func:`write` only: the history file holding the version this
     #: write replaced, or None when the write created the memory.
     replaced: Path | None = None
@@ -251,6 +262,8 @@ class Memory:
             parts.append(f"recorded {self.created}")
         if self.updated and self.updated != self.created:
             parts.append(f"updated {self.updated}")
+        if self.confirmed:
+            parts.append(f"confirmed by a person on {self.confirmed}")
         if self.model:
             parts.append(f"model {self.model}")
         if self.against:
@@ -353,7 +366,7 @@ def _provenance(meta: dict[str, Any], key: str) -> str | None:
     if value is None:
         return None
     if isinstance(value, date | datetime):
-        dated = ("created", "updated", "expires_at")
+        dated = ("created", "updated", "expires_at", "confirmed")
         return value.isoformat()[:10] if key in dated else value.isoformat()
     if isinstance(value, str) and value.strip():
         return value.strip()
@@ -476,6 +489,7 @@ def parse_memory(path: Path) -> Memory:
             kind=kind,
             expires_at=_provenance(meta, "expires_at"),
             where=_provenance(meta, "where"),
+            confirmed=_provenance(meta, "confirmed"),
         )
     except MemoryStoreError as e:
         raise MemoryStoreError(f"{path}: {e}") from None
@@ -542,13 +556,21 @@ def write(
     kind: str = DEFAULT_KIND,
     expires_at: str | date | None = None,
     where: str | None = None,
+    confirmed: date | None = None,
     directory: Path | None = None,
 ) -> Memory:
     """Record a fact, creating the memory or replacing it whole.
 
-    *evidence* is what confirmed the fact: a run id, a dry run, a failure
-    record. Without it the write is refused unless *unverified* is true,
-    which records the fact as a claim that recall flags and review lists.
+    *evidence* is what confirmed the fact: the id of a run that completed,
+    and one line saying what it showed. A dry-run id or a failure record
+    may be cited, and neither verifies the fact. Without evidence the write
+    is refused unless *unverified* is true, which records the fact as a
+    claim that recall flags and review lists.
+
+    *confirmed* is the day a person checked the fact by hand, which
+    ``slab memory confirm`` passes. A write that does not pass it drops the
+    stamp, so the stamp stands only while the last write is that
+    confirmation.
 
     *kind* is one of :data:`KINDS`. An ``outage`` expires: it takes
     *expires_at*, or :data:`OUTAGE_DAYS` from today when the caller gives
@@ -637,6 +659,8 @@ def write(
         frontmatter["expires_at"] = until
     if where:
         frontmatter["where"] = where
+    if confirmed is not None:
+        frontmatter["confirmed"] = confirmed
     if agent:
         frontmatter["agent"] = agent
     if model:
@@ -1015,8 +1039,9 @@ def catalog_block(memories: dict[str, Memory], live: Mapping[str, str] | None = 
                 "quirk of this machine or its software worth keeping — a package "
                 "flag, a workaround, a path that surprised you — call the "
                 "remember tool with a name, a one-line description, the "
-                "detail, and the evidence that confirmed it (a run id, a dry "
-                "run, a failure record). Machine facts only: results belong in "
+                "detail, and the evidence that confirmed it (the id of a run "
+                "that completed, and one line saying what it showed). Machine "
+                "facts only: results belong in "
                 "runs, project decisions in the notebook, and credentials nowhere.",
             ]
         )

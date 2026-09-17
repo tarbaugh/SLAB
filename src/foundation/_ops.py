@@ -2917,14 +2917,27 @@ def evidence_note(rows: list[dict[str, Any]]) -> str:
 
 
 def evidence_host(rows: list[dict[str, Any]]) -> str | None:
-    """The host the first counting run ran on, or None when no row names one.
+    """The host the evidence ran on, or None when no cited run names one.
+
+    The first counting run's host wins; otherwise the first cited run that
+    the workspace holds with a host. The host is the provenance of the
+    citation, not its verification: an outage whose evidence is the run
+    that died on a node still names that node, so a later session reads
+    which host was broken even though the failed run confirms nothing.
 
     Examples:
         >>> evidence_host([{"counts": False, "host": "n1"}, {"counts": True, "host": "n2"}])
         'n2'
+        >>> evidence_host([{"counts": False, "host": None}, {"counts": False, "host": "n1"}])
+        'n1'
+        >>> evidence_host([{"counts": False, "host": None}]) is None
+        True
     """
     for row in rows:
         if row["counts"] and row["host"]:
+            return str(row["host"])
+    for row in rows:
+        if row["host"]:
             return str(row["host"])
     return None
 

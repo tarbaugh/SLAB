@@ -528,6 +528,28 @@ def test_run_ids_are_read_out_of_the_evidence() -> None:
     assert memory_store.run_ids("checked by hand") == []
 
 
+def test_a_persons_confirmation_is_stamped_and_a_later_write_drops_it(
+    memory_root: Path,
+) -> None:
+    checked = memory_store.write(
+        "scratch-quota", "The scratch filesystem fills at 80 percent.", "Seen.",
+        evidence="checked by hand", confirmed=date(2026, 9, 17), directory=memory_root,
+    )
+    assert checked.confirmed == "2026-09-17"
+    assert "confirmed: 2026-09-17\n" in checked.path.read_text(encoding="utf-8")
+    assert "confirmed by a person on 2026-09-17" in checked.provenance()
+    assert memory_store.discover(memory_root)["scratch-quota"].confirmed == "2026-09-17"
+
+    # An agent's rewrite is a new claim, so the person's stamp goes with the
+    # version it confirmed.
+    rewritten = memory_store.write(
+        "scratch-quota", "The scratch filesystem fills at 90 percent.", "Seen again.",
+        agent="pi", evidence="run 01k2x7abcd", directory=memory_root,
+    )
+    assert rewritten.confirmed is None
+    assert "confirmed:" not in rewritten.path.read_text(encoding="utf-8")
+
+
 # -- kinds, outages, and documented behaviour --------------------------------
 
 

@@ -342,7 +342,9 @@ def test_purge_never_touches_the_serve_record_or_its_job(tmp_path: Path) -> None
 
 @pytest.fixture()
 def memories(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A memory store of this test's own, seeded with two facts."""
+    """A memory store of this test's own, seeded with two facts a person confirmed."""
+    from datetime import date
+
     from foundation import memory as memory_store
 
     root = tmp_path / "memory"
@@ -355,11 +357,13 @@ def memories(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         model="qwen3-30b",
         directory=root,
         evidence="checked by hand",
+        confirmed=date.today(),
     )
     memory_store.write(
         "srun-in-sandbox", "srun cannot reach the controller here.", "Use mpirun.",
         agent="md-expert", directory=root,
         evidence="checked by hand",
+        confirmed=date.today(),
     )
     return root
 
@@ -536,9 +540,9 @@ def test_memory_review_rejudges_the_evidence_against_a_workspace(
     assert "device-init-fails" in result.output
     assert "no completed run confirms it" in result.output
     assert "scratch-quota" not in result.output
-    # The memories seeded by the fixture cite no run at all, so they are
-    # listed too: nothing is deleted, the person decides.
-    assert "3 of 4 memory(s) to review" in result.output
+    # The memories seeded by the fixture cite no run at all, but a person
+    # confirmed each by hand, so they are not judged against the runs.
+    assert "1 of 4 memory(s) to review" in result.output
 
     rows = json.loads(
         runner.invoke(app, ["memory", "review", "--workspace", str(root), "--json"]).output
@@ -546,6 +550,44 @@ def test_memory_review_rejudges_the_evidence_against_a_workspace(
     (row,) = [r for r in rows if r["name"] == "device-init-fails"]
     assert row["kind"] == "build"
     assert f"{going.id} does not (running" in row["reasons"][0]
+
+
+def test_memory_review_finds_the_workspace_the_environment_and_the_config_name(
+    tmp_path: Path, memories: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The review reads the workspace every other command reads: the flag,
+    then $SLAB_WORKSPACE, then [workspace] root, then ./.slab."""
+    from foundation import memory as memory_store
+
+    root = tmp_path / "ws"
+    with Workspace(root) as ws:
+        going = ws.runs.create(Run(name="melt"))
+        ws.runs.set_status(going.id, "running")
+    memory_store.write(
+        "device-init-fails", "A node refuses to initialise its GPUs.", "Body.",
+        agent="md-expert", evidence=f"run {going.id} died at once", directory=memories,
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    monkeypatch.delenv("SLAB_CONFIG", raising=False)
+    monkeypatch.delenv("SLAB_SITE_CONFIG", raising=False)
+
+    monkeypatch.delenv("SLAB_WORKSPACE", raising=False)
+    unjudged = runner.invoke(app, ["memory", "review"])
+    assert unjudged.exit_code == 0, unjudged.output
+    assert "no completed run confirms it" not in unjudged.output
+
+    monkeypatch.setenv("SLAB_WORKSPACE", str(root))
+    by_env = runner.invoke(app, ["memory", "review"])
+    assert by_env.exit_code == 0, by_env.output
+    assert f"{going.id} does not (running" in by_env.output
+
+    monkeypatch.delenv("SLAB_WORKSPACE")
+    (project / "slab.toml").write_text(f'[workspace]\nroot = "{root}"\n')
+    by_config = runner.invoke(app, ["memory", "review"])
+    assert by_config.exit_code == 0, by_config.output
+    assert f"{going.id} does not (running" in by_config.output
 
 
 def test_memory_review_lists_an_expired_outage_for_deletion(memories: Path) -> None:
@@ -592,6 +634,113 @@ def test_memory_confirm_records_the_evidence_and_restamps(memories: Path) -> Non
 
     ghost = runner.invoke(app, ["memory", "confirm", "ghost", "--evidence", "e"])
     assert ghost.exit_code == 1 and "no memory named 'ghost'" in ghost.output
+
+
+def test_a_confirmed_memory_is_not_listed_again_and_the_warning_says_why(
+    tmp_path: Path, memories: Path
+) -> None:
+    """A person who checked a fact by hand is not asked again at every review."""
+    from datetime import date
+
+    from foundation import memory as memory_store
+
+    root = tmp_path / "ws"
+    with Workspace(root) as ws:
+        going = ws.runs.create(Run(name="melt"))
+        ws.runs.set_status(going.id, "running")
+        done = ws.runs.create(Run(name="quench"))
+        ws.runs.set_status(done.id, "running")
+        ws.runs.set_status(done.id, "completed")
+    memory_store.write(
+        "device-init-fails", "A node refuses to initialise its GPUs.", "Body.",
+        agent="md-expert", evidence=f"run {going.id} died at once", directory=memories,
+    )
+    before = runner.invoke(app, ["memory", "review", "--workspace", str(root)])
+    assert "device-init-fails" in before.output
+
+    by_hand = runner.invoke(
+        app, ["memory", "confirm", "device-init-fails", "--evidence", "checked by hand",
+              "--workspace", str(root)]
+    )
+    assert by_hand.exit_code == 0, by_hand.output
+    assert "confirmed device-init-fails: evidence checked by hand" in by_hand.output
+    assert "warning: the evidence names no run id; the memory stands on your check alone" in (
+        by_hand.output
+    )
+    memory = memory_store.discover()["device-init-fails"]
+    assert memory.confirmed == date.today().isoformat()
+    assert "confirmed by a person on " in memory.provenance()
+
+    after = runner.invoke(app, ["memory", "review", "--workspace", str(root)])
+    assert after.exit_code == 0, after.output
+    assert "device-init-fails" not in after.output
+    assert "nothing to review" in after.output
+
+    # A run that never completed is named in the warning; a completed one
+    # is not, because then the run confirms it.
+    still_going = runner.invoke(
+        app, ["memory", "confirm", "device-init-fails", "--evidence",
+              f"run {going.id} died", "--workspace", str(root)]
+    )
+    assert f"warning: no completed run confirms it (evidence: {going.id} does not (running" in (
+        still_going.output
+    )
+    finished = runner.invoke(
+        app, ["memory", "confirm", "device-init-fails", "--evidence",
+              f"run {done.id} completed", "--workspace", str(root)]
+    )
+    assert finished.exit_code == 0 and "warning:" not in finished.output
+    # Without a workspace to read, the warning says where it looked.
+    nowhere = runner.invoke(
+        app, ["memory", "confirm", "device-init-fails", "--evidence",
+              f"run {done.id} completed", "--workspace", str(tmp_path / "missing")]
+    )
+    assert "warning: no workspace at " in nowhere.output
+
+    # An agent's later write is a new claim, and review judges it again.
+    memory_store.write(
+        "device-init-fails", "A node refuses to initialise its GPUs.", "Body.",
+        agent="md-expert", evidence=f"run {going.id} died at once", directory=memories,
+    )
+    again = runner.invoke(app, ["memory", "review", "--workspace", str(root)])
+    assert "device-init-fails" in again.output
+
+
+def test_memory_confirm_moves_an_outages_expiry_out(memories: Path) -> None:
+    from datetime import date, timedelta
+
+    from foundation import memory as memory_store
+
+    memory_store.write(
+        "device-init-fails", "A node refuses to initialise its GPUs.", "Body.",
+        agent="md-expert", evidence="run 01k2x7abcd", kind="outage", where="n1",
+        expires_at=date.today() - timedelta(days=1), directory=memories,
+    )
+    assert "[expired outage" in runner.invoke(app, ["memory", "review"]).output
+
+    result = runner.invoke(
+        app, ["memory", "confirm", "device-init-fails", "--evidence", "still down today"]
+    )
+    assert result.exit_code == 0, result.output
+    memory = memory_store.discover()["device-init-fails"]
+    a_week = (date.today() + timedelta(days=memory_store.OUTAGE_DAYS)).isoformat()
+    assert memory.expires_at == a_week and memory.where == "n1"
+    assert f"expires {a_week}" in result.output
+    assert "nothing to review" in runner.invoke(app, ["memory", "review"]).output
+
+    dated = runner.invoke(
+        app, ["memory", "confirm", "device-init-fails", "--evidence", "still down today",
+              "--expires", "2030-01-01"]
+    )
+    assert dated.exit_code == 0, dated.output
+    assert memory_store.discover()["device-init-fails"].expires_at == "2030-01-01"
+
+    # Only an outage expires, so --expires on a build memory is refused.
+    refused = runner.invoke(
+        app, ["memory", "confirm", "srun-in-sandbox", "--evidence", "e", "--expires",
+              "2030-01-01"]
+    )
+    assert refused.exit_code == 1 and "only an outage expires" in refused.output
 
 
 def test_memory_purge_matches_globs_and_confirms(memories: Path) -> None:
