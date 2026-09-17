@@ -903,7 +903,12 @@ def _render_event(event: dict[str, Any], full: bool) -> None:
             how = "asked for the design in the notebook"
         case = what.get(int(event.get("case") or 0), "?")
         where = "at the ceiling" if event.get("loop") is None else "early, in a reasoning loop"
-        typer.secho(f"[{stamp}] reply cut {where} ({case}); {how}", fg=typer.colors.YELLOW)
+        cost = f", {event['tokens']} tokens" if event.get("tokens") else ""
+        after = f", after {event['after_tool']}" if event.get("after_tool") else ""
+        typer.secho(
+            f"[{stamp}] reply cut {where} ({case}{cost}{after}); {how}",
+            fg=typer.colors.YELLOW,
+        )
         if event.get("loop") is not None:
             typer.secho(f"  repeated: {event['loop']}", dim=True)
     elif kind == "turn":
@@ -1220,6 +1225,37 @@ def _offenders(counts: dict[str, int]) -> str:
     return ", ".join(f"{name} x{n}" for name, n in list(counts.items())[:4])
 
 
+def _cut_line(summary: dict[str, Any]) -> str:
+    """What the reply-token ceiling cost this session, and after which tool.
+
+    The tool is named when one leads the count: "after" it for a single
+    cut, "most after" it for several. A tie names nothing.
+
+    Examples:
+        >>> _cut_line({"total_cuts": 3, "total_cut_tokens": 96000,
+        ...            "total_cut_after_tools": {"read_artifact": 2, "shell": 1}})
+        'replies cut at the ceiling: 3, 96000 completion tokens lost; most after read_artifact'
+        >>> _cut_line({"total_cuts": 1, "total_cut_tokens": 32000,
+        ...            "total_cut_after_tools": {"shell": 1}})
+        'replies cut at the ceiling: 1, 32000 completion tokens lost; after shell'
+        >>> _cut_line({"total_cuts": 2, "total_cut_tokens": 32000,
+        ...            "total_cut_after_tools": {"read_artifact": 1, "shell": 1}})
+        'replies cut at the ceiling: 2, 32000 completion tokens lost'
+        >>> _cut_line({"total_cuts": 1, "total_cut_tokens": 32000,
+        ...            "total_cut_after_tools": {}})
+        'replies cut at the ceiling: 1, 32000 completion tokens lost'
+    """
+    line = (
+        f"replies cut at the ceiling: {summary['total_cuts']}, "
+        f"{summary['total_cut_tokens']} completion tokens lost"
+    )
+    counts = list((summary.get("total_cut_after_tools") or {}).values())
+    if counts and (len(counts) == 1 or counts[0] > counts[1]):
+        leader = next(iter(summary["total_cut_after_tools"]))
+        line += f"; after {leader}" if summary["total_cuts"] == 1 else f"; most after {leader}"
+    return line
+
+
 @app.command("report")
 def mason_report(
     transcript: Annotated[
@@ -1343,6 +1379,8 @@ def mason_report(
             f"errored calls: {summary['errored_calls']} "
             f"({_offenders(summary['errored_tools'])})"
         )
+    if summary.get("total_cuts"):
+        typer.echo(_cut_line(summary))
     typer.echo(f"memory: {summary['recall']} recall, {summary['remember']} remember")
     if summary["skills"]:
         typer.echo(f"skills loaded: {', '.join(summary['skills'])}")

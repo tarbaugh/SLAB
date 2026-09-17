@@ -102,6 +102,30 @@ All notable changes to SLAB, newest first. Dates are commit dates on
   pair as the finite-size wander it is.
   The `md-expert` and `planner` cards point at the new section, and a
   brief for a melting step now names the route and the order parameter.
+- A numeric table is for a script, and a cut reply costs one cheap retry.
+  A read that returns more than `[agent] table_nudge_rows` rows of
+  numbers (default 20) ends with one harness line: a table this long is
+  for a script, not for reading. `read_artifact` carries it for a JSON
+  table or an artifact with a `.dat`, `.csv`, or `.yaml` name.
+  `read_file` carries it for a file with one of those suffixes. A card
+  with no shell, such as the planner, reads the variant that sends it to
+  its specialist. The line is the `table-nudge` mechanism, so the
+  benchmark can ablate it.
+  The one retry after a reply cut with no text now runs under half the
+  reply ceiling as well as at low effort. So a second failure costs half
+  of what the first did. The partial outcome a cut specialist hands back
+  counts its cuts, and says when the last one ran under half the ceiling.
+  A `cut` event records the completion tokens the ceiling discarded, the
+  ceiling itself, and the tool the model read last. `slab mason read`
+  prints the tokens and the tool. `slab mason report` sums the tokens
+  lost and names the tool most of the cuts followed.
+  `[agent.roster.<name>]` already overrode `max_reply_tokens`,
+  so a specialist that reads data can run under a lower ceiling than its
+  lead. The md, dft, and analysis cards now say to compute a table's
+  statistic with a script and never to reason over the rows.
+  Benchmark-4 session 1 hit the ceiling seventeen times and lost 544,000
+  completion tokens, 28 % of everything it generated, and fourteen of
+  the fifteen cut events followed a raw read of a `fix ave/time` table.
 
 - A lead continues a specialist it already briefed, and sizes each brief.
   `delegate` takes `continues`, the handle from an earlier report's

@@ -2405,7 +2405,9 @@ def test_read_artifact_samples_a_json_table_by_columns_and_rows(
     assert lines[1] == "table 0: 3000 rows; columns Step, Temp of Step, Temp, PotEng, Press"
     assert lines[2] == "   row\tStep\tTemp"
     assert lines[3] == "     1\t0\t300.0" and lines[4] == "   101\t1000\t400.0"
-    assert lines[-1] == "[rows 1-3000, every 100th: 30 shown, 2970 omitted]"
+    assert lines[-2] == "[rows 1-3000, every 100th: 30 shown, 2970 omitted]"
+    # Thirty rows is still thirty rows for a model to read in its head.
+    assert lines[-1].startswith("[harness: a table this long")
     assert len(sampled) < 2_000
     missing = read(run_id=run_id, name="md-thermo.json", columns="Tmp")
     assert "no column 'Tmp' in table 0; its columns: Step, Temp, PotEng, Press" in missing
@@ -2721,3 +2723,146 @@ def test_forget_undoes_only_this_sessions_writes(tmp_path: Path, memory_root: Pa
     assert sorted(memory_store.discover()) == ["fix-nph", "older-fact"]
     events = [json.loads(line) for line in lead.transcript_path.read_text().splitlines()]
     assert [e["name"] for e in events if e["type"] == "forget"] == ["fix-nph", "mpi-bind"]
+
+
+def _rows(n: int) -> str:
+    """*n* rows of a thermo table, with a header line."""
+    head = "# Step Temp Press\n"
+    return head + "".join(f"{i * 100} {300.0 + i} {1.0 + i}\n" for i in range(1, n + 1))
+
+
+def test_a_long_table_read_raw_carries_the_nudge(tmp_path: Path) -> None:
+    """A read that returns more rows than table_nudge_rows ends with the
+    line telling the model to compute the statistic instead."""
+    (tmp_path / "thermo.dat").write_text(_rows(30))
+    box = build_toolbox(_session(tmp_path))
+    answer = box.dispatch(_call("read_file", path="thermo.dat", raw=True))
+    assert answer.endswith(
+        "compute the statistic with a workflow or a shell python one-liner "
+        "and read the number back]"
+    )
+    assert "301.0" in answer  # the rows still come back
+
+
+def test_a_short_table_carries_no_nudge(tmp_path: Path) -> None:
+    (tmp_path / "thermo.dat").write_text(_rows(10))
+    box = build_toolbox(_session(tmp_path))
+    answer = box.dispatch(_call("read_file", path="thermo.dat", raw=True))
+    assert "[harness: a table this long" not in answer
+
+
+def test_a_digested_first_read_carries_no_nudge(tmp_path: Path) -> None:
+    """The first read of a fix ave/time file is its digest, a few lines with
+    the ends of the series. The nudge is for the raw read that follows."""
+    (tmp_path / "avg.dat").write_text(
+        "# Time-averaged data for fix avg\n# TimeStep c_thermo_temp\n"
+        + "".join(f"{i * 100} {300.0 + i}\n" for i in range(1, 31))
+    )
+    box = build_toolbox(_session(tmp_path))
+    answer = box.dispatch(_call("read_file", path="avg.dat"))
+    assert answer.startswith("fix ave/time digest: avg.dat")
+    assert "[harness: a table this long" not in answer
+
+
+def test_a_structure_artifact_is_never_nudged(tmp_path: Path) -> None:
+    """A data file's Atoms section is forty rows of numbers and not a
+    table: a raw read of a structure gets no advice to compute a statistic.
+    A JSON table and a .dat artifact do."""
+    atoms = "".join(f"{i} 1 {i * 0.1} {i * 0.2} 0.0\n" for i in range(1, 41))
+    (tmp_path / "cu.data").write_text(
+        "LAMMPS data file\n\n40 atoms\n1 atom types\n\n0.0 10.0 xlo xhi\n0.0 10.0 ylo yhi\n"
+        f"0.0 10.0 zlo zhi\n\nAtoms # atomic\n\n{atoms}"
+    )
+    table = {"columns": ["Step", "Temp"], "rows": [[i, 300.0 + i] for i in range(30)]}
+    (tmp_path / "md-thermo.json").write_text(json.dumps([table], indent=1))
+    (tmp_path / "series.dat").write_text(_rows(30))
+    (tmp_path / "keep.py").write_text(
+        "from pathlib import Path\nfrom foundation import current_run\n"
+        + "".join(
+            f"current_run().keep({name!r}, Path({str(tmp_path / name)!r}))\n"
+            for name in ("cu.data", "md-thermo.json", "series.dat")
+        )
+    )
+    box = build_toolbox(_session(tmp_path))
+    run_id = _run_id(box.dispatch(_call("launch_workflow", script="keep.py", intent="keep")))
+
+    def read(**arguments: object) -> str:
+        call = ToolCall(id="ra", name="read_artifact", arguments=arguments, arguments_raw="{}")
+        return box.dispatch(call)
+
+    structure = read(run_id=run_id, name="cu.data", raw=True)
+    assert "\t40 1 4.0 8.0 0.0" in structure
+    assert "[harness: a table this long" not in structure
+    assert "[harness: a table this long" in read(run_id=run_id, name="md-thermo.json")
+    assert "[harness: a table this long" in read(run_id=run_id, name="md-thermo.json", raw=True)
+    assert "[harness: a table this long" in read(run_id=run_id, name="series.dat", raw=True)
+
+
+def test_prose_and_source_files_are_never_nudged(tmp_path: Path) -> None:
+    """The suffix and the row count both decide: a long script is not a table."""
+    (tmp_path / "run.py").write_text("\n".join(f"x{i} = {i} + 1" for i in range(60)))
+    (tmp_path / "notes.dat").write_text("\n".join(f"step {i} looked fine" for i in range(60)))
+    box = build_toolbox(_session(tmp_path))
+    for name in ("run.py", "notes.dat"):
+        assert "[harness: a table this long" not in box.dispatch(_call("read_file", path=name))
+
+
+def test_a_card_without_a_shell_is_sent_to_its_specialist(tmp_path: Path) -> None:
+    from mason.roster import discover_roster
+
+    (tmp_path / "thermo.csv").write_text(_rows(30))
+    planner = discover_roster(tmp_path)["planner"]
+    assert "shell" not in (planner.tools or ())
+    box = build_toolbox(_session(tmp_path), planner)
+    answer = box.dispatch(_call("read_file", path="thermo.csv", raw=True))
+    assert answer.endswith("ask the specialist for the statistic, not the table]")
+
+
+def test_the_table_nudge_switch_ablates_it(tmp_path: Path) -> None:
+    (tmp_path / "thermo.dat").write_text(_rows(30))
+    session = _session(tmp_path, mechanisms=["check-gating"])
+    box = build_toolbox(session)
+    assert "[harness: a table this long" not in box.dispatch(
+        _call("read_file", path="thermo.dat", raw=True)
+    )
+
+
+def test_the_row_count_is_configurable(tmp_path: Path) -> None:
+    (tmp_path / "thermo.dat").write_text(_rows(30))
+    box = build_toolbox(_session(tmp_path, table_nudge_rows=50))
+    assert "[harness: a table this long" not in box.dispatch(
+        _call("read_file", path="thermo.dat", raw=True)
+    )
+
+
+def test_the_partial_outcome_counts_the_cuts_and_reads_the_halving_off_them(
+    tmp_path: Path,
+) -> None:
+    """A turn cut more than once cost the lead every reply, so the hand-back
+    counts them. It says the last ran under half the ceiling only when the
+    events say so: not for two continued cuts at the full ceiling, not
+    with adaptive-effort off, and yes when a design cut and a brevity cut
+    precede the halved retry."""
+    from mason.tools import partial_outcome
+
+    parent = _session(tmp_path)
+
+    def child(name: str, *ceilings: int, continued: bool = False) -> str:
+        spawned = parent.spawn(name, MasonConfig.model_validate({}).agent)
+        for ceiling in ceilings:
+            spawned.record(
+                {"type": "cut", "case": 1, "continued": continued, "ceiling": ceiling}
+            )
+        return partial_outcome(spawned)
+
+    assert "ceiling;" in child("md-expert", 16000)
+    assert "ceiling twice;" in child("md-expert", 16000, 16000, continued=True)
+    assert "ceiling twice;" in child("dft-expert", 16000, 16000)
+    assert "ceiling 3 times, the last under half the ceiling;" in child(
+        "analysis-expert", 16000, 8000, 8000
+    )
+    # A cut recorded before ceilings were says nothing about the halving.
+    spawned = parent.spawn("worker", MasonConfig.model_validate({}).agent)
+    spawned.record({"type": "cut", "case": 1, "continued": False})
+    spawned.record({"type": "cut", "case": 1, "continued": False, "ceiling": 8000})
+    assert "ceiling twice;" in partial_outcome(spawned)

@@ -90,3 +90,8 @@ data, far above 1 is fiction. Read it over the frames a run produced
 (the mlip-training skill says how, per model kind), report the largest
 value next to the result, and hand the high-gamma frames back to the
 mlip-training skill as candidates for labels, not as results.
+
+Read a table's digest, not its rows. A thermo table, a fix ave/time file,
+or a column of energies is input for a script. Compute the statistic you
+need with a workflow task or a one-line shell script, and read the number
+back. Never reason over the rows yourself.

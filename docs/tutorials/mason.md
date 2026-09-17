@@ -1016,7 +1016,20 @@ layers, cheapest first.
    `run_lammps`, as rows. `columns=` picks the columns and `every=` keeps
    every n-th row, so one call samples a 3,000-row series, and the result
    states how many rows it left out. `every=` thins the lines of a text
-   artifact the same way.
+   artifact the same way. A read that still returns more than
+   `table_nudge_rows` rows of numbers (default 20) ends with one harness
+   line. The line says that a table this long is for a script, not for
+   reading. It tells the model to compute the statistic with a workflow
+   or a shell one-liner and read the number back. A card with no shell,
+   such as the planner, reads the variant that sends it to its
+   specialist. `read_artifact` carries the line for a JSON table or an
+   artifact with a `.dat`, `.csv`, or `.yaml` name. `read_file` carries
+   it for a file with one of those suffixes. A structure file or a dump
+   never carries it, whatever its rows.
+   One benchmark session was cut at the reply ceiling seventeen times,
+   and fourteen of the fifteen cut events followed a raw read of a `fix
+   ave/time` table the model then tried to interpret in its head. The
+   line is the `table-nudge` mechanism, so the benchmark can ablate it.
 2. **Tool-result clearing.** Once the prompt passes
    `clear_tool_results_at` × `context_window` (default 25%), tool results
    older than the newest `keep_tool_results` (default 6) are replaced by
@@ -1086,11 +1099,29 @@ Two more controls bound one step's spend. Every request carries a
 to the room the window has left after the prompt. A thinking model's
 think block counts toward it, so the cap bounds one step, not the
 campaign. A cut reply with no text is asked once more at low effort,
-because the identical request would be cut the same way. A cut reply
+because the identical request would be cut the same way. That retry also
+runs under half the ceiling, because the answer it asks for is a few
+lines, so a second failure costs half of what the first did. A cut reply
 that held text or a tool call is continued instead, because the text
 was most of an answer or a script. One planner briefed the same
 specialist three times because the brevity nudge discarded such replies,
 and lost about thirty minutes and 470,000 tokens. A second cut is marked.
+The mark and the partial outcome a cut specialist hands its lead count
+the cuts, and say when the last one ran under half the ceiling.
+
+Each cut is recorded with what it cost. The `cut` event carries the
+completion tokens the ceiling discarded and the tool the model read last,
+`slab mason read` prints both, and `slab mason report` sums the tokens
+lost across the session and its specialists and names the tool most of
+the cuts followed:
+
+```
+replies cut at the ceiling: 3, 56000 completion tokens lost; most after read_artifact
+```
+
+`[agent] max_reply_tokens` takes a per-card value in
+`[agent.roster.<name>]`, so a specialist that reads data runs under a
+lower ceiling than its lead without changing the lead's.
 
 A cut reply with no text is most often reasoning that reached a design
 and ran out before it wrote a line. The reasoning never returns to the
