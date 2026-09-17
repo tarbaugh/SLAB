@@ -592,6 +592,52 @@ def test_mason_read_live_follows_the_session_and_its_delegations(
     assert "not valid JSON" not in out  # the half line waited for its newline
 
 
+def test_mason_read_live_follows_two_siblings_growing_at_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wave writes two delegation transcripts at the same time; --live shows both."""
+    import json
+    import time
+
+    def line(text: str, role: str = "assistant") -> str:
+        return json.dumps({"at": "2026-09-13T10:00:00+00:00", "type": "message",
+                           "message": {"role": role, "content": text}}) + "\n"
+
+    root = tmp_path / "20260913-110000-1.jsonl"
+    root.write_text(line("hand out the wave", "user"))
+    first = tmp_path / "20260913-110000-1-md-expert-1.jsonl"
+    second = tmp_path / "20260913-110000-1-dft-expert-2.jsonl"
+
+    def both(step: int) -> None:
+        with open(first, "a", encoding="utf-8") as handle:
+            handle.write(line(f"melting step {step}"))
+        with open(second, "a", encoding="utf-8") as handle:
+            handle.write(line(f"relaxing step {step}"))
+
+    steps = [lambda: both(1), lambda: both(2)]
+
+    def poll(seconds: float) -> None:
+        if not steps:
+            raise KeyboardInterrupt
+        steps.pop(0)()
+
+    monkeypatch.setattr(time, "sleep", poll)
+    result = runner.invoke(app, ["read", str(root), "--live"])
+    assert result.exit_code == 0, result.output
+    out = result.output
+    # Both siblings are read on each poll, in name order.
+    order = [
+        "--- delegation dft-expert-2 (20260913-110000-1-dft-expert-2.jsonl)",
+        "relaxing step 1",
+        "--- delegation md-expert-1 (20260913-110000-1-md-expert-1.jsonl)",
+        "melting step 1",
+        "relaxing step 2",
+        "melting step 2",
+    ]
+    positions = [out.index(text) for text in order]
+    assert positions == sorted(positions), out
+
+
 def test_mason_read_without_a_path_offers_the_sessions_by_project_and_time(
     tmp_path: Path,
 ) -> None:

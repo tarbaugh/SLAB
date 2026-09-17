@@ -23,6 +23,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import warnings
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -302,6 +303,32 @@ def transcript_for(workspace_root: str | os.PathLike[str], session: str) -> Path
     raise SessionError(f"session prefix {session!r} is ambiguous: {names}")
 
 
+class WaveLocks:
+    """One lock per piece of state a wave of specialists shares.
+
+    A wave runs several specialist loops in threads inside the lead's
+    process (:func:`mason.tools._run_children`), so the state a child
+    reaches through its parent chain has more than one writer. Every
+    session in one tree holds the same instance, handed down by
+    :meth:`MasonSession.spawn`. The locks are reentrant because one writer
+    recurses: ``count_usage`` chains to the parent, which takes the same
+    lock again.
+
+    Nothing here is a transaction boundary for the run store. That store
+    opens its own connection per call and serialises its own writes.
+    """
+
+    __slots__ = ("approval", "memories", "notebook", "observer", "setups", "usage")
+
+    def __init__(self) -> None:
+        self.usage = threading.RLock()
+        self.memories = threading.RLock()
+        self.setups = threading.RLock()
+        self.notebook = threading.RLock()
+        self.approval = threading.RLock()
+        self.observer = threading.RLock()
+
+
 class MasonSession:
     """One agent session in one project directory.
 
@@ -382,6 +409,9 @@ class MasonSession:
         self.ablated: tuple[str, ...] = ()
         self._parent: MasonSession | None = None
         self._children_spawned = 0
+        # The locks the specialists of a wave share; one instance per
+        # session tree, so a child takes the same lock its lead would.
+        self.locks = WaveLocks()
         # Unset compute_profile derives from the machine: a config that declares
         # SLURM partitions is a cluster, anything else is treated as a laptop —
         # the conservative guess, since over-sizing a calculation wastes hours
@@ -446,10 +476,11 @@ class MasonSession:
         The lead of a delegation reads the child's list after it returns,
         so a memory a grandchild wrote reaches every lead on the way up.
         """
-        session: MasonSession | None = self
-        while session is not None:
-            session.memories_written.append(entry)
-            session = session._parent
+        with self.locks.memories:
+            session: MasonSession | None = self
+            while session is not None:
+                session.memories_written.append(entry)
+                session = session._parent
 
     def written_memory(self, name: str) -> dict[str, Any] | None:
         """The first write of *name* in this session tree, or None.
@@ -588,6 +619,7 @@ class MasonSession:
         child._parent = self
         child.api_keys = self.api_keys  # one key store per conversation
         child.recorded_setups = self.recorded_setups  # one full copy per conversation
+        child.locks = self.locks  # one set of locks per session tree
         child._software_versions = self._software_versions  # probed once, if at all
         # A flag outranks config for everyone: the child's loop re-asserts
         # these over its own [agent.roster] table exactly as the parent did.
@@ -611,6 +643,18 @@ class MasonSession:
             return self._parent.session_id
         return self.transcript_path.stem
 
+    def observe(self, kind: str, text: str) -> None:
+        """Send one line to the session's observer, one writer at a time.
+
+        A wave of specialists shares the lead's terminal, so the lock keeps
+        each line whole. The attribution already names the agent.
+        """
+        observer = self.observer
+        if observer is None:
+            return
+        with self.locks.observer:
+            observer(kind, self.attribution(), text)
+
     def attribution(self) -> str:
         """The ``[agent]`` marker for approval previews — children only."""
         return f"[{self.agent_name}] " if self._parent is not None else ""
@@ -621,7 +665,10 @@ class MasonSession:
         """Whether this tool call may run under the session's approval policy."""
         if not requires_approval or self.auto_approve or self.agent.approval == "auto":
             return True
-        return self.approver(tool_name, preview)
+        # One question at a time: a wave's specialists share the terminal,
+        # and the preview names whose call it is.
+        with self.locks.approval:
+            return self.approver(tool_name, preview)
 
     def shell_allowlisted(self, command: str) -> bool:
         """True when the command matches an allowlist prefix at a word boundary.
@@ -668,12 +715,15 @@ class MasonSession:
         # blackboard), so a delegated agent's entries carry its name. The
         # file itself is the project's: foundation writes it the same way
         # for every client.
-        project_files.notebook_append(
-            self.cwd,
-            entry,
-            heading=heading,
-            author=self.agent_name if self._parent is not None else None,
-        )
+        # One writer at a time, so two specialists of a wave never
+        # interleave the lines of one entry.
+        with self.locks.notebook:
+            project_files.notebook_append(
+                self.cwd,
+                entry,
+                heading=heading,
+                author=self.agent_name if self._parent is not None else None,
+            )
 
     @property
     def compactions_path(self) -> Path:
@@ -736,14 +786,15 @@ class MasonSession:
         completion_tokens: int | None,
         cached_prompt_tokens: int | None = None,
     ) -> None:
-        if prompt_tokens:
-            self.prompt_tokens += prompt_tokens
-        if completion_tokens:
-            self.completion_tokens += completion_tokens
-        if cached_prompt_tokens:
-            self.cached_prompt_tokens += cached_prompt_tokens
-        if self._parent is not None:
-            self._parent.count_usage(prompt_tokens, completion_tokens, cached_prompt_tokens)
+        with self.locks.usage:
+            if prompt_tokens:
+                self.prompt_tokens += prompt_tokens
+            if completion_tokens:
+                self.completion_tokens += completion_tokens
+            if cached_prompt_tokens:
+                self.cached_prompt_tokens += cached_prompt_tokens
+            if self._parent is not None:
+                self._parent.count_usage(prompt_tokens, completion_tokens, cached_prompt_tokens)
 
     def usage_text(self) -> str:
         """``P+C`` tokens, with the cached share when the server reported one.

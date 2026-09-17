@@ -246,6 +246,10 @@ class AgentConfig(BaseModel):
     # overrides keyed by card name. The cards themselves are markdown files
     # (mason.roster); config holds only the machine facts about them.
     delegation: bool = True
+    # How many briefs one delegate_many wave may carry. The specialists run
+    # their loops at the same time in this process, so the cap is what the
+    # machine and the model server can serve at once. 1 removes the tool.
+    parallel_delegations: int = Field(default=3, ge=1)
     roster: dict[str, RosterOverride] = Field(default_factory=dict)
     # The harness mechanisms this session runs with (mason.mechanisms):
     # unset means every one. A name outside the registry is refused, so a

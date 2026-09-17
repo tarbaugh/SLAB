@@ -73,6 +73,9 @@ code, not prompt text:
   attributed. The notebook is the group's shared memory, so briefs stay
   short.
 - `[agent] delegation = false` removes the tool everywhere.
+- Independent briefs go out together with `delegate_many`, and their
+  specialists run at the same time. The rules above hold for every
+  brief in a wave.
 
 A deliberately small errand, captured whole. The project directory holds
 `data.txt`, which says `the secret word is perovskite`:
@@ -116,6 +119,52 @@ Delegation quality is the served model's quality. The capture above is
 explicit briefs; it also fails some attempts, so expect retries. Larger
 served models handle larger briefs. The single loop remains the default
 experience, and nothing requires you to delegate.
+
+### A wave of independent briefs
+
+`delegate_many(briefs)` hands out two or more briefs at once. Each brief
+is an `{agent, task, context?}` object, the same three fields `delegate`
+takes, and the same specialist may take two of them. The specialists run
+their loops at the same time, in threads inside the lead's process and
+under the lead's session lock, and the lead receives every report
+together:
+
+```text
+## md-expert (brief 1 of 2)
+
+The cell is molten at 1200 K (run aa11bb).
+
+[md-expert: finish after 1 step(s); tokens 100+10; transcript 20260917-203324-2634-md-expert-1.jsonl]
+
+## dft-expert (brief 2 of 2)
+
+a = 3.601 A (run cc22dd).
+
+[dft-expert: finish after 1 step(s); tokens 100+10; transcript 20260917-203324-2634-dft-expert-2.jsonl]
+
+wave: 2 briefs, 6 s; sequential would have been about 10 s
+```
+
+The last line is the wave's own accounting: the wall-clock it took, and
+what the same briefs would have cost one after the other. The capture
+above is a two-brief wave against a scripted client, so the step counts
+and the token counts are the script's, not a campaign's.
+
+Briefs in one wave must share no file and no run, because nothing
+sequences them. A step that needs another step's result goes through
+`delegate`, after it. The launches the briefs make draw on one budget, so
+size every brief from `free_resources` before the wave goes out. One
+brief that fails leaves the others' reports intact, and its section says
+how it stopped; re-brief that one alone with `delegate`.
+
+Each brief keeps its own share of the tool-result cap
+(`[agent] max_tool_output_chars`), so a long report is shortened in place
+and no section is dropped whole.
+
+`[agent] parallel_delegations` caps a wave, and defaults to 3. A wave
+larger than the cap is refused naming it, and `parallel_delegations = 1`
+removes the tool and leaves `delegate` alone. `slab mason report` counts
+the waves and the wall-clock they saved.
 
 ## A critic before compute
 

@@ -408,6 +408,7 @@ def team_block(
     *,
     delegate: bool = True,
     review: bool = True,
+    parallel: bool = False,
 ) -> str:
     """The ``# Your team`` section for a lead, or empty.
 
@@ -418,7 +419,7 @@ def team_block(
     apart, under the review tool, because it takes no briefs. *delegate*
     and *review* say which of the two tools the session actually offers:
     each list renders only behind its tool, so the prompt never promises
-    an absent one.
+    an absent one. *parallel* adds the sentence for ``delegate_many``.
     """
     others = list(hands(spec, roster).values()) if delegate else []
     reviewers = (
@@ -437,6 +438,14 @@ def team_block(
             "with dry_run) before it is launched.",
             "",
         ]
+        if parallel:
+            lines += [
+                "Briefs that share no file and no run can go out together with "
+                "delegate_many, and their specialists run at the same time. "
+                "Briefs that depend on each other go through delegate, one "
+                "after the other.",
+                "",
+            ]
         lines.extend(f"- {card.name}: {card.description}" for card in others)
     if reviewers:
         lines += [
