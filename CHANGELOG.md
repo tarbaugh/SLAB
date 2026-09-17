@@ -5,6 +5,35 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- A finish that cites no verified run is refused once, and the evidence a
+  lead needs is reachable without a worker's shell. Under `check-gating`,
+  a lead's `finish` whose cited runs hold none in a passing state comes
+  back naming each run and how it stands, for example `01m2hy5ygy
+  running, 01m2hvw3ca quarantined 3/5 checks`, and a cited id that
+  matches no run is named the same way. The refusal says that a campaign
+  is scored on verified runs and that a traced analysis workflow over the
+  evidence files produces one. The identical finish after it stands, and
+  its transcript event carries `unverified: true`, which the scorer
+  copies into the record and adds to its failure line. A table can then
+  count a campaign that was told and finished anyway apart from one whose
+  runs failed unseen. A specialist's finish and a finish that cites
+  nothing are untouched.
+
+- `read_artifact` reads a run's live files. A name that is no registered
+  artifact of the run is looked for in that run's scratch directory, so a
+  running run's LAMMPS log and the files of a run that died before it
+  registered anything read through the same digests, headed `<name>
+  (live file of run <id>, <n> bytes so far, not an artifact)`. A
+  registered artifact of the same name still wins. `show_run` on a
+  running run lists those files under `live_files`. Nothing is copied
+  into the artifact store, and the scratch sweep is unchanged.
+  `read_file` and `list_dir` stay fenced out of the scratch: it is
+  reached by run id alone.
+
+- A `dry-<stamp>` id goes in `read_artifact`'s `hash` as well as its
+  `run_id`, and without a `name` it lists the files that record holds.
+  `show_run` on a dry id returns the record itself.
+
 - A lead continues a specialist it already briefed, and sizes each brief.
   `delegate` takes `continues`, the handle from an earlier report's
   harness line, and gives that specialist another turn with its messages

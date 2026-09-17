@@ -85,6 +85,7 @@ def _tally(transcript: Path) -> dict[str, Any]:
     finish_report: str | None = None
     finish_results: dict[str, Any] = {}
     finish_run_ids: list[str] = []
+    finish_unverified = False
     finished = False
     retire: dict[str, Any] | None = None
     commands: Counter[str] = Counter()
@@ -161,6 +162,7 @@ def _tally(transcript: Path) -> dict[str, Any]:
             finish_results = dict(raw_results) if isinstance(raw_results, dict) else {}
             raw_ids = event.get("run_ids")
             finish_run_ids = [str(r) for r in raw_ids] if isinstance(raw_ids, list) else []
+            finish_unverified = bool(event.get("unverified"))
         elif kind == "retire":
             retire = {k: v for k, v in event.items() if k not in ("at", "type")}
         elif kind == "command":
@@ -222,6 +224,8 @@ def _tally(transcript: Path) -> dict[str, Any]:
             "report": finish_report,
             "results": finish_results,
             "run_ids": finish_run_ids,
+            # The lead was told no cited run is verified and finished anyway.
+            "unverified": finish_unverified,
         },
         "retire": retire,
         "commands": dict(commands),

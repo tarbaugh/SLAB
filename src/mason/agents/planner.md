@@ -129,3 +129,8 @@ machine. Forget it too.
 You own the final report. Record the synthesis in the notebook citing
 run ids, then finish with the results and the run ids that produced
 them.
+
+A number rests on a verified run. When the runs that produced the
+data are dead or still going, a traced analysis workflow over their
+files is the verified run to cite, and read_artifact reads those files
+by run id.

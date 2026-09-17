@@ -119,6 +119,7 @@ def test_the_digest_counts_every_dimension(tmp_path: Path) -> None:
         "report": "a0 = 3.30 A for bcc Nb, MLIP-level",
         "results": {},
         "run_ids": [],
+        "unverified": False,
     }
 
 
@@ -157,6 +158,7 @@ def test_an_empty_transcript_is_a_zero_report(tmp_path: Path) -> None:
         "report": None,
         "results": {},
         "run_ids": [],
+        "unverified": False,
     }
     assert summary["model"] is None  # no header: an older transcript
 

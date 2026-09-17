@@ -54,6 +54,7 @@ from foundation.errors import (
     SerializationError,
     SessionNotFoundError,
 )
+from foundation.lifecycle import PASSING_STATES as LIFECYCLE_PASSING_STATES
 from foundation.runtime import Workspace
 from foundation.serialize import loads
 from foundation.session_record import SessionRecord, find_session_record
@@ -81,7 +82,9 @@ if TYPE_CHECKING:
 RECORDS_FILE = Path("benchmarks") / "results.jsonl"
 
 #: Lifecycle states a cited run must have reached for its number to count.
-PASSING_STATES = frozenset({"verified", "promoted", "archived"})
+#: The same set Mason's finish gate reads, so a campaign is refused where it
+#: can still be fixed and scored the same way afterwards.
+PASSING_STATES = LIFECYCLE_PASSING_STATES
 
 #: Engine classes the reference values and tolerance bands are keyed by. A
 #: DFT run is judged against the functional it actually used, because PBE
@@ -500,6 +503,10 @@ def score_session(
         "skills": skills,
         "run_ids": list(finish.get("run_ids") or []),
         "results": dict(finish.get("results") or {}),
+        # The lead was told that no cited run is verified and finished anyway.
+        # A campaign that failed this way is a different failure from one that
+        # cited a run whose checks failed, and a table can tell them apart.
+        "unverified": bool(finish.get("unverified")),
         "reference": {},
         "tolerance": {},
         "passed": False,
@@ -597,6 +604,7 @@ def _harness_summary(harness: SessionRecord) -> dict[str, Any]:
         "reported": results is not None,
         "results": dict((results or {}).get("results") or {}),
         "run_ids": list((results or {}).get("run_ids") or []),
+        "unverified": bool((results or {}).get("unverified")),
     }
     return {
         "model": None,
@@ -636,7 +644,8 @@ def _judge_campaign(
         if run["run"]["state"] not in PASSING_STATES
     ]
     if unverified:
-        return fail("cited runs never verified: " + ", ".join(unverified))
+        told = " (the lead was told and finished anyway)" if record.get("unverified") else ""
+        return fail("cited runs never verified: " + ", ".join(unverified) + told)
     try:
         engines, engine_class = _engines(ws, details)
     except BenchmarkError as e:
