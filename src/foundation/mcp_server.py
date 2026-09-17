@@ -854,9 +854,12 @@ def build_server(
                 "name": m.name,
                 "description": m.description,
                 "unverified": m.unverified,
+                "kind": m.kind,
+                "expires_at": m.expires_at,
                 "changed_since": m.drift(live) if m.against else [],
             }
             for _, m in sorted(known.items())
+            if not m.expired()
         ]
 
     @server.tool()
@@ -877,15 +880,20 @@ def build_server(
         answer: dict[str, Any] = {
             "name": found.name,
             "unverified": found.unverified,
+            "kind": found.kind,
             "description": found.description,
             "body": body,
             "provenance": found.provenance(),
             "evidence": found.evidence,
             "changed_since": found.drift(software_versions()) if found.against else [],
         }
-        if memory_store.run_ids(found.evidence):
+        if found.kind == "outage":
+            answer["outage"] = found.outage_note()
+        if memory_store.run_ids(found.evidence) or memory_store.dry_run_ids(found.evidence):
             with Workspace(root) as ws:
-                answer["evidence_runs"] = _ops.evidence_run_lines(ws, found.evidence)
+                rows = _ops.evidence_rows(ws, found.evidence)
+            answer["evidence_runs"] = [row["line"] for row in rows]
+            answer["evidence_note"] = _ops.evidence_note(rows)
         earlier = memory_store.versions(name)
         if earlier and earlier[0].body != body.strip():
             answer["previous"] = {
@@ -903,32 +911,38 @@ def build_server(
         body: str,
         evidence: str | None = None,
         unverified: bool = False,
+        kind: str = memory_store.DEFAULT_KIND,
     ) -> dict[str, Any]:
         """Record one confirmed fact about this machine or its software so
         later sessions start knowing it: a package that behaves unlike its
         documentation, a flag that matters, a workaround. name is
         lowercase-with-hyphens; description is the one line a future session
         reads to decide whether the fact applies. evidence is what confirmed
-        the fact: a run id and one line, a dry run, or a failure record. A
-        write without evidence is refused unless unverified is true, which
-        marks the memory as a claim every later session must test. Re-using
+        the fact: the id of a run that completed, and one line saying what it
+        showed. A write without evidence is refused unless unverified is
+        true, and a write whose evidence names only running runs, runs this
+        workspace does not hold, or dry runs is recorded as a claim every
+        later session must test. kind is build (how this machine's software
+        behaves), resource (what its hardware does), or outage (broken now),
+        which expires in a week and names the host it happened on. Re-using
         a name replaces that memory and keeps the old version. Not for
-        results (they belong to runs), project decisions (the notebook), or
-        credentials (nowhere)."""
+        results (they belong to runs), project decisions (the notebook),
+        documented behaviour of a command (the skills), or credentials
+        (nowhere)."""
         text = f"{name}\n{description}\n{body}"
         versions = software_versions()
         against = memory_store.stamp(text, versions)
         about_slab = memory_store.about_slab(text, _TOOL_NAMES)
         if about_slab and "slab-stack" in versions:
             against.setdefault("slab-stack", versions["slab-stack"])
-        checked: list[str] = []
-        if memory_store.run_ids(evidence):
+        rows: list[dict[str, Any]] = []
+        if memory_store.run_ids(evidence) or memory_store.dry_run_ids(evidence):
             with Workspace(root) as ws:
-                checked = _ops.evidence_run_lines(ws, evidence)
-        # Evidence naming only runs this workspace never held is a claim.
-        doubted = bool(checked) and all(
-            line.endswith("no such run in this workspace") for line in checked
-        )
+                rows = _ops.evidence_rows(ws, evidence)
+        # A memory rests on a run that finished. Anything else is a claim,
+        # while no evidence at all is refused by the store below.
+        cited = bool(str(evidence or "").strip())
+        confirmed = not cited or any(row["counts"] for row in rows)
         written = memory_store.write(
             name,
             description,
@@ -936,18 +950,22 @@ def build_server(
             agent="mcp",
             against=against,
             evidence=evidence,
-            unverified=unverified or doubted,
+            unverified=unverified or not confirmed,
+            kind=kind,
+            where=_ops.evidence_host(rows) if kind == "outage" else None,
         )
         answer: dict[str, Any] = {
             "name": written.name,
             "path": str(written.path),
             "against": dict(written.against),
             "unverified": written.unverified,
+            "kind": written.kind,
+            "evidence_note": _ops.evidence_note(rows),
         }
-        if checked:
-            answer["evidence_runs"] = checked
-        if doubted:
-            answer["doubt"] = "unverified: the evidence names no run this workspace holds"
+        if written.kind == "outage":
+            answer["outage"] = written.outage_note()
+        if rows:
+            answer["evidence_runs"] = [row["line"] for row in rows]
         if about_slab:
             answer["note"] = ABOUT_SLAB_NOTE.format(version=written.against.get("slab-stack", "?"))
         return answer

@@ -2863,13 +2863,69 @@ def cancel_job(job_id: str, *, workspace: str | os.PathLike[str] | None = None) 
     return summary
 
 
-def evidence_run_lines(ws: Workspace, evidence: str | None) -> list[str]:
-    """What each run a memory's evidence cites looks like now, one line per id.
+def evidence_rows(ws: Workspace, evidence: str | None) -> list[dict[str, Any]]:
+    """What each id a memory's evidence cites is, and whether it counts.
 
     A reader of a memory judges its evidence by the run, not the claim: a
-    run that failed, or one this workspace never held, is a reason to
-    doubt the memory. The status read is the current one, so a run that
-    was still going when the memory was written shows how it ended.
+    run that failed, or one this workspace never held, is a reason to doubt
+    the memory. The status read is the current one, so a run that was still
+    going when the memory was written shows how it ended.
+
+    Only a completed run counts. A run that is still going has shown
+    nothing yet, a failed run shows the failure and not the fact, and a dry
+    run never produced a result at all. Each row carries ``id``, the
+    ``line`` a reader sees, whether it ``counts``, the ``why`` in a phrase,
+    and the ``host`` the run ran on when the store holds one.
+
+    Examples:
+        >>> import tempfile
+        >>> with Workspace(tempfile.mkdtemp()) as ws:
+        ...     [(r["id"], r["counts"], r["why"]) for r in
+        ...      evidence_rows(ws, "run 01k2x7abcdefgh and dry-20260917-121314-ab12")]
+        [('01k2x7abcdefgh', False, 'no such run in this workspace'), \
+('dry-20260917-121314-ab12', False, 'a dry run, which confirms nothing')]
+    """
+    from foundation import memory as memory_store
+    from foundation.errors import AmbiguousRunIdError, RunNotFoundError
+
+    rows: list[dict[str, Any]] = []
+    for token in memory_store.run_ids(evidence):
+        row: dict[str, Any] = {"id": token, "counts": False, "host": None}
+        try:
+            run = ws.runs.get(token)
+        except RunNotFoundError:
+            row.update(line=f"{token}: no such run in this workspace", why=NO_SUCH_RUN)
+            rows.append(row)
+            continue
+        except AmbiguousRunIdError:
+            why = "matches more than one run; cite the whole id"
+            row.update(line=f"{token}: {why}", why=why)
+            rows.append(row)
+            continue
+        line = f"{run.id}: {run.name}, {run.status.value}, {run.state.value}"
+        if run.error:
+            line += f", error: {run.error[:200]}"
+        counts = run.status is ExecutionStatus.COMPLETED
+        why = (
+            "completed"
+            if counts
+            else f"{run.status.value}, so it has not confirmed anything"
+        )
+        row.update(id=run.id, line=line, counts=counts, why=why, host=run.host)
+        rows.append(row)
+    for token in memory_store.dry_run_ids(evidence):
+        why = "a dry run, which confirms nothing"
+        rows.append({"id": token, "line": f"{token}: {why}", "counts": False, "why": why,
+                     "host": None})
+    return rows
+
+
+#: What a row says about an id the workspace does not hold.
+NO_SUCH_RUN = "no such run in this workspace"
+
+
+def evidence_run_lines(ws: Workspace, evidence: str | None) -> list[str]:
+    """One line per cited id, as a reader of the memory sees it.
 
     Examples:
         >>> import tempfile
@@ -2877,24 +2933,55 @@ def evidence_run_lines(ws: Workspace, evidence: str | None) -> list[str]:
         ...     evidence_run_lines(ws, "run 01k2x7abcdefgh")
         ['01k2x7abcdefgh: no such run in this workspace']
     """
-    from foundation import memory as memory_store
-    from foundation.errors import AmbiguousRunIdError, RunNotFoundError
+    return [str(row["line"]) for row in evidence_rows(ws, evidence)]
 
-    lines = []
-    for token in memory_store.run_ids(evidence):
-        try:
-            run = ws.runs.get(token)
-        except RunNotFoundError:
-            lines.append(f"{token}: no such run in this workspace")
-            continue
-        except AmbiguousRunIdError:
-            lines.append(f"{token}: matches more than one run; cite the whole id")
-            continue
-        line = f"{run.id}: {run.name}, {run.status.value}, {run.state.value}"
-        if run.error:
-            line += f", error: {run.error[:200]}"
-        lines.append(line)
-    return lines
+
+def evidence_note(rows: list[dict[str, Any]]) -> str:
+    """One line naming which cited ids counted as evidence and which did not.
+
+    Examples:
+        >>> evidence_note([{"id": "01a", "counts": True, "why": "completed"},
+        ...                {"id": "01b", "counts": False, "why": "running, so it has "
+        ...                 "not confirmed anything"}])
+        'evidence: 01a counts (completed); 01b does not (running, so it has not confirmed anything)'
+        >>> evidence_note([])
+        'evidence: no run id cited'
+    """
+    if not rows:
+        return "evidence: no run id cited"
+    parts = [
+        f"{row['id']} counts ({row['why']})"
+        if row["counts"]
+        else f"{row['id']} does not ({row['why']})"
+        for row in rows
+    ]
+    return "evidence: " + "; ".join(parts)
+
+
+def evidence_host(rows: list[dict[str, Any]]) -> str | None:
+    """The host the evidence ran on, or None when no cited run names one.
+
+    The first counting run's host wins; otherwise the first cited run that
+    the workspace holds with a host. The host is the provenance of the
+    citation, not its verification: an outage whose evidence is the run
+    that died on a node still names that node, so a later session reads
+    which host was broken even though the failed run confirms nothing.
+
+    Examples:
+        >>> evidence_host([{"counts": False, "host": "n1"}, {"counts": True, "host": "n2"}])
+        'n2'
+        >>> evidence_host([{"counts": False, "host": None}, {"counts": False, "host": "n1"}])
+        'n1'
+        >>> evidence_host([{"counts": False, "host": None}]) is None
+        True
+    """
+    for row in rows:
+        if row["counts"] and row["host"]:
+            return str(row["host"])
+    for row in rows:
+        if row["host"]:
+            return str(row["host"])
+    return None
 
 
 def cancel_lines(summary: dict[str, Any]) -> list[str]:

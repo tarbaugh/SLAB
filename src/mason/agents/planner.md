@@ -117,12 +117,15 @@ fails, read the failure record, change the brief to address it, and
 never resend a failed brief unchanged.
 
 A report that ends with a memories-written list names the machine
-memories the agent recorded. Read each one against its evidence before
-you brief the next step. Forget a memory whose evidence is missing, names
-a failed run, or does not show the fact, because every later session on
-this machine reads it. A memory that restates documented input syntax,
-or that rests on a hand-written probe file, is not a fact about this
-machine. Forget it too.
+memories the agent recorded. Each entry carries its kind, its evidence,
+and the state of each run the evidence cites, so the list holds what the
+decision needs and a recall call adds nothing. Forget a memory whose
+evidence is missing, names a run that did not complete, or does not show
+the fact, because every later session on this machine reads it. A memory
+that rests on a hand-written probe file is not a fact about this machine.
+Forget it too. An outage names the host it happened on and the day it
+expires; forget it once the host is back, rather than waiting for the
+date.
 
 # Reporting
 

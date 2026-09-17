@@ -2569,14 +2569,15 @@ def test_remember_wants_evidence_or_says_unverified(tmp_path: Path, memory_root:
     from foundation import memory as memory_store
 
     box = build_toolbox(_session(tmp_path))
-    fact = {"name": "fix-halt", "description": "fix halt has no error keyword.", "body": "So."}
+    fact = {"name": "mpi-bind", "description": "mpirun needs --bind-to none here.",
+            "body": "Ranks pile up on one core without it."}
     refused = box.dispatch(_call("remember", **fact))
     assert refused.startswith("not recorded: a memory needs evidence")
     assert memory_store.discover(memory_root) == {}
 
     claim = box.dispatch(_call("remember", **fact, unverified=True))
-    assert "it is marked unverified until a run confirms it" in claim
-    recalled = box.dispatch(_call("recall", name="fix-halt"))
+    assert "it is marked unverified until a completed run confirms it" in claim
+    recalled = box.dispatch(_call("recall", name="mpi-bind"))
     assert recalled.startswith("unverified: no run confirmed this memory.")
     assert "no evidence recorded]" in recalled
 
@@ -2595,10 +2596,12 @@ def test_recall_shows_the_evidence_runs_and_the_previous_body(
               body="It fails when another job holds the card.", evidence=f"run {run_id}")
     )
     assert f"the evidence runs now: {run_id}: gpu-probe, failed" in answer
+    # A failed run shows the failure, not the fact, so it confirms nothing.
+    assert f"{run_id} does not (failed, so it has not confirmed anything)" in answer
 
     recalled = box.dispatch(_call("recall", name="gpu-build"))
-    assert not recalled.startswith("unverified")
-    assert recalled.startswith("It fails when another job holds the card.")
+    assert recalled.startswith("unverified: no run confirmed this memory.")
+    assert "It fails when another job holds the card." in recalled
     assert f"[evidence runs now: {run_id}: gpu-probe, failed, quarantined, error: Kokkos" in (
         recalled
     )
@@ -2638,12 +2641,13 @@ def test_a_delegates_memories_reach_the_lead(tmp_path: Path, memory_root: Path) 
     assert "The order is settled." in report
     lines = rest.strip().splitlines()
     assert lines[0].startswith(
-        "- newton-before-read-data (md-expert): newton on must precede read_data. "
-        f"evidence: run {run_id} failed without it [runs now: {run_id}: newton-probe, failed"
+        "- newton-before-read-data (md-expert, build): newton on must precede read_data. "
+        f"evidence: run {run_id} failed without it [unverified] [runs now: {run_id}: "
+        f"newton-probe, failed"
     )
     assert lines[1] == (
-        "- masses-before-grace (md-expert): masses must come before pair_style grace. "
-        "evidence: none [unverified]"
+        "- masses-before-grace (md-expert, build): masses must come before pair_style "
+        "grace. evidence: none [unverified]"
     )
     assert lines[2:-1] == [""]  # the harness line follows, as for any report
     assert lines[-1].startswith("[md-expert-1: finish after 3 step(s);")
@@ -2697,14 +2701,14 @@ def test_forget_undoes_only_this_sessions_writes(tmp_path: Path, memory_root: Pa
               body="Wrong again.", unverified=True)
     )
     specialist.dispatch(
-        _call("remember", name="halt-keyword", description="fix halt has no error keyword.",
-              body="So.", unverified=True)
+        _call("remember", name="mpi-bind", description="mpirun needs --bind-to none here.",
+              body="Ranks pile up on one core without it.", unverified=True)
     )
     box = build_toolbox(lead)
 
     refused = box.dispatch(_call("forget", name="older-fact"))
     assert refused.startswith("refused: 'older-fact' was not written in this session")
-    assert "Written in this session: fix-nph, halt-keyword" in refused
+    assert "Written in this session: fix-nph, mpi-bind" in refused
     assert "older-fact" in memory_store.discover()
 
     restored = box.dispatch(_call("forget", name="fix-nph"))
@@ -2713,7 +2717,7 @@ def test_forget_undoes_only_this_sessions_writes(tmp_path: Path, memory_root: Pa
     assert memory.body() == "The right body.\n" and memory.unverified is False
     assert memory_store.versions("fix-nph")[0].body == "Wrong again."
 
-    assert box.dispatch(_call("forget", name="halt-keyword")).startswith("forgot 'halt-keyword'")
+    assert box.dispatch(_call("forget", name="mpi-bind")).startswith("forgot 'mpi-bind'")
     assert sorted(memory_store.discover()) == ["fix-nph", "older-fact"]
     events = [json.loads(line) for line in lead.transcript_path.read_text().splitlines()]
-    assert [e["name"] for e in events if e["type"] == "forget"] == ["fix-nph", "halt-keyword"]
+    assert [e["name"] for e in events if e["type"] == "forget"] == ["fix-nph", "mpi-bind"]

@@ -74,10 +74,12 @@ The rules the store enforces:
 - The body is required, and at most 4000 characters. A memory states one
   fact. Split a longer one, or fold it into an existing memory.
 - One machine holds at most 100 memories.
-- `evidence` is what confirmed the fact: a run id with one line, a dry
-  run, or a failure record, at most 500 characters. A write without it is
-  refused unless the writer marks the fact `unverified: true`. See
-  [Evidence](#evidence).
+- `evidence` is what confirmed the fact: a run id with one line, at most
+  500 characters. A write without it is refused unless the writer marks
+  the fact `unverified: true`. See [Evidence](#evidence).
+- `kind` is what sort of fact this is: `build`, `resource`, or `outage`.
+  A file that names no kind is a `build` memory. An outage also carries
+  `expires_at` and `where`. See [Kinds](#kinds).
 - `created`, `updated`, `agent`, and `model` are provenance the store
   writes. You may edit any file by hand. A file you write yourself needs
   only the description and the body, and it reads as unverified until it
@@ -164,16 +166,39 @@ keeps what it holds.
 A memory enters every later session's prompt, so a wrong one misleads
 every session after it. Most wrong memories share one cause. The agent
 wrote the fact before any run confirmed it. So `remember` requires
-evidence:
+evidence, and the evidence is a run that finished. Cite the run id and
+one line saying what the run showed.
 
-- a run id, with one line saying what the run showed
-- a dry run of the script that showed it
-- a failure record, when the failure is the fact
+A memory is verified only when its evidence names at least one run in the
+completed status. These do not count:
 
-Without evidence the write is refused:
+| What the evidence names | Why it does not count |
+|---|---|
+| a run that is still going | the run has shown nothing yet |
+| a run that failed | the failure is evidence of the failure, not of the fact |
+| a run this workspace does not hold | nobody can read it |
+| a dry-run record id | a dry run rehearses a script and produces no result |
+
+The text keeps whatever the writer cited, including a dry-run id, because
+the next reader wants to see it. It counts for nothing. The reply says
+which cited ids counted and which did not:
 
 ```text
-not recorded: a memory needs evidence: the run id, the dry run, or the failure record that confirmed the fact. Pass evidence, or pass unverified=true to record it as an unverified claim that recall flags and 'slab memory review' lists
+recorded as memory 'device-init-fails' in /Users/you/.config/slab/memory/device-init-fails.md; every later session on this machine reads it; recorded as an outage (outage recorded 2026-09-17 on n1; expires 2026-09-24); it is marked unverified until a completed run confirms it, because a memory rests on a run that finished; evidence: 01m2rv8ghj574k7s8f2gv3vs5g does not (running, so it has not confirmed anything); the evidence runs now: 01m2rv8ghj574k7s8f2gv3vs5g: melt-1500K, running, quarantined
+```
+
+The same call once the run has finished:
+
+```text
+recorded as memory 'device-init-fails' in /Users/you/.config/slab/memory/device-init-fails.md; every later session on this machine reads it; recorded as an outage (outage recorded 2026-09-17 on n1; expires 2026-09-24); evidence: 01m2rv8ghj574k7s8f2gv3vs5g counts (completed); the evidence runs now: 01m2rv8ghj574k7s8f2gv3vs5g: melt-1500K, completed, quarantined
+```
+
+Without evidence the write is refused. The refusal says what evidence
+is, and that a dry-run id or a failure record may be cited but does not
+verify the fact:
+
+```text
+not recorded: a memory needs evidence: the id of a run that completed, and one line saying what it showed. A dry-run id or a failure record may be cited, and neither verifies the fact. Pass evidence, or pass unverified=true to record it as an unverified claim that recall flags and 'slab memory review' lists
 ```
 
 An agent that has a lead worth keeping but no confirmation passes
@@ -198,27 +223,115 @@ the claim. The readers check it. `recall`, the delegate list, and the MCP
 now. A cited run that failed, or one the workspace does not hold, is a
 reason to doubt the memory.
 
+## Kinds
+
+A memory says what sort of fact it holds, because the sorts age
+differently:
+
+| Kind | What it holds | How it ages |
+|---|---|---|
+| `build` | how this machine's software behaves | until the software changes, which the version stamp reports |
+| `resource` | what this machine's hardware does | until the hardware changes |
+| `outage` | something that is broken now | it expires, by default a week after it was written |
+
+`build` is the default, and a memory whose file names no kind is a
+`build` memory.
+
+An outage is temporary. A node whose GPUs fail to initialise is
+repaired, and a memory that outlives the repair steers every later
+session away from a working node. So an outage carries two more fields.
+`where` is the host its evidence ran on, and `expires_at` is the day it
+stops being read. The host comes from the cited runs. The store takes
+the first completed run's host stamp, or else the first cited run's that
+carries one. The host is the provenance of the citation, not its
+verification, so an outage whose evidence is the run that died on the
+node still names that node while the memory stays unverified:
+
+```text
+---
+description: A node refuses to initialise its GPUs.
+created: 2026-09-17
+updated: 2026-09-17
+kind: outage
+expires_at: 2026-09-24
+where: n1
+agent: pi
+evidence: run 01m2rv8ghj574k7s8f2gv3vs5g died at once on that node
+---
+Every launch on it dies before the first step, with a Kokkos abort.
+```
+
+`recall` puts the outage line in front of the fact, so the agent reads
+the host and the date before the claim:
+
+```text
+outage recorded 2026-09-17 on n1; expires 2026-09-24
+
+Every launch on it dies before the first step, with a Kokkos abort.
+
+[recorded by pi on 2026-09-17, evidence: run 01m2rv8ghj574k7s8f2gv3vs5g died at once on that node]
+
+[evidence runs now: 01m2rv8ghj574k7s8f2gv3vs5g: melt-1500K, completed, quarantined]
+```
+
+After the expiry date the catalog stops carrying the memory, so no later
+session reads it. The file stays on the machine, and `slab memory review`
+lists it for deletion. Nothing deletes a memory except the person.
+
+## Documented behaviour is not a memory
+
+What a LAMMPS command does everywhere is not a fact about this machine.
+The skills already carry that material, and a memory that restates it
+costs every later session prompt space and, when the restatement is
+wrong, misleads that session.
+
+So the store refuses a memory that restates what a bundled skill
+documents, and the refusal names the section that holds the real answer:
+
+```text
+not recorded: this is documented behaviour, not a fact about this machine: see two-phase-melting section 3 for what the common-neighbour-analysis codes mean. If this machine really departs from that, say so in your finish report so the skill gets fixed, and record only what the machine does differently
+```
+
+The table in `foundation.documented` holds the subjects. It covers the
+commands an agent has been seen to re-derive and record:
+
+| Command | Documented in |
+|---|---|
+| `cna/atom`, the structure codes | two-phase-melting, section 3 |
+| `dilate`, which atoms a barostat remaps | two-phase-melting, section 2 |
+| `fix_modify energy` and `econserve` | lammps-scripting, section 8 |
+| `velocity create` and `velocity scale` | lammps-scripting, section 3 |
+| `fix halt`, its syntax and what it does | lammps-scripting, section 7 |
+
+The table is deliberately small. A memory is refused only when its
+description names the command and its text touches that subject, so a
+real machine fact about the same command is recorded. A memory saying
+that `cna/atom` segfaults above eight threads on this build is a machine
+fact, and the store keeps it.
+
 ## What a delegate hands back
 
 A delegated specialist can write memories that its lead never sees in
 the report. So the harness appends a list to the delegate result. The
-list names every memory the specialist and its own delegates wrote, with
-the evidence and the state of each cited run:
+list names every memory the specialist and its own delegates wrote. Each
+entry carries the kind, the evidence, the state of each cited run, and,
+for an outage, the host and the expiry, so the lead decides what to
+forget without calling `recall`:
 
 ```text
 The order is settled: masses, then pair_style grace.
 
 [memories written: read each one, and forget any its evidence does not support]
-- masses-before-grace (md-expert): masses must come before pair_style grace in this build. evidence: run 01m2gey0s4fcb88yd9vpba7vab [runs now: 01m2gey0s4fcb88yd9vpba7vab: grace-order-probe, failed, quarantined, error: ERROR: Invalid atom type in probe.data]
-- newton-before-read-data (md-expert): newton on must precede read_data. evidence: none [unverified]
+- masses-before-grace (md-expert, build): masses must come before pair_style grace in this build. evidence: run 01m2rv8gjssxwn7e1byw7f0xbx [unverified] [runs now: 01m2rv8gjssxwn7e1byw7f0xbx: grace-order-probe, failed, quarantined, error: ERROR: Invalid atom type in probe.data]
+- device-init-fails (md-expert, outage): A node refuses to initialise its GPUs. evidence: run 01m2rv8gjt5psj83ymxbcyffcr died at once on that node [on n1, expires 2026-09-24] [runs now: 01m2rv8gjt5psj83ymxbcyffcr: device-probe, completed, quarantined]
 
-[md-expert: finish after 3 step(s); tokens 300+30; transcript 20260914-172013-40505-md-expert-1.jsonl]
+[md-expert-1: finish after 3 step(s); tokens 300+30; transcript 20260917-232935-45458-md-expert-1.jsonl; continue with continues="md-expert-1"]
 ```
 
 The planner and the PI cards tell the lead to read each entry before the
 next brief, and to forget a memory whose evidence is missing, names a
-failed run, or does not show the fact. Here the cited run failed on a
-hand-written probe file, so the lead forgets that memory:
+failed run, or does not show the fact. Here the first memory's run
+failed on a hand-written probe file, so the lead forgets it:
 
 ```text
 forgot 'masses-before-grace'; it did not exist before this session
@@ -334,24 +447,45 @@ Add `--json` for the same catalog with the full provenance of each
 memory, the evidence included.
 
 `slab memory review` lists only the memories a person should check. A
-memory is listed when it is unverified, or when software it is stamped
-against has changed since it was written. The reasons follow each line:
+memory is listed when it is unverified, when software it is stamped
+against has changed since it was written, or when it has expired. The
+reasons follow each line:
 
 ```bash
 slab memory review
 ```
 
 ```text
-mace-model-inside-the-fence  2026-08-28  md-expert         The sandbox cannot reach ~/.cache, so a MACE model file must live in the project directory. [unverified]
-newton-before-read-data      2026-09-14  md-expert         newton on must precede read_data. [unverified]
-2 of 3 memory(s) to review: 'slab memory confirm <name> --evidence ...' or 'slab memory forget <name>'
+device-init-fails  2026-09-17  md-expert         A node refuses to initialise its GPUs. [expired outage, recorded 2026-09-17]
+1 of 2 memory(s) to review: 'slab memory confirm <name> --evidence ...' or 'slab memory forget <name>'
 ```
+
+The command also re-judges the evidence of every memory that is marked
+verified, under the rule that evidence is a run that completed. That is
+how the rule reaches the memories written before it. The runs live in a
+workspace. The command reads the one that `--workspace`,
+`$SLAB_WORKSPACE`, or `[workspace] root` in `slab.toml` names, as every
+other command does, or `./.slab` when you run it where the workspace
+is. A memory whose cited run never completed is listed with what each
+cited id is now:
+
+```text
+device-init-fails  2026-09-17  md-expert         A node refuses to initialise its GPUs. [no completed run confirms it (evidence: 01m2rpft646ry89qphzy710p03 does not (running, so it has not confirmed anything))]
+```
+
+The command reads a workspace and never creates one. Where there is no
+workspace, the evidence is left as it stands. A memory you confirmed by
+hand is not judged against the runs, because no run need name what you
+checked.
 
 Test each fact, then take one of two actions:
 
 - If the fact holds, run `slab memory confirm <name> --evidence ...`.
   The body stays as it is. The memory gets the evidence, loses the
-  unverified mark, and is stamped against the software present now.
+  unverified mark, records today as the day a person confirmed it, and
+  is stamped against the software present now. When the evidence names
+  no completed run, the command says so in a warning line, and the
+  memory stands on your check alone.
 - If the fact does not hold, run `slab memory forget <name>`.
 
 ```bash
@@ -360,7 +494,15 @@ slab memory confirm mace-model-inside-the-fence --evidence "a relax with the mod
 
 ```text
 confirmed mace-model-inside-the-fence: evidence a relax with the model under the project dir completed; the ~/.cache path failed
+warning: the evidence names no run id; the memory stands on your check alone
 ```
+
+The file then carries `confirmed: 2026-09-17`. A later write by an agent
+drops the stamp, so the review judges that write's evidence again.
+
+Confirming an outage moves its expiry to a week from today, or to the
+day `--expires` names, because a confirmed outage is one that is still
+broken now.
 
 `slab memory add <name> <description> <body>` writes a memory yourself,
 under the same rules as `remember`. Give `--evidence`, or `--unverified`
@@ -371,8 +513,12 @@ slab memory add srun-in-sandbox "srun cannot reach the controller inside the san
 ```
 
 ```text
-Error: a memory needs evidence: the run id, the dry run, or the failure record that confirmed the fact. Pass --evidence, or pass --unverified to record it as a claim that recall flags and 'slab memory review' lists
+error: a memory needs evidence: the id of a run that completed, and one line saying what it showed. A dry-run id or a failure record may be cited, and neither verifies the fact. Pass --evidence, or pass --unverified to record it as a claim that recall flags and 'slab memory review' lists
 ```
+
+`--kind` says what sort of fact it is. An outage takes `--where` for the
+host and `--expires` for the day it stops being read, and defaults to a
+week from today.
 
 `slab memory forget <name>` deletes one memory. It prints what it
 is about to delete and asks first, and `--yes` skips the question.

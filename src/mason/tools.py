@@ -4391,6 +4391,8 @@ def _add_machine_memory_tools(box: Toolbox, session: MasonSession) -> None:
             return f"no memory named {name!r}; memories on this machine: {known}"
         session.record({"type": "recall", "name": name})
         parts = []
+        if found.kind == "outage":
+            parts.append(found.outage_note())
         if found.unverified:
             parts.append(
                 "unverified: no run confirmed this memory. Test it before you rely "
@@ -4437,13 +4439,18 @@ def _add_machine_memory_tools(box: Toolbox, session: MasonSession) -> None:
         description = str(arguments["description"])
         body = str(arguments["body"])
         evidence = arguments.get("evidence")
+        kind = str(arguments.get("kind") or memory_store.DEFAULT_KIND).strip().lower()
         flag = arguments.get("unverified")
         unverified = flag is True or (isinstance(flag, str) and flag.strip().lower() == "true")
-        # Evidence that names runs this workspace never held is no evidence:
-        # the memory is stored, but as a claim, so the catalog says so.
-        checked = _evidence_lines(session, str(evidence) if evidence is not None else None)
-        doubted = bool(checked) and all(line.endswith(_NO_SUCH_RUN) for line in checked)
-        if doubted:
+        # A memory rests on a run that finished. Evidence that names a run
+        # still going, a run this workspace never held, or a dry run is kept
+        # in the text and counts for nothing, so the catalog says the fact is
+        # a claim until a completed run confirms it.
+        rows = _evidence_rows(session, str(evidence) if evidence is not None else None)
+        checked = [str(row["line"]) for row in rows]
+        # A write with no evidence at all is refused by the store below, so
+        # only evidence that was given and does not hold up marks a claim.
+        if str(evidence or "").strip() and not any(row["counts"] for row in rows):
             unverified = True
         text = f"{name}\n{description}\n{body}"
         versions = session.software_versions()
@@ -4464,6 +4471,10 @@ def _add_machine_memory_tools(box: Toolbox, session: MasonSession) -> None:
                 against=against,
                 evidence=str(evidence) if evidence is not None else None,
                 unverified=unverified,
+                kind=kind,
+                # The host the evidence ran on, so a later session on another
+                # machine reads the outage as one host's and not the pool's.
+                where=_ops.evidence_host(rows) if kind == "outage" else None,
             )
         except MemoryStoreError as e:
             # A refusal is an observation the model can act on, not a crash:
@@ -4476,6 +4487,7 @@ def _add_machine_memory_tools(box: Toolbox, session: MasonSession) -> None:
                 "path": str(written.path),
                 "evidence": written.evidence,
                 "unverified": written.unverified,
+                "kind": written.kind,
             }
         )
         first = session.written_memory(name)
@@ -4485,6 +4497,9 @@ def _add_machine_memory_tools(box: Toolbox, session: MasonSession) -> None:
                 "description": written.description,
                 "evidence": written.evidence,
                 "unverified": written.unverified,
+                "kind": written.kind,
+                "expires_at": written.expires_at,
+                "where": written.where,
                 "agent": session.agent_name,
                 # The version that stood before this session touched the
                 # memory: forget puts it back. A later write in the same
@@ -4505,16 +4520,17 @@ def _add_machine_memory_tools(box: Toolbox, session: MasonSession) -> None:
             f"recorded as memory {written.name!r} in {written.path}; "
             f"every later session on this machine reads it"
         )
-        if doubted:
+        if written.kind == "outage":
+            answer += f"; recorded as an outage ({written.outage_note()})"
+        if written.unverified:
             answer += (
-                "; it is marked unverified because its evidence names no run this "
-                "workspace holds"
+                "; it is marked unverified until a completed run confirms it, "
+                "because a memory rests on a run that finished"
             )
-        elif written.unverified:
-            answer += "; it is marked unverified until a run confirms it"
         if written.against:
             stamped = ", ".join(f"{n} {v}" for n, v in written.against.items())
             answer += f" (stamped against {stamped})"
+        answer += "; " + _ops.evidence_note(rows)
         if checked:
             answer += "; the evidence runs now: " + "; ".join(checked)
         if about_slab:
@@ -4528,14 +4544,19 @@ def _add_machine_memory_tools(box: Toolbox, session: MasonSession) -> None:
                 "Record one confirmed fact about this machine or its software so "
                 "later sessions start knowing it: a package that behaves unlike "
                 "its documentation, a flag that matters, a workaround. Cite what "
-                "confirmed it in evidence: the run id, the dry run, or the failure "
-                "record. A write without evidence is refused unless you pass "
-                "unverified=true, which marks the memory as a claim every later "
-                "session must test. Write the description as the line a future "
-                "session reads when deciding whether the fact applies. Re-using a "
-                "name replaces that memory and keeps the old version. Not for "
-                "results (they belong to runs), project decisions (the notebook), "
-                "or credentials (nowhere)."
+                "confirmed it in evidence: the id of a run that completed. A write "
+                "without evidence is refused unless you pass unverified=true, and a "
+                "write whose evidence names only running runs, runs this workspace "
+                "does not hold, or dry runs is recorded as a claim every later "
+                "session must test. Say what sort of fact it is in kind: 'build' for "
+                "how this machine's software behaves, 'resource' for what its "
+                "hardware does, 'outage' for something that is broken now, which "
+                "expires in a week and names the host it happened on. Write the "
+                "description as the line a future session reads when deciding "
+                "whether the fact applies. Re-using a name replaces that memory and "
+                "keeps the old version. Not for results (they belong to runs), "
+                "project decisions (the notebook), documented behaviour of a "
+                "command (the skills), or credentials (nowhere)."
             ),
             parameters=_schema(
                 {
@@ -4551,8 +4572,16 @@ def _add_machine_memory_tools(box: Toolbox, session: MasonSession) -> None:
                     "evidence": {
                         "type": "string",
                         "description": (
-                            "what confirmed the fact: a run id and one line, a dry "
-                            "run, or a failure record"
+                            "what confirmed the fact: the id of a completed run and "
+                            "one line saying what it showed"
+                        ),
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": list(memory_store.KINDS),
+                        "description": (
+                            "build (how this machine's software behaves), resource "
+                            "(what its hardware does), or outage (broken now)"
                         ),
                     },
                     "unverified": {
@@ -4623,18 +4652,20 @@ def _add_machine_memory_tools(box: Toolbox, session: MasonSession) -> None:
     )
 
 
-_NO_SUCH_RUN = "no such run in this workspace"
-
-
-def _evidence_lines(session: MasonSession, evidence: str | None) -> list[str]:
-    """The current state of each run *evidence* cites, or nothing when it cites none."""
-    if not memory_store.run_ids(evidence):
+def _evidence_rows(session: MasonSession, evidence: str | None) -> list[dict[str, Any]]:
+    """What each id *evidence* cites is now, or nothing when it cites none."""
+    if not memory_store.run_ids(evidence) and not memory_store.dry_run_ids(evidence):
         return []
     try:
         with _open_workspace(session) as ws:
-            return _ops.evidence_run_lines(ws, evidence)
+            return _ops.evidence_rows(ws, evidence)
     except RunStoreUnavailable:
         return []
+
+
+def _evidence_lines(session: MasonSession, evidence: str | None) -> list[str]:
+    """The current state of each run *evidence* cites, one line each."""
+    return [str(row["line"]) for row in _evidence_rows(session, evidence)]
 
 
 def memories_written_block(session: MasonSession, entries: list[dict[str, Any]]) -> str:
@@ -4642,14 +4673,24 @@ def memories_written_block(session: MasonSession, entries: list[dict[str, Any]])
 
     Built by the harness from the delegate's writes, not from its report,
     so a memory the report leaves out still reaches the lead. Each entry
-    carries its evidence and the current state of the runs it cites.
+    carries its kind, its evidence and the state of the runs it cites, and,
+    for an outage, the host and the expiry, so the lead decides whether to
+    forget it without calling recall.
     """
     lines = [
         "[memories written: read each one, and forget any its evidence does not support]"
     ]
     for entry in entries:
         evidence = entry["evidence"] or "none"
-        line = f"- {entry['name']} ({entry['agent']}): {entry['description']} evidence: {evidence}"
+        kind = entry.get("kind") or memory_store.DEFAULT_KIND
+        line = (
+            f"- {entry['name']} ({entry['agent']}, {kind}): {entry['description']} "
+            f"evidence: {evidence}"
+        )
+        if kind == "outage":
+            where = entry.get("where") or "an unrecorded host"
+            until = entry.get("expires_at") or "no date"
+            line += f" [on {where}, expires {until}]"
         if entry["unverified"]:
             line += " [unverified]"
         checked = _evidence_lines(session, entry["evidence"])

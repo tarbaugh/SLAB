@@ -610,15 +610,29 @@ def test_remember_over_mcp_wants_evidence_or_says_unverified(
     assert _call(server, "list_memories")[0]["unverified"] is True
     assert _call(server, "recall", {"name": "mpi-bind"})["unverified"] is True
 
+    # A run that has not finished confirms nothing, so the fact stays a claim.
     with Workspace(root) as ws:
         run = ws.runs.create(Run(name="bind-probe"))
-    checked = _call(server, "remember", {**fact, "body": "Ranks pile up.", "evidence": run.id})
+    pending = _call(server, "remember", {**fact, "body": "Ranks pile up.", "evidence": run.id})
+    assert pending["unverified"] is True
+    assert pending["evidence_note"] == (
+        f"evidence: {run.id} does not (pending, so it has not confirmed anything)"
+    )
+
+    with Workspace(root) as ws:
+        ws.runs.set_status(run.id, "running")
+        ws.runs.set_status(run.id, "completed")
+    checked = _call(
+        server, "remember", {**fact, "body": "Ranks pile up on one core.", "evidence": run.id}
+    )
     assert checked["unverified"] is False
-    assert checked["evidence_runs"] == [f"{run.id}: bind-probe, pending, quarantined"]
+    assert checked["kind"] == "build"
+    assert checked["evidence_note"] == f"evidence: {run.id} counts (completed)"
+    assert checked["evidence_runs"] == [f"{run.id}: bind-probe, completed, quarantined"]
     recalled = _call(server, "recall", {"name": "mpi-bind"})
     assert recalled["unverified"] is False and recalled["evidence"] == run.id
-    assert recalled["previous"]["body"] == "Or else."
-    assert recalled["previous"]["evidence"] is None
+    assert recalled["previous"]["body"] == "Ranks pile up."
+    assert recalled["previous"]["evidence"] == run.id
 
 
 def test_skills_are_cataloged_loaded_and_recorded(root: Path, tmp_path: Path) -> None:
