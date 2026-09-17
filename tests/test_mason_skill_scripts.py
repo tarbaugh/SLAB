@@ -463,7 +463,8 @@ def test_every_builtin_skill_validates_and_maps_to_its_specialists(tmp_path: Pat
     # The scriptless skills are deliberate: scripts are optional in the format.
     assert not (skills["surface-energy"].root / "scripts").exists()
     assert not (skills["mlip-training"].root / "scripts").exists()
-    assert (skills["two-phase-melting"].root / "scripts" / "interface_velocity.py").is_file()
+    for script in ("interface_velocity.py", "coexistence_fraction.py"):
+        assert (skills["two-phase-melting"].root / "scripts" / script).is_file()
 
 
 # -- fit_rates ----------------------------------------------------------------
@@ -1526,6 +1527,203 @@ def test_interface_velocity_classifies_a_perfect_crystal_and_refuses_bad_flags(
     assert isinstance(code, str) and "--cutoff" in code
 
 
+# -- coexistence_fraction (two-phase-melting) ---------------------------------
+
+COEXISTENCE = SKILLS / "two-phase-melting" / "scripts" / "coexistence_fraction.py"
+#: A real 70 ps NPH leg on a 5120-atom Lennard-Jones coexistence cell, eight
+#: unit cells across, with the solid-like count written by ``fix ave/time``.
+COEX_LOG = DATA / "lammps-lj-coex-nph-yaml.log"
+COEX_FRACTION = DATA / "lammps-lj-coex-fraction.dat"
+#: The pure-phase legs of the same system at the same temperature.
+COEX_BASELINES = ("--crystal-baseline", "1.00", "--liquid-baseline", "0.045")
+
+
+def _run_err(
+    script: Path, *args: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> tuple[object, str, str]:
+    """Execute a script as __main__; return (exit code, stdout, stderr)."""
+    monkeypatch.setattr(sys, "argv", [str(script), *args])
+    with pytest.raises(SystemExit) as excinfo:
+        runpy.run_path(str(script), run_name="__main__")
+    captured = capsys.readouterr()
+    return excinfo.value.code, captured.out, captured.err
+
+
+def test_coexistence_fraction_refuses_a_thin_cross_section_without_the_flag(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _, err = _run_err(
+        COEXISTENCE, str(COEX_LOG), "--cells", "6", monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert code == 2
+    assert "6.0 unit cells, under the 8" in err and "--small-cell" in err
+
+    # The same cell passes with the flag, and the caveat line comes with it.
+    code, out, _ = _run_err(
+        COEXISTENCE, str(COEX_LOG), "--cells", "6", "--small-cell",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    assert "finite-size caveat: the cross section is 6.0 unit cells" in out
+    assert "finite-size shift of tens of kelvin" in out
+    assert "the report must carry this line" in out
+
+    # Eight cells is the bound itself, so it needs no flag and prints no caveat.
+    code, out, _ = _run_err(
+        COEXISTENCE, str(COEX_LOG), "--cells", "8", monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert code == 0 and "caveat" not in out
+    # The two lengths give the same count as --cells does.
+    code, out, _ = _run_err(
+        COEXISTENCE, str(COEX_LOG), "--cross-section-A", "29.6", "--lattice-A", "3.70",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0 and "cross section 8.0 unit cells" in out
+
+
+def test_coexistence_fraction_reads_the_plateau_of_the_bundled_nph_log(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, _ = _run_err(
+        COEXISTENCE, str(COEX_LOG), "--cells", "8", "--plateau", "--timestep-fs", "2",
+        "--fraction", str(COEX_FRACTION), "--natoms", "5120", *COEX_BASELINES,
+        "--json", monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    result = json.loads(out)
+    # The melt and the enthalpy-setting legs printed text tables; the NPH leg
+    # printed YAML documents, and the last table is the one read.
+    assert result["tables"] == 3 and result["rows"] == 351
+    assert result["cells"] == 8.0 and result["small_cell"] is False
+
+    plateau = result["plateau"]
+    # The primary window is the last 35 ps of the 70 ps leg, the secondary the
+    # last 17.5 ps of that.
+    assert plateau["primary"]["rows"] == 176 and plateau["secondary"]["rows"] == 88
+    assert plateau["primary"]["ps"] == [35.0, 70.0]
+    assert plateau["secondary"]["ps"] == [52.6, 70.0]
+    assert abs(plateau["primary"]["mean"] - 1442.6) < 0.5
+    assert abs(plateau["secondary"]["mean"] - 1433.5) < 0.5
+    assert abs(plateau["primary"]["block_error"] - 5.0) < 0.5
+    # The cell wanders: the temperature falls 29 K over the primary window,
+    # far wider than the block error, so 70 ps is not yet a plateau here.
+    assert abs(plateau["primary"]["change"] + 29.1) < 0.5
+    assert abs(plateau["primary"]["change_error"] - 4.1) < 0.5
+    assert plateau["primary"]["drift_in_errors"] < -3.0
+    assert plateau["settled"] is False
+    # The two window means still agree inside their combined error.
+    assert plateau["windows_agree"] is True
+    assert abs(plateau["window_gap"] - 9.1) < 0.5
+    assert abs(plateau["t_plateau"] - 1442.6) < 0.5
+    assert result["verdict"] == "not a plateau"
+    assert any("the temperature drifts" in r for r in result["verdict_reasons"])
+
+    # Both phases survived the whole window, against the measured baselines.
+    fraction = result["fraction"]
+    assert fraction["rows"] == 350
+    assert 0.50 < fraction["window_mean"] < 0.65
+    assert fraction["both_phases"] is True
+    assert result["warnings"] == []
+
+    code, out, _ = _run_err(
+        COEXISTENCE, str(COEX_LOG), "--cells", "8", "--plateau", "--timestep-fs", "2",
+        "--fraction", str(COEX_FRACTION), "--natoms", "5120", *COEX_BASELINES,
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    assert "primary      1442.58 +/- 5.01 (176 rows, 35.0 to 70.0 ps)" in out
+    assert "secondary    1433.50 +/- 2.81 (88 rows, 52.6 to 70.0 ps)" in out
+    assert "drift         -29.07 +/- 4.07" in out and "(-5.8 block errors)" in out
+    assert "verdict: not a plateau; T_m = 1442.6 +/- 5.0" in out
+    assert "because the temperature drifts" in out
+
+
+def test_coexistence_fraction_holds_the_gates_to_the_calibrated_baselines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Baselines of one and zero are the uncalibrated case the skill refuses to
+    # let a gate use; the script says so rather than silently rescaling.
+    code, out, _ = _run_err(
+        COEXISTENCE, str(COEX_LOG), "--cells", "8", "--fraction", str(COEX_FRACTION),
+        "--natoms", "5120", monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    assert any("the baselines are 1 and 0" in line for line in out.splitlines())
+
+    # Against the liquid baseline as the crystal one, a coexistence cell reads
+    # as a consumed phase, and the verdict says so.
+    code, out, _ = _run_err(
+        COEXISTENCE, str(COEX_LOG), "--cells", "8", "--plateau", "--fraction",
+        str(COEX_FRACTION), "--natoms", "5120", "--crystal-baseline", "0.60",
+        "--liquid-baseline", "0.045", monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    assert "a phase was consumed" in out
+    assert "one phase was consumed" in out
+
+    # A series truncated by a second fix writing the same name does not cover
+    # the plateau window, and the script says which hazard that is.
+    truncated = tmp_path / "fraction.dat"
+    truncated.write_text(
+        "\n".join(COEX_FRACTION.read_text().splitlines()[:60]) + "\n"
+    )
+    code, out, _ = _run_err(
+        COEXISTENCE, str(COEX_LOG), "--cells", "8", "--plateau", "--fraction",
+        str(truncated), "--natoms", "5120", *COEX_BASELINES,
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    assert "does not cover the plateau window 17500 to 35000" in out
+    assert "wrote over this file" in out
+
+    # A series of counts without --natoms is a refusal, not a fraction above 1.
+    code, _, err = _run_err(
+        COEXISTENCE, str(COEX_LOG), "--cells", "8", "--fraction", str(COEX_FRACTION),
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 2 and "--natoms" in err
+    # An inverted pair of baselines, a window outside (0, 1], a thin cell
+    # without the flag, and a log with no table are all refusals.
+    code, _, err = _run_err(
+        COEXISTENCE, str(COEX_LOG), "--cells", "8", "--fraction", str(COEX_FRACTION),
+        "--natoms", "5120", "--crystal-baseline", "0.045", "--liquid-baseline", "1.00",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 2 and "--crystal-baseline" in err
+    code, _, err = _run_err(
+        COEXISTENCE, str(COEX_LOG), "--cells", "8", "--window", "0",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 2 and "--window" in err
+    code, _, err = _run_err(COEXISTENCE, str(COEX_LOG), monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 2 and "--cells" in err
+    empty = tmp_path / "empty.log"
+    empty.write_text("LAMMPS (22 Jul 2025)\nunits metal\n")
+    code, _, err = _run_err(
+        COEXISTENCE, str(empty), "--cells", "8", monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert code == 2 and "no thermo table found" in err
+
+
+def test_coexistence_fraction_reads_a_thermo_json_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The artifact ``run_lammps`` keeps carries the same tables as the log."""
+    from slab.outputs import lammps_thermo
+
+    tables = lammps_thermo(COEX_LOG.read_text())
+    artifact = tmp_path / "coex-thermo.json"
+    artifact.write_text(json.dumps(tables))
+    code, out, _ = _run_err(
+        COEXISTENCE, str(artifact), "--cells", "8", "--plateau", "--json",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    result = json.loads(out)
+    assert result["rows"] == 351
+    assert abs(result["plateau"]["primary"]["mean"] - 1442.6) < 0.5
+
+
 # -- the MD and strain templates, end to end ----------------------------------
 
 
@@ -2004,6 +2202,39 @@ def test_close_contact_guidance_reaches_the_builder_and_the_runner() -> None:
         "run 5000",
     ):
         assert line in recipe and line in scripting, line
+
+
+def test_two_phase_melting_states_what_a_hot_crystal_reads() -> None:
+    """The order parameter, the route table, and the cross-section bound are in
+    the skill, and every gate it states is a calibrated one."""
+    skill = (SKILLS / "two-phase-melting" / "SKILL.md").read_text()
+    flat = " ".join(skill.split())
+    for section in (
+        "## 1. Choose the route",
+        "## 2. What a hot crystal reads",
+        "### The cross-section bound",
+        "### Small cells and GPU builds",
+        "## 4. Run the NPH plateau route",
+        "## 5. Run the velocity ladder",
+    ):
+        assert section in skill, section
+    # The two classifications the skill prescribes, and the calibration.
+    assert "fix pos all ave/atom" in flat and "compute ptm/atom" in flat
+    assert "crystal baseline and the liquid baseline" in flat
+    assert "(f - f_liquid) / (f_crystal - f_liquid)" in flat.replace("\u2212", "-")
+    # The gates are calibrated ones, and no gate is a cold count.
+    assert "it is the only number a gate may test" in flat
+    assert "`fix halt` thresholds are calibrated fractions" in flat
+    # The bound the script enforces, and the flag that accepts a thin cell.
+    assert "eight or more unit cells across" in flat
+    assert "refuses a cross section under eight cells" in flat
+    assert "`--small-cell` accepts it and prints the caveat line" in flat
+    # The build traps the campaign hit, each named where the step is.
+    assert "dilate all`, not `dilate <group>`" in flat
+    assert "vaporises" in flat
+    # Both scripts are named with the flags the skill tells the agent to pass.
+    assert "coexistence_fraction.py --plateau" in flat
+    assert "interface_velocity.py" in flat
 
 
 def test_skills_send_ave_time_rows_through_series() -> None:

@@ -5,6 +5,36 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- The two-phase-melting skill states what a hot crystal reads. A new
+  section names the deficit: a crystal near T_m classifies a large share
+  of its atoms as unknown under an instantaneous order parameter, by an
+  amount no one can predict, so a gate against a cold count condemns a
+  crystal that is intact. The skill prescribes time-averaged positions
+  before `compute cna/atom`, or `compute ptm/atom`, with a crystal and a
+  liquid baseline from the pure-phase legs at the run's own temperature,
+  and it restates every gate as the calibrated fraction against those
+  two baselines. The opening now puts the NPH plateau route first for a
+  cell under ten thousand atoms, three seeds of one run each, with the
+  velocity ladder kept as the route for a large cell and for a v(T)
+  table; a table gives each route its cell size, its runs, and its steps
+  so a lead can size a wave against the time a job has left. The build
+  recipe gained the traps the last campaign hit: assemble each phase
+  from its own equilibrated leg, minimise with the crystal frozen after
+  the soft-repulsion push-off, leave no gap at the periodic wrap, write
+  `dilate all` because a group dilate crashes under KOKKOS, and never
+  barostat z to zero pressure on a cell with a free liquid surface. The
+  new script `coexistence_fraction.py` enforces the cross-section bound,
+  refusing a cross section under eight unit cells unless `--small-cell`
+  is passed, which prints the finite-size caveat line the report must
+  carry. Its `--plateau` mode reads a NPH run's thermo YAML and its
+  fraction series and prints the primary and the secondary window means
+  with their block standard errors, the drift across the primary window
+  with the error of the fitted slope, and the two-phase verdict. The
+  bundled 70 ps log of a 5120-atom coexistence cell is a real run, and
+  its verdict is that 70 ps in a cell that small is not yet a plateau.
+  The `md-expert` and `planner` cards point at the new section, and a
+  brief for a melting step now names the route and the order parameter.
+
 - A lead continues a specialist it already briefed, and sizes each brief.
   `delegate` takes `continues`, the handle from an earlier report's
   harness line, and gives that specialist another turn with its messages

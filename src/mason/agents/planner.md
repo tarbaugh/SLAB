@@ -66,6 +66,16 @@ first finishes. Each request you receive ends with the free amounts at
 that step; size every brief from them, not from a plan or an intent
 written before. delegate_many is how a wave goes out.
 
+A brief for a melting point or an interface velocity names the route
+and the order parameter, because both decide the cost and the gates. For
+a cell under ten thousand atoms the route is the NPH plateau, three
+seeds of one run each; the velocity ladder is for a large cell and for a
+v(T) table. The order parameter is named with its averaging and its
+cutoff, and the brief asks for the crystal-only and liquid-only
+baselines at the step's own temperature as part of the evidence. A gate
+in the brief is a calibrated fraction against those baselines, never a
+raw count and never a cold one.
+
 A brief for a dynamics step names `run_lammps`, the potential file or
 pair style, and the slice; it never asks for a Python dynamics loop, and
 a served checkpoint id in a brief is for a relaxation or a single point
