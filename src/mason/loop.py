@@ -691,13 +691,13 @@ def _unverified_refusal(states: list[str]) -> str:
         f"finish refused: none of the cited runs is verified ({', '.join(states)}). "
         f"A campaign is scored on verified runs. Produce one (a traced "
         f"workflow over the evidence files verifies), or finish again with the "
-        f"same report to record an unverified result."
+        f"same results and run ids to record an unverified result."
     )
 
 
 def _finish_signature(results: dict[str, Any], run_ids: tuple[str, ...]) -> str:
     """What makes two finishes the same one: the numbers and the runs cited."""
-    return json.dumps([results, list(run_ids)], sort_keys=True, default=str)
+    return json.dumps([results, sorted(set(run_ids))], sort_keys=True, default=str)
 
 
 def _retire_at_finish(session: MasonSession, run_ids: tuple[str, ...]) -> None:

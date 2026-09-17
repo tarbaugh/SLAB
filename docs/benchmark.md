@@ -40,8 +40,8 @@ reference. A campaign that fails records why: no finish report, no
 structured result, a cited run that does not exist or never verified, or
 a value outside the band.
 
-The loop refuses the second condition once, where the agent can still
-fix it. A lead's `finish` whose cited runs hold none in a passing state
+The loop refuses a finish that breaks the second condition once, where
+the agent can still fix it. A lead's `finish` whose cited runs hold none in a passing state
 comes back naming each run and how it stands, and saying that a traced
 analysis workflow over the evidence files is a run that verifies. The
 identical `finish` after that refusal stands, and the record carries

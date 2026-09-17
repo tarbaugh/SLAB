@@ -124,7 +124,7 @@ def test_a_finish_citing_only_an_unverified_run_is_refused_once(tmp_path: Path) 
     assert f"{quarantined[:10]} quarantined 0/1 checks" in refusal
     assert "01nosuchru no such run" in refusal
     assert "A campaign is scored on verified runs" in refusal
-    assert "finish again with the same report" in refusal
+    assert "finish again with the same results and run ids" in refusal
 
     assert result.finished and result.results == {"a0": {"value": 3.30, "unit": "A"}}
     finish = next(e for e in _events(session) if e["type"] == "finish")
@@ -284,10 +284,9 @@ def test_a_dead_runs_scratch_file_is_readable_until_the_sweep_removes_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A run that died before it registered anything leaves its files where
-    they lie. That is the only evidence of what went wrong."""
-    import shutil
-
-    from foundation import _ops
+    they lie until the sweep removes them. That is the only evidence of
+    what went wrong."""
+    from foundation import _ops, sweep_scratch
     from foundation.lifecycle import ExecutionStatus
     from foundation.models import Run
 
@@ -309,7 +308,9 @@ def test_a_dead_runs_scratch_file_is_readable_until_the_sweep_removes_it(
         id="sr", name="show_run", arguments={"run_id": run.id}, arguments_raw="{}"
     )))
     assert "live_files" not in record
-    shutil.rmtree(scratch)
+    with Workspace(session.workspace_root) as ws:
+        swept = sweep_scratch(ws, only=[run.id], root=root)
+    assert [r["path"] for r in swept.removed] == [str(scratch)]
     assert _read(box, run_id=run.id, name="md.screen").startswith("no artifact named")
 
 
@@ -374,3 +375,19 @@ def test_show_run_on_a_dry_id_returns_the_record(dry: tuple[Toolbox, str]) -> No
         arguments_raw="{}",
     ))
     assert gone.startswith("no dry-run record dry-20260101-000000-0000")
+
+
+def test_a_second_finish_with_the_same_runs_in_another_order_stands(tmp_path: Path) -> None:
+    """The identity of a finish is its numbers and its runs, not their order."""
+    from mason.loop import _finish_signature
+
+    first = _finish_signature({"a": 1.0}, ("01x", "01y", "01x"))
+    second = _finish_signature({"a": 1.0}, ("01y", "01x"))
+    assert first == second
+
+
+def test_a_dry_id_given_twice_with_two_values_is_refused(live: tuple[Toolbox, str, Path]) -> None:
+    """A dry-run id names one record; two different ones in run_id and hash is a mistake."""
+    box, _, _ = live
+    reply = _read(box, run_id="dry-20260917-000000", hash="dry-20260917-000001", name="x")
+    assert reply.startswith("a dry-run id names one record")

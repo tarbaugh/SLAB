@@ -1764,8 +1764,9 @@ def _add_workflow_tools(
         """A file of the run's scratch directory as (name, head, bytes), or None.
 
         This is the evidence of a run that is still going, and of one that
-        died before it registered an artifact. The file is read where it
-        lies; nothing is copied into the store.
+        died before it registered an artifact, until the reap or the purge
+        that follows removes its scratch. The file is read where it lies;
+        nothing is copied into the store.
         """
         for name, path, _ in _ops.run_live_files(run_id):
             if name != wanted:
@@ -1786,8 +1787,13 @@ def _add_workflow_tools(
         wanted = str(arguments["name"]) if arguments.get("name") else ""
         requested = str(arguments["run_id"]) if arguments.get("run_id") else ""
         digest = str(arguments["hash"]) if arguments.get("hash") else ""
-        if not requested and digest.startswith(_ops.DRY_RUN_PREFIX):
+        if digest.startswith(_ops.DRY_RUN_PREFIX):
             # A dry id is an id, not a hash, and it is offered in both places.
+            if requested and requested != digest:
+                return (
+                    f"a dry-run id names one record; give it once, in run_id or hash "
+                    f"(run_id={requested}, hash={digest})"
+                )
             requested, digest = digest, ""
         if requested.startswith(_ops.DRY_RUN_PREFIX):
             if not wanted:
@@ -1922,8 +1928,9 @@ def _add_workflow_tools(
                 "the read follows the edge to the run "
                 "that executed the task and says so on the first line. A name that is "
                 "no artifact of a run is looked for in that run's scratch directory, "
-                "so a running run's log and the files of a run that died before it "
-                "registered anything read the same way. Or pass hash= "
+                "so a running run's log reads the same way, and so do the files of a run "
+                "that died before it registered anything, until the reap or purge "
+                "that follows removes its scratch. Or pass hash= "
                 "(a sha256 prefix of 6+ characters) alone for any bytes the workspace "
                 "holds, a task's input or output included; the answer names the runs "
                 "that reference it. This is how to read an "
