@@ -95,6 +95,14 @@ ALLOWED_STATUS_CHANGES: Final[Mapping[ExecutionStatus, frozenset[ExecutionStatus
 """Permitted execution-status changes. ``completed`` and ``failed`` are final."""
 
 
+PASSING_STATES = frozenset({"verified", "promoted", "archived"})
+"""The states in which a run counts as evidence: its checks passed at least once.
+
+A campaign is scored on these runs (:mod:`slab_stack.benchmark`), and Mason
+refuses a finish that cites none of them.
+"""
+
+
 def is_terminal(state: LifecycleState) -> bool:
     """Return True if no transition leaves *state*.
 

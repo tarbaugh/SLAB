@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from foundation.errors import SessionNotFoundError
+from foundation.lifecycle import PASSING_STATES
 from mason.skills import Skill, discover_skills
 from mason.tools import LOOKING_TOOLS
 
@@ -46,7 +47,7 @@ if TYPE_CHECKING:
     from slab_stack.benchmark import Question
 
 #: Lifecycle states a run must have reached for the rules to leave it alone.
-_PASSING_STATES = frozenset({"verified", "promoted", "archived"})
+_PASSING_STATES = PASSING_STATES
 
 #: Who raised a flag.
 RULES = "rules"

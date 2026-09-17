@@ -57,6 +57,11 @@ You own the final report. Check that every number a specialist returns
 carries a run id, spot-check anything surprising with show_run, and
 record the synthesis in the notebook citing run ids.
 
+A number rests on a verified run. When the runs that produced the
+data are dead or still going, a traced analysis workflow over their
+files is the verified run to cite, and read_artifact reads those files
+by run id.
+
 # Budgets and follow-ups
 
 Size every brief. A brief that reads a record and reports takes a small

@@ -2482,30 +2482,72 @@ def span_text(seconds: float) -> str:
     return f"{total // 3600}h {total % 3600 // 60}m"
 
 
-def lammps_live_log(run_id: str) -> Path | None:
-    """The log of the LAMMPS script a running run is executing now, or None.
+def run_scratch_dirs(run_id: str, *, prefix: str = "slab-") -> list[Path]:
+    """The scratch directories whose owner marker names *run_id*, newest first.
 
-    ``run_lammps`` runs its script in a scratch directory whose owner
-    marker names the run (:mod:`slab.scratch`). This looks under the
+    Every scratch directory an engine makes carries a marker naming the
+    run that made it (:mod:`slab.scratch`). This looks under the
     ``[paths] scratch`` root and the platform temp directory, where a
-    scratch made without that setting lands, and returns the newest
-    ``log.lammps`` of a directory that the run owns.
+    scratch made without that setting lands. *prefix* narrows the glob
+    to one engine's directories.
     """
     from slab.scratch import read_owner
 
     roots = [root for root in (scratch_root(), Path(tempfile.gettempdir())) if root is not None]
-    newest: tuple[float, Path] | None = None
+    found: list[tuple[float, Path]] = []
     for root in dict.fromkeys(roots):
         with suppress(OSError):
-            for directory in root.glob(f"{_LAMMPS_SCRATCH_PREFIX}*"):
+            for directory in root.glob(f"{prefix}*"):
                 owner = read_owner(directory)
                 if owner is None or owner.run_id != run_id:
                     continue
-                log = directory / "log.lammps"
                 with suppress(OSError):
-                    mtime = log.stat().st_mtime
-                    if newest is None or mtime > newest[0]:
-                        newest = (mtime, log)
+                    found.append((directory.stat().st_mtime, directory))
+    return [directory for _, directory in sorted(found, key=lambda pair: -pair[0])]
+
+
+def run_live_files(run_id: str) -> list[tuple[str, Path, int]]:
+    """Every file a run left in its scratch directories: name, path, bytes.
+
+    The name is the path under the scratch directory, so a file in a
+    sub-directory keeps it. The owner marker is left out. A name two
+    directories both hold comes from the newer one. The list is sorted
+    by name.
+
+    These are the files of a run that is still going and of one that died
+    before it registered anything. Nothing is copied into the artifact
+    store, and the scratch sweep removes them on its own schedule.
+    """
+    from slab.scratch import OWNER_MARKER
+
+    found: dict[str, tuple[Path, int]] = {}
+    for directory in run_scratch_dirs(run_id):
+        with suppress(OSError):
+            for path in sorted(directory.rglob("*")):
+                if path.name == OWNER_MARKER or not path.is_file():
+                    continue
+                name = path.relative_to(directory).as_posix()
+                if name in found:
+                    continue
+                with suppress(OSError):
+                    found[name] = (path, path.stat().st_size)
+    return [(name, found[name][0], found[name][1]) for name in sorted(found)]
+
+
+def lammps_live_log(run_id: str) -> Path | None:
+    """The log of the LAMMPS script a running run is executing now, or None.
+
+    ``run_lammps`` runs its script in a scratch directory whose owner
+    marker names the run, and this returns the newest ``log.lammps``
+    among the directories the run owns.
+    """
+    newest: tuple[float, Path] | None = None
+    for directory in run_scratch_dirs(run_id, prefix=_LAMMPS_SCRATCH_PREFIX):
+        log = directory / "log.lammps"
+        with suppress(OSError):
+            mtime = log.stat().st_mtime
+            if newest is None or mtime > newest[0]:
+                newest = (mtime, log)
     return None if newest is None else newest[1]
 
 

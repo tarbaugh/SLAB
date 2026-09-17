@@ -218,6 +218,21 @@ def test_an_unverified_cited_run_fails_even_with_the_right_number(tmp_path: Path
     assert "never verified" in record["reason"] and "quarantined" in record["reason"]
 
 
+def test_a_finish_the_lead_was_warned_about_is_recorded_as_unverified(tmp_path: Path) -> None:
+    """Mason refuses such a finish once. A lead that finished anyway is a
+    different failure from one that never saw the state of its runs, and the
+    record keeps the two apart."""
+    root = tmp_path / "ws"
+    session = "20260901-100000-9"
+    draft = _unverified_run(root, session)
+    finish = _finish({"a0": {"value": 3.632, "unit": "\u00c5"}}, [draft]) | {"unverified": True}
+    _transcript(root, session, [_events_header(), _user(Q1.instruction), finish])
+    record = benchmark.score_session(root, session)
+    assert record["passed"] is False and record["unverified"] is True
+    assert "never verified" in record["reason"]
+    assert "the lead was told and finished anyway" in record["reason"]
+
+
 def _score_dft(tmp_path: Path, session: str, value: float, **runs: Any) -> dict[str, Any]:
     """Score a Q1 campaign citing dft runs made with the given families."""
     root = tmp_path / "ws"

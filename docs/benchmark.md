@@ -40,6 +40,14 @@ reference. A campaign that fails records why: no finish report, no
 structured result, a cited run that does not exist or never verified, or
 a value outside the band.
 
+The loop refuses a finish that breaks the second condition once, where
+the agent can still fix it. A lead's `finish` whose cited runs hold none in a passing state
+comes back naming each run and how it stands, and saying that a traced
+analysis workflow over the evidence files is a run that verifies. The
+identical `finish` after that refusal stands, and the record carries
+`unverified: true` beside the failure line. That separates a campaign
+that was told and finished anyway from one whose runs failed unseen.
+
 The verdict is an outcome, not a defect. After the verdict, the review
 reads the same evidence and raises flags: attributable defects, each
 naming the skill, card, or tool a revision edits. The flags travel in the

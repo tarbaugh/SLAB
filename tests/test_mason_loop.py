@@ -96,16 +96,15 @@ def test_finish_tool_closes_the_turn(tmp_path: Path) -> None:
 def test_finish_hands_back_structured_results_and_run_ids(tmp_path: Path) -> None:
     """The scorer's contract: results and run ids travel as given, into the
     TurnResult and the transcript's finish event alike."""
-    client = FakeClient(
-        [
-            _tool_reply(
-                "finish",
-                report="a0 = 3.615 A (run ab12)",
-                results={"a0": {"value": 3.615, "unit": "A"}},
-                run_ids=["ab12"],
-            )
-        ]
+    # No run here ever verified, so the first finish is refused once and the
+    # identical one after it stands (test_a_finish_citing_no_verified_run_*).
+    finishing = _tool_reply(
+        "finish",
+        report="a0 = 3.615 A (run ab12)",
+        results={"a0": {"value": 3.615, "unit": "A"}},
+        run_ids=["ab12"],
     )
+    client = FakeClient([finishing, finishing])
     session = _session(tmp_path)
     result = Mason(session, client=client).run_turn("measure a0")
     assert result.finished
@@ -1858,7 +1857,8 @@ def test_a_retire_error_never_changes_the_finish(
     monkeypatch.setattr(_ops, "retire_session", broken)
     session = _session(tmp_path)
     _stamped_run(session, "eos")
-    client = FakeClient([_tool_reply("finish", report="a0 = 3.615 A", run_ids=["01abc"])])
+    finishing = _tool_reply("finish", report="a0 = 3.615 A", run_ids=["01abc"])
+    client = FakeClient([finishing, finishing])  # the cited run never verified
     result = Mason(session, client=client).run_turn("go")
     assert result.finished and result.text == "a0 = 3.615 A" and result.run_ids == ("01abc",)
     retire = next(e for e in _events(session) if e["type"] == "retire")

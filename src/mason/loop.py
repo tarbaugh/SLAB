@@ -635,6 +635,71 @@ def _reap_at_session_start(session: MasonSession) -> None:
         return
 
 
+def _citation_state(ws: Any, run: Any) -> str:
+    """How one cited run stands, in the words a refusal uses.
+
+    A run still executing is ``running``; a settled one is named by its
+    lifecycle state, and a verification pass that failed adds the tally
+    of checks that passed.
+    """
+    if run.status.value == "running":
+        return "running"
+    if run.status.value == "failed":
+        return f"{run.state.value}, failed"
+    checks = ws.runs.list_check_results(run.id)
+    if not checks:
+        return str(run.state.value)
+    passed = sum(1 for result in checks if result.passed)
+    return f"{run.state.value} {passed}/{len(checks)} checks"
+
+
+def _unverified_citations(session: MasonSession, run_ids: tuple[str, ...]) -> list[str] | None:
+    """How each cited run stands, or None when one of them is verified.
+
+    None is also the answer when the run store cannot be read. A finish
+    is never refused over a fault the agent has no way to fix. A finish
+    that cites nothing is not this gate's business either: it has no
+    evidence to weigh, and the scorer already names that failure.
+    """
+    import sqlite3
+
+    from foundation.errors import FoundationError
+    from foundation.lifecycle import PASSING_STATES
+    from foundation.runtime import Workspace
+    from slab.errors import SlabError
+
+    states: list[str] = []
+    try:
+        with Workspace(session.workspace_root) as ws:
+            for cited in run_ids:
+                try:
+                    run = ws.runs.get(ws.runs.resolve(cited))
+                except FoundationError:
+                    states.append(f"{cited[:10]} no such run")
+                    continue
+                if run.state.value in PASSING_STATES:
+                    return None
+                states.append(f"{run.id[:10]} {_citation_state(ws, run)}")
+    except (FoundationError, SlabError, ValueError, sqlite3.Error, OSError):
+        return None
+    return states
+
+
+def _unverified_refusal(states: list[str]) -> str:
+    """The one refusal a finish with no verified evidence gets."""
+    return (
+        f"finish refused: none of the cited runs is verified ({', '.join(states)}). "
+        f"A campaign is scored on verified runs. Produce one (a traced "
+        f"workflow over the evidence files verifies), or finish again with the "
+        f"same results and run ids to record an unverified result."
+    )
+
+
+def _finish_signature(results: dict[str, Any], run_ids: tuple[str, ...]) -> str:
+    """What makes two finishes the same one: the numbers and the runs cited."""
+    return json.dumps([results, sorted(set(run_ids))], sort_keys=True, default=str)
+
+
 def _retire_at_finish(session: MasonSession, run_ids: tuple[str, ...]) -> None:
     """Promote what the finish cites; expire what this session did not cite.
 
@@ -723,6 +788,9 @@ class Mason:
         #: reads it between steps and ends the turn with what it has, so an
         #: in-flight model call is not abandoned mid-request.
         self.stop: threading.Event | None = None
+        #: The signature of the finish the unverified-evidence gate refused.
+        #: An identical finish after it stands, and is recorded as unverified.
+        self._finish_refused: str | None = None
         if spec is None:
             spec = self.roster["pi"]  # the built-in layer guarantees pi exists
         self.spec = spec
@@ -1134,21 +1202,39 @@ class Mason:
                         # it is refused here, where the agent can still fix it.
                         self._append_tool_result(call, mismatch, as_text=from_text)
                         continue
-                    self._append_tool_result(call, "task closed", as_text=from_text)
-                    self._answer_unrun(calls[position + 1 :], from_text=from_text)
                     raw_ids = call.arguments.get("run_ids")
                     run_ids = tuple(str(r) for r in raw_ids) if isinstance(raw_ids, list) else ()
+                    unverified = False
+                    gate = run_ids and self.depth == 0
+                    if gate and enabled(self.session.agent, "check-gating"):
+                        # A campaign is scored on verified runs. The lead is
+                        # told once, while it can still produce one; a second
+                        # finish for the same numbers stands, and says so.
+                        signature = _finish_signature(results, run_ids)
+                        if signature == self._finish_refused:
+                            unverified = True
+                        else:
+                            states = _unverified_citations(self.session, run_ids)
+                            if states is not None:
+                                self._finish_refused = signature
+                                self._append_tool_result(
+                                    call, _unverified_refusal(states), as_text=from_text
+                                )
+                                continue
+                    self._append_tool_result(call, "task closed", as_text=from_text)
+                    self._answer_unrun(calls[position + 1 :], from_text=from_text)
                     raw_verdict = call.arguments.get("verdict")
                     verdict = raw_verdict if raw_verdict in ("approve", "revise") else None
-                    self.session.record(
-                        {
-                            "type": "finish",
-                            "report": report,
-                            "results": results,
-                            "run_ids": list(run_ids),
-                            "verdict": verdict,
-                        }
-                    )
+                    finished: dict[str, Any] = {
+                        "type": "finish",
+                        "report": report,
+                        "results": results,
+                        "run_ids": list(run_ids),
+                        "verdict": verdict,
+                    }
+                    if unverified:
+                        finished["unverified"] = True
+                    self.session.record(finished)
                     if self.depth == 0:
                         # The finish is the completion-time act: the cited
                         # runs are promoted and the session's other runs

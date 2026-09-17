@@ -1691,13 +1691,37 @@ def _add_workflow_tools(
         """A run id, a unique prefix, or this session's newest run of that name."""
         return _ops.resolve_run(ws, value, session=session.session_id)
 
+    def _show_dry_run(record_id: str) -> str:
+        """A dry-run record as it was kept: when, the script, and the files."""
+        try:
+            directory, row = _ops.dry_run_record(session.workspace_root, record_id)
+        except FoundationError as e:
+            return str(e)
+        record = dict(row) | {"path": str(directory)}
+        return (
+            f"dry-run record {record_id}; read a file with read_artifact "
+            f"run_id={record_id} name=<file>\n"
+            + json.dumps(record, indent=1, ensure_ascii=False)
+        )
+
     def show_run(arguments: dict[str, Any]) -> str:
         from foundation._ops import run_details
 
+        requested = str(arguments["run_id"])
+        if requested.startswith(_ops.DRY_RUN_PREFIX):
+            return _show_dry_run(requested)
         with _open_workspace(session) as ws:
-            run_id, note = _resolve_run(ws, str(arguments["run_id"]))
+            run_id, note = _resolve_run(ws, requested)
+            run = ws.runs.get(run_id)
             details = run_details(ws, run_id)
-            details["run"] = _rendered_run(details["run"], ws.runs.get(run_id))
+            details["run"] = _rendered_run(details["run"], run)
+            # A run still going holds its files in scratch, where nothing has
+            # registered them yet; they are the only evidence it has so far.
+            live = (
+                [{"name": name, "bytes": size} for name, _, size in _ops.run_live_files(run_id)]
+                if run.status.value == "running"
+                else []
+            )
         if arguments.get("task") is not None:
             details = _one_task(details, arguments["task"])
         elif not arguments.get("full"):
@@ -1706,6 +1730,8 @@ def _add_workflow_tools(
             details = _without_failure_records(details)
         if not arguments.get("setup"):
             details = _ops.fold_setups(details, _SETUP_SHOWN_BY_SHOW_RUN)
+        if live:
+            details["live_files"] = live
         return note + json.dumps(details, indent=1, ensure_ascii=False)
 
     def _read_dry_run_file(record_id: str, wanted: str) -> tuple[str, str, bytes] | str:
@@ -1721,6 +1747,38 @@ def _add_workflow_tools(
         raw = (directory / wanted).read_bytes()
         return wanted, f"{wanted} ({len(raw)} bytes, dry-run record {record_id})", raw
 
+    def _list_dry_run_files(record_id: str) -> str:
+        """The file names a dry-run record holds, for a read that named none."""
+        try:
+            _, row = _ops.dry_run_record(session.workspace_root, record_id)
+        except FoundationError as e:
+            return str(e)
+        files = [str(name) for name in row.get("files") or []]
+        listed = "\n".join(f"  {name}" for name in files) or "  (none)"
+        return (
+            f"dry-run record {record_id} holds {len(files)} file(s); read one with "
+            f"read_artifact run_id={record_id} name=<file>\n{listed}"
+        )
+
+    def _read_live_file(run_id: str, wanted: str) -> tuple[str, str, bytes] | None:
+        """A file of the run's scratch directory as (name, head, bytes), or None.
+
+        This is the evidence of a run that is still going, and of one that
+        died before it registered an artifact, until the reap or the purge
+        that follows removes its scratch. The file is read where it lies;
+        nothing is copied into the store.
+        """
+        for name, path, _ in _ops.run_live_files(run_id):
+            if name != wanted:
+                continue
+            try:
+                raw = path.read_bytes()
+            except OSError:
+                return None
+            head = f"{name} (live file of run {run_id}, {len(raw)} bytes so far, not an artifact)"
+            return name, head, raw
+        return None
+
     def read_artifact(arguments: dict[str, Any]) -> str:
         from foundation.errors import ArtifactNotFoundError
 
@@ -1728,7 +1786,18 @@ def _add_workflow_tools(
         limit = int(arguments.get("limit", _MAX_READ_LINES))
         wanted = str(arguments["name"]) if arguments.get("name") else ""
         requested = str(arguments["run_id"]) if arguments.get("run_id") else ""
+        digest = str(arguments["hash"]) if arguments.get("hash") else ""
+        if digest.startswith(_ops.DRY_RUN_PREFIX):
+            # A dry id is an id, not a hash, and it is offered in both places.
+            if requested and requested != digest:
+                return (
+                    f"a dry-run id names one record; give it once, in run_id or hash "
+                    f"(run_id={requested}, hash={digest})"
+                )
+            requested, digest = digest, ""
         if requested.startswith(_ops.DRY_RUN_PREFIX):
+            if not wanted:
+                return _list_dry_run_files(requested)
             found_file = _read_dry_run_file(requested, wanted)
             if isinstance(found_file, str):
                 return found_file
@@ -1737,26 +1806,39 @@ def _add_workflow_tools(
                 return f"{head}\nlooks binary; read_artifact only reads text"
             text = raw.decode("utf-8", errors="replace")
         else:
+            live: tuple[str, str, bytes] | None = None
+            read = None
             with _open_workspace(session) as ws:
                 try:
                     read = _ops.read_artifact(
                         ws,
                         run_id=requested or None,
                         name=wanted or None,
-                        digest=str(arguments["hash"]) if arguments.get("hash") else None,
+                        digest=digest or None,
                         session=session.session_id,
                     )
                 except ArtifactNotFoundError as e:
                     note = ""
-                    if requested and not arguments.get("hash"):
+                    found_run = ""
+                    if requested and not digest:
                         with contextlib.suppress(FoundationError):
-                            note = _resolve_run(ws, requested)[1]
-                    return f"{note}{e}"
-            head = "\n".join(read.head)
-            if read.text is None:
-                return f"{head}\n{read.reason}"
-            text = read.text
-            name = read.name
+                            found_run, note = _resolve_run(ws, requested)
+                    if found_run and wanted:
+                        live = _read_live_file(found_run, wanted)
+                    if live is None:
+                        return f"{note}{e}"
+            if live is not None:
+                name, head, raw = live
+                if b"\x00" in raw[:8192]:
+                    return f"{head}\nlooks binary; read_artifact only reads text"
+                text = raw.decode("utf-8", errors="replace")
+            else:
+                assert read is not None  # the read either returned or raised
+                head = "\n".join(read.head)
+                if read.text is None:
+                    return f"{head}\n{read.reason}"
+                text = read.text
+                name = read.name
         try:
             every = _count_argument(arguments, "every") or 1
         except ValueError as e:
@@ -1808,7 +1890,10 @@ def _add_workflow_tools(
                 "full=true for every task's. An engine's setup block (module loads "
                 "and exports) is named by its line count and digest; setup=true "
                 "prints it. run_id takes an id, a unique prefix, or "
-                "the name of a run this session created. Read this before "
+                "the name of a run this session created. A run that is still going "
+                "also lists its live files, the ones its scratch directory holds "
+                "before anything registers them. A dry-<stamp> id returns that "
+                "dry-run record. Read this before "
                 "correcting a failed run; read_artifact reads its files."
             ),
             parameters=_schema(
@@ -1837,9 +1922,15 @@ def _add_workflow_tools(
             name="read_artifact",
             description=(
                 "Read one of a run's artifacts. name is the artifact's name from show_run "
-                "(or a hash prefix); run_id as for show_run, or the dry-<stamp> id a "
-                "failed dry run names for its LAMMPS files. A run whose task was a "
-                "that executed the task and says so on the first line. Or pass hash= "
+                "(or a hash prefix); run_id as for show_run. A dry-<stamp> id goes in "
+                "run_id or hash, and without a name it lists the files that record "
+                "holds. A run whose task was a cache hit keeps no file of its own, so "
+                "the read follows the edge to the run "
+                "that executed the task and says so on the first line. A name that is "
+                "no artifact of a run is looked for in that run's scratch directory, "
+                "so a running run's log reads the same way, and so do the files of a run "
+                "that died before it registered anything, until the reap or purge "
+                "that follows removes its scratch. Or pass hash= "
                 "(a sha256 prefix of 6+ characters) alone for any bytes the workspace "
                 "holds, a task's input or output included; the answer names the runs "
                 "that reference it. This is how to read an "
