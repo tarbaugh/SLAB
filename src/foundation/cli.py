@@ -24,8 +24,16 @@ from foundation import _ops
 from foundation.config import apply_gpu_exclusion
 from foundation.errors import FoundationError
 from foundation.lifecycle import LifecycleState
-from foundation.models import Reservation
-from foundation.runtime import Workspace, describe_liveness, run_liveness, this_host, this_job
+from foundation.models import Reservation, SessionLease
+from foundation.runtime import (
+    DEFAULT_LEASE_SILENCE_S,
+    Workspace,
+    describe_liveness,
+    lease_verdict,
+    run_liveness,
+    this_host,
+    this_job,
+)
 from slab.errors import SlabError
 from slab.scratch import process_alive
 
@@ -411,7 +419,7 @@ def promote(
     Name the runs, or name the session that created them with ``--session``.
     A session promote reports every run it considered: it promotes the
     verified ones, skips the unverified ones unless ``--force`` is given, and
-    never promotes a failed run. List the sessions with ``slab sessions``.
+    never promotes a failed run. List the sessions with ``slab sessions list``.
     """
     if (run_ids and session) or not (run_ids or session):
         _fail("give run ids or --session, not both (and not neither)")
@@ -512,7 +520,7 @@ def retire(
     except (FoundationError, SlabError, OSError) as e:
         _fail(str(e))
     if not result["runs_total"] and not keep:
-        _fail(f"no run carries session {session!r}; list the sessions with 'slab sessions'")
+        _fail(f"no run carries session {session!r}; list the sessions with 'slab sessions list'")
     _echo_retire(result)
     if not result["complete"]:
         raise typer.Exit(code=1)
@@ -550,26 +558,62 @@ def _echo_retire(result: dict[str, object]) -> None:
     )
 
 
-@app.command()
-def sessions(
+sessions_app = typer.Typer(
+    help="Session leases: who owns which runs, and settling the runs of sessions "
+    "that are gone.",
+    no_args_is_help=True,
+    add_completion=False,
+)
+
+
+def _lease_line(lease: SessionLease, running: int) -> str:
+    """One row of the lease table: what it is, when it beat, how it ended."""
+    ends = lease.deadline_at.strftime("%H:%M") if lease.deadline_at else "-"
+    if lease.ended_at is not None:
+        state = f"ended {lease.end_reason or 'no reason given'}"
+    else:
+        state = lease_verdict(lease, silence_s=DEFAULT_LEASE_SILENCE_S) or "alive"
+    return (
+        f"{lease.id[:26]:<26} {lease.harness:<7} {(lease.agent or '-'):<10} "
+        f"{(lease.job_id or '-'):>8} {_age(lease.started_at):>5} "
+        f"{_age(lease.heartbeat_at):>5} {ends:>5} {running:>4}  {state}"
+    )
+
+
+@sessions_app.command("list")
+def sessions_list(
     workspace: _WorkspaceOpt = None,
     limit: Annotated[int, typer.Option(help="Maximum rows.")] = 20,
 ) -> None:
-    """List the client sessions that created runs, newest first.
+    """List the session leases, newest first, and the runs each still has running.
 
-    Each row is one conversation. Promote a whole row with
-    ``slab promote --session <id>``.
+    A lease says who owns a run for as long as the session lives. A row
+    that is ended, past its deadline, or silent owns nothing any more:
+    ``slab sessions sweep`` settles its runs. Sessions that created runs
+    without a lease follow, one row each.
     """
     with _open(workspace) as ws:
+        leases = ws.runs.list_leases()[:limit]
+        running: dict[str, int] = {}
+        for run in ws.runs.list_runs(status="running"):
+            running[run.session or ""] = running.get(run.session or "", 0) + 1
+        if not leases:
+            typer.echo("no leases")
+        else:
+            typer.echo(
+                f"{'SESSION':<26} {'HARNESS':<7} {'AGENT':<10} {'JOB':>8} "
+                f"{'START':>5} {'BEAT':>5} {'ENDS':>5} {'RUNS':>4}  STATE"
+            )
+            for lease in leases:
+                typer.echo(_lease_line(lease, running.get(lease.id, 0)))
         try:
             summary = _ops.sessions_summary(ws, limit=limit)
         except ValueError as e:
             _fail(str(e))
-        rows = summary["sessions"]
-        if not rows:
-            typer.echo("no sessions")
-        else:
-            typer.echo(f"{'SESSION':<26} {'RUNS':>4} {'AGE':>5}  STATES")
+        held = {lease.id for lease in ws.runs.list_leases()}
+        rows = [row for row in summary["sessions"] if row["session"] not in held]
+        if rows:
+            typer.echo(f"\n{'SESSION (no lease)':<26} {'RUNS':>4} {'AGE':>5}  STATES")
             for row in rows:
                 typer.echo(
                     f"{row['session'][:26]:<26} {row['runs']:>4} "
@@ -577,6 +621,57 @@ def sessions(
                 )
         if summary["unstamped"]:
             typer.echo(f"({summary['unstamped']} run(s) carry no session)")
+
+
+@sessions_app.command("end")
+def sessions_end(
+    session_id: Annotated[
+        str | None, typer.Argument(help="Session id, or --job for every lease of one job.")
+    ] = None,
+    job: Annotated[
+        str | None, typer.Option("--job", help="End every lease of this scheduler job.")
+    ] = None,
+    reason: Annotated[
+        str, typer.Option("--reason", help="Why the session ended.")
+    ] = "ended by the operator",
+    workspace: _WorkspaceOpt = None,
+) -> None:
+    """Close a session's lease by hand and settle the runs it was still executing.
+
+    The batch script calls this with ``--job`` when the scheduler signals
+    the job, so the job's runs are settled even when the session itself
+    cannot finish. Each run gets a TERM to its process group here, a KILL
+    after a grace, and the error line naming the session and the reason.
+    """
+    if (session_id is None) == (job is None):
+        _fail("name one session id, or --job <id>; not both and not neither")
+    with _open(workspace) as ws:
+        targets = (
+            [session_id]
+            if session_id is not None
+            else [lease.id for lease in ws.runs.list_leases(job_id=job) if lease.ended_at is None]
+        )
+        if not targets:
+            typer.echo(f"no open lease for job {job}")
+            return
+        for target in targets:
+            lease, ended = ws.end_session(target, reason=reason)
+            if lease is None:
+                typer.echo(f"no lease for session {target}")
+                continue
+            typer.echo(f"ended {lease.id} ({reason})")
+            for run in ended:
+                typer.echo(f"failed  {run.id}  {run.name}  {run.error}")
+
+
+@sessions_app.command("sweep")
+def sessions_sweep(workspace: _WorkspaceOpt = None) -> None:
+    """Settle the runs of every lease that ended, passed its deadline, or fell silent."""
+    with _open(workspace) as ws:
+        reaped = ws.reap_dead(caller="slab sessions sweep")
+        for item in reaped:
+            typer.echo(f"failed  {item.id}  {item.name}  {item.error}")
+    typer.echo(f"{len(reaped)} run(s) settled")
 
 
 @app.command()
@@ -630,8 +725,12 @@ runs_app = typer.Typer(
 
 @runs_app.command("reap")
 def runs_reap(workspace: _WorkspaceOpt = None) -> None:
-    """Mark failed every running run whose recorded process on this host is gone
-    or whose job ended, and release every reservation no live process holds."""
+    """Mark failed every running run whose owner is gone, and release every
+    reservation no live process holds.
+
+    An owner is the session that holds the lease, the scheduler job, or
+    the recorded process on this host.
+    """
     with _open(workspace) as ws:
         released = ws.release_dead()
         for held in released:
@@ -639,8 +738,12 @@ def runs_reap(workspace: _WorkspaceOpt = None) -> None:
         reaped = ws.reap_dead(caller="slab runs reap")
         for item in reaped:
             typer.echo(f"failed  {item.id}  {item.name}  {item.error}")
+        leases = ws.runs.leases()
         for item in ws.runs.list_runs(status="running"):
-            typer.echo(f"running {item.id}  {item.name}  {describe_liveness(item)}")
+            typer.echo(
+                f"running {item.id}  {item.name}  "
+                f"{describe_liveness(item, leases=leases, silence_s=ws.lease_silence_s())}"
+            )
     typer.echo(f"{len(reaped)} run(s) marked failed, {len(released)} reservation(s) released")
 
 

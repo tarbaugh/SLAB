@@ -508,6 +508,28 @@ def _free_counts(session: MasonSession, *, reap: bool) -> dict[str, int] | None:
         return None
 
 
+def job_clock(session: MasonSession, *, short: bool = False) -> str:
+    """When this job ends and how long is left, or empty outside a job.
+
+    The agent sizes the last wave against this: work that cannot finish
+    before the job ends is not launched. The long form is the environment
+    block's line, the short form rides the per-step free line.
+    """
+    ends_at = session.job_ends_at()
+    if ends_at is None:
+        return ""
+    left = (ends_at - datetime.now(UTC)).total_seconds()
+    minutes = max(0, int(left // 60))
+    if short:
+        return f"{minutes} min left" if minutes < 60 else ""
+    clock = ends_at.astimezone(UTC).strftime("%H:%M UTC")
+    if minutes >= 60:
+        span = f"{minutes // 60} h {minutes % 60:02d} min left"
+    else:
+        span = f"{minutes} min left"
+    return f"this job ends at {clock} ({span})"
+
+
 def free_hint(session: MasonSession) -> str:
     """The free resources right now, for a lead that sizes briefs it cannot launch.
 
@@ -522,9 +544,11 @@ def free_hint(session: MasonSession) -> str:
     if free is None:
         return ""
     found = budget().counts
+    clock = job_clock(session, short=True)
     return (
         f"[harness: free right now: {free['cpus']} of {found['cpus']} cpu(s), "
-        f"{free['gpus']} of {found['gpus']} gpu(s). {WAVE_RULE}]"
+        f"{free['gpus']} of {found['gpus']} gpu(s). {WAVE_RULE}"
+        + (f" {clock}.]" if clock else "]")
     )
 
 
@@ -607,6 +631,11 @@ def environment_block(
         # an unsized launch, and the promise the tools keep.
         resources_line(session),
     ]
+    # The other bound on a wave: a launch that cannot finish before the
+    # job ends produces nothing, whatever is free.
+    clock = job_clock(session)
+    if clock:
+        lines.append(clock)
     if minimal:
         if skills:
             lines.append("\n" + catalog_block(skills))

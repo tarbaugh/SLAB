@@ -7,7 +7,7 @@ import pytest
 from typer.testing import CliRunner
 
 from foundation import Workspace
-from foundation.cli import app
+from foundation.cli import app, sessions_app
 
 runner = CliRunner()
 
@@ -385,7 +385,7 @@ def test_promote_session_unknown_or_ambiguous(root: Path) -> None:
     _seed_run(root, verified=True, session="chat-2")
     unknown = runner.invoke(app, ["promote", "--session", "nope", "-w", str(root)])
     assert unknown.exit_code == 1
-    assert "slab sessions" in unknown.output
+    assert "slab sessions list" in unknown.output
 
     ambiguous = runner.invoke(app, ["promote", "--session", "chat", "-w", str(root)])
     assert ambiguous.exit_code == 1
@@ -399,7 +399,7 @@ def test_sessions_lists_rows_and_counts_the_unstamped(root: Path) -> None:
     _seed_run(root, name="a", verified=True, session="chat-1")
     _seed_run(root, name="b", verified=False, session="chat-1")
     _seed_run(root, name="c", verified=True)
-    result = runner.invoke(app, ["sessions", "-w", str(root)])
+    result = runner.invoke(sessions_app, ["list", "-w", str(root)])
     assert result.exit_code == 0, result.output
     assert "chat-1" in result.output
     assert "1 quarantined, 1 verified" in result.output
@@ -408,16 +408,16 @@ def test_sessions_lists_rows_and_counts_the_unstamped(root: Path) -> None:
 
 def test_sessions_refuses_a_negative_limit(root: Path) -> None:
     _seed_run(root, verified=True, session="chat-1")
-    result = runner.invoke(app, ["sessions", "-w", str(root), "--limit", "-1"])
+    result = runner.invoke(sessions_app, ["list", "-w", str(root), "--limit", "-1"])
     assert result.exit_code == 1
     assert "limit must be >= 0" in result.output
 
 
 def test_sessions_empty_workspace(root: Path) -> None:
     _seed_run(root, verified=True)
-    result = runner.invoke(app, ["sessions", "-w", str(root)])
+    result = runner.invoke(sessions_app, ["list", "-w", str(root)])
     assert result.exit_code == 0
-    assert "no sessions" in result.output
+    assert "no leases" in result.output
 
 
 # -- session stamps --------------------------------------------------------------------
@@ -725,7 +725,7 @@ def _future_workspace(tmp_path: Path) -> Path:
         ["list"],
         ["show", "01xxxxxxxx"],
         ["promote", "01xxxxxxxx"],
-        ["sessions"],
+
         ["expire", "--older-than", "0d"],
         ["gc"],
     ],

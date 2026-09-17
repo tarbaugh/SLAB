@@ -56,7 +56,17 @@ from foundation.models import (
 )
 from foundation.references import find_artifact, hash_holders
 from foundation.retention import DEFAULT_POLICY, RetentionPolicy, _reachable_hashes, sweep_scratch
-from foundation.runtime import Replay, Workspace, describe_liveness, this_host, this_job
+from foundation.runtime import (
+    JOB_SIGNAL_GRACE_S,
+    Replay,
+    Workspace,
+    describe_lease,
+    describe_liveness,
+    job_deadline,
+    lease_verdict,
+    this_host,
+    this_job,
+)
 from foundation.serialize import loads
 from slab.scratch import RUN_ENV, scratch_root
 
@@ -742,7 +752,7 @@ PERMANENT_STATES = (LifecycleState.PROMOTED, LifecycleState.ARCHIVED)
 def sessions_summary(ws: Workspace, *, limit: int | None = None) -> dict[str, Any]:
     """The sessions that created runs, newest first, plus the unstamped count.
 
-    This is ``slab sessions`` and the MCP ``list_sessions`` tool: it
+    This is ``slab sessions list`` and the MCP ``list_sessions`` tool: it
     answers "which conversation produced which runs" so a user can promote a
     whole session without collecting run ids. Runs created before session
     stamping, or by a client that sets none, carry no session; they are
@@ -2592,7 +2602,15 @@ def wait_for_run(
     failed (:meth:`Workspace.reap_dead`), so a wait never blocks on a
     hard-killed record.
 
-    The result's ``outcome`` is one of ``finished`` (``run`` holds the
+    A wait inside a job is capped at the job's end less the grace the
+    batch script is signalled in (:data:`JOB_SIGNAL_GRACE_S`), because a
+    wait past the end never returns; ``capped_by`` names the cap. A run
+    of another live session is polled once and reported with its owner,
+    so this session is not held for another one's whole run.
+
+    The result's ``outcome`` is one of ``settled`` (the session that
+    started the run is gone, and this call failed the run with it;
+    ``liveness`` phrases the lease verdict), ``finished`` (``run`` holds the
     :class:`Run` and ``progress`` its tally; an id-less wait adds
     ``also_finished``, the other runs that finished in the same interval,
     and ``running``, the ones still running), ``process_gone`` (the same
@@ -2610,10 +2628,21 @@ def wait_for_run(
 
     asked = max(0.0, float(timeout_s))
     timeout = min(asked, MAX_WAIT_S)
+    # A wait past the job's end never returns: the job takes the process
+    # with it. The cap leaves the grace the batch script is signalled in,
+    # so the session closes its lease and settles its runs first.
+    capped_by = ""
+    ends_at = job_deadline()
+    if ends_at is not None:
+        left = (ends_at - datetime.now(UTC)).total_seconds() - JOB_SIGNAL_GRACE_S
+        if left < timeout:
+            timeout = max(0.0, left)
+            capped_by = "the job's end"
     deadline = time.monotonic() + timeout
     grace_until = time.monotonic() + min(grace_s, timeout)
     resolved: str | None = None
     note = ""
+    owner = ""  # the other session that holds the watched run, when one does
     watched: set[str] = set()  # the runs an id-less wait has seen running
     gap = min(1.0, poll_s)
 
@@ -2623,17 +2652,44 @@ def wait_for_run(
     while True:
         with Workspace(root) as ws:
             reaped = {r.id for r in ws.reap_dead(caller="wait_for_run")}
+            if session:
+                # A wait is the longest a session goes without a model call,
+                # and it is still working: every poll says so, so a wait
+                # never lets its own lease fall silent.
+                ws.beat_lease(session)
+            leases = ws.runs.leases()
+            silence = ws.lease_silence_s()
             if run_id:
                 if resolved is None:
                     resolved, note = resolve_run(ws, run_id, session=session)
                 run = ws.runs.get(resolved)
+                lease = leases.get(run.session or "")
+                verdict = (
+                    lease_verdict(lease, silence_s=silence) if lease is not None else None
+                )
                 if run.status.value != "running":
+                    if run.id in reaped and verdict is not None and lease is not None:
+                        # The owner is gone, so this run is over. Waiting on
+                        # it again would wait forever.
+                        return {
+                            "outcome": "settled",
+                            "note": note,
+                            "run": run,
+                            "progress": run_progress(ws, run.id),
+                            "liveness": describe_lease(lease, verdict),
+                        }
                     return {
                         "outcome": "process_gone" if run.id in reaped else "finished",
                         "note": note,
                         "run": run,
                         "progress": run_progress(ws, run.id),
                     }
+                if lease is not None and verdict is None and run.session != session:
+                    # Another session is still working on it. Report where it
+                    # stands after one poll instead of holding this session
+                    # for the other one's whole run.
+                    deadline = min(deadline, time.monotonic() + poll_s)
+                    owner = f"session {lease.id} ({lease.harness}) is still working on it"
                 running = [run]
             else:
                 try:
@@ -2665,6 +2721,8 @@ def wait_for_run(
                     "note": note,
                     "timeout_s": timeout,
                     "asked_s": asked,
+                    "capped_by": capped_by,
+                    "owner": owner,
                     "running": still(ws, running),
                 }
         time.sleep(min(gap, max(0.05, deadline - time.monotonic())))

@@ -66,6 +66,10 @@ _F = TypeVar("_F", bound=Callable[..., Any])
 _TOOL_NAMES: list[str] = []
 
 
+#: How often the server says it is still there, in seconds.
+_LEASE_BEAT_S = 60.0
+
+
 def _surfaced(fn: _F) -> _F:
     """Re-raise SLAB's own errors as ``ToolError`` so agents read them.
 
@@ -147,6 +151,11 @@ def build_server(
     project_dir = Path(project if project is not None else Path.cwd()).resolve()
     session_id = session or new_session_id("mcp")
     record = SessionRecord(root, session_id, client="mcp")
+    # The lease that owns this server's runs. A client that dies without
+    # closing it leaves it silent, and the next reader settles its runs
+    # instead of reading them as active.
+    with suppress(FoundationError, sqlite3.Error, OSError), Workspace(root) as ws:
+        ws.open_lease(session_id, harness="mcp", cwd=project_dir)
     hpc = load_slab_config(project_dir).hpc
     versions: dict[str, dict[str, str]] = {}
     from slab._ops import setup_digest
@@ -546,8 +555,10 @@ def build_server(
         The wait costs nothing while it blocks. 'outcome' is finished (with
         the run and its task tally), process_gone (this call found the run's
         recorded process dead on this host and marked the run failed;
-        nothing to wait for), still_running ('note_running' says waiting
-        again is the right call; each entry says whether its process is
+        nothing to wait for), settled (the session that started the run is
+        gone, so the run was failed with it; 'liveness' says how that
+        session ended, and the work needs launching again), still_running
+        ('note_running' says waiting again is the right call; each entry says whether its process is
         alive here or runs on another host, the time since it started, and
         the LAMMPS step against the run's end when a run_lammps task is
         running), none_running (the session's finished runs), or no_runs."""
@@ -559,7 +570,7 @@ def build_server(
             all_runs=all,
         )
         # Only the runs that finished during this wait are recorded.
-        if waited["outcome"] in ("finished", "process_gone"):
+        if waited["outcome"] in ("finished", "process_gone", "settled"):
             for finished in [waited["run"], *waited.get("also_finished", [])]:
                 _record_run_commands(finished.id, "wait_for_run")
         elif waited["outcome"] == "none_running":
@@ -579,8 +590,13 @@ def build_server(
                 | {"progress": progress, "liveness": liveness, "advance": advance}
                 for r, progress, liveness, advance in waited["running"]
             ]
+        if waited["outcome"] == "settled":
+            answer["liveness"] = waited["liveness"]
         if waited["outcome"] == "still_running":
             answer["waited_s"] = waited["timeout_s"]
+            for key in ("capped_by", "owner"):
+                if waited.get(key):
+                    answer[key] = waited[key]
             if timeout_s > waited["timeout_s"]:
                 answer["capped"] = (
                     f"waited {waited['timeout_s']:.0f} s, capped from the {timeout_s:.0f} s asked"
@@ -1053,7 +1069,24 @@ def serve(root: Path, *, project: Path | None = None) -> None:  # pragma: no cov
     (:func:`foundation.config.apply_gpu_exclusion`), so the server's budget
     and every launch it starts leave a broken device out.
     """
+    import threading
+
     from foundation.config import apply_gpu_exclusion
 
     apply_gpu_exclusion(project)
-    build_server(root, project=project).run()
+    session_id = new_session_id("mcp")
+    server = build_server(root, project=project, session=session_id)
+    stop = threading.Event()
+
+    def beat() -> None:
+        while not stop.wait(_LEASE_BEAT_S):
+            with suppress(FoundationError, sqlite3.Error, OSError), Workspace(root) as ws:
+                ws.beat_lease(session_id)
+
+    threading.Thread(target=beat, name="mcp-lease", daemon=True).start()
+    try:
+        server.run()
+    finally:
+        stop.set()
+        with suppress(FoundationError, sqlite3.Error, OSError), Workspace(root) as ws:
+            ws.end_session(session_id, reason="the server stopped")

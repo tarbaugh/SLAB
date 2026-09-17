@@ -28,6 +28,7 @@ import warnings
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from types import EllipsisType
 from typing import Any
 
 from foundation import project as project_files
@@ -329,6 +330,28 @@ class WaveLocks:
         self.observer = threading.RLock()
 
 
+def _beat_until_stopped(
+    workspace_root: Path, session_id: str, beat_s: float, stop: threading.Event
+) -> None:
+    """Stamp one lease every *beat_s* seconds until *stop* is set.
+
+    A free function, not a method: the heartbeat thread must not keep its
+    session alive. A beat that cannot be written is skipped, because the
+    session's work matters more than the bookkeeping.
+    """
+    import sqlite3
+
+    from foundation.errors import FoundationError
+    from foundation.runtime import Workspace
+
+    while not stop.wait(beat_s):
+        try:
+            with Workspace(workspace_root) as ws:
+                ws.beat_lease(session_id)
+        except (FoundationError, sqlite3.Error, OSError):
+            continue
+
+
 class MasonSession:
     """One agent session in one project directory.
 
@@ -385,6 +408,10 @@ class MasonSession:
         apply_gpu_exclusion(self.cwd)
         self.approver: Approver = approver if approver is not None else _approve_nothing
         self.auto_approve = auto_approve
+        # Whether a person is at the keyboard. An interactive session reads
+        # Ctrl-C as "stop this turn", so the loop leaves SIGINT alone there;
+        # a batch session reads it as the end of the session.
+        self.interactive = False
         # API keys this session (and its delegates) read from the
         # environment, withdrawn from os.environ once read so nothing the
         # model drives can print them back. Shared with a parent session.
@@ -459,6 +486,14 @@ class MasonSession:
         stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         self.transcript_path = self.sessions_dir / f"{stamp}-{os.getpid()}.jsonl"
         self._lock_handle: Any | None = None
+        # The lease this session holds over its runs: open from the first
+        # turn to the last, beaten while it works, closed when it ends. A
+        # delegated child rides its lead's lease, so only a root opens one.
+        self.lease_open = False
+        self._beat_thread: threading.Thread | None = None
+        self._beat_stop = threading.Event()
+        self._lease_warned = False
+        self._deadline: datetime | EllipsisType | None = ...
         self._software_versions: dict[str, str] | None = None
         # The machine memories this session and its delegates wrote, in
         # order: name, description, evidence, unverified, agent, and the
@@ -584,6 +619,142 @@ class MasonSession:
         if self._lock_handle is not None:
             self._lock_handle.close()
             self._lock_handle = None
+
+
+    # -- the lease this session holds over its runs ---------------------------
+
+    def open_lease(self) -> None:
+        """Claim this session's runs for as long as the session lives.
+
+        The lease is what makes a dead session's runs settleable from
+        another process: a reader that finds it ended, past its job's end,
+        or silent fails those runs instead of reading them as active. A
+        heartbeat thread stamps it every ``[agent] lease_beat_s`` seconds,
+        and the loop stamps it at every step as well, so a session working
+        through a long tool call is never taken for dead. A workspace that
+        cannot be opened is not a reason to refuse the session: the first
+        workspace tool call names the fault with its recovery.
+        """
+        if self._parent is not None or self.lease_open:
+            return
+        if not self._with_workspace(
+            lambda ws: ws.open_lease(
+                self.session_id, harness="mason", agent=self.agent_name, cwd=self.cwd
+            )
+        ):
+            return
+        self.lease_open = True
+        self._beat_stop.clear()
+        # The thread holds the workspace root and the id, never the session:
+        # a session nobody closed must still be collectable, and its lock
+        # released with it.
+        thread = threading.Thread(
+            target=_beat_until_stopped,
+            args=(self.workspace_root, self.session_id, self.lease_beat_s(), self._beat_stop),
+            name="mason-lease",
+            daemon=True,
+        )
+        self._beat_thread = thread
+        thread.start()
+
+    def lease_beat_s(self) -> float:
+        """How often this session beats: the config, and never a slow tenth.
+
+        ``[workspace] lease_silence_s`` is how long a reader waits before
+        it settles a silent session's runs, and a session beats ten times
+        inside that window, so a beat slower than a tenth of it is brought
+        down to one.
+        """
+        from foundation.config import lease_silence_s
+
+        return min(self.agent.lease_beat_s, lease_silence_s(self.cwd) / 10)
+
+    def beat_lease(self) -> None:
+        """Say this session is still working (cheap enough for every step)."""
+        root = self
+        while root._parent is not None:
+            root = root._parent
+        if not root.lease_open:
+            return
+        root._with_workspace(lambda ws: ws.beat_lease(root.session_id))
+
+    def end_lease(self, reason: str) -> list[Any]:
+        """Close the lease and end the runs this session was still executing.
+
+        Whatever ended the session, its runs end with it: each one is
+        stopped here and marked failed naming the session and *reason*, so
+        no later reader finds a run of a session that is over. Returns the
+        runs ended.
+        """
+        if self._parent is not None or not self.lease_open:
+            return []
+        self.lease_open = False
+        self._beat_stop.set()
+        if self._beat_thread is not None:
+            self._beat_thread.join(timeout=2.0)
+            self._beat_thread = None
+        ended: list[Any] = []
+
+        def close(ws: Any) -> None:
+            _lease, runs = ws.end_session(self.session_id, reason=reason)
+            ended.extend(runs)
+
+        self._with_workspace(close)
+        return ended
+
+    def close(self, reason: str = "finished") -> list[Any]:
+        """End this session: record why, close the lease, release the lock.
+
+        Every exit runs through here, so a session that stops for any
+        reason leaves no run at ``running`` behind it and no later reader
+        has to guess. Returns the runs ended with the session.
+        """
+        if self._parent is not None:
+            return []
+        ended = self.end_lease(reason)
+        self.record(
+            {
+                "type": "session_end",
+                "reason": reason,
+                "runs_ended": [run.id for run in ended],
+            }
+        )
+        self.release_session_lock()
+        return ended
+
+    def job_ends_at(self) -> datetime | None:
+        """When this session's job ends, or None outside a job (read once)."""
+        if self._deadline is ...:
+            from foundation.runtime import job_deadline
+
+            self._deadline = job_deadline()
+        return self._deadline
+
+    def _with_workspace(self, action: Callable[[Any], Any]) -> bool:
+        """Run *action* on the run store; report a fault once and carry on.
+
+        A beat that cannot be written must never raise into the loop: the
+        session's work matters more than the bookkeeping, and a silent
+        lease is settled by the next reader anyway.
+        """
+        import sqlite3
+
+        from foundation.errors import FoundationError
+        from foundation.runtime import Workspace
+
+        try:
+            with Workspace(self.workspace_root) as ws:
+                action(ws)
+        except (FoundationError, sqlite3.Error, OSError) as e:
+            if not self._lease_warned:
+                self._lease_warned = True
+                warnings.warn(
+                    f"this session's lease could not be written ({e}); its runs will "
+                    f"be settled by whoever reads them next",
+                    stacklevel=2,
+                )
+            return False
+        return True
 
     # -- where the model lives ------------------------------------------------
 

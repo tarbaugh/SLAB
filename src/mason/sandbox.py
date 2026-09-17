@@ -60,6 +60,7 @@ from pathlib import Path
 from typing import Any
 
 from foundation.memory import memory_dir
+from foundation.runtime import JOB_SIGNAL_GRACE_S
 from mason.config import AgentConfig
 from mason.errors import MasonError
 from mason.serve import read_record, record_path
@@ -1719,6 +1720,24 @@ GPU_ID_LINES = (
 )
 
 
+#: When the job ends, resolved on the host and carried into the container,
+#: which ``--cleanenv`` would otherwise strip. The scheduler's own
+#: ``SLURM_JOB_END_TIME`` answers first (epoch seconds); where it is unset,
+#: ``squeue`` is asked for the end time of this job (an ISO stamp). Empty
+#: outside a job, which reads as no deadline. The session inside stamps its
+#: lease with it, so a reader outside settles the job's runs the moment the
+#: job is over, and sizes its last wave to the time left.
+JOB_END_LINES = (
+    'SLAB_JOB_END="${SLURM_JOB_END_TIME:-}"',
+    'if [ -z "$SLAB_JOB_END" ] && [ -n "${SLURM_JOB_ID:-}" ] &&'
+    " command -v squeue >/dev/null 2>&1; then",
+    '  SLAB_JOB_END="$(squeue -h -j "$SLURM_JOB_ID" -o %e 2>/dev/null | head -1)"',
+    "fi",
+    "export SLAB_JOB_END",
+    'echo "this job ends at: ${SLAB_JOB_END:-unknown}"',
+)
+
+
 def _gres_gpus(gres: str | None) -> int | None:
     """The gpu count a gres string asks for, or None: :func:`slab.resources.gres_gpus`.
 
@@ -2036,6 +2055,14 @@ def render_sandbox_script(
         "trap 'kill \"$BRIDGE_PID\" 2>/dev/null || true' EXIT",
         'for _ in $(seq 50); do [ -S "$BRIDGE" ] && break; sleep 0.1; done',
         *GPU_ID_LINES,
+        *JOB_END_LINES,
+        # The scheduler signals this shell JOB_SIGNAL_GRACE_S before the time
+        # limit. The session inside the container gets the same TERM and
+        # normally closes its own lease first; this trap is what settles the
+        # job's runs when the container dies before it can.
+        "trap 'if [ -n \"${SLURM_JOB_ID:-}\" ]; then "
+        f'{slab} sessions end --job "$SLURM_JOB_ID" --reason "time limit" || true; '
+        "fi' TERM",
     ]
     # render_sbatch exports SLAB_GPU_EXCLUDE from the partition's list
     # before these lines; --cleanenv would strip it at the container.
@@ -2093,6 +2120,11 @@ def render_sandbox_script(
             # job id, and 'slab hpc cancel <job>' fails none of them. Empty
             # outside a job, so a local render still runs.
             '--env SLURM_JOB_ID="${SLURM_JOB_ID:-}"',
+            # When this job ends, in the form the prologue could resolve.
+            # The session inside reads it to size its last wave and to
+            # stamp its lease, so a reader outside settles its runs the
+            # moment the job is over.
+            '--env SLAB_JOB_END="$SLAB_JOB_END"',
             # --cleanenv also strips the GPU ids and the thread count the
             # scheduler set, and the budget inside reads exactly these:
             # CUDA_VISIBLE_DEVICES as the prologue computed it (GPU_ID_LINES:
@@ -2139,6 +2171,7 @@ def render_sandbox_script(
     )
     script = render_sbatch(
         command,
+        extra_directives=(f"--signal=B:TERM@{JOB_SIGNAL_GRACE_S}",),
         job_name="mason-sandbox",
         partition=partition,
         config=hpc,

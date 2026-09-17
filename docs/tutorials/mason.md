@@ -534,6 +534,42 @@ inside the parent's lock. On a filesystem that cannot hold an advisory
 lock, the lock degrades to a warning, and `session_lock = false` turns
 it off.
 
+## Running as a job
+
+A session that runs inside a batch job is owned by that job, and the job
+ends on a clock the session does not control. Three things follow from
+that, and Mason does all three for you.
+
+The session takes a lease on its runs when it starts. It stamps the lease
+every minute and at every step, and it closes the lease when it ends. A
+reader in another process settles the runs of a lease that is closed,
+past its job's end, or silent, so a session that dies with its job never
+leaves a run looking live. See
+[Session leases](lifecycle-and-retention.md#session-leases-who-owns-a-run-while-it-runs)
+for the operator's side.
+
+The session is told when its job ends. The environment block carries one
+line under the compute budget, and each step's harness line repeats the
+minutes left once they fall under an hour:
+
+```text
+this job ends at 00:31 UTC (2 h 10 min left)
+```
+
+The cards read that as a bound on the last wave: a launch that cannot
+finish before the job ends produces nothing, whatever is free. A
+`wait_for_run` is capped at the job's end less three minutes, because a
+wait past the end never returns.
+
+The job signals itself before the limit. The rendered sandbox script
+carries `#SBATCH --signal=B:TERM@180`, so the batch shell gets a TERM
+three minutes before the end. The session's own handler runs first: it
+closes the lease, ends the runs it was still executing, and records a
+`session_end` event with the reason. The batch shell's trap is the
+fallback for a container that died before the session could finish, and
+it runs `slab sessions end --job $SLURM_JOB_ID --reason "time limit"`,
+which settles the job's leases and their runs from the host.
+
 ## The sandbox: autonomous runs without a network
 
 `--auto` removes the approval gate, so the boundary for an unattended run
@@ -818,6 +854,18 @@ computed. The refusal and error counts, when present, say where the
 harness pushed back; a tool that shows up there repeatedly is a
 friction report addressed to you. For the event-by-event view, use
 `slab mason read`; the report says where to look, the viewer shows it.
+
+Every campaign carries a `session_end` event, written when the session
+ends whatever ended it, and the report prints it as one line:
+
+```text
+session ended: the session stopped: finish
+```
+
+A session that stopped at its job's time limit says `terminated
+(SIGTERM)` instead, and names the runs it ended with it. That line is
+the answer to "why did this campaign stop", which the transcript could
+not answer before.
 
 A campaign that finished also carries a `retire` event, recorded right
 after the `finish`. It says what the finish kept: how many runs were
