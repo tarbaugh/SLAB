@@ -1621,9 +1621,10 @@ class SQLiteRunStore:
           rank and thread counts from the defaults, shrunk to fit.
 
         A gpu with an :meth:`exclude_gpu` row on the host under *job_id*
-        is not free, whatever the budget says. The refusal carries the free ids. A count below one is a
-        :class:`ValueError`: ``None`` means unsized, and a zero-rank launch
-        is a mistake the caller should hear about, not a launch of one.
+        is not free, whatever the budget says, and the refusal carries the
+        free ids. A count below one is a :class:`ValueError`: ``None``
+        means unsized, and a zero-rank launch is a mistake the caller
+        should hear about, not a launch of one.
 
         Examples:
             >>> store = SQLiteRunStore(":memory:")

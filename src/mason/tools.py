@@ -4240,8 +4240,10 @@ def _add_memory_tools(box: Toolbox, session: MasonSession) -> None:
 
     # What the notebook held when this box was built is the prior record: a
     # result this session notes later is its own, not one to cite as prior.
-    notebook = project_files.notebook_path(session.cwd)
-    prior_end = len(notebook.read_text(encoding="utf-8")) if notebook.exists() else 0
+    notebook_file = project_files.notebook_path(session.cwd)
+    prior_end = (
+        len(notebook_file.read_text(encoding="utf-8")) if notebook_file.exists() else 0
+    )
 
     def plan(arguments: dict[str, Any]) -> str:
         content = str(arguments["content"]).rstrip() + "\n"

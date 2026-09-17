@@ -535,10 +535,6 @@ def resources_line(session: MasonSession) -> str:
     the difference; a store that cannot be opened leaves the budget alone
     on the line, and the tools report the fault when they are called.
     """
-    import sqlite3
-
-    from foundation.errors import FoundationError
-    from foundation.runtime import Workspace
     from slab.config import config_value
     from slab.errors import SlabError
     from slab.resources import budget, envelope

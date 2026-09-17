@@ -23,8 +23,8 @@ import re
 import shlex
 import signal
 import subprocess
-from collections.abc import Sequence
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -1002,7 +1002,9 @@ def is_error_line(line: str) -> bool:
         True
         >>> is_error_line("[warn] Epoll MOD(1) on fd 14 failed. Old events were 6; ERROR")
         False
-        >>> is_error_line("Kokkos::OpenMP::initialize WARNING: OMP_PROC_BIND environment variable not set")
+        >>> is_error_line(
+        ...     "Kokkos::OpenMP::initialize WARNING: OMP_PROC_BIND environment variable not set"
+        ... )
         False
         >>> is_error_line("# neigh_modify one 4000 avoids a Segmentation fault")
         False

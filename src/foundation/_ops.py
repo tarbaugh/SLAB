@@ -1557,7 +1557,10 @@ def dry_run_script(
         if from_run is not None and real is None:
             raise FoundationError("from_run needs the workspace that holds the run")
         ws = stack.enter_context(_throwaway_workspace())
-        replay = None if from_run is None else _replaying(ws, real, str(from_run))
+        replay = None
+        if from_run is not None:
+            assert real is not None  # the guard above refused that pair
+            replay = _replaying(ws, real, str(from_run))
         run_id, error, buffer = _run_script_in(
             ws,
             script_path,

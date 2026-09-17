@@ -1535,7 +1535,7 @@ def _table_summary(table: dict[str, Any], call: str | None = None) -> dict[str, 
 _ROW_KEYS = frozenset({"rows", "data", "values"})
 
 
-class TableSummary(dict):
+class TableSummary(dict[str, Any]):
     """A table summary that refuses the keys the rows would sit under.
 
     ``run_lammps`` hands back its ``tables`` and ``averages`` entries as

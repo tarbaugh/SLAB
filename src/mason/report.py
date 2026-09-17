@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections import Counter, deque
+from collections import Counter, defaultdict, deque
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -91,7 +91,7 @@ def _tally(transcript: Path) -> dict[str, Any]:
     # Waves of parallel briefs: the wall-clock each wave took, by wave
     # number, and the seconds its specialists spent between them.
     wave_wall: dict[int, float] = {}
-    wave_spent: Counter[int] = Counter()
+    wave_spent: dict[int, float] = defaultdict(float)
     parallel_briefs = 0
     header: dict[str, Any] = {}
     # Tool results carry no name, but they answer the most recent
