@@ -812,6 +812,12 @@ class Mason:
         # the reply to them was cut. Clearing and compaction spare these.
         self._unread_from = len(self.messages)
         self._effort_override: str | None = None
+        # The retry after a case-1 cut runs under half the reply ceiling, so
+        # a second failure costs half; consumed by the next model call.
+        self._reply_scale = 1
+        # The tool of the last call this turn dispatched, recorded with a cut
+        # so a report can name what the model was reading when it was cut.
+        self._last_tool: str | None = None
         if depth == 0:
             # The transcript says which model answered it, so a later reader
             # (a report, a benchmark score) trusts the record, not the config
@@ -919,6 +925,8 @@ class Mason:
     def run_turn(self, user_text: str) -> TurnResult:
         """Drive one goal until an answer, a finish, or a harness stop."""
         self._append({"role": "user", "content": user_text})
+        # A cut names the tool this turn read last, not the turn before's.
+        self._last_tool = None
         error_streak = 0
         empty_nudged = False
         cut_nudged = False
@@ -985,7 +993,7 @@ class Mason:
                 kept = reply.model_copy(update={"content": reply.content or ""})
                 self._append_assistant(kept, has_calls=False)
                 self._observe_step(reply, interim=False)
-                self.session.record({"type": "cut", "case": 3, "continued": True})
+                self._record_cut({"type": "cut", "case": 3, "continued": True}, reply)
                 nudge = self._cut_call_nudge(cut_call, dropped=len(reply.tool_calls))
                 self._append({"role": "user", "content": nudge})
                 continue
@@ -1033,7 +1041,7 @@ class Mason:
                     if loop_line is not None:
                         event["loop"] = loop_line
                         nudge += _CUT_LOOP_NOTE.format(line=loop_line)
-                    self.session.record(event)
+                    self._record_cut(event, reply)
                     self._append({"role": "user", "content": nudge})
                     if enabled(self.session.agent, "adaptive-effort"):
                         self._effort_override = _retry_effort(self.session.agent.effort)
@@ -1046,7 +1054,7 @@ class Mason:
                         # the history; the model resumes it, and the join
                         # below puts the two halves together on return.
                         cut_prefix = text
-                        self.session.record({"type": "cut", "case": 2, "continued": True})
+                        self._record_cut({"type": "cut", "case": 2, "continued": True}, reply)
                         self._append({"role": "user", "content": _CONTINUE_REPLY_NUDGE})
                         continue
                     # Case 1: the budget went to the think block and no text
@@ -1057,10 +1065,15 @@ class Mason:
                     brevity: dict[str, Any] = {"type": "cut", "case": case, "continued": False}
                     if loop_line is not None:
                         brevity["loop"] = loop_line
-                    self.session.record(brevity)
+                    self._record_cut(brevity, reply)
                     self._append({"role": "user", "content": _CUT_REPLY_NUDGE})
                     if enabled(self.session.agent, "adaptive-effort"):
                         self._effort_override = _retry_effort(self.session.agent.effort)
+                        if case == 1:
+                            # The answer asked for is a few lines, so the
+                            # retry runs under half the ceiling and a second
+                            # failure costs half of what the first did.
+                            self._reply_scale = 2
                     continue
                 if cut_prefix is not None and not text.strip() and not cut:
                     # The continuation was empty: a think block took it. Ask
@@ -1086,7 +1099,7 @@ class Mason:
             if cut and cut_call is not None:
                 # A second cut inside a call, or one with the switch off: the
                 # malformed call is answered with its JSON error, as before.
-                self.session.record({"type": "cut", "case": 3, "continued": False})
+                self._record_cut({"type": "cut", "case": 3, "continued": False}, reply)
             # A reply that went on to act was not the answer the cut half
             # started; the half is not joined onto whatever comes later.
             cut_prefix = None
@@ -1095,6 +1108,7 @@ class Mason:
             waited_on_run = False
             noted = False
             for position, call in enumerate(calls):
+                self._last_tool = call.name
                 if call.name == "finish" and call.arguments_error is None:
                     if len(calls) > 1:
                         # A finish sharing its reply with other tool calls was
@@ -1444,7 +1458,10 @@ class Mason:
             messages = [*messages, {"role": "user", "content": hint}]
         # A one-call effort override, set by the cut-reply retry and consumed
         # here, so the next ordinary step runs at the configured effort.
-        options: dict[str, Any] = {"max_tokens": self._reply_budget()}
+        # The halved ceiling is for one call, like the effort override, and
+        # is taken here whether or not the request goes through.
+        scale, self._reply_scale = self._reply_scale, 1
+        options: dict[str, Any] = {"max_tokens": self._reply_budget(scale)}
         if watch is not None:
             options["watch"] = watch
         if self._effort_override is not None:
@@ -1465,7 +1482,7 @@ class Mason:
             messages = self.messages
             if hint is not None:
                 messages = [*messages, {"role": "user", "content": hint}]
-            options["max_tokens"] = self._reply_budget()
+            options["max_tokens"] = self._reply_budget(scale)
             try:
                 reply = self.client.chat(messages, tools, **options)
             except ContextOverflowError as again:
@@ -1481,7 +1498,7 @@ class Mason:
                 messages = self.messages
                 if hint is not None:
                     messages = [*messages, {"role": "user", "content": hint}]
-                options["max_tokens"] = self._reply_budget()
+                options["max_tokens"] = self._reply_budget(scale)
                 reply = self.client.chat(messages, tools, **options)
         self.session.count_usage(
             reply.prompt_tokens, reply.completion_tokens, reply.cached_prompt_tokens
@@ -1499,11 +1516,24 @@ class Mason:
         )
         return reply
 
-    def _reply_budget(self) -> int:
-        """One step's ``max_tokens``: the configured or default cap, bounded by
-        the room the window has left after the prompt."""
+    def _record_cut(self, event: dict[str, Any], reply: ChatReply) -> None:
+        """Record one cut with what it cost and what the model read last.
+
+        The completion tokens are the reasoning and text the ceiling
+        discarded, and ``after_tool`` is the tool of the last call this turn
+        dispatched. ``slab mason report`` sums the first and counts the
+        second, so a session that loses its replies after one kind of read
+        says so.
+        """
+        event["after_tool"] = self._last_tool
+        event["tokens"] = reply.completion_tokens or 0
+        self.session.record(event)
+
+    def _reply_budget(self, scale: int = 1) -> int:
+        """One step's ``max_tokens``: the configured or default cap over
+        *scale*, bounded by the room the window has left after the prompt."""
         agent = self.session.agent
-        budget = agent.max_reply_tokens or _DEFAULT_REPLY_TOKENS
+        budget = (agent.max_reply_tokens or _DEFAULT_REPLY_TOKENS) // scale
         room = agent.context_window - self._estimated_prompt_tokens() - _REPLY_MARGIN_TOKENS
         return max(_MIN_REPLY_TOKENS, min(budget, room))
 

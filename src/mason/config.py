@@ -157,6 +157,7 @@ class RosterOverride(BaseModel):
     keep_tool_results: int | None = Field(default=None, ge=1)
     clear_tool_results_at: float | None = Field(default=None, gt=0.0, le=1.0)
     shell_timeout_s: float | None = Field(default=None, gt=0)
+    table_nudge_rows: int | None = Field(default=None, ge=1)
     tool_protocol: Literal["native", "fenced"] | None = None
 
     _key_env_name = field_validator("api_key_env")(lambda cls, v: _env_name(v))
@@ -216,6 +217,10 @@ class AgentConfig(BaseModel):
     keep_tool_results: int = Field(default=6, ge=1)
     clear_tool_results_at: float = Field(default=0.25, gt=0.0, le=1.0)
     shell_timeout_s: float = Field(default=120.0, gt=0)
+    # A read that returns more numeric rows than this ends with one harness
+    # line telling the model to compute the statistic instead of reading the
+    # rows (the table-nudge mechanism).
+    table_nudge_rows: int = Field(default=20, ge=1)
     tool_protocol: Literal["native", "fenced"] = "native"
     approval: Literal["ask", "auto"] = "ask"
 

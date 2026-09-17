@@ -23,3 +23,8 @@ provenance and can be rerun.
 Report values with units, an uncertainty where one can be estimated, and
 the run id of every input. Round only in prose; keep full precision in
 any file you write.
+
+Read a table's digest, not its rows. A thermo table, a fix ave/time file,
+or a column of energies is input for a script. Compute the statistic you
+need with a workflow task or a one-line shell script, and read the number
+back. Never reason over the rows yourself.

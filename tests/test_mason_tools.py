@@ -2405,7 +2405,9 @@ def test_read_artifact_samples_a_json_table_by_columns_and_rows(
     assert lines[1] == "table 0: 3000 rows; columns Step, Temp of Step, Temp, PotEng, Press"
     assert lines[2] == "   row\tStep\tTemp"
     assert lines[3] == "     1\t0\t300.0" and lines[4] == "   101\t1000\t400.0"
-    assert lines[-1] == "[rows 1-3000, every 100th: 30 shown, 2970 omitted]"
+    assert lines[-2] == "[rows 1-3000, every 100th: 30 shown, 2970 omitted]"
+    # Thirty rows is still thirty rows for a model to read in its head.
+    assert lines[-1].startswith("[harness: a table this long")
     assert len(sampled) < 2_000
     missing = read(run_id=run_id, name="md-thermo.json", columns="Tmp")
     assert "no column 'Tmp' in table 0; its columns: Step, Temp, PotEng, Press" in missing
@@ -2717,3 +2719,80 @@ def test_forget_undoes_only_this_sessions_writes(tmp_path: Path, memory_root: Pa
     assert sorted(memory_store.discover()) == ["fix-nph", "older-fact"]
     events = [json.loads(line) for line in lead.transcript_path.read_text().splitlines()]
     assert [e["name"] for e in events if e["type"] == "forget"] == ["fix-nph", "halt-keyword"]
+
+
+def _rows(n: int) -> str:
+    """*n* rows of a thermo table, with a header line."""
+    head = "# Step Temp Press\n"
+    return head + "".join(f"{i * 100} {300.0 + i} {1.0 + i}\n" for i in range(1, n + 1))
+
+
+def test_a_long_table_read_raw_carries_the_nudge(tmp_path: Path) -> None:
+    """A read that returns more rows than table_nudge_rows ends with the
+    line telling the model to compute the statistic instead."""
+    (tmp_path / "thermo.dat").write_text(_rows(30))
+    box = build_toolbox(_session(tmp_path))
+    answer = box.dispatch(_call("read_file", path="thermo.dat", raw=True))
+    assert answer.endswith(
+        "compute the statistic with a workflow or a shell python one-liner "
+        "and read the number back]"
+    )
+    assert "301.0" in answer  # the rows still come back
+
+
+def test_a_short_table_carries_no_nudge(tmp_path: Path) -> None:
+    (tmp_path / "thermo.dat").write_text(_rows(10))
+    box = build_toolbox(_session(tmp_path))
+    answer = box.dispatch(_call("read_file", path="thermo.dat", raw=True))
+    assert "[harness: a table this long" not in answer
+
+
+def test_prose_and_source_files_are_never_nudged(tmp_path: Path) -> None:
+    """The suffix and the row count both decide: a long script is not a table."""
+    (tmp_path / "run.py") .write_text("\n".join(f"x{i} = {i} + 1" for i in range(60)))
+    (tmp_path / "notes.dat").write_text("\n".join(f"step {i} looked fine" for i in range(60)))
+    box = build_toolbox(_session(tmp_path))
+    for name in ("run.py", "notes.dat"):
+        assert "[harness: a table this long" not in box.dispatch(_call("read_file", path=name))
+
+
+def test_a_card_without_a_shell_is_sent_to_its_specialist(tmp_path: Path) -> None:
+    from mason.roster import discover_roster
+
+    (tmp_path / "thermo.csv").write_text(_rows(30))
+    planner = discover_roster(tmp_path)["planner"]
+    assert "shell" not in (planner.tools or ())
+    box = build_toolbox(_session(tmp_path), planner)
+    answer = box.dispatch(_call("read_file", path="thermo.csv", raw=True))
+    assert answer.endswith("ask the specialist for the statistic, not the table]")
+
+
+def test_the_table_nudge_switch_ablates_it(tmp_path: Path) -> None:
+    (tmp_path / "thermo.dat").write_text(_rows(30))
+    session = _session(tmp_path, mechanisms=["check-gating"])
+    box = build_toolbox(session)
+    assert "[harness: a table this long" not in box.dispatch(
+        _call("read_file", path="thermo.dat", raw=True)
+    )
+
+
+def test_the_row_count_is_configurable(tmp_path: Path) -> None:
+    (tmp_path / "thermo.dat").write_text(_rows(30))
+    box = build_toolbox(_session(tmp_path, table_nudge_rows=50))
+    assert "[harness: a table this long" not in box.dispatch(
+        _call("read_file", path="thermo.dat", raw=True)
+    )
+
+
+def test_the_partial_outcome_names_both_cuts(tmp_path: Path) -> None:
+    """A turn cut twice cost the lead the first reply and the short answer
+    asked for after it, so the hand-back says so."""
+    from mason.tools import partial_outcome
+
+    parent = _session(tmp_path)
+    child = parent.spawn("md-expert", MasonConfig.model_validate({}).agent)
+    child.record({"type": "cut", "case": 1, "continued": False, "tokens": 16000})
+    assert "ceiling twice" not in partial_outcome(child)
+    child.record({"type": "cut", "case": 1, "continued": False, "tokens": 8000})
+    outcome = partial_outcome(child)
+    assert "ceiling twice, the second time under half the ceiling" in outcome

@@ -135,10 +135,24 @@ MECHANISMS: tuple[Mechanism, ...] = (
         "one in turn while the budget sits half free.",
     ),
     Mechanism(
+        "table-nudge",
+        "A read that returns a numeric table longer than table_nudge_rows ends "
+        "with one harness line: a table this long is for a script, not for "
+        "reading. A card with no shell is told to ask its specialist for the "
+        "statistic instead. Off, the rows come back with nothing after them.",
+        "Benchmark-4 session 1 hit the reply ceiling seventeen times, and "
+        "fourteen of the fifteen cut events followed a raw read of a fix "
+        "ave/time table the model then tried to interpret in its head.",
+    ),
+    Mechanism(
         "adaptive-effort",
         "A reply cut at the token budget is retried once at lower effort with "
-        "a request for brevity before the turn ends.",
-        "Transcripts where a high-effort reply was cut twice and the turn ended with no report.",
+        "a request for brevity before the turn ends. The retry after a cut "
+        "that carried no text also runs under half the reply ceiling, so a "
+        "second failure costs half of what the first did.",
+        "Transcripts where a high-effort reply was cut twice and the turn ended "
+        "with no report. Benchmark-4 session 1 lost 544,000 completion tokens, "
+        "28 % of everything it generated, to seventeen cuts.",
     ),
     Mechanism(
         "continue-cut-reply",

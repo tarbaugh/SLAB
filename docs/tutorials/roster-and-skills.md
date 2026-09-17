@@ -659,8 +659,10 @@ The table accepts the connection and budget fields: `provider`,
 `endpoint`, `model`, `api_key_env`, `effort`, `temperature`,
 `context_window`, `compact_at`, `max_turns`, `max_reply_tokens`,
 `request_timeout_s`, `max_tool_output_chars`, `clear_tool_results`,
-`keep_tool_results`, `clear_tool_results_at`, `shell_timeout_s`, and
-`tool_protocol`. Session policy is deliberately not per-agent: one
+`keep_tool_results`, `clear_tool_results_at`, `shell_timeout_s`,
+`table_nudge_rows`, and `tool_protocol`. A specialist that reads data can
+run under a lower `max_reply_tokens` than its lead this way, so a cut
+reply costs the session less. Session policy is deliberately not per-agent: one
 `approval` mode, one `shell_allowlist`, one `[agent.serve]` section per
 session.
 

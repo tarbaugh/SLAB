@@ -88,6 +88,10 @@ def _tally(transcript: Path) -> dict[str, Any]:
     finished = False
     retire: dict[str, Any] | None = None
     commands: Counter[str] = Counter()
+    # Replies the reply-token ceiling cut: how many, what they cost in
+    # completion tokens, and the tool each one followed.
+    cuts = cut_tokens = 0
+    cut_after: Counter[str] = Counter()
     # Waves of parallel briefs: the wall-clock each wave took, by wave
     # number, and the seconds its specialists spent between them.
     wave_wall: dict[int, float] = {}
@@ -165,6 +169,11 @@ def _tally(transcript: Path) -> dict[str, Any]:
             retire = {k: v for k, v in event.items() if k not in ("at", "type")}
         elif kind == "command":
             commands[str(event.get("kind") or "?")] += 1
+        elif kind == "cut":
+            cuts += 1
+            cut_tokens += int(event.get("tokens") or 0)
+            if event.get("after_tool"):
+                cut_after[str(event["after_tool"])] += 1
         elif kind == "turn":
             turns += 1
         elif kind == "delegate":
@@ -225,6 +234,9 @@ def _tally(transcript: Path) -> dict[str, Any]:
         },
         "retire": retire,
         "commands": dict(commands),
+        "cuts": cuts,
+        "cut_tokens": cut_tokens,
+        "cut_after_tools": dict(cut_after.most_common()),
         "waves": len(wave_wall),
         "parallel_briefs": parallel_briefs,
         # What running the waves side by side saved: what the specialists
@@ -258,6 +270,9 @@ def summarize(
     total_prompt = summary["prompt_tokens"]
     total_completion = summary["completion_tokens"]
     total_cached = summary["cached_prompt_tokens"]
+    total_cuts = summary["cuts"]
+    total_cut_tokens = summary["cut_tokens"]
+    cut_after: Counter[str] = Counter(summary["cut_after_tools"])
     for sibling in siblings or []:
         child = _tally(sibling)
         delegations.append(
@@ -275,7 +290,15 @@ def summarize(
         total_prompt += child["prompt_tokens"]
         total_completion += child["completion_tokens"]
         total_cached += child["cached_prompt_tokens"]
+        total_cuts += child["cuts"]
+        total_cut_tokens += child["cut_tokens"]
+        cut_after.update(child["cut_after_tools"])
     summary["delegations"] = delegations
+    # A lead's cuts and its specialists': the ceiling costs the session
+    # whichever loop paid for it.
+    summary["total_cuts"] = total_cuts
+    summary["total_cut_tokens"] = total_cut_tokens
+    summary["total_cut_after_tools"] = dict(cut_after.most_common())
     summary["total_steps"] = total_steps
     summary["total_prompt_tokens"] = total_prompt
     summary["total_completion_tokens"] = total_completion

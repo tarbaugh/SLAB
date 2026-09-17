@@ -1954,3 +1954,58 @@ def test_a_cut_at_the_last_step_returns_the_kept_half_marked(tmp_path: Path) -> 
     result = Mason(session, client=FakeClient([cut])).run_turn("go")
     assert result.stop_reason == "max_turns" and result.truncated
     assert result.text.startswith("line 1\nline 2\n\n\n[truncated:")
+
+
+def test_the_retry_after_a_case_1_cut_runs_under_half_the_ceiling(tmp_path: Path) -> None:
+    """A case-1 cut costs the whole ceiling. The one retry asks for a few
+    lines, so it runs at low effort under half the ceiling, and a second
+    failure costs half of what the first did. The step after it is whole
+    again."""
+    (tmp_path / "thermo.dat").write_text("1 2\n")
+    session = _session(tmp_path, effort="high", max_reply_tokens=8_000)
+    client = FakeClient(
+        [
+            _tool_reply("read_file", path="thermo.dat"),
+            ChatReply(content="", finish_reason="max_tokens", completion_tokens=8_000),
+            _tool_reply("notebook", text="the design"),
+            _text_reply("done"),
+        ]
+    )
+    result = Mason(session, client=client).run_turn("go")
+    assert result.text == "done"
+    assert [options["max_tokens"] for options in client.options] == [8_000, 8_000, 4_000, 8_000]
+    assert client.options[2]["effort"] == "low"
+    (event,) = _cut_events(session)
+    assert event["case"] == 1 and event["continued"] is False
+    # The cut says what it cost and what the model had just read.
+    assert event["tokens"] == 8_000
+    assert event["after_tool"] == "read_file"
+
+
+def test_the_ceiling_is_not_halved_without_adaptive_effort(tmp_path: Path) -> None:
+    """The halving is part of the one adaptive retry; ablate the mechanism
+    and the retry runs at the configured effort and the whole ceiling."""
+    session = _session(tmp_path, effort="high", max_reply_tokens=8_000, mechanisms=["skills"])
+    client = FakeClient(
+        [ChatReply(content="", finish_reason="max_tokens"), _text_reply("short")]
+    )
+    Mason(session, client=client).run_turn("go")
+    assert [options["max_tokens"] for options in client.options] == [8_000, 8_000]
+    assert "effort" not in client.options[1]
+
+
+def test_a_card_can_run_under_its_own_reply_ceiling(tmp_path: Path) -> None:
+    """A specialist that reads data runs under a lower ceiling than the lead,
+    from [agent.roster.<name>], and the lead's stays where it was."""
+    from mason.config import roster_agent_config
+
+    session = _session(
+        tmp_path,
+        max_reply_tokens=8_000,
+        roster={"pi": {"max_reply_tokens": 2_000}},
+    )
+    client = FakeClient([_text_reply("ok")])
+    Mason(session, client=client).run_turn("go")
+    assert client.options[0]["max_tokens"] == 2_000
+    assert session.base_agent.max_reply_tokens == 8_000
+    assert roster_agent_config(session.base_agent, "md-expert").max_reply_tokens == 8_000

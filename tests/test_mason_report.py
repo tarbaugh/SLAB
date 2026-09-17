@@ -452,3 +452,54 @@ def test_a_continued_specialist_is_one_row_with_its_turn_count(tmp_path: Path) -
     assert (row["turns"], row["steps"]) == (3, 3)
     assert summary["briefs"] == 3
     assert summary["brief_budget_stops"] == 1
+
+
+def _cut(at: str, tokens: int, after_tool: str | None) -> dict[str, Any]:
+    return {
+        "at": at,
+        "type": "cut",
+        "case": 1,
+        "continued": False,
+        "tokens": tokens,
+        "after_tool": after_tool,
+    }
+
+
+def test_the_report_sums_the_tokens_the_ceiling_cost(tmp_path: Path) -> None:
+    """Benchmark-4 session 1 lost 544,000 completion tokens to seventeen
+    cuts and the report said nothing about them. It sums them now, and
+    names the tool most of them followed."""
+    sessions = tmp_path / "ws" / "mason" / "sessions"
+    conversation = _write(
+        sessions / "20260917-100000-1.jsonl",
+        [
+            _usage("2026-09-17T10:00:00+00:00"),
+            _assistant("2026-09-17T10:00:01+00:00", "read_artifact"),
+            _tool_result("2026-09-17T10:00:02+00:00", "1 2\n3 4\n"),
+            _cut("2026-09-17T10:00:03+00:00", 32_000, "read_artifact"),
+            _cut("2026-09-17T10:00:04+00:00", 16_000, "read_artifact"),
+        ],
+    )
+    sibling = _write(
+        sessions / "20260917-100000-1-md-expert-1.jsonl",
+        [_usage("2026-09-17T10:01:00+00:00"), _cut("2026-09-17T10:01:01+00:00", 8_000, "shell")],
+    )
+    summary = summarize(conversation, siblings=[sibling])
+    assert summary["cuts"] == 2 and summary["cut_tokens"] == 48_000
+    assert summary["cut_after_tools"] == {"read_artifact": 2}
+    # The specialist's cut is the session's cost too.
+    assert summary["total_cuts"] == 3 and summary["total_cut_tokens"] == 56_000
+    assert next(iter(summary["total_cut_after_tools"])) == "read_artifact"
+    result = runner.invoke(app, ["report", "-w", str(tmp_path / "ws")])
+    assert result.exit_code == 0, result.output
+    assert (
+        "replies cut at the ceiling: 3, 56000 completion tokens lost; "
+        "most after read_artifact" in result.output
+    )
+
+
+def test_a_session_without_cuts_says_nothing_about_them(tmp_path: Path) -> None:
+    conversation = _campaign(tmp_path / "ws" / "mason" / "sessions" / "20260917-110000-2.jsonl")
+    assert summarize(conversation)["total_cuts"] == 0
+    result = runner.invoke(app, ["report", "-w", str(tmp_path / "ws")])
+    assert "replies cut at the ceiling" not in result.output

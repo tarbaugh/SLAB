@@ -250,6 +250,27 @@ class Toolbox:
             lines.append(f"- {tool.name}({arguments}): {tool.description}")
         return "\n".join(lines)
 
+    def _table_nudge(self, call: ToolCall, result: str) -> str:
+        """The harness line for a read whose answer is a long numeric table.
+
+        Only the two read tools carry it, and ``read_file`` only for the
+        suffixes an engine writes its tables to. A card with no shell reads
+        the variant that sends it to its specialist.
+        """
+        if call.name not in NUDGED_READS or _is_refusal(result):
+            return ""
+        if not enabled(self.session.agent, "table-nudge"):
+            return ""
+        if call.name == "read_file":
+            suffix = Path(str(call.arguments.get("path") or "")).suffix.lower()
+            if suffix not in TABLE_SUFFIXES:
+                return ""
+        return table_nudge(
+            result,
+            rows=self.session.agent.table_nudge_rows,
+            shell="shell" in self.tools,
+        )
+
     def dispatch(self, call: ToolCall) -> str:
         """Execute one tool call; the answer is always a string, never a raise."""
         tool = self.tools.get(call.name)
@@ -299,6 +320,9 @@ class Toolbox:
             if enabled(agent, "context-hygiene")
             else result
         )
+        if nudge := self._table_nudge(call, shown):
+            # After the cap, so the nudge survives a middle-truncated table.
+            shown = f"{shown}\n{nudge}"
         if call.name in FACT_TOOLS and not _is_refusal(shown):
             self.session.facts[_fact_key(call)] = shown
         return shown
@@ -3435,6 +3459,76 @@ def _table_window(
     return "\n".join(parts)
 
 
+#: The line that follows a read whose answer is a long numeric table. The
+#: harness digests a table on the first read; the raw read that follows is
+#: where a model starts interpreting rows in its head. Benchmark-4 session
+#: 1 was cut at the reply ceiling seventeen times, and fourteen of the
+#: fifteen cut events followed a raw read of a fix ave/time table.
+TABLE_NUDGE = (
+    "[harness: a table this long is for a script, not for reading: compute the "
+    "statistic with a workflow or a shell python one-liner and read the number back]"
+)
+#: The same line for a card that has no shell, such as the planner.
+TABLE_NUDGE_NO_SHELL = (
+    "[harness: a table this long is for a script, not for reading: ask the "
+    "specialist for the statistic, not the table]"
+)
+#: The file suffixes read_file nudges on: the thermo tables an engine
+#: writes beside its log. A source file or a note is never one.
+TABLE_SUFFIXES = frozenset({".dat", ".csv", ".yaml", ".yml"})
+#: The reads whose answers carry the nudge.
+NUDGED_READS = frozenset({"read_artifact", "read_file"})
+_NUMBER = re.compile(r"^[-+]?(?:\d+\.?\d*|\.\d+)(?:[eEdD][-+]?\d+)?$|^[-+]?(?:nan|inf)$", re.I)
+
+
+def numeric_rows(text: str) -> int:
+    r"""How many lines of *text* are rows of a numeric table.
+
+    A row is a line of two or more fields, every one of them a number.
+    Tabs, commas, and spaces all separate fields, so a line-numbered
+    window, a csv row, and a YAML sequence item all count.
+
+    Examples:
+        >>> numeric_rows("Step Temp Press\n0 300.0 1.2\n1000 301.5 1.1")
+        2
+        >>> numeric_rows("     1\t0\t300.0\n     2\t1000\t301.5")
+        2
+        >>> numeric_rows("- [0, 300.0, 1.2]\n- [1000, 301.5, 1.1]")
+        2
+        >>> numeric_rows("the melting point is 1234 K\ntotal energy -4.5 eV")
+        0
+    """
+    count = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- "):
+            stripped = stripped[2:].strip()
+        stripped = stripped.strip("[]").strip()
+        fields = stripped.replace("\t", " ").replace(",", " ").split()
+        if len(fields) >= 2 and all(_NUMBER.match(field) for field in fields):
+            count += 1
+    return count
+
+
+def table_nudge(text: str, *, rows: int, shell: bool) -> str:
+    r"""The harness line to append to *text*, or the empty string.
+
+    *rows* is ``[agent] table_nudge_rows``, and *shell* says whether the
+    card can run a script itself.
+
+    Examples:
+        >>> table_nudge("1 2\n3 4\n", rows=20, shell=True)
+        ''
+        >>> table_nudge("\n".join(f"{i} {i}" for i in range(30)), rows=20, shell=True)[:22]
+        '[harness: a table this'
+        >>> "ask the specialist" in table_nudge("1 2\n" * 30, rows=20, shell=False)
+        True
+    """
+    if numeric_rows(text) <= rows:
+        return ""
+    return TABLE_NUDGE if shell else TABLE_NUDGE_NO_SHELL
+
+
 def _digest_unless_raw(arguments: dict[str, Any], name: str, text: str, n_lines: int) -> str | None:
     """The digest of an engine output, unless the caller asked for the text.
 
@@ -3465,9 +3559,13 @@ def partial_outcome(child_session: MasonSession, turn: int | None = None) -> str
     a background launch has no id until it starts). Order is kept and
     repeats are folded. With *turn*, only what that turn left behind is
     named: a specialist the lead continues reports one turn at a time.
+
+    A turn the ceiling cut twice says so, because the lead paid for the
+    first reply and for the short answer asked for after it.
     """
     files: list[str] = []
     runs: list[str] = []
+    cuts = 0
     try:
         lines = child_session.transcript_path.read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -3486,7 +3584,9 @@ def partial_outcome(child_session: MasonSession, turn: int | None = None) -> str
             continue
         if not counting:
             continue
-        if kind == "edit" and event.get("path") and str(event["path"]) not in files:
+        if kind == "cut":
+            cuts += 1
+        elif kind == "edit" and event.get("path") and str(event["path"]) not in files:
             files.append(str(event["path"]))
         elif kind == "command" and event.get("run_id") and str(event["run_id"]) not in runs:
             runs.append(str(event["run_id"]))
@@ -3496,9 +3596,13 @@ def partial_outcome(child_session: MasonSession, turn: int | None = None) -> str
     if runs:
         parts.append("runs it launched: " + ", ".join(runs))
     left = "; ".join(parts) or "it wrote no file and launched no run"
+    # Two cuts in one turn is the shape that ends a turn with no text: the
+    # reply was cut, and so was the short answer asked for under half the
+    # ceiling. The lead reads that it paid for both.
+    twice = " twice, the second time under half the ceiling" if cuts >= 2 else ""
     return (
         f"[partial outcome: the specialist's turn ended cut at its reply-token "
-        f"ceiling; {left}. Re-brief it to continue from these, not from zero.]"
+        f"ceiling{twice}; {left}. Re-brief it to continue from these, not from zero.]"
     )
 
 
