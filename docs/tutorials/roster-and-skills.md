@@ -73,6 +73,9 @@ final report. The rules are code, not prompt text:
   attributed. The notebook is the group's shared memory, so briefs stay
   short.
 - `[agent] delegation = false` removes the tool everywhere.
+- Independent briefs go out together with `delegate_many`, and their
+  specialists run at the same time. The rules above hold for every
+  brief in a wave.
 
 A deliberately small errand, captured whole. The project directory holds
 `data.txt`, which says `the secret word is perovskite`:
@@ -117,14 +120,62 @@ explicit briefs; it also fails some attempts, so expect retries. Larger
 served models handle larger briefs. The single loop remains the default
 experience, and nothing requires you to delegate.
 
+### A wave of independent briefs
+
+`delegate_many(briefs)` hands out two or more briefs at once. Each brief
+is an `{agent, task, context?}` object, the same three fields `delegate`
+takes, and the same specialist may take two of them. The specialists run
+their loops at the same time, in threads inside the lead's process and
+under the lead's session lock, and the lead receives every report
+together:
+
+```text
+## md-expert (brief 1 of 2)
+
+The cell is molten at 1200 K (run aa11bb).
+
+[md-expert-1: finish after 1 step(s); tokens 100+10; transcript 20260917-212159-12060-md-expert-1.jsonl; continue with continues="md-expert-1"]
+
+## dft-expert (brief 2 of 2)
+
+a = 3.601 A (run cc22dd).
+
+[dft-expert-2: finish after 1 step(s); tokens 100+10; transcript 20260917-212159-12060-dft-expert-2.jsonl; continue with continues="dft-expert-2"]
+
+wave: 2 briefs, 3 s; sequential would have been about 6 s
+```
+
+The last line is the wave's own accounting: the wall-clock it took, and
+what the same briefs would have cost one after the other. The capture
+above is a two-brief wave against a scripted client whose every call
+takes three seconds, so the step counts, the token counts, and the spans
+are the script's, not a campaign's.
+
+Briefs in one wave must share no file and no run, because nothing
+sequences them. A step that needs another step's result goes through
+`delegate`, after it. The launches the briefs make draw on one budget, so
+size every brief from `free_resources` before the wave goes out. One
+brief that fails leaves the others' reports intact, and its section says
+how it stopped; re-brief that one alone with `delegate`.
+
+Each brief keeps its own share of the tool-result cap
+(`[agent] max_tool_output_chars`), so a long report is shortened in place
+and no section is dropped whole.
+
+`[agent] parallel_delegations` caps a wave, and defaults to 3. A wave
+larger than the cap is refused naming it, and `parallel_delegations = 1`
+removes the tool and leaves `delegate` alone. `slab mason report` counts
+the waves and the wall-clock they saved.
+
 ### Continuing a specialist
 
-The harness line captured above was recorded before handles existed. A
-line today names the specialist by its handle, `analysis-expert-1`, and ends
-with `continue with continues="analysis-expert-1"`. The handle is the
-agent name and the ordinal of the brief that created it, and it is also
-the tail of the specialist's transcript name. Pass it back as `continues`
-to give that same specialist another turn.
+Every harness line names its specialist by a handle, `md-expert-1` in the
+wave above, and ends with `continue with continues="md-expert-1"`. (The
+single-delegation capture earlier on this page is older than handles and
+shows the line without one.) The handle is the agent name and the ordinal
+of the brief that created it, and it is also the tail of the specialist's
+transcript name. Pass it back as `continues` to give that same specialist
+another turn.
 
 A continued specialist keeps the messages of its earlier turns, so it
 still holds the failure record it read, the script it wrote, and the run
@@ -145,6 +196,9 @@ one when the step is new.
   --resume`, a continue replays the specialist's transcript into a fresh
   loop and records the resume in it. That reaches the specialists of the
   conversation that was resumed, one hop back.
+- A wave's specialists are continued the same way, one at a time. A
+  `continues` handle inside a `delegate_many` brief is refused, because
+  one live specialist is never in two turns at once.
 
 ### Sizing a brief
 

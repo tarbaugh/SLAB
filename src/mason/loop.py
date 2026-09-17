@@ -34,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -718,6 +719,10 @@ class Mason:
         #: child died of a transport error mid-turn, so the footer can say
         #: how far it got.
         self.steps_taken = 0
+        #: Set by the lead of a wave when the person interrupts it. The loop
+        #: reads it between steps and ends the turn with what it has, so an
+        #: in-flight model call is not abandoned mid-request.
+        self.stop: threading.Event | None = None
         if spec is None:
             spec = self.roster["pi"]  # the built-in layer guarantees pi exists
         self.spec = spec
@@ -762,6 +767,7 @@ class Mason:
                 self.roster,
                 delegate="delegate" in self.toolbox.tools,
                 review="review" in self.toolbox.tools,
+                parallel="delegate_many" in self.toolbox.tools,
             )
             or None
         )
@@ -931,6 +937,15 @@ class Mason:
         watches = continue_cut and bool(getattr(self.client, "accepts_watch", False))
         max_turns = self.session.agent.max_turns
         for step in range(1, max_turns + 1):
+            if self.stop is not None and self.stop.is_set():
+                return TurnResult(
+                    text=(
+                        f"stopped: the lead interrupted the wave after step "
+                        f"{self.steps_taken}; the transcript holds the steps taken"
+                    ),
+                    stop_reason="error",
+                    steps=self.steps_taken,
+                )
             self.steps_taken = step
             self._clear_tool_results()
             self._maybe_compact()
@@ -1524,9 +1539,7 @@ class Mason:
             f"OLLAMA_CONTEXT_LENGTH=32768 before starting the server) and run again."
         )
         self.session.record({"type": "warning", "text": text})
-        observer = self.session.observer
-        if observer is not None:
-            observer("harness", self.session.attribution(), f"[warning] {text}")
+        self.session.observe("harness", f"[warning] {text}")
 
     # -- message bookkeeping --------------------------------------------------
 
@@ -1541,14 +1554,12 @@ class Mason:
         the text protocols the content *is* the call markup, and the
         approval preview already shows the call.
         """
-        observer = self.session.observer
-        if observer is None:
+        if self.session.observer is None:
             return
-        attribution = self.session.attribution()
         if reply.reasoning:
-            observer("reasoning", attribution, reply.reasoning)
+            self.session.observe("reasoning", reply.reasoning)
         if interim and reply.content and reply.content.strip():
-            observer("text", attribution, reply.content)
+            self.session.observe("text", reply.content)
 
     def _append_assistant(self, reply: ChatReply, *, has_calls: bool) -> None:
         if reply.reasoning:
@@ -1664,13 +1675,9 @@ class Mason:
         # The server's last count described the uncleared prompt.
         self._last_prompt_tokens = None
         self.session.record({"type": "clearing", "cleared": len(chosen), "chars": freed})
-        observer = self.session.observer
-        if observer is not None:
-            observer(
-                "harness",
-                self.session.attribution(),
-                f"[cleared {len(chosen)} old tool result(s), {freed} characters]",
-            )
+        self.session.observe(
+            "harness", f"[cleared {len(chosen)} old tool result(s), {freed} characters]"
+        )
 
     # -- compaction -----------------------------------------------------------
 

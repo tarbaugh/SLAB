@@ -405,13 +405,36 @@ more than model choice.
 | `notebook`, `plan` | the memory instruments (below). `plan` refuses a plan whose Goal names a quantity the notebook already reports, until it has a line `prior result: ...`, and it checks each `run:<id>/<name>` reference against the run store. A reference to a cache-hit run is rewritten to the run that produced the file |
 | `recall`, `remember`, `forget` | the machine's memory across sessions, described in [Memory](memory.md); `remember` takes the evidence that confirmed the fact, and `forget` undoes only a memory written in this session |
 | `skill` | load a skill: its instructions, root path, and bundled files; the catalog is per-agent |
-| `delegate` | hand one scoped task to a specialist's own loop; the PI only, one level deep, sequential; the result lists every machine memory the specialist wrote, with its evidence. `continues` takes the handle from an earlier report's harness line and gives that same specialist another turn, with everything it already read still in its context. `steps` and `effort` size one brief, and only downward from the agent's own budget |
+| `delegate` | hand one scoped task to a specialist's own loop; the PI only, one level deep; the specialist runs while the lead waits, so dependent steps go here one after the other; the result lists every machine memory the specialist wrote, with its evidence. `continues` takes the handle from an earlier report's harness line and gives that same specialist another turn, with everything it already read still in its context. `steps` and `effort` size one brief, and only downward from the agent's own budget |
+| `delegate_many` | hand a wave of independent briefs to the team at once; two to `[agent] parallel_delegations` briefs (default 3); the specialists run their loops at the same time and every report comes back together, one section per brief, in brief order; a wave briefs fresh specialists, so a `continues` handle belongs to `delegate` |
 | `review` | hand the plan or a file to the read-only critic before compute is spent; the leads only; the findings persist as a review record |
 | `finish` | end the task with a report citing run ids; honored only as the sole call of its reply, and only with a report. When the caller named the expected result keys (`slab mason run --expect t_melt:K`, or a benchmark question), a finish whose `results` names differ is not honored either. The tool result names the keys and units the goal asks for, and the agent calls finish again. The cited runs are the keep decision: the harness promotes the verified ones and expires the session's other runs, so the agent cites every run a number rests on, anchors from earlier sessions included |
 
-`skill`, `delegate`, and `review` belong to the roster: Mason is a research
-group of agent cards with per-specialist skills, described in
-[The roster and skills](roster-and-skills.md).
+`skill`, `delegate`, `delegate_many`, and `review` belong to the roster:
+Mason is a research group of agent cards with per-specialist skills,
+described in [The roster and skills](roster-and-skills.md).
+
+A wave is briefs that share no file and no run. `delegate_many` runs each
+brief's specialist loop in its own thread inside the lead's process, under
+the lead's session lock, and returns when the last one returns. Every
+child session is created before the first thread starts, so the ordinals
+and the transcript names follow brief order however the loops interleave.
+The result carries one section per brief, each with the report, the
+machine memories that brief wrote, and the same bracketed harness line a
+single `delegate` returns. A last line states the wall-clock the wave took
+and what the briefs would have cost one after the other. A brief that
+names an agent outside the team is refused before any thread starts, and
+more briefs than the cap are refused naming the cap. Read every harness
+footer before the next wave, and re-brief a failed brief on its own with
+`delegate`.
+
+The physics still has to fit. The launches a wave's briefs make together
+draw on one budget, so the lead calls `free_resources` first and sizes
+each brief from what is free. A vLLM endpoint serves the wave's model
+calls concurrently; a single-stream server, which is what Ollama is by
+default, answers them one at a time, which is correct and simply slower.
+Set `[agent] parallel_delegations = 1` to remove the tool, or switch off
+the `parallel-delegation` mechanism.
 
 `wait_for_run` is the way to wait on a run, however long the run is. One
 call blocks for up to 6 hours, so a 3-hour run needs one call. A longer
@@ -1301,8 +1324,9 @@ rather than summarizing linearly, follows the context-folding line
 
 ## Limitations, honestly stated
 
-Mason's roster delegates one level deep and sequentially: no parallel
-delegation, no specialist-to-specialist messaging, no recursive teams.
+Mason's roster delegates one level deep: independent briefs run together
+in one wave, dependent ones in sequence, and there is no
+specialist-to-specialist messaging and no recursive team.
 Delegation quality is bounded by the served model, and an 8B-class model
 handles only small, explicit briefs. Mason does not stream tokens,
 because an agent loop consumes whole turns. Its judgment is the served

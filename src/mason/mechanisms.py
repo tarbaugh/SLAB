@@ -125,6 +125,16 @@ MECHANISMS: tuple[Mechanism, ...] = (
         "separable subtasks only.",
     ),
     Mechanism(
+        "parallel-delegation",
+        "A lead hands out a wave of independent briefs with delegate_many, and "
+        "the specialists run their loops at the same time inside the lead's "
+        "process. Off, every brief goes through delegate, one after the other.",
+        "Anthropic's multi-agent research system: the orchestrator's subagents "
+        "run in parallel, and separable subtasks are what pays for the extra "
+        "tokens. A campaign whose plan holds independent steps waits for each "
+        "one in turn while the budget sits half free.",
+    ),
+    Mechanism(
         "adaptive-effort",
         "A reply cut at the token budget is retried once at lower effort with "
         "a request for brevity before the turn ends.",

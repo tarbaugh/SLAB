@@ -1518,8 +1518,11 @@ def test_a_server_that_truncates_the_prompt_is_named_once(tmp_path: Path) -> Non
 
 
 def test_an_honest_count_raises_no_warning(tmp_path: Path) -> None:
+    # A count of the same order as the estimate. The number tracks the
+    # fixed prefix, which grows as the cards and the core prompt do: the
+    # warning fires only below half the estimate.
     session = _session(tmp_path)
-    Mason(session, client=FakeClient([_text_reply("hi", prompt_tokens=6_000)])).run_turn("hi")
+    Mason(session, client=FakeClient([_text_reply("hi", prompt_tokens=12_000)])).run_turn("hi")
     assert '"type": "warning"' not in session.transcript_path.read_text()
 
 

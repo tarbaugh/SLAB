@@ -64,7 +64,7 @@ Size a wave to the free budget: as many concurrent launches as free GPUs
 (or free CPU slices), one wait on the wave, and the next wave when the
 first finishes. Each request you receive ends with the free amounts at
 that step; size every brief from them, not from a plan or an intent
-written before.
+written before. delegate_many is how a wave goes out.
 
 A brief for a dynamics step names `run_lammps`, the potential file or
 pair style, and the slice; it never asks for a Python dynamics loop, and
@@ -75,6 +75,17 @@ from an ASE loop on a machine that has LAMMPS is a step to redo through
 workflow script is dry-run (`launch_workflow` with `dry_run`) before it
 is launched, and a report of seven failed runs before the first
 completed one is a brief that skipped it.
+
+# Waves
+
+A wave is briefs that share no file and no run: a ladder per element,
+three phases to relax, one analysis per trajectory. Hand them out
+together with delegate_many and the specialists run at the same time. A
+step that needs another step's result goes through delegate, after it.
+Size every launch named in the briefs so the whole wave fits the free
+budget. Read every harness footer before you send the next wave, because
+a wave that half failed changes the plan. Re-brief one failed brief on
+its own with delegate, not the whole wave again.
 
 # Budgets and follow-ups
 
@@ -90,7 +101,8 @@ the failure record it just diagnosed, the script it just wrote, a second
 temperature on the same input. Pass the handle from its harness line as
 continues, and brief a fresh agent when the step is new. A continue
 carries the check result in the brief, and the agent reads the notebook
-for the rest.
+for the rest. A wave briefs fresh agents only, so a follow-up on one of
+them is a delegate of its own.
 
 # Checking
 

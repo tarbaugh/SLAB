@@ -33,7 +33,10 @@ import re
 import shlex
 import sqlite3
 import subprocess
-from collections.abc import Callable
+import threading
+import time
+from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -93,6 +96,7 @@ TOOL_VOCABULARY = frozenset(
         "remember",
         "forget",
         "delegate",
+        "delegate_many",
         "review",
         "finish",
     }
@@ -162,8 +166,8 @@ READ_ONLY_TOOLS = frozenset(
 )
 
 #: What a ``review_first`` card may not call before a critic approves the
-#: plan: the three tools that spend compute.
-_GATED_UNTIL_REVIEWED = ("launch_workflow", "submit_job", "delegate")
+#: plan: the tools that spend compute.
+_GATED_UNTIL_REVIEWED = ("launch_workflow", "submit_job", "delegate", "delegate_many")
 
 _MAX_READ_LINES = 400
 _MAX_LINE_CHARS = 500
@@ -446,6 +450,11 @@ def build_toolbox(
 
         if spec.delegates and hands(spec, roster):
             _add_delegate_tool(box, session, spec, roster, skills, parent_client)
+            # A wave needs room for at least two briefs, so a cap of one
+            # leaves the sequential tool alone.
+            cap = session.agent.parallel_delegations
+            if cap > 1 and enabled(session.agent, "parallel-delegation"):
+                _add_delegate_many_tool(box, session, spec, roster, skills, cap)
         if (
             (spec.delegates or spec.review_first)
             and critics(roster)
@@ -1585,8 +1594,12 @@ def _add_workflow_tools(
             record_command(session, kind="engine", tool=tool, run_id=run_id, error=str(e))
             return
         # The first event to carry a setup block keeps it; later ones, in
-        # this transcript or a delegation's, name its digest.
-        for entry in _ops.name_setups_once(entries, session.recorded_setups):
+        # this transcript or a delegation's, name its digest. The set is
+        # shared with the whole session tree, so a wave of specialists
+        # names each block once between them.
+        with session.locks.setups:
+            named = _ops.name_setups_once(entries, session.recorded_setups)
+        for entry in named:
             record_command(session, kind="engine", tool=tool, **entry)
 
     def _run_line(run: Any) -> str:
@@ -2941,6 +2954,8 @@ def brief_budget(
     return updates, notes, None
 
 
+
+
 def _child_config(session: MasonSession, target: AgentSpec) -> Any:
     """The configuration a specialist of *session* runs under.
 
@@ -2958,136 +2973,17 @@ def _child_config(session: MasonSession, target: AgentSpec) -> Any:
     return effective
 
 
-def _child_client(
-    session: MasonSession, child_session: MasonSession, parent_client: Any | None
-) -> Any:
-    """The parent's client when the two agents connect the same way, else a new one."""
-    from mason.loop import client_from_config, connection_profile
+def _spawn_child(
+    session: MasonSession, target: AgentSpec, *, handle: str | None = None
+) -> MasonSession:
+    """The session a brief to *target* runs in, spawned in the caller's thread.
 
-    if parent_client is not None and connection_profile(child_session.agent) == connection_profile(
-        session.agent
-    ):
-        return parent_client
-    return client_from_config(child_session.agent, child_session.api_keys)
-
-
-def _fresh_child(
-    session: MasonSession,
-    roster: dict[str, AgentSpec],
-    skills: dict[str, Skill],
-    parent_client: Any | None,
-    target: AgentSpec,
-    *,
-    keep: bool,
-) -> Any:
-    """A specialist's loop, built at depth 1 and ready for its first brief.
-
-    With *keep* the loop is remembered on the lead's session under its
-    handle, so a later brief can continue it with its messages intact.
-    Nothing is kept for a critic: a review is a fresh reading each time.
+    A wave spawns every child here before it starts a thread, so the
+    ordinals and the transcript names follow brief order. With *handle* the
+    child takes an existing one and its transcript, which is how a
+    specialist continued in a later process writes on into its own file.
     """
-    # Local import: tools must not import the loop at module scope (the
-    # loop imports tools).
-    from mason.loop import Mason
-
-    child_session = session.spawn(target.name, _child_config(session, target))
-    child = Mason(
-        child_session,
-        client=_child_client(session, child_session, parent_client),
-        skills=skills,
-        spec=target,
-        roster=roster,
-        depth=1,
-    )
-    if keep and child_session.handle is not None:
-        session.children[child_session.handle] = child
-    return child
-
-
-def _revive_child(
-    session: MasonSession,
-    roster: dict[str, AgentSpec],
-    skills: dict[str, Skill],
-    parent_client: Any | None,
-    target: AgentSpec,
-    handle: str,
-) -> Any:
-    """A specialist of an earlier process, replayed from its own transcript.
-
-    A lead's live children die with its process, so a continue after
-    ``--resume`` rebuilds one: the same handle, the same transcript, the
-    messages the file holds, and a system message built fresh. A compacted
-    child replays its pre-compaction messages and compacts again on its
-    own, which is what ``--resume`` does for a lead.
-    """
-    from mason.loop import Mason
-
-    child_session = session.spawn(target.name, _child_config(session, target), handle=handle)
-    # A resumed lead's own transcript is new; the specialist keeps writing
-    # into the file it already has.
-    found = child_transcript(session, handle)
-    if found is not None:
-        child_session.transcript_path = found
-    messages = session.load_messages(child_session.transcript_path)
-    return Mason(
-        child_session,
-        client=_child_client(session, child_session, parent_client),
-        skills=skills,
-        spec=target,
-        roster=roster,
-        depth=1,
-        resume_from=messages,
-        resume_in_place=True,
-    )
-
-
-def _apply_budget(child: Any, budget: dict[str, object]) -> None:
-    """Put this brief's step and effort budget on *child*, for this turn.
-
-    The baseline is the specialist's own configuration, so a brief that
-    sizes nothing runs at the card's budget however the brief before it
-    was sized. A budget that changes what the client bakes in (the effort
-    dial) builds that turn its own client.
-    """
-    from mason.config import override_agent
-    from mason.loop import client_from_config, connection_profile
-
-    session = child.session
-    before = session.agent
-    after = override_agent(session.base_agent, budget) if budget else session.base_agent
-    if after == before:
-        return
-    session.agent = after
-    if connection_profile(after) != connection_profile(before):
-        child.client = client_from_config(after, session.api_keys)
-
-
-def _child_turn(child: Any, brief: str) -> Any:
-    """One turn of a specialist's loop, with the transport failure caught."""
-    from mason.client import LlmError
-    from mason.loop import TurnResult
-
-    try:
-        return child.run_turn(brief)
-    except LlmError as e:
-        # The server failed the child mid-turn, after the client's own
-        # retries. The steps it took are in its transcript, so the parent
-        # gets a result that says so instead of an exception that discards
-        # them: one real critic lost five steps and twenty minutes to a
-        # gateway 502, and the lead paid for the review twice.
-        return TurnResult(
-            text=(
-                f"stopped: the model server failed mid-turn after step "
-                f"{child.steps_taken} ({e}); the transcript holds the steps taken"
-            ),
-            stop_reason="error",
-            steps=child.steps_taken,
-        )
-
-
-def _turn_number(child_session: MasonSession) -> int:
-    """Which turn of this specialist the next one is, counted from its transcript."""
-    return len(child_session.recorded("turn")) + 1
+    return session.spawn(target.name, _child_config(session, target), handle=handle)
 
 
 def _conversations(session: MasonSession) -> list[Path]:
@@ -3155,6 +3051,175 @@ def handle_refusal(
     return None
 
 
+def _turn_number(child_session: MasonSession) -> int:
+    """Which turn of this specialist the next one is, counted from its transcript."""
+    return len(child_session.recorded("turn")) + 1
+
+
+def _apply_budget(child: Any, budget: dict[str, object]) -> None:
+    """Put this brief's step and effort budget on *child*, for this turn.
+
+    The baseline is the specialist's own configuration, so a brief that
+    sizes nothing runs at the card's budget however the brief before it
+    was sized. A budget that changes what the client bakes in (the effort
+    dial) builds that turn its own client.
+    """
+    from mason.config import override_agent
+    from mason.loop import client_from_config, connection_profile
+
+    session = child.session
+    before = session.agent
+    after = override_agent(session.base_agent, budget) if budget else session.base_agent
+    if after == before:
+        return
+    session.agent = after
+    if connection_profile(after) != connection_profile(before):
+        child.client = client_from_config(after, session.api_keys)
+
+
+def _build_child(
+    child_session: MasonSession,
+    roster: dict[str, AgentSpec],
+    skills: dict[str, Skill],
+    client: Any,
+    target: AgentSpec,
+    *,
+    resume_from: list[dict[str, Any]] | None = None,
+) -> Any:
+    """The specialist's loop, built at depth 1 and ready for a brief."""
+    # Local import: tools must not import the loop at module scope (the
+    # loop imports tools).
+    from mason.loop import Mason
+
+    return Mason(
+        child_session,
+        client=client,
+        skills=skills,
+        spec=target,
+        roster=roster,
+        depth=1,
+        resume_from=resume_from,
+        resume_in_place=resume_from is not None,
+    )
+
+
+def _revive_child(
+    session: MasonSession,
+    roster: dict[str, AgentSpec],
+    skills: dict[str, Skill],
+    parent_client: Any | None,
+    target: AgentSpec,
+    handle: str,
+) -> Any:
+    """A specialist of an earlier process, replayed from its own transcript.
+
+    A lead's live children die with its process, so a continue after
+    ``--resume`` rebuilds one: the same handle, the same transcript, the
+    messages the file holds, and a system message built fresh. A compacted
+    child replays its pre-compaction messages and compacts again on its
+    own, which is what ``--resume`` does for a lead.
+    """
+    child_session = _spawn_child(session, target, handle=handle)
+    # A resumed lead's own transcript is new; the specialist keeps writing
+    # into the file it already has.
+    found = child_transcript(session, handle)
+    if found is not None:
+        child_session.transcript_path = found
+    messages = session.load_messages(child_session.transcript_path)
+    client = _child_client(session, child_session, parent_client)
+    return _build_child(child_session, roster, skills, client, target, resume_from=messages)
+
+
+def _child_client(
+    session: MasonSession, child_session: MasonSession, parent_client: Any | None
+) -> Any:
+    """The parent's client when the two agents connect the same way, else a new one."""
+    from mason.loop import client_from_config, connection_profile
+
+    if parent_client is not None and connection_profile(child_session.agent) == connection_profile(
+        session.agent
+    ):
+        return parent_client
+    return client_from_config(child_session.agent, child_session.api_keys)
+
+
+def _turn_child(
+    child: Any,
+    brief: str,
+    *,
+    stop: threading.Event | None = None,
+    hold_errors: bool = False,
+) -> Any:
+    """Run one turn of a built specialist loop on *brief*; its TurnResult.
+
+    The turn is marked in the child's transcript first, so a specialist
+    its lead briefs again is one file with a marker per brief. *stop* is
+    the wave's interrupt flag, read between steps. *hold_errors* turns an
+    exception the loop did not catch into an error result, which is what a
+    wave needs: one failed brief must not discard the reports its siblings
+    already produced.
+    """
+    from mason.client import LlmError
+    from mason.loop import TurnResult
+
+    child_session = child.session
+    child.stop = stop
+    child_session.record({"type": "turn", "n": _turn_number(child_session)})
+    try:
+        return child.run_turn(brief)
+    except LlmError as e:
+        # The server failed the child mid-turn, after the client's own
+        # retries. The steps it took are in its transcript, so the parent
+        # gets a result that says so instead of an exception that discards
+        # them: one real critic lost five steps and twenty minutes to a
+        # gateway 502, and the lead paid for the review twice.
+        return TurnResult(
+            text=(
+                f"stopped: the model server failed mid-turn after step "
+                f"{child.steps_taken} ({e}); the transcript holds the steps taken"
+            ),
+            stop_reason="error",
+            steps=child.steps_taken,
+        )
+    except Exception as e:
+        if not hold_errors:
+            raise
+        last = str(e).strip().splitlines()[-1:] or [e.__class__.__name__]
+        return TurnResult(
+            text=(
+                f"stopped: {last[0]} after step {child.steps_taken}; "
+                f"the transcript holds the steps taken"
+            ),
+            stop_reason="error",
+            steps=child.steps_taken,
+        )
+
+
+def _fresh_child(
+    session: MasonSession,
+    roster: dict[str, AgentSpec],
+    skills: dict[str, Skill],
+    parent_client: Any | None,
+    target: AgentSpec,
+    *,
+    keep: bool,
+) -> Any:
+    """A specialist's loop for a first brief, one level down.
+
+    A child whose connection profile matches the lead's reuses the lead's
+    client, one connection to one server. With *keep* the loop is
+    remembered on the lead's session under its handle, so a later brief can
+    continue it with its messages intact. Nothing is kept for a critic: a
+    review is a fresh reading each time.
+    """
+    child_session = _spawn_child(session, target)
+    client = _child_client(session, child_session, parent_client)
+    child = _build_child(child_session, roster, skills, client, target)
+    if keep and child_session.handle is not None:
+        session.children[child_session.handle] = child
+    return child
+
+
 def _run_child(
     session: MasonSession,
     roster: dict[str, AgentSpec],
@@ -3165,13 +3230,94 @@ def _run_child(
 ) -> tuple[Any, MasonSession]:
     """Run *target*'s own loop on *brief*, one level down; (result, child session).
 
-    The one place a tool spins a loop of its own, used by ``review`` and by
-    the first brief of a ``delegate``. The child is not kept for a later
-    continue here; ``delegate`` keeps its own.
+    The one place ``review`` spins a loop of its own. The critic is not
+    kept for a continue.
     """
     child = _fresh_child(session, roster, skills, parent_client, target, keep=False)
-    child.session.record({"type": "turn", "n": _turn_number(child.session)})
-    return _child_turn(child, brief), child.session
+    return _turn_child(child, brief), child.session
+
+
+def _run_children(
+    session: MasonSession,
+    roster: dict[str, AgentSpec],
+    skills: dict[str, Skill],
+    briefs: list[tuple[AgentSpec, str]],
+) -> tuple[list[tuple[Any, MasonSession, float]], float, bool]:
+    """Run every brief's specialist loop at the same time; results in brief order.
+
+    Returns one (result, child session, its own seconds) per brief, the
+    wave's wall-clock seconds, and whether a person interrupted it. Every
+    child session is spawned here, in the caller's thread, before any
+    thread starts, so the ordinals and the transcript names follow brief
+    order however the loops interleave.
+
+    Each child builds its own client. The lead's client is never shared
+    into a wave: one client object serves one conversation's requests, and
+    two loops calling it at once is not a contract any backend here makes.
+
+    A person's interrupt sets the stop flag every child loop reads between
+    its steps, and the wave then returns with what the children have.
+    """
+    from mason.loop import TurnResult, client_from_config
+
+    children = [(target, _spawn_child(session, target), brief) for target, brief in briefs]
+    stop = threading.Event()
+    answers: list[tuple[Any, MasonSession, float] | None] = [None] * len(children)
+    # The built loops, by index, so the lead can continue one of them after
+    # the wave. They are collected here and registered in the caller's
+    # thread, where the lead's own dict has one writer.
+    built: list[Any | None] = [None] * len(children)
+
+    def work(index: int) -> None:
+        target, child_session, brief = children[index]
+        started = time.monotonic()
+        try:
+            client = client_from_config(child_session.agent, child_session.api_keys)
+            child = _build_child(child_session, roster, skills, client, target)
+            built[index] = child
+            result = _turn_child(child, brief, stop=stop, hold_errors=True)
+        except Exception as e:  # a client this specialist's config cannot build
+            last = str(e).strip().splitlines()[-1:] or [e.__class__.__name__]
+            result = TurnResult(
+                text=f"stopped: {last[0]}; no step ran", stop_reason="error", steps=0
+            )
+        answers[index] = (result, child_session, time.monotonic() - started)
+
+    began = time.monotonic()
+    interrupted = False
+    pool = ThreadPoolExecutor(max_workers=len(children))
+    try:
+        futures = [pool.submit(work, index) for index in range(len(children))]
+        for future in futures:
+            try:
+                future.result()
+            except KeyboardInterrupt:
+                # The children end at their next step boundary. Waiting for
+                # the in-flight model calls is what keeps each transcript a
+                # complete record; the caller raises again afterwards.
+                interrupted = True
+                stop.set()
+    finally:
+        pool.shutdown(wait=True)
+    wave_s = time.monotonic() - began
+    for child in built:
+        if child is not None and child.session.handle is not None:
+            session.children[child.session.handle] = child
+    settled = [
+        answer
+        if answer is not None
+        else (
+            TurnResult(
+                text="stopped: the brief did not run; the wave ended first",
+                stop_reason="error",
+                steps=0,
+            ),
+            children[index][1],
+            0.0,
+        )
+        for index, answer in enumerate(answers)
+    ]
+    return settled, wave_s, interrupted
 
 
 def _json_tables(text: str) -> dict[str, dict[str, Any]] | None:
@@ -3404,6 +3550,70 @@ def _harness_footer(
     return line + "]"
 
 
+def _pick_hand(spec: AgentSpec, roster: dict[str, AgentSpec], name: str) -> AgentSpec | str:
+    """The team member named, or the refusal a lead reads instead.
+
+    Shared by ``delegate`` and ``delegate_many`` so a bad name is refused
+    the same way whichever tool asked, and, for a wave, before any thread
+    starts.
+    """
+    from mason.roster import hands
+
+    team = hands(spec, roster)
+    others = ", ".join(team)
+    if name == spec.name:
+        return f"you cannot delegate to yourself; your team: {others}"
+    target = team.get(name)
+    if target is not None:
+        return target
+    if name in roster and roster[name].reviews:
+        return (
+            f"{name} reviews and takes no briefs; hand it the plan or a file "
+            f"with the review tool. your team: {others}"
+        )
+    if name in roster:
+        return f"{name} leads a group of its own and takes no briefs; your team: {others}"
+    return f"no agent named {name!r}; your team: {others}"
+
+
+def _child_report(
+    session: MasonSession,
+    name: str,
+    result: Any,
+    child_session: MasonSession,
+    notes: list[str],
+    errors: list[str],
+    *,
+    turn: int | None = None,
+    written: list[dict[str, Any]] | None = None,
+    stop: str | None = None,
+    continues: str | None = None,
+    budget_notes: Sequence[str] = (),
+) -> str:
+    """One specialist's report as the lead reads it: text, what it left, the footer.
+
+    *turn* and *written* narrow the outcome and the memories to one brief,
+    which is what a lead that continued a specialist asked for. Without
+    them the whole errand is reported, as a first brief's is.
+    """
+    text = result.text
+    if result.truncated:
+        text = f"{text}\n\n{partial_outcome(child_session, turn)}"
+    memories = child_session.memories_written if written is None else written
+    if memories:
+        text = f"{text}\n\n{memories_written_block(session, memories)}"
+    refs = "".join(f"\n[harness] {note}" for note in budget_notes)
+    refs += "".join(f"\n[harness] brief: {note}" for note in notes)
+    refs += "".join(f"\n[harness] brief reference not found: {error}" for error in errors)
+    footer = _harness_footer(name, result, child_session, stop=stop, continues=continues)
+    return f"{text}\n\n{footer}{refs}"
+
+
+def _brief_text(spec: AgentSpec, task: str, context: object) -> str:
+    """The brief a specialist reads: the task, and the lead's context under it."""
+    return task if not context else f"{task}\n\nContext from {spec.name}:\n{context}"
+
+
 def _add_delegate_tool(
     box: Toolbox,
     session: MasonSession,
@@ -3414,27 +3624,15 @@ def _add_delegate_tool(
 ) -> None:
     def delegate(arguments: dict[str, Any]) -> str:
         from mason.errors import MasonError
-        from mason.roster import hands
 
         name = str(arguments["agent"])
-        team = hands(spec, roster)
-        others = ", ".join(team)
         raw_handle = arguments.get("continues")
         handle = str(raw_handle).strip() if raw_handle else ""
         if handle and (refusal := handle_refusal(session, roster, handle, name)):
             return refusal
-        if name == spec.name:
-            return f"you cannot delegate to yourself; your team: {others}"
-        target = team.get(name)
-        if target is None:
-            if name in roster and roster[name].reviews:
-                return (
-                    f"{name} reviews and takes no briefs; hand it the plan or a file "
-                    f"with the review tool. your team: {others}"
-                )
-            if name in roster:
-                return f"{name} leads a group of its own and takes no briefs; your team: {others}"
-            return f"no agent named {name!r}; your team: {others}"
+        target = _pick_hand(spec, roster, name)
+        if isinstance(target, str):
+            return target
         budget, budget_notes, budget_refusal = brief_budget(
             _child_config(session, target),
             session.flag_updates,
@@ -3444,8 +3642,7 @@ def _add_delegate_tool(
         if budget_refusal is not None:
             return budget_refusal
         task = str(arguments["task"])
-        context = arguments.get("context")
-        brief = task if not context else f"{task}\n\nContext from {spec.name}:\n{context}"
+        brief = _brief_text(spec, task, arguments.get("context"))
         # A reference to a cache-hit run's file is sent as one to the run
         # that holds it; a reference nothing answers is sent as written,
         # and the lead reads why below the report.
@@ -3470,8 +3667,7 @@ def _add_delegate_tool(
         # reads back are what THIS brief produced, not the whole errand's.
         turn = _turn_number(child_session)
         seen_memories = len(child_session.memories_written)
-        child_session.record({"type": "turn", "n": turn})
-        result = _child_turn(child, brief)
+        result = _turn_child(child, brief)
         written = child_session.memories_written[seen_memories:]
         event: dict[str, Any] = {
             "type": "delegate",
@@ -3490,22 +3686,19 @@ def _add_delegate_tool(
         if "effort" in budget:
             event["effort"] = budget["effort"]
         session.record(event)
-        text = result.text
-        if result.truncated:
-            text = f"{text}\n\n{partial_outcome(child_session, turn)}"
-        if written:
-            text = f"{text}\n\n{memories_written_block(session, written)}"
-        footer = _harness_footer(
+        return _child_report(
+            session,
             child_session.handle or name,
             result,
             child_session,
+            notes,
+            errors,
+            turn=turn,
+            written=written,
             stop=stop_text(result, child_session.agent, budget.get("max_turns")),  # type: ignore[arg-type]
             continues=child_session.handle,
+            budget_notes=budget_notes,
         )
-        refs = "".join(f"\n[harness] {note}" for note in budget_notes)
-        refs += "".join(f"\n[harness] brief: {note}" for note in notes)
-        refs += "".join(f"\n[harness] brief reference not found: {error}" for error in errors)
-        return f"{text}\n\n{footer}{refs}"
 
     box.add(
         Tool(
@@ -3558,6 +3751,172 @@ def _add_delegate_tool(
             handler=delegate,
         )
     )
+
+
+def _add_delegate_many_tool(
+    box: Toolbox,
+    session: MasonSession,
+    spec: AgentSpec,
+    roster: dict[str, AgentSpec],
+    skills: dict[str, Skill],
+    cap: int,
+) -> None:
+    def delegate_many(arguments: dict[str, Any]) -> str:
+        raw = arguments.get("briefs")
+        if not isinstance(raw, list):
+            return "briefs must be a list of {agent, task, context} objects"
+        if len(raw) < 2:
+            return (
+                "a wave carries at least two briefs; one task goes to delegate, "
+                "which is also where a step that depends on another one goes"
+            )
+        if len(raw) > cap:
+            return (
+                f"{len(raw)} briefs is more than this session runs at once "
+                f"(the cap is {cap}, from [agent] parallel_delegations); send "
+                f"{cap} now and the rest in the next wave"
+            )
+        briefs: list[tuple[AgentSpec, str]] = []
+        names: list[str] = []
+        tasks: list[str] = []
+        references: list[tuple[list[str], list[str]]] = []
+        # Every name is checked before any thread starts: a wave that would
+        # refuse halfway has already spent the other specialists' tokens.
+        for position, item in enumerate(raw, start=1):
+            if not isinstance(item, dict) or not item.get("agent") or not item.get("task"):
+                return f"brief {position} needs an agent and a task"
+            if item.get("continues"):
+                return (
+                    f"brief {position}: continue a specialist with delegate, one at a "
+                    f"time; a wave briefs fresh specialists, and one live specialist is "
+                    f"never in two turns at once"
+                )
+            name = str(item["agent"])
+            target = _pick_hand(spec, roster, name)
+            if isinstance(target, str):
+                return f"brief {position}: {target}"
+            task = str(item["task"])
+            brief, notes, errors = resolve_artifact_refs(
+                session.workspace_root, _brief_text(spec, task, item.get("context"))
+            )
+            briefs.append((target, brief))
+            names.append(name)
+            tasks.append(task)
+            references.append((notes, errors))
+
+        output_cap = _listing_cap(session)
+        share = None if output_cap is None else max((output_cap - 200) // len(briefs), 400)
+        wave = _next_wave(session)
+        answers, wave_s, interrupted = _run_children(session, roster, skills, briefs)
+        sections: list[str] = []
+        for position, (result, child_session, child_s) in enumerate(answers, start=1):
+            notes, errors = references[position - 1]
+            session.record(
+                {
+                    "type": "delegate",
+                    "agent": names[position - 1],
+                    "task": tasks[position - 1],
+                    "transcript": child_session.transcript_path.name,
+                    "stop": result.stop_reason,
+                    "steps": result.steps,
+                    "memories": [e["name"] for e in child_session.memories_written],
+                    "wave": wave,
+                    "parallel": True,
+                    "elapsed_s": round(child_s, 1),
+                    "wave_s": round(wave_s, 1),
+                }
+            )
+            report = _child_report(
+                session,
+                child_session.handle or names[position - 1],
+                result,
+                child_session,
+                notes,
+                errors,
+                continues=child_session.handle,
+            )
+            section = (
+                f"## {names[position - 1]} (brief {position} of {len(answers)})\n\n{report}"
+            )
+            # Each brief keeps its own share of the result cap. Capping the
+            # joined text instead would drop a middle section whole, and a
+            # report the lead never sees is a brief paid for twice.
+            if share is not None:
+                section = _truncate_middle(section, share)
+            sections.append(section)
+        if interrupted:
+            # The transcripts are complete and the events are written; the
+            # person's interrupt still ends the lead's turn.
+            raise KeyboardInterrupt
+        sequential = sum(child_s for _result, _child, child_s in answers)
+        sections.append(
+            f"wave: {len(answers)} briefs, {wave_s:.0f} s; sequential would "
+            f"have been about {sequential:.0f} s"
+        )
+        return "\n\n".join(sections)
+
+    box.add(
+        Tool(
+            name="delegate_many",
+            description=(
+                "Hand several independent briefs to your team at once. Briefs "
+                "must not depend on each other's files or runs, and their "
+                "launches together must fit what is free; call free_resources "
+                "first. Dependent steps go through delegate, one after the "
+                f"other. Two to {cap} briefs per wave; you receive every report "
+                "together, one section per brief."
+            ),
+            parameters=_schema(
+                {
+                    "briefs": {
+                        "type": "array",
+                        "description": (
+                            "the independent briefs, two or more; the same "
+                            "specialist may take two of them"
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "agent": {
+                                    "type": "string",
+                                    "description": "a name from Your team",
+                                },
+                                "task": {
+                                    "type": "string",
+                                    "description": (
+                                        "the scoped goal, self-contained and checkable"
+                                    ),
+                                },
+                                "context": {
+                                    "type": "string",
+                                    "description": "optional background the task needs",
+                                },
+                            },
+                            "required": ["agent", "task"],
+                        },
+                    }
+                },
+                ["briefs"],
+            ),
+            handler=delegate_many,
+        )
+    )
+
+
+def _next_wave(session: MasonSession) -> int:
+    """Which wave this is in the conversation, counting the ones on record.
+
+    Examples:
+        >>> import types
+        >>> session = types.SimpleNamespace(
+        ...     recorded=lambda kind: [{"wave": 1}, {"wave": 1}, {"wave": 2}])
+        >>> _next_wave(session)
+        3
+        >>> _next_wave(types.SimpleNamespace(recorded=lambda kind: [{}]))
+        1
+    """
+    waves = [int(e["wave"]) for e in session.recorded("delegate") if e.get("wave")]
+    return max(waves, default=0) + 1
 
 
 # -- review: a critic before compute -----------------------------------------
