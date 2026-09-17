@@ -219,6 +219,15 @@ class Toolbox:
 
     session: MasonSession
     tools: dict[str, Tool] = field(default_factory=dict)
+    #: What the dispatch in progress read. ``read_artifact`` sets ``table``
+    #: when the artifact is a table, a JSON one or a file with a table
+    #: suffix; a data file's Atoms section or a dump is rows of numbers and
+    #: not a table, so the nudge to compute a statistic never follows it.
+    #: The handler shares this dict and never closes over the box: a
+    #: handler holding the box ties the box, its tools, and their handlers
+    #: into a cycle, and the session lock rides the session until the
+    #: cycle is collected.
+    read_state: dict[str, bool] = field(default_factory=dict, init=False, repr=False)
 
     def add(self, tool: Tool) -> None:
         self.tools[tool.name] = tool
@@ -253,9 +262,10 @@ class Toolbox:
     def _table_nudge(self, call: ToolCall, result: str) -> str:
         """The harness line for a read whose answer is a long numeric table.
 
-        Only the two read tools carry it, and ``read_file`` only for the
-        suffixes an engine writes its tables to. A card with no shell reads
-        the variant that sends it to its specialist.
+        Only the two read tools carry it: ``read_file`` for the suffixes an
+        engine writes its tables to, and ``read_artifact`` for a JSON table
+        or an artifact with one of those suffixes. A card with no shell
+        reads the variant that sends it to its specialist.
         """
         if call.name not in NUDGED_READS or _is_refusal(result):
             return ""
@@ -265,6 +275,8 @@ class Toolbox:
             suffix = Path(str(call.arguments.get("path") or "")).suffix.lower()
             if suffix not in TABLE_SUFFIXES:
                 return ""
+        elif not self.read_state.get("table"):
+            return ""
         return table_nudge(
             result,
             rows=self.session.agent.table_nudge_rows,
@@ -307,6 +319,7 @@ class Toolbox:
                     f"tool {call.name} was not approved by the user; explain what you "
                     f"wanted it for, or work another way"
                 )
+        self.read_state.clear()
         try:
             result = tool.handler(call.arguments)
         except Exception as e:  # evidence for the model, never a dead loop
@@ -1745,6 +1758,8 @@ def _add_workflow_tools(
         raw = (directory / wanted).read_bytes()
         return wanted, f"{wanted} ({len(raw)} bytes, dry-run record {record_id})", raw
 
+    read_state = box.read_state
+
     def read_artifact(arguments: dict[str, Any]) -> str:
         from foundation.errors import ArtifactNotFoundError
 
@@ -1785,7 +1800,12 @@ def _add_workflow_tools(
             every = _count_argument(arguments, "every") or 1
         except ValueError as e:
             return f"{head}\nrefused: {e}"
-        tables = None if arguments.get("raw") else _json_tables(text)
+        tables = _json_tables(text)
+        # A JSON table, raw or windowed, or a file with a table suffix is
+        # a table the nudge may follow; a structure file or a dump is not.
+        read_state["table"] = tables is not None or Path(name).suffix.lower() in TABLE_SUFFIXES
+        if arguments.get("raw"):
+            tables = None
         if tables is not None:
             return f"{head}\n" + _table_window(
                 tables, arguments, offset=offset, limit=limit, every=every
@@ -3560,12 +3580,14 @@ def partial_outcome(child_session: MasonSession, turn: int | None = None) -> str
     repeats are folded. With *turn*, only what that turn left behind is
     named: a specialist the lead continues reports one turn at a time.
 
-    A turn the ceiling cut twice says so, because the lead paid for the
-    first reply and for the short answer asked for after it.
+    A turn the ceiling cut more than once says how many times, because the
+    lead paid for every reply. When the last cut ran under a lower ceiling
+    than the first, it was the halved brevity retry, and the outcome says
+    that too.
     """
     files: list[str] = []
     runs: list[str] = []
-    cuts = 0
+    ceilings: list[int | None] = []
     try:
         lines = child_session.transcript_path.read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -3585,7 +3607,7 @@ def partial_outcome(child_session: MasonSession, turn: int | None = None) -> str
         if not counting:
             continue
         if kind == "cut":
-            cuts += 1
+            ceilings.append(event.get("ceiling"))
         elif kind == "edit" and event.get("path") and str(event["path"]) not in files:
             files.append(str(event["path"]))
         elif kind == "command" and event.get("run_id") and str(event["run_id"]) not in runs:
@@ -3596,14 +3618,52 @@ def partial_outcome(child_session: MasonSession, turn: int | None = None) -> str
     if runs:
         parts.append("runs it launched: " + ", ".join(runs))
     left = "; ".join(parts) or "it wrote no file and launched no run"
-    # Two cuts in one turn is the shape that ends a turn with no text: the
-    # reply was cut, and so was the short answer asked for under half the
-    # ceiling. The lead reads that it paid for both.
-    twice = " twice, the second time under half the ceiling" if cuts >= 2 else ""
+    # More than one cut in a turn is the shape that ends a turn with no
+    # text: the reply was cut, and so was the answer asked for after it.
+    # The lead reads how many replies it paid for, and whether the last
+    # was the halved retry.
+    twice = f" {times(len(ceilings))}{halved_clause(ceilings)}" if len(ceilings) >= 2 else ""
     return (
         f"[partial outcome: the specialist's turn ended cut at its reply-token "
         f"ceiling{twice}; {left}. Re-brief it to continue from these, not from zero.]"
     )
+
+
+#: Said of the last cut when it ran under a lower ceiling than the first:
+#: the retry after a case-1 cut runs under half the ceiling, so the
+#: truncated mark and the partial outcome read it off the cut events.
+HALVED_CLAUSE = ", the last under half the ceiling"
+
+
+def times(n: int) -> str:
+    """How many times, in words for one and two.
+
+    Examples:
+        >>> times(1), times(2), times(3)
+        ('once', 'twice', '3 times')
+    """
+    return {1: "once", 2: "twice"}.get(n, f"{n} times")
+
+
+def halved_clause(ceilings: Sequence[int | None]) -> str:
+    """The clause for a turn whose last cut ran under a lower ceiling than
+    its first, read off the cut events' ``ceiling``, or the empty string.
+
+    A ceiling of ``None`` is a cut recorded before ceilings were, and says
+    nothing.
+
+    Examples:
+        >>> halved_clause([16000, 8000])
+        ', the last under half the ceiling'
+        >>> halved_clause([16000, 16000]), halved_clause([16000]), halved_clause([None, 8000])
+        ('', '', '')
+    """
+    if len(ceilings) < 2:
+        return ""
+    first, last = ceilings[0], ceilings[-1]
+    if first is not None and last is not None and last < first:
+        return HALVED_CLAUSE
+    return ""
 
 
 def stop_text(result: Any, agent: Any, brief_steps: int | None) -> str:

@@ -1977,9 +1977,26 @@ def test_the_retry_after_a_case_1_cut_runs_under_half_the_ceiling(tmp_path: Path
     assert client.options[2]["effort"] == "low"
     (event,) = _cut_events(session)
     assert event["case"] == 1 and event["continued"] is False
-    # The cut says what it cost and what the model had just read.
+    # The cut says what it cost, under which ceiling, and what the model
+    # had just read.
     assert event["tokens"] == 8_000
+    assert event["ceiling"] == 8_000
     assert event["after_tool"] == "read_file"
+
+
+def test_the_design_call_after_a_case_1_cut_runs_under_half_the_ceiling(tmp_path: Path) -> None:
+    """The design path is the other retry after a case-1 cut: one notebook
+    call, so it runs under half the ceiling like the brevity retry."""
+    session = _session(tmp_path, effort="high", max_reply_tokens=8_000)
+    client = FakeClient(
+        [_design_cut(), _tool_reply("notebook", entry="Design: Pdamp 1.0"), _text_reply("done")]
+    )
+    result = Mason(session, client=client).run_turn("go")
+    assert result.text == "done"
+    assert [options["max_tokens"] for options in client.options] == [8_000, 4_000, 8_000]
+    assert client.options[1]["effort"] == "low"
+    (event,) = _cut_events(session)
+    assert event["design"] is True and event["ceiling"] == 8_000
 
 
 def test_the_ceiling_is_not_halved_without_adaptive_effort(tmp_path: Path) -> None:
@@ -1992,6 +2009,32 @@ def test_the_ceiling_is_not_halved_without_adaptive_effort(tmp_path: Path) -> No
     Mason(session, client=client).run_turn("go")
     assert [options["max_tokens"] for options in client.options] == [8_000, 8_000]
     assert "effort" not in client.options[1]
+
+
+def test_the_truncated_mark_reads_the_cuts_off_the_events(tmp_path: Path) -> None:
+    """The mark counts the turn's cuts and says the last ran under half the
+    ceiling only when its recorded ceiling is below the first's: not for
+    two continued cuts at the full ceiling, not with adaptive-effort off,
+    and yes when a design cut and a brevity cut precede the halved retry."""
+    mid_text = ChatReply(content="line 1\npart", finish_reason="max_tokens", prompt_tokens=10)
+    empty = ChatReply(content="", finish_reason="max_tokens", prompt_tokens=10)
+
+    continued = _session(tmp_path / "a", effort="high", max_reply_tokens=8_000)
+    result = Mason(continued, client=FakeClient([mid_text, mid_text])).run_turn("go")
+    assert result.truncated
+    assert "hit the reply-token ceiling twice;" in result.text
+    assert [e["ceiling"] for e in _cut_events(continued)] == [8_000, 8_000]
+
+    plain = _session(tmp_path / "b", effort="high", max_reply_tokens=8_000, mechanisms=["skills"])
+    result = Mason(plain, client=FakeClient([empty, empty])).run_turn("go")
+    assert "hit the reply-token ceiling twice;" in result.text
+    assert [e["ceiling"] for e in _cut_events(plain)] == [8_000, 8_000]
+
+    designed = _session(tmp_path / "c", effort="high", max_reply_tokens=8_000)
+    client = FakeClient([_design_cut(), _design_cut(), empty])
+    result = Mason(designed, client=client).run_turn("go")
+    assert "hit the reply-token ceiling 3 times, the last under half the ceiling;" in result.text
+    assert [e["ceiling"] for e in _cut_events(designed)] == [8_000, 4_000, 4_000]
 
 
 def test_a_card_can_run_under_its_own_reply_ceiling(tmp_path: Path) -> None:

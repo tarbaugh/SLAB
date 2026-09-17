@@ -35,6 +35,7 @@ import hashlib
 import json
 import os
 import threading
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -70,6 +71,8 @@ from mason.tools import (
     WAIT_STILL_RUNNING,
     Toolbox,
     build_toolbox,
+    halved_clause,
+    times,
 )
 from slab._version import __version__
 
@@ -126,10 +129,23 @@ _CUT_REPLY_NUDGE = (
     "per finding)."
 )
 _TRUNCATED_MARK = (
-    "\n\n[truncated: the reply hit the reply-token ceiling twice, the second time "
-    "at low effort; the operator can raise [agent] max_reply_tokens or lower the "
-    "effort for this agent]"
+    "\n\n[truncated: the reply hit the reply-token ceiling {times}{halved}; the "
+    "operator can raise [agent] max_reply_tokens or lower the effort for this agent]"
 )
+
+
+def _truncated_mark(ceilings: Sequence[int | None]) -> str:
+    """The mark on an answer the ceiling cut, from the turn's cut ceilings.
+
+    Examples:
+        >>> _truncated_mark([16000, 8000]).split(";")[0].strip()
+        '[truncated: the reply hit the reply-token ceiling twice, the last under half the ceiling'
+        >>> _truncated_mark([16000, 16000, 16000]).split(";")[0].strip()
+        '[truncated: the reply hit the reply-token ceiling 3 times'
+    """
+    return _TRUNCATED_MARK.format(times=times(len(ceilings)), halved=halved_clause(ceilings))
+
+
 #: A cut reply that held text and no tool call was two thirds of an
 #: answer or a script, not a spent think block. The text stays in the
 #: history and the model resumes it; the join on return trims the
@@ -818,6 +834,11 @@ class Mason:
         # The tool of the last call this turn dispatched, recorded with a cut
         # so a report can name what the model was reading when it was cut.
         self._last_tool: str | None = None
+        # The max_tokens of the last model call, recorded with a cut so the
+        # truncated mark can say whether the last cut ran under a lower
+        # ceiling than the first; and this turn's cut ceilings, in order.
+        self._last_ceiling: int | None = None
+        self._turn_cuts: list[int | None] = []
         if depth == 0:
             # The transcript says which model answered it, so a later reader
             # (a report, a benchmark score) trusts the record, not the config
@@ -927,6 +948,7 @@ class Mason:
         self._append({"role": "user", "content": user_text})
         # A cut names the tool this turn read last, not the turn before's.
         self._last_tool = None
+        self._turn_cuts = []
         error_streak = 0
         empty_nudged = False
         cut_nudged = False
@@ -1045,6 +1067,9 @@ class Mason:
                     self._append({"role": "user", "content": nudge})
                     if enabled(self.session.agent, "adaptive-effort"):
                         self._effort_override = _retry_effort(self.session.agent.effort)
+                        # The design call is one notebook call, so it runs
+                        # under half the ceiling like the brevity retry.
+                        self._reply_scale = 2
                     continue
                 if cut and not cut_nudged:
                     cut_nudged = True
@@ -1093,8 +1118,13 @@ class Mason:
                     self._append({"role": "user", "content": _EMPTY_REPLY_NUDGE})
                     continue
                 if cut:
+                    # The cut that ends the turn is recorded like the ones
+                    # before it, so the mark, the partial outcome, and the
+                    # report count every reply the ceiling took. Text that
+                    # stands in the answer was kept, not lost.
+                    self._record_cut({"type": "cut", "case": case, "continued": case == 2}, reply)
                     # A truncated answer must not be passed off as a finished one.
-                    text += _TRUNCATED_MARK
+                    text += _truncated_mark(self._turn_cuts)
                 return TurnResult(text=text, stop_reason="answer", steps=step, truncated=cut)
             if cut and cut_call is not None:
                 # A second cut inside a call, or one with the switch off: the
@@ -1500,6 +1530,7 @@ class Mason:
                     messages = [*messages, {"role": "user", "content": hint}]
                 options["max_tokens"] = self._reply_budget(scale)
                 reply = self.client.chat(messages, tools, **options)
+        self._last_ceiling = int(options["max_tokens"])
         self.session.count_usage(
             reply.prompt_tokens, reply.completion_tokens, reply.cached_prompt_tokens
         )
@@ -1523,10 +1554,13 @@ class Mason:
         discarded, and ``after_tool`` is the tool of the last call this turn
         dispatched. ``slab mason report`` sums the first and counts the
         second, so a session that loses its replies after one kind of read
-        says so.
+        says so. ``ceiling`` is the ``max_tokens`` of the call that was cut,
+        so a reader can tell a halved retry from a cut at the full ceiling.
         """
         event["after_tool"] = self._last_tool
         event["tokens"] = reply.completion_tokens or 0
+        event["ceiling"] = self._last_ceiling
+        self._turn_cuts.append(self._last_ceiling)
         self.session.record(event)
 
     def _reply_budget(self, scale: int = 1) -> int:

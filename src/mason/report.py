@@ -88,8 +88,9 @@ def _tally(transcript: Path) -> dict[str, Any]:
     finished = False
     retire: dict[str, Any] | None = None
     commands: Counter[str] = Counter()
-    # Replies the reply-token ceiling cut: how many, what they cost in
-    # completion tokens, and the tool each one followed.
+    # Replies the reply-token ceiling cut: how many, what the ones whose
+    # text was discarded cost in completion tokens, and the tool each one
+    # followed. A continued cut kept its text, so it lost nothing.
     cuts = cut_tokens = 0
     cut_after: Counter[str] = Counter()
     # Waves of parallel briefs: the wall-clock each wave took, by wave
@@ -171,7 +172,8 @@ def _tally(transcript: Path) -> dict[str, Any]:
             commands[str(event.get("kind") or "?")] += 1
         elif kind == "cut":
             cuts += 1
-            cut_tokens += int(event.get("tokens") or 0)
+            if not event.get("continued"):
+                cut_tokens += int(event.get("tokens") or 0)
             if event.get("after_tool"):
                 cut_after[str(event["after_tool"])] += 1
         elif kind == "turn":

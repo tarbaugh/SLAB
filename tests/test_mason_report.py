@@ -498,6 +498,31 @@ def test_the_report_sums_the_tokens_the_ceiling_cost(tmp_path: Path) -> None:
     )
 
 
+def test_a_continued_cut_is_counted_but_lost_nothing(tmp_path: Path) -> None:
+    """A cut the loop continued kept its text in the history, so its
+    tokens were not lost; the report counts the cut and not the tokens.
+    A single cut names its tool with "after", and a tie names none."""
+    sessions = tmp_path / "ws" / "mason" / "sessions"
+    continued = {**_cut("2026-09-17T12:00:02+00:00", 9_000, "shell"), "case": 2, "continued": True}
+    conversation = _write(
+        sessions / "20260917-120000-3.jsonl",
+        [_usage("2026-09-17T12:00:00+00:00"), continued],
+    )
+    summary = summarize(conversation)
+    assert summary["total_cuts"] == 1 and summary["total_cut_tokens"] == 0
+    result = runner.invoke(app, ["report", "-w", str(tmp_path / "ws")])
+    assert "replies cut at the ceiling: 1, 0 completion tokens lost; after shell" in result.output
+    _write(
+        sessions / "20260917-120000-3-md-expert-1.jsonl",
+        [
+            _usage("2026-09-17T12:01:00+00:00"),
+            _cut("2026-09-17T12:01:01+00:00", 4_000, "read_file"),
+        ],
+    )
+    result = runner.invoke(app, ["report", "-w", str(tmp_path / "ws")])
+    assert "replies cut at the ceiling: 2, 4000 completion tokens lost\n" in result.output
+
+
 def test_a_session_without_cuts_says_nothing_about_them(tmp_path: Path) -> None:
     conversation = _campaign(tmp_path / "ws" / "mason" / "sessions" / "20260917-110000-2.jsonl")
     assert summarize(conversation)["total_cuts"] == 0

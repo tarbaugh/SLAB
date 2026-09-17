@@ -1018,11 +1018,14 @@ layers, cheapest first.
    states how many rows it left out. `every=` thins the lines of a text
    artifact the same way. A read that still returns more than
    `table_nudge_rows` rows of numbers (default 20) ends with one harness
-   line: a table this long is for a script, not for reading, so compute
-   the statistic with a workflow or a shell one-liner and read the number
-   back. A card with no shell, such as the planner, reads the variant
-   that sends it to its specialist. `read_artifact` carries the line for
-   any long table, and `read_file` for a `.dat`, `.csv`, or `.yaml` file.
+   line. The line says that a table this long is for a script, not for
+   reading. It tells the model to compute the statistic with a workflow
+   or a shell one-liner and read the number back. A card with no shell,
+   such as the planner, reads the variant that sends it to its
+   specialist. `read_artifact` carries the line for a JSON table or an
+   artifact with a `.dat`, `.csv`, or `.yaml` name. `read_file` carries
+   it for a file with one of those suffixes. A structure file or a dump
+   never carries it, whatever its rows.
    One benchmark session was cut at the reply ceiling seventeen times,
    and fourteen of the fifteen cut events followed a raw read of a `fix
    ave/time` table the model then tried to interpret in its head. The
@@ -1102,8 +1105,9 @@ lines, so a second failure costs half of what the first did. A cut reply
 that held text or a tool call is continued instead, because the text
 was most of an answer or a script. One planner briefed the same
 specialist three times because the brevity nudge discarded such replies,
-and lost about thirty minutes and 470,000 tokens. A second cut is marked,
-and the partial outcome a cut specialist hands its lead names both cuts.
+and lost about thirty minutes and 470,000 tokens. A second cut is marked.
+The mark and the partial outcome a cut specialist hands its lead count
+the cuts, and say when the last one ran under half the ceiling.
 
 Each cut is recorded with what it cost. The `cut` event carries the
 completion tokens the ceiling discarded and the tool the model read last,

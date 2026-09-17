@@ -1228,10 +1228,19 @@ def _offenders(counts: dict[str, int]) -> str:
 def _cut_line(summary: dict[str, Any]) -> str:
     """What the reply-token ceiling cost this session, and after which tool.
 
+    The tool is named when one leads the count: "after" it for a single
+    cut, "most after" it for several. A tie names nothing.
+
     Examples:
         >>> _cut_line({"total_cuts": 3, "total_cut_tokens": 96000,
         ...            "total_cut_after_tools": {"read_artifact": 2, "shell": 1}})
         'replies cut at the ceiling: 3, 96000 completion tokens lost; most after read_artifact'
+        >>> _cut_line({"total_cuts": 1, "total_cut_tokens": 32000,
+        ...            "total_cut_after_tools": {"shell": 1}})
+        'replies cut at the ceiling: 1, 32000 completion tokens lost; after shell'
+        >>> _cut_line({"total_cuts": 2, "total_cut_tokens": 32000,
+        ...            "total_cut_after_tools": {"read_artifact": 1, "shell": 1}})
+        'replies cut at the ceiling: 2, 32000 completion tokens lost'
         >>> _cut_line({"total_cuts": 1, "total_cut_tokens": 32000,
         ...            "total_cut_after_tools": {}})
         'replies cut at the ceiling: 1, 32000 completion tokens lost'
@@ -1240,9 +1249,10 @@ def _cut_line(summary: dict[str, Any]) -> str:
         f"replies cut at the ceiling: {summary['total_cuts']}, "
         f"{summary['total_cut_tokens']} completion tokens lost"
     )
-    after = summary.get("total_cut_after_tools") or {}
-    if after:
-        line += f"; most after {next(iter(after))}"
+    counts = list((summary.get("total_cut_after_tools") or {}).values())
+    if counts and (len(counts) == 1 or counts[0] > counts[1]):
+        leader = next(iter(summary["total_cut_after_tools"]))
+        line += f"; after {leader}" if summary["total_cuts"] == 1 else f"; most after {leader}"
     return line
 
 
