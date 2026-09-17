@@ -14,7 +14,7 @@ resident agent is ``slab mason``.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, NoReturn
 
@@ -26,7 +26,6 @@ from foundation.errors import FoundationError
 from foundation.lifecycle import LifecycleState
 from foundation.models import Reservation, SessionLease
 from foundation.runtime import (
-    DEFAULT_LEASE_SILENCE_S,
     Workspace,
     describe_liveness,
     lease_verdict,
@@ -566,17 +565,21 @@ sessions_app = typer.Typer(
 )
 
 
-def _lease_line(lease: SessionLease, running: int) -> str:
-    """One row of the lease table: what it is, when it beat, how it ended."""
-    ends = lease.deadline_at.strftime("%H:%M") if lease.deadline_at else "-"
+def _lease_line(lease: SessionLease, running: int, *, silence_s: float) -> str:
+    """One row of the lease table: what it is, when it beat, how it ended.
+
+    *silence_s* is the workspace's ``[workspace] lease_silence_s``, the
+    same bound the sweep, the doctor, and every reader judge silence by.
+    """
+    ends = lease.deadline_at.astimezone(UTC).strftime("%H:%M UTC") if lease.deadline_at else "-"
     if lease.ended_at is not None:
         state = f"ended {lease.end_reason or 'no reason given'}"
     else:
-        state = lease_verdict(lease, silence_s=DEFAULT_LEASE_SILENCE_S) or "alive"
+        state = lease_verdict(lease, silence_s=silence_s) or "alive"
     return (
         f"{lease.id[:26]:<26} {lease.harness:<7} {(lease.agent or '-'):<10} "
         f"{(lease.job_id or '-'):>8} {_age(lease.started_at):>5} "
-        f"{_age(lease.heartbeat_at):>5} {ends:>5} {running:>4}  {state}"
+        f"{_age(lease.heartbeat_at):>5} {ends:>9} {running:>4}  {state}"
     )
 
 
@@ -602,10 +605,11 @@ def sessions_list(
         else:
             typer.echo(
                 f"{'SESSION':<26} {'HARNESS':<7} {'AGENT':<10} {'JOB':>8} "
-                f"{'START':>5} {'BEAT':>5} {'ENDS':>5} {'RUNS':>4}  STATE"
+                f"{'START':>5} {'BEAT':>5} {'ENDS':>9} {'RUNS':>4}  STATE"
             )
+            silence = ws.lease_silence_s()
             for lease in leases:
-                typer.echo(_lease_line(lease, running.get(lease.id, 0)))
+                typer.echo(_lease_line(lease, running.get(lease.id, 0), silence_s=silence))
         try:
             summary = _ops.sessions_summary(ws, limit=limit)
         except ValueError as e:

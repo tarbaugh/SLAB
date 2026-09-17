@@ -27,6 +27,7 @@ from __future__ import annotations
 import functools
 import os
 import sqlite3
+import sys
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
@@ -66,8 +67,23 @@ _F = TypeVar("_F", bound=Callable[..., Any])
 _TOOL_NAMES: list[str] = []
 
 
-#: How often the server says it is still there, in seconds.
+#: How often the server says it is still there, in seconds, and never
+#: slower than a tenth of ``[workspace] lease_silence_s`` (see
+#: :func:`lease_beat_s`), so a reader never judges a working server silent.
 _LEASE_BEAT_S = 60.0
+
+
+def lease_beat_s(project: Path | None = None) -> float:
+    """How often the server beats: the default, or a tenth of the silence.
+
+    Examples:
+        >>> import tempfile
+        >>> lease_beat_s(tempfile.mkdtemp())
+        60.0
+    """
+    from foundation.config import lease_silence_s
+
+    return min(_LEASE_BEAT_S, lease_silence_s(project) / 10)
 
 
 def _surfaced(fn: _F) -> _F:
@@ -1077,11 +1093,26 @@ def serve(root: Path, *, project: Path | None = None) -> None:  # pragma: no cov
     session_id = new_session_id("mcp")
     server = build_server(root, project=project, session=session_id)
     stop = threading.Event()
+    interval = lease_beat_s(project)
+    warned = False
 
     def beat() -> None:
-        while not stop.wait(_LEASE_BEAT_S):
-            with suppress(FoundationError, sqlite3.Error, OSError), Workspace(root) as ws:
-                ws.beat_lease(session_id)
+        nonlocal warned
+        while not stop.wait(interval):
+            try:
+                with Workspace(root) as ws:
+                    ws.beat_lease(session_id)
+            except (FoundationError, sqlite3.Error, OSError) as e:
+                # A beat that fails for ten intervals leaves a silent lease,
+                # and the next reader settles this server's runs: say so
+                # once, on stderr, where the client's log keeps it.
+                if not warned:
+                    warned = True
+                    print(
+                        f"slab mcp: this session's lease could not be written ({e}); "
+                        f"a lease silent for ten beats has its runs settled by the next reader",
+                        file=sys.stderr,
+                    )
 
     threading.Thread(target=beat, name="mcp-lease", daemon=True).start()
     try:

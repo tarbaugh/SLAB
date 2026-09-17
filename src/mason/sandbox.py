@@ -1723,18 +1723,59 @@ GPU_ID_LINES = (
 #: When the job ends, resolved on the host and carried into the container,
 #: which ``--cleanenv`` would otherwise strip. The scheduler's own
 #: ``SLURM_JOB_END_TIME`` answers first (epoch seconds); where it is unset,
-#: ``squeue`` is asked for the end time of this job (an ISO stamp). Empty
-#: outside a job, which reads as no deadline. The session inside stamps its
-#: lease with it, so a reader outside settles the job's runs the moment the
-#: job is over, and sizes its last wave to the time left.
+#: ``squeue`` is asked for the end time of this job, a stamp in the site's
+#: local time that ``date -d`` turns into epoch seconds on the same host.
+#: Only epoch seconds are exported: ``Unknown``, ``N/A``, ``NONE``, an
+#: empty answer, a failed ``squeue``, or a ``date`` that cannot read the
+#: stamp leave the variable empty, which reads as no deadline, because a
+#: wrong deadline would settle the job's own live runs. Every pipeline
+#: here tolerates failure, since the script runs under ``set -e``.
 JOB_END_LINES = (
     'SLAB_JOB_END="${SLURM_JOB_END_TIME:-}"',
     'if [ -z "$SLAB_JOB_END" ] && [ -n "${SLURM_JOB_ID:-}" ] &&'
     " command -v squeue >/dev/null 2>&1; then",
-    '  SLAB_JOB_END="$(squeue -h -j "$SLURM_JOB_ID" -o %e 2>/dev/null | head -1)"',
+    '  _end="$(squeue -h -j "$SLURM_JOB_ID" -o %e 2>/dev/null | head -1 || true)"',
+    '  case "${_end:-}" in',
+    '    ""|Unknown|N/A|NONE|NotSet) ;;',
+    '    *) SLAB_JOB_END="$(date -d "$_end" +%s 2>/dev/null || true)" ;;',
+    "  esac",
     "fi",
+    'case "$SLAB_JOB_END" in *[!0-9]*|"") SLAB_JOB_END="" ;; esac',
     "export SLAB_JOB_END",
     'echo "this job ends at: ${SLAB_JOB_END:-unknown}"',
+)
+
+
+#: The batch shell's TERM handler, installed once the container runs in
+#: the background. Bash defers a trap while a foreground child runs, and
+#: ``--signal=B:TERM`` reaches the batch shell alone, so a container in
+#: the foreground would never see the signal: the shell must own it. The
+#: handler forwards TERM to the container, waits for it to close (the
+#: session inside closes its own lease and its runs), and then ends the
+#: job's leases from the host, the fallback for a container that died
+#: before the session could finish.
+def _term_trap_lines(slab: str) -> list[str]:
+    return [
+        "_on_term() {",
+        '  kill -TERM "$CHILD" 2>/dev/null || true',
+        "  STATUS=0",
+        '  wait "$CHILD" || STATUS=$?',
+        '  if [ -n "${SLURM_JOB_ID:-}" ]; then',
+        f'    {slab} sessions end --job "$SLURM_JOB_ID" --reason "time limit" || true',
+        "  fi",
+        '  exit "$STATUS"',
+        "}",
+    ]
+
+
+#: The lines after the container command: it runs in the background, the
+#: shell forwards TERM to it, and the shell exits with its status.
+CONTAINER_WAIT_LINES = (
+    "CHILD=$!",
+    "trap _on_term TERM",
+    "STATUS=0",
+    'wait "$CHILD" || STATUS=$?',
+    'exit "$STATUS"',
 )
 
 
@@ -2057,12 +2098,10 @@ def render_sandbox_script(
         *GPU_ID_LINES,
         *JOB_END_LINES,
         # The scheduler signals this shell JOB_SIGNAL_GRACE_S before the time
-        # limit. The session inside the container gets the same TERM and
-        # normally closes its own lease first; this trap is what settles the
-        # job's runs when the container dies before it can.
-        "trap 'if [ -n \"${SLURM_JOB_ID:-}\" ]; then "
-        f'{slab} sessions end --job "$SLURM_JOB_ID" --reason "time limit" || true; '
-        "fi' TERM",
+        # limit. The handler forwards the TERM to the container, whose
+        # session closes its own lease first, and then settles the job's
+        # leases from the host (see _term_trap_lines).
+        *_term_trap_lines(slab),
     ]
     # render_sbatch exports SLAB_GPU_EXCLUDE from the partition's list
     # before these lines; --cleanenv would strip it at the container.
@@ -2080,6 +2119,9 @@ def render_sandbox_script(
             "trap 'kill \"$FORWARD_PID\" 2>/dev/null || true' EXIT",
             f"{slab} mason sandbox verify --port {BRIDGE_PORT}",
             f"cd {shlex.quote(str(project))}",
+            # The session runs in the background for the same reason the
+            # container does outside: this shell must forward the TERM that
+            # apptainer hands it, or the session's own handler never runs.
             f"{slab} mason run --auto"
             + (f" --agent {shlex.quote(entry_agent)}" if entry_agent else "")
             + (f" --condition {shlex.quote(entry_condition)}" if entry_condition else "")
@@ -2088,7 +2130,14 @@ def render_sandbox_script(
                 f" --expect {shlex.quote(f'{name}:{unit}')}"
                 for name, unit in (expected_results or {}).items()
             )
-            + f" --endpoint http://127.0.0.1:{BRIDGE_PORT}/v1 {shlex.quote(goal)}",
+            + f" --endpoint http://127.0.0.1:{BRIDGE_PORT}/v1 {shlex.quote(goal)} &",
+            "MASON_PID=$!",
+            'SIGNALLED=""',
+            "trap 'SIGNALLED=1; kill -TERM \"$MASON_PID\" 2>/dev/null || true' TERM",
+            "STATUS=0",
+            'wait "$MASON_PID" || STATUS=$?',
+            'if [ -n "$SIGNALLED" ]; then STATUS=0; wait "$MASON_PID" || STATUS=$?; fi',
+            'exit "$STATUS"',
         ]
     )
     command = " \\\n  ".join(
@@ -2166,9 +2215,9 @@ def render_sandbox_script(
             f"--env PATH={shlex.quote(str(Path(_python()).parent))}"
             ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             '"$IMAGE"',
-            f"bash -c {shlex.quote(inner)}",
+            f"bash -c {shlex.quote(inner)} &",
         ]
-    )
+    ) + "\n" + "\n".join(CONTAINER_WAIT_LINES)
     script = render_sbatch(
         command,
         extra_directives=(f"--signal=B:TERM@{JOB_SIGNAL_GRACE_S}",),

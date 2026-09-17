@@ -493,6 +493,11 @@ class MasonSession:
         self._beat_thread: threading.Thread | None = None
         self._beat_stop = threading.Event()
         self._lease_warned = False
+        self._closed = False
+        # What runs once when this session closes (the loop's signal
+        # registry forgets the session here), so a closed session is never
+        # closed again by a later signal.
+        self._close_hooks: list[Callable[[], None]] = []
         self._deadline: datetime | EllipsisType | None = ...
         self._software_versions: dict[str, str] | None = None
         # The machine memories this session and its delegates wrote, in
@@ -707,10 +712,18 @@ class MasonSession:
 
         Every exit runs through here, so a session that stops for any
         reason leaves no run at ``running`` behind it and no later reader
-        has to guess. Returns the runs ended with the session.
+        has to guess. The first close wins: a signal handler that closes
+        the session and the CLI's error path that closes it again after
+        the re-raise leave one ``session_end`` event and the first reason.
+        Returns the runs ended with the session, and nothing the second
+        time.
         """
-        if self._parent is not None:
+        if self._parent is not None or self._closed:
             return []
+        self._closed = True
+        for hook in self._close_hooks:
+            hook()
+        self._close_hooks.clear()
         ended = self.end_lease(reason)
         self.record(
             {

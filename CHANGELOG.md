@@ -10,32 +10,35 @@ All notable changes to SLAB, newest first. Dates are commit dates on
   MCP server each write one `sessions` row when they start (schema 10),
   stamp it every `[agent] lease_beat_s` seconds, at every step, and at
   every `wait_for_run` poll, and close it when they end. A reader draws
-  three new verdicts from the row: `session-ended`, `deadline-passed`
-  (the lease carries the moment its job ends, from `$SLAB_JOB_END` or
-  `$SLURM_JOB_END_TIME`), and `session-silent` (no beat for
-  `[workspace] lease_silence_s`, default 600 s). `reap_dead` fails those
-  runs, releases their reservations, and sweeps their scratch, and it
-  does so from any host, in any job, with no scheduler to ask, which is
-  what the pid and job checks could never do. A beating lease keeps its
-  runs, and a run with no lease row is judged exactly as before; the
-  scheduler still outranks a lease that beats from a job it calls ended.
+  three new verdicts from the row. `session-ended` means the session
+  closed its lease. `deadline-passed` means the job that held the lease
+  is over; the lease carries that moment from `$SLAB_JOB_END` or
+  `$SLURM_JOB_END_TIME`, both epoch seconds. `session-silent` means no
+  beat for `[workspace] lease_silence_s`, default 600 s. `reap_dead`
+  fails those runs, releases their reservations, and sweeps their
+  scratch. It does so from any host and in any job, with no scheduler to
+  ask. A beating lease keeps its runs, and a run with no lease row is
+  judged exactly as before. The scheduler still outranks a lease that
+  beats from a job it calls ended.
   A session that ends also ends the runs it was still executing, with a
   TERM to each process group and the error line naming the session and
   the reason, so no session leaves a run behind it. The loop closes the
   lease on finish, on the error path, and on SIGTERM, and records a
   `session_end` event that `slab mason report` prints. The session reads
-  its job's clock: the environment block says when the job ends and how
+  its job's clock. The environment block says when the job ends and how
   long is left, the per-step harness line repeats the minutes under an
   hour, a wait is capped at the job's end less the signal grace, and the
   `pi` and `planner` cards size the last wave to what is left. The
-  rendered sandbox job carries `#SBATCH --signal=B:TERM@180`, exports
-  `SLAB_JOB_END`, and traps TERM to run `slab sessions end --job`, the
-  fallback for a container that dies before the session can close its
-  own lease. `slab sessions` is now a group: `list` shows every lease
-  with its harness, agent, job, beat, deadline, and the runs it still
-  has running, `end` closes one lease or one job's leases by hand, and
-  `sweep` settles what is over. `slab doctor` gains a `leases` row, and
-  `slab purge` settles ended leases as it settles ended jobs.
+  rendered sandbox job carries `#SBATCH --signal=B:TERM@180` and exports
+  `SLAB_JOB_END`, converted on the host from `squeue`'s local stamp to
+  epoch seconds. The batch shell runs the container in the background,
+  forwards the TERM to it, waits for it, and then runs `slab sessions end
+  --job`, the fallback for a container that dies before the session can
+  close its own lease. `slab sessions` is now a group. `list` shows every
+  lease with its harness, agent, job, beat, deadline, and the runs it
+  still has running, `end` closes one lease or one job's leases by hand,
+  and `sweep` settles what is over. `slab doctor` gains a `leases` row,
+  and `slab purge` settles ended leases as it settles ended jobs.
 
 - A lead continues a specialist it already briefed, and sizes each brief.
   `delegate` takes `continues`, the handle from an earlier report's

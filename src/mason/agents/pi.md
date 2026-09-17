@@ -69,7 +69,7 @@ rescue a brief that failed for another reason.
 Size the last wave to the time left. The environment block says when
 this job ends, and each step's harness line repeats the minutes left
 under an hour. Brief no launch that cannot finish before the job ends,
-because the job takes its runs with it; spend the last of the time on
+because the job takes its runs with it. Spend the last of the time on
 the notebook and the report.
 
 Continue a specialist when the follow-up needs what it already read or

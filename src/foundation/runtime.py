@@ -725,15 +725,17 @@ def job_deadline(env: Mapping[str, str] | None = None) -> datetime | None:
 
     ``$SLAB_JOB_END`` is read first, because the sandbox script computes it
     on the host and carries it into a container that ``--cleanenv`` strips.
-    ``$SLURM_JOB_END_TIME`` answers where the scheduler sets it. Both are
-    epoch seconds; an ISO stamp is accepted as well, and anything else is
-    read as no deadline, because a wrong clock must not settle live runs.
+    ``$SLURM_JOB_END_TIME`` answers where the scheduler sets it. Only an
+    integer epoch (digits) is accepted, and anything else is read as no
+    deadline. A naive stamp is never taken as UTC: a site clock that is not
+    UTC would put the deadline hours wrong, and the session's own reap
+    would settle its own live runs.
 
     Examples:
         >>> job_deadline({"SLAB_JOB_END": "1789000000"}).year
         2026
-        >>> job_deadline({"SLURM_JOB_END_TIME": "2026-09-17T07:31:00+00:00"}).hour
-        7
+        >>> job_deadline({"SLURM_JOB_END_TIME": "2026-09-17T07:31:00"}) is None
+        True
         >>> job_deadline({"SLAB_JOB_END": "Unknown"}) is None
         True
         >>> job_deadline({}) is None
@@ -742,17 +744,12 @@ def job_deadline(env: Mapping[str, str] | None = None) -> datetime | None:
     source = env if env is not None else os.environ
     for name in (JOB_END_ENV, "SLURM_JOB_END_TIME"):
         raw = (source.get(name) or "").strip()
-        if not raw:
+        if not raw.isdigit():
             continue
         try:
-            return datetime.fromtimestamp(float(raw), tz=UTC)
+            return datetime.fromtimestamp(int(raw), tz=UTC)
         except (ValueError, OverflowError, OSError):
-            pass
-        try:
-            moment = datetime.fromisoformat(raw)
-        except ValueError:
             continue
-        return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
     return None
 
 

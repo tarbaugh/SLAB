@@ -725,7 +725,6 @@ def _future_workspace(tmp_path: Path) -> Path:
         ["list"],
         ["show", "01xxxxxxxx"],
         ["promote", "01xxxxxxxx"],
-
         ["expire", "--older-than", "0d"],
         ["gc"],
     ],
@@ -740,6 +739,17 @@ def test_a_future_schema_workspace_fails_as_an_error_line(
     the rest reported cleanly.
     """
     result = runner.invoke(app, [*argv, "-w", str(_future_workspace(tmp_path))])
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "error:" in result.output
+
+
+@pytest.mark.parametrize("argv", [["list"], ["end", "s1"], ["end", "--job", "1001"], ["sweep"]])
+def test_a_future_schema_workspace_fails_the_sessions_group_as_an_error_line(
+    tmp_path: Path, argv: list[str]
+) -> None:
+    """The sessions group opens the workspace through the same guard."""
+    result = runner.invoke(sessions_app, [*argv, "-w", str(_future_workspace(tmp_path))])
     assert result.exit_code == 1
     assert result.exception is None or isinstance(result.exception, SystemExit)
     assert "error:" in result.output

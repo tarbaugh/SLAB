@@ -36,6 +36,7 @@ import json
 import os
 import threading
 import weakref
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -672,7 +673,9 @@ def _retire_at_finish(session: MasonSession, run_ids: tuple[str, ...]) -> None:
 
 #: The sessions whose leases the signal handlers close, weakly, so a
 #: session nobody closed is still collectable and the handler that
-#: outlives it does nothing.
+#: outlives it does nothing. A session leaves the list when it closes, so
+#: a later signal in the same process (a benchmark runs many sessions)
+#: closes only the sessions still open.
 _OPEN_SESSIONS: list[weakref.ref[MasonSession]] = []
 _HANDLERS_INSTALLED: set[int] = set()
 
@@ -690,7 +693,14 @@ def _end_session_on_signal(session: MasonSession) -> None:
     """
     import signal
 
-    _OPEN_SESSIONS.append(weakref.ref(session))
+    ref = weakref.ref(session)
+    _OPEN_SESSIONS.append(ref)
+
+    def forget() -> None:
+        with suppress(ValueError):
+            _OPEN_SESSIONS.remove(ref)
+
+    session._close_hooks.append(forget)
 
     def handler(signum: int, _frame: Any) -> None:
         name = "SIGTERM" if signum == signal.SIGTERM else "SIGINT"

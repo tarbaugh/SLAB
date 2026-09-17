@@ -209,7 +209,7 @@ Two safety valves follow the same logic:
 A run records the session that started it, the job, the pid, and the host.
 None of those says whether the owner is still working, and a session that
 dies with its job leaves its runs at `running` for good. The next session
-then reads them as live work: it waits on them, counts their slices as
+then reads them as live work. It waits on them, counts their slices as
 held, and cites them.
 
 A lease closes that gap. Every Mason session and every MCP server writes
@@ -226,8 +226,10 @@ verdicts from it:
 
 Every reader of an active run settles those runs first, so no report is
 built on a record that outlived its owner. The verdict needs no pid, no
-scheduler, and no particular host, which is what makes it work from
-inside a container and from a login node alike.
+scheduler, and no particular host, so it works from inside a container
+and from a login node alike. A session that cannot write its beat logs
+the fault once and carries on, and after ten missed beats a reader
+judges the lease silent and settles its runs.
 
 List the leases:
 
@@ -236,9 +238,9 @@ slab sessions list
 ```
 
 ```text
-SESSION                    HARNESS AGENT           JOB START  BEAT  ENDS RUNS  STATE
-20260917-093000-2201       mason   planner      481603    0s    0s     -    1  alive
-20260917-071500-31904      mason   pi           481512    0s    2h 20:21    1  deadline-passed
+SESSION                    HARNESS AGENT           JOB START  BEAT      ENDS RUNS  STATE
+20260917-093000-2201       mason   planner        1001   25m   20s         -    1  alive
+20260917-071500-31904      mason   pi             1002    2h    2h 21:32 UTC    1  deadline-passed
 ```
 
 `RUNS` is how many runs that session still has at `running`. A row that
@@ -249,7 +251,7 @@ slab sessions sweep
 ```
 
 ```text
-failed  01m2rqazz20es8yqnqg2fmkkbv  w-melt-quench  session 20260917-071500-31904's job ended at 20:21 UTC; the process died with it; marked failed by slab sessions sweep
+failed  01m2rvp6jwzz6rfvw171bav29q  w-melt-quench  session 20260917-071500-31904's job ended at 21:32 UTC; the process died with it; marked failed by slab sessions sweep
 1 run(s) settled
 ```
 
