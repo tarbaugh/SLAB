@@ -14,18 +14,21 @@ finite-size shift on T_m of tens of kelvin, so ``--cells`` under eight is
 refused; ``--small-cell`` accepts it and prints the caveat line the
 report must carry.
 
-Then the run. ``--plateau`` treats the log as the NPH direct route: the
+Then the run. ``--plateau`` treats the log as the NPH plateau route: the
 latent heat drives the cell to T_m, so the temperature settles on a
 plateau while both phases survive. It reports the mean temperature over
-the primary window (the tail set by ``--window``) and over the secondary
-window (the second half of the primary), each with its block standard
-error, the drift across the primary window with the error of the fitted
-slope, and the verdict. The verdict is a plateau only when the drift
-stays inside three block errors, the two windows agree, and the
+the primary window (the tail set by ``--window``) and over each of its
+two disjoint halves, each with its block standard error, the drift across
+the primary window with the error of the fitted slope, and the verdict.
+The verdict is a plateau only when the drift stays inside three block
+errors, the two halves agree within two combined errors, and the
 calibrated crystalline fraction from ``--fraction`` stays off both
-baselines. A hot crystal reads well below one under instantaneous CNA, so
-``--crystal-baseline`` and ``--liquid-baseline`` come from the pure-phase
-legs at the same temperature. Exit code 2 is a refusal.
+baselines. The block error is repeated over a doubling series of block
+lengths (16, 8, 4 blocks) and counts as converged only when the last
+ratio is under 1.2. A hot crystal reads well below one under
+instantaneous CNA, so ``--crystal-baseline`` and ``--liquid-baseline``
+come from the pure-phase legs at the same temperature. Exit code 2 is a
+refusal.
 """
 
 from __future__ import annotations
@@ -45,6 +48,12 @@ _MIN_CROSS_SECTION_CELLS = 8.0
 _DRIFT_LIMIT = 3.0
 #: The calibrated fraction must stay this far off both baselines.
 _PHASE_MARGIN = 0.05
+#: The block counts of the doubling series, finest first; the coarsest is 4.
+_DOUBLING_BLOCKS = (16, 8, 4)
+#: The block error is converged when the last doubling grows it less than this.
+_DOUBLING_LIMIT = 1.2
+#: The two halves of the window agree within this many combined errors.
+_HALVES_LIMIT = 2.0
 
 _THERMO_HEAD = re.compile(r"^\s*Step\s+\S")
 _YAML_OPEN = "---"
@@ -164,38 +173,63 @@ def block_error(values: np.ndarray, blocks: int) -> float:
     return float(means.std(ddof=1) / np.sqrt(blocks))
 
 
+def doubling_series(values: np.ndarray) -> tuple[list[int], list[float]]:
+    """The block error over 16, 8, and 4 blocks, as many as the rows allow.
+
+    Each level doubles the block length of the one before, and the coarsest
+    level has four blocks. A level whose blocks would hold fewer than two
+    rows is dropped, so a short series gives a shorter list.
+    """
+    counts = [count for count in _DOUBLING_BLOCKS if len(values) // count >= 2]
+    return counts, [block_error(values, count) for count in counts]
+
+
 def window_stats(steps: np.ndarray, values: np.ndarray, blocks: int) -> dict[str, Any]:
     """Mean, block error, and the drift across the window with the slope's error.
 
     The block error is an error of the mean only where the block is longer
-    than the series correlates. ``block_error_half`` repeats it over half as
-    many blocks, twice as long; an error that still grows with the block
-    length says the series correlates over the block, so the reported error
-    is a lower bound and every ratio against it is an upper bound.
+    than the series correlates. ``block_error_series`` repeats it over the
+    doubling series of block lengths; the error is converged only when the
+    last doubling grows it by less than ``_DOUBLING_LIMIT``. An error that
+    still grows says the series correlates over the block, so the reported
+    error is a lower bound and every ratio against it is an upper bound.
+
+    The fitted slope's error assumes independent residuals. The residuals of
+    a thermo series correlate, so the error is scaled by the ratio of their
+    block error to their naive error, the same correction the mean carries.
     """
     mean = float(values.mean())
     error = block_error(values, blocks)
-    half = block_error(values, max(2, blocks // 2))
-    converged = bool(
-        np.isfinite(error) and np.isfinite(half) and error > 0 and half <= 1.5 * error
-    )
+    counts, series = doubling_series(values)
+    if len(series) >= 2 and np.isfinite(series[-2]) and series[-2] > 0:
+        last_ratio = float(series[-1] / series[-2])
+    else:
+        last_ratio = float("nan")
+    converged = bool(np.isfinite(last_ratio) and last_ratio < _DOUBLING_LIMIT)
     span = float(steps[-1] - steps[0])
     if len(values) > 3 and span != 0.0:
-        (slope, _), cov = np.polyfit(steps, values, 1, cov=True)
+        (slope, intercept), cov = np.polyfit(steps, values, 1, cov=True)
         change = float(slope) * span
-        change_error = float(np.sqrt(max(cov[0, 0], 0.0))) * span
+        residuals = values - (slope * steps + intercept)
+        naive = float(residuals.std(ddof=1) / np.sqrt(len(residuals)))
+        correlated = block_error(residuals, blocks)
+        scale = max(1.0, correlated / naive) if naive > 0 and np.isfinite(correlated) else 1.0
+        change_error = float(np.sqrt(max(cov[0, 0], 0.0))) * span * scale
     else:
-        change, change_error = 0.0, float("nan")
+        change, change_error, scale = 0.0, float("nan"), float("nan")
     return {
         "rows": len(values),
         "steps": [float(steps[0]), float(steps[-1])],
         "mean": mean,
         "std": float(values.std(ddof=1)) if len(values) > 1 else 0.0,
         "block_error": error,
-        "block_error_half": half,
+        "block_error_blocks": counts,
+        "block_error_series": series,
+        "block_error_last_ratio": last_ratio,
         "error_converged": converged,
         "change": change,
         "change_error": change_error,
+        "change_error_scale": scale,
         "drift_in_errors": (
             change / error if error and np.isfinite(error) and error > 0 else float("nan")
         ),
@@ -215,19 +249,23 @@ def plateau(
     window: float,
     blocks: int,
 ) -> dict[str, Any]:
-    """The primary and secondary window statistics of an NPH temperature series."""
+    """The primary window statistics of an NPH temperature series, and those
+    of its two disjoint halves. The halves agree when their gap sits within
+    two combined block errors."""
     primary_steps, primary = _tail(steps, temperatures, window)
-    secondary_steps, secondary = _tail(primary_steps, primary, 0.5)
+    cut = len(primary) // 2
     first = window_stats(primary_steps, primary, blocks)
-    second = window_stats(secondary_steps, secondary, blocks)
-    gap = abs(first["mean"] - second["mean"])
-    combined = float(np.sqrt(first["block_error"] ** 2 + second["block_error"] ** 2))
+    head = window_stats(primary_steps[:cut], primary[:cut], blocks)
+    tail = window_stats(primary_steps[cut:], primary[cut:], blocks)
+    gap = abs(head["mean"] - tail["mean"])
+    combined = float(np.sqrt(head["block_error"] ** 2 + tail["block_error"] ** 2))
     return {
         "primary": first,
-        "secondary": second,
+        "first_half": head,
+        "second_half": tail,
         "window_gap": gap,
         "window_gap_error": combined,
-        "windows_agree": bool(np.isfinite(combined) and gap <= 2.0 * combined),
+        "windows_agree": bool(np.isfinite(combined) and gap <= _HALVES_LIMIT * combined),
         "settled": bool(
             np.isfinite(first["drift_in_errors"]) and abs(first["drift_in_errors"]) <= _DRIFT_LIMIT
         ),
@@ -274,7 +312,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--window", type=float, default=0.5, help="primary window as a tail fraction (default 0.5)"
     )
-    parser.add_argument("--blocks", type=int, default=5, help="blocks for the error (default 5)")
+    parser.add_argument(
+        "--blocks", type=int, default=10, help="blocks for the reported error (default 10)"
+    )
     parser.add_argument("--timestep-fs", type=float, help="timestep in fs, to print ps windows")
     parser.add_argument("--fraction", type=Path, help="an ave/time file of the fraction series")
     parser.add_argument(
@@ -368,7 +408,7 @@ def main(argv: list[str] | None = None) -> int:
             rows[:, step_index], temperatures, window=args.window, blocks=args.blocks
         )
         if args.timestep_fs:
-            for key in ("primary", "secondary"):
+            for key in ("primary", "first_half", "second_half"):
                 stats = result["plateau"][key]
                 stats["ps"] = [s * args.timestep_fs / 1000.0 for s in stats["steps"]]
 
@@ -432,17 +472,26 @@ def main(argv: list[str] | None = None) -> int:
                 f"{abs(stats['primary']['drift_in_errors']):.1f} block errors"
             )
         if not stats["primary"]["error_converged"]:
+            primary = stats["primary"]
+            counts = ", ".join(str(count) for count in primary["block_error_blocks"])
+            errors_text = ", ".join(f"{value:.2f}" for value in primary["block_error_series"])
+            ratio = (
+                f"the last ratio is {primary['block_error_last_ratio']:.2f}, "
+                f"not under {_DOUBLING_LIMIT:.1f}"
+                if np.isfinite(primary["block_error_last_ratio"])
+                else "the rows allow no doubling"
+            )
             result["warnings"].append(
-                f"the block error has not converged: half as many blocks, twice as long, give "
-                f"{stats['primary']['block_error_half']:.2f} against "
-                f"{stats['primary']['block_error']:.2f}. The series correlates over the block, "
-                "so the error is a lower bound and the drift in errors is an upper bound. "
-                "Lengthen the run, and settle it against the other enthalpies' plateaus"
+                f"the block error has not converged: over {counts} blocks it reads {errors_text}, "
+                f"and {ratio}. The series correlates over the block, so the error is a lower "
+                "bound and the drift in errors is an upper bound. Lengthen the run, and settle "
+                "it against the other enthalpies' plateaus"
             )
         if not stats["windows_agree"]:
             reasons.append(
-                f"the two windows differ by {stats['window_gap']:.1f} against a combined error "
-                f"of {stats['window_gap_error']:.1f}"
+                f"the two halves of the window differ by {stats['window_gap']:.1f} against a "
+                f"combined error of {stats['window_gap_error']:.1f}, more than "
+                f"{_HALVES_LIMIT:.0f} combined errors"
             )
         if "fraction" in result and not result["fraction"]["both_phases"]:
             reasons.append("one phase was consumed, so the plateau is not a coexistence plateau")
@@ -463,7 +512,9 @@ def main(argv: list[str] | None = None) -> int:
         print(caveat)
     if args.plateau:
         stats = result["plateau"]
-        for label, key in (("primary", "primary"), ("secondary", "secondary")):
+        for label, key in (
+            ("primary", "primary"), ("first half", "first_half"), ("second half", "second_half")
+        ):
             one = stats[key]
             span = (
                 f"{one['ps'][0]:.1f} to {one['ps'][1]:.1f} ps"
@@ -471,23 +522,41 @@ def main(argv: list[str] | None = None) -> int:
                 else f"steps {one['steps'][0]:.0f} to {one['steps'][1]:.0f}"
             )
             print(
-                f"{label:<10} {one['mean']:>9.2f} +/- {one['block_error']:.2f} "
+                f"{label:<12} {one['mean']:>9.2f} +/- {one['block_error']:.2f} "
                 f"({one['rows']} rows, {span})"
             )
-        primary = stats["primary"]
         print(
-            f"drift      {primary['change']:>+9.2f} +/- {primary['change_error']:.2f} across the "
-            f"primary window ({primary['drift_in_errors']:+.1f} block errors)"
+            f"halves       gap {stats['window_gap']:.2f} against a combined error of "
+            f"{stats['window_gap_error']:.2f}; they agree within {_HALVES_LIMIT:.0f} combined "
+            f"errors: {stats['windows_agree']}"
+        )
+        primary = stats["primary"]
+        counts = ", ".join(str(count) for count in primary["block_error_blocks"])
+        errors_text = ", ".join(f"{value:.2f}" for value in primary["block_error_series"])
+        ratio = (
+            f"last ratio {primary['block_error_last_ratio']:.2f}"
+            if np.isfinite(primary["block_error_last_ratio"])
+            else "no doubling"
+        )
+        print(
+            f"block error  over {counts} blocks: {errors_text} ({ratio}, converged under "
+            f"{_DOUBLING_LIMIT:.1f}: {primary['error_converged']})"
+        )
+        print(
+            f"drift        {primary['change']:>+9.2f} +/- {primary['change_error']:.2f} across "
+            f"the primary window ({primary['drift_in_errors']:+.1f} block errors; the slope "
+            f"error is scaled {primary['change_error_scale']:.1f}x for correlated residuals)"
         )
         if "fraction" in result:
             frac = result["fraction"]
             print(
-                f"fraction   {frac['window_mean']:>9.2f} calibrated over the window "
+                f"fraction     {frac['window_mean']:>9.2f} calibrated over the window "
                 f"({frac['window_min']:.2f} to {frac['window_max']:.2f}, baselines "
-                f"{frac['liquid_baseline']:.2f} and {frac['crystal_baseline']:.2f})"
+                f"{frac['liquid_baseline']:.3f} and {frac['crystal_baseline']:.3f})"
             )
+        label = "T_m" if result["verdict"] == "two-phase plateau" else "window mean"
         print(
-            f"verdict: {result['verdict']}; T_m = {stats['t_plateau']:.1f} +/- "
+            f"verdict: {result['verdict']}; {label} = {stats['t_plateau']:.1f} +/- "
             f"{stats['t_plateau_error']:.1f}"
         )
         for reason in result["verdict_reasons"]:

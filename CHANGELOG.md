@@ -14,29 +14,31 @@ All notable changes to SLAB, newest first. Dates are commit dates on
   liquid baseline from the pure-phase legs at the run's own temperature,
   and it restates every gate as the calibrated fraction against those
   two baselines. The opening now puts the NPH plateau route first for a
-  cell under ten thousand atoms, three seeds of one run each, with the
-  velocity ladder kept as the route for a large cell and for a v(T)
-  table; a table gives each route its cell size, its runs, and its steps
-  so a lead can size a wave against the time a job has left. The build
-  recipe gained the traps the last campaign hit: assemble each phase
-  from its own equilibrated leg, minimise with the crystal frozen after
-  the soft-repulsion push-off, leave no gap at the periodic wrap, write
-  `dilate all` because a group dilate crashes under KOKKOS, and never
-  barostat z to zero pressure on a cell with a free liquid surface. The
-  new script `coexistence_fraction.py` enforces the cross-section bound,
-  refusing a cross section under eight unit cells unless `--small-cell`
-  is passed, which prints the finite-size caveat line the report must
-  carry. Its `--plateau` mode reads a NPH run's thermo YAML and its
-  fraction series and prints the primary and the secondary window means
-  with their block standard errors, the drift across the primary window
-  with the error of the fitted slope, and the two-phase verdict. It also
-  repeats the block error over half as many blocks, twice as long, and
-  warns when the error still grows with the block length, because the
-  error is then a lower bound and the drift in errors an upper bound.
-  Two real runs of a 5120-atom coexistence cell are bundled with it, one
-  of 70 ps and one of 200 ps. Neither passes the drift gate, their means
-  agree at 1442.6 and 1440.4 K, and the skill reads that pair as the
-  finite-size wander it is.
+  cell under ten thousand atoms, three starting enthalpies with one run
+  each. The velocity ladder stays the route for a large cell and for a
+  v(T) table. A table gives each route its cell size, its runs, and its
+  steps, so a lead can size a wave against the time a job has left. The
+  build recipe gained the traps the last campaign hit. Assemble each
+  phase from its own equilibrated leg, and minimise with the crystal
+  frozen after the soft-repulsion push-off. Leave no gap at the periodic
+  wrap. Write `dilate all`, because a group dilate crashes under KOKKOS.
+  Never barostat z to zero pressure on a cell with a free liquid
+  surface. The new script `coexistence_fraction.py` enforces the
+  cross-section bound. It refuses a cross section under eight unit cells
+  unless `--small-cell` is passed, which prints the finite-size caveat
+  line the report must carry. Its `--plateau` mode reads a NPH run's
+  thermo YAML and its fraction series. It prints the primary window mean
+  and the means of the window's two disjoint halves, each with its block
+  standard error, then the drift across the primary window with the
+  error of the fitted slope, and the two-phase verdict. The halves agree
+  only within two combined errors. The script also repeats the block
+  error over 16, 8, and 4 blocks and calls it converged only when the
+  last ratio is under 1.2. An error that still grows is a lower bound,
+  and the drift in errors is then an upper bound. One real run of a
+  5120-atom coexistence cell is bundled with it, read at 70 ps and the
+  same run continued to 200 ps. Neither window passes the drift gate,
+  and their means agree at 1442.6 and 1440.4 K. The skill reads that
+  pair as the finite-size wander it is.
   The `md-expert` and `planner` cards point at the new section, and a
   brief for a melting step now names the route and the order parameter.
 

@@ -24,24 +24,27 @@ growth kinetics. The bundled scripts cover both.
 
 | Route | Cell | Runs | Steps per run | Gives |
 |---|---|---|---|---|
-| NPH plateau | under ten thousand atoms | 3, one per starting enthalpy | 100 000 (200 ps) after 30 ps of preparation | T_m alone |
+| NPH plateau | under ten thousand atoms | 3, three starting enthalpies with one run each | 100 000 (200 ps) after 30 ps of preparation | T_m alone |
 | N P_z A T velocity ladder | ten thousand atoms or more | 12, two seeds at each of 6 rungs | 100 000 (200 ps) per rung | T_m and v(T) |
 
 Run the NPH plateau route first for a cell under ten thousand atoms. It
-is one seed at each of three starting enthalpies, and the temperature
-each run settles on is T_m. The velocity ladder costs four times as many
+is three starting enthalpies, one run each, and the temperature each
+run settles on is T_m. The velocity ladder costs four times as many
 runs of the same length and buys the kinetic coefficient with it, so it
 is the route for a large cell and for a v(T) table.
 
 Size the wave from the rate the smoke test itself reports. The log's
 `Performance` line gives Matom-step/s, so the wall time of a run is its
 atoms times its steps divided by that rate. One core under a plain pair
-potential does 2 to 4 Matom-step/s, so 5000 atoms for 100 000 steps is
-about three core-minutes, and the three-run NPH route on a small cell
-finishes inside a short job. A machine-learned potential is two orders
-of magnitude slower per atom-step, and the same route then needs the GPU
-slice and the hours that go with it. State the rate you measured next to
-the plan.
+potential does 2 to 3 Matom-step/s with the order parameter read every
+100 steps. The bundled NPH stage sampled the order parameter every 10
+steps and ran at 0.93 Matom-step/s, so 5120 atoms for 100 000 steps
+took about 9 minutes on one core. The order-parameter computes cost two
+to three times, and the three-run NPH route on a small cell still fits
+a short job. A machine-learned potential is two orders of magnitude
+slower per atom-step, and the same route then needs the GPU slice and
+the hours that go with it. State the rate you measured next to the
+plan.
 
 ## 2. What a hot crystal reads
 
@@ -51,13 +54,13 @@ neighbour signature, so `compute cna/atom` on one snapshot classifies a
 large share of the atoms as unknown. How large depends on the potential,
 the temperature, and the cutoff, and it is not predictable. The
 Lennard-Jones crystal of the bundled cell reads 0.53 fcc a few kelvin
-below its own T_m, range 0.44 to 0.61 over 10 ps, at the cutoff taken
-from its own a(T), while its liquid reads zero. One tungsten campaign
-read 0.31 down to 0.13 fcc between 1250 and 1450 K. Both are intact
-crystals. A gate that compares either number to
-a cold count, or to one, fails on a crystal that is working, and that
-campaign diagnosed a failed freeze twice when the freeze had worked.
-Measure the number, never assume it.
+below its own T_m, at the cutoff taken from its own a(T). Its range
+over 10 ps is 0.44 to 0.61, and its liquid reads zero. One copper
+campaign read 0.31 down to 0.13 fcc between 1250 and 1450 K, the range
+that brackets copper's T_m of 1358 K. Both are intact crystals. A gate
+that compares either number to a cold count, or to one, fails on a
+crystal that is working. That campaign diagnosed a failed freeze twice
+when the freeze had worked. Measure the number, never assume it.
 
 Prescribe one of two classifications and record which.
 
@@ -179,37 +182,51 @@ The barostat needs care on a two-phase cell.
 ## 4. Run the NPH plateau route
 
 - Prepare the pair as section 3 says, then hold it at one temperature
-  near the expected T_m under N P_z A T for 20 to 30 ps. This sets the
-  enthalpy, and the fractions shift while it runs.
-- Release the thermostat. `fix nph all z 0.0 0.0 <Pdamp>` integrates
+  near the expected T_m under N P_z A T for 15 to 30 ps. This sets the
+  enthalpy, and the fractions shift while it runs. The bundled run held
+  15 ps.
+- Release the thermostat. `fix nph all nph z 0.0 0.0 <Pdamp>` integrates
   with no temperature control, so the latent heat carries the cell to
   T_m and holds it there. Run 200 ps.
 - Print thermo often enough for two windows of statistics, 100 steps or
-  less, and write the fraction series with its own `fix ave/time`.
-- Read the plateau with `coexistence_fraction.py --plateau`, which gives
-  the mean temperature over the primary window and over the secondary
-  window, each with its block standard error, the drift across the
-  primary window with the error of the fitted slope, and the verdict.
-  The verdict is a plateau only when the drift stays inside three block
-  errors, the two windows agree, and the calibrated fraction stays off
-  both baselines.
-- Read the block error before you read the drift. The script repeats the
-  error over half as many blocks, twice as long, and warns when the
-  error still grows with the block length. It then is a lower bound, the
-  drift in errors is an upper bound, and the run is too short for either
-  to settle the question.
-- Repeat at three starting enthalpies, set by three preparation
-  temperatures 30 K apart, each from its own seed. T_m is the mean of
-  the three plateaus, and its error is their spread, not one run's block
-  error. Three plateaus that disagree by more than their block errors
-  say the cell has not equilibrated, not that T_m is uncertain.
+  less, and write it as YAML with `thermo_modify line yaml`, because
+  `run_lammps` reads the YAML documents. Write the fraction series with
+  its own `fix ave/time`.
+- Read the plateau with `coexistence_fraction.py --plateau`. It gives
+  the mean temperature over the primary window and over each of its two
+  disjoint halves, each with its block standard error. It also gives
+  the drift across the primary window with the error of the fitted
+  slope, and the verdict. The verdict is a plateau only when the drift stays inside
+  three block errors, the two halves agree, and the calibrated fraction
+  stays off both baselines. The halves agree when their gap is within
+  two combined block errors, and the script prints the rule next to the
+  gap.
+- Read the block error before you read the drift. The script repeats
+  the error over 16, 8, and 4 blocks, each level twice as long as the
+  one before, and prints the series. The error is converged only when
+  the last ratio is under 1.2. When the error still grows, the series
+  correlates over the block. The error is then a lower bound, the drift
+  in errors is an upper bound, and the run is too short for either to
+  settle the question. The slope error assumes independent residuals,
+  so the script scales it by the ratio of the residuals' block error to
+  their naive error and prints the factor on the drift line.
+- Repeat at three starting enthalpies, one run each, set by three
+  preparation temperatures 30 K apart. T_m is the mean of the three
+  plateaus, and its error is their spread, not one run's block error.
+  Three plateaus that disagree by more than their block errors say the
+  cell has not equilibrated, not that T_m is uncertain.
 - A cell that drifts through the whole run has the wrong enthalpy. Reset
   the enthalpy at the plateau temperature the run reached and release
   again.
 
-The bundled 70 ps log is one such run, on a 5120-atom Lennard-Jones
-coexistence cell eight unit cells across, with the baselines measured on
-that cell's own pure phases at the same temperature:
+The bundled 70 ps log is a run on a 5120-atom Lennard-Jones coexistence
+cell eight unit cells across, and it predates the recipe of section 3.
+It melted the upper half at 1900 K under NVT for 15 ps with the lower
+half frozen, then held the whole cell under N P_z A T at 1450 K for
+15 ps, then released it to NPH for 70 ps. It has no separate legs, no
+minimisation, and no close-contacts check, so it serves the plateau
+analysis and not the build. The baselines were measured on that cell's
+own pure phases at the same temperature:
 
     python <skill root>/scripts/coexistence_fraction.py \
         lammps-lj-coex-nph-70ps-yaml.log --cells 8 --plateau --timestep-fs 2 \
@@ -218,45 +235,55 @@ that cell's own pure phases at the same temperature:
 
 ```text
 lammps-lj-coex-nph-70ps-yaml.log: 3 thermo table(s), 351 rows in the one read; cross section 8.0 unit cells
-primary      1442.58 +/- 5.01 (176 rows, 35.0 to 70.0 ps)
-secondary    1433.50 +/- 2.81 (88 rows, 52.6 to 70.0 ps)
-drift         -29.07 +/- 4.07 across the primary window (-5.8 block errors)
-fraction        0.57 calibrated over the window (0.53 to 0.61, baselines 0.04 and 1.00)
-verdict: not a plateau; T_m = 1442.6 +/- 5.0
-  because the temperature drifts -29.1 over the window, 5.8 block errors
-warning: the block error has not converged: half as many blocks, twice as long, give 9.08 against 5.01. The series correlates over the block, so the error is a lower bound and the drift in errors is an upper bound. Lengthen the run, and settle it against the other enthalpies' plateaus
+primary        1442.58 +/- 3.48 (176 rows, 35.0 to 70.0 ps)
+first half     1451.66 +/- 2.33 (88 rows, 35.0 to 52.4 ps)
+second half    1433.50 +/- 2.91 (88 rows, 52.6 to 70.0 ps)
+halves       gap 18.16 against a combined error of 3.73; they agree within 2 combined errors: False
+block error  over 16, 8, 4 blocks: 2.97, 4.21, 5.85 (last ratio 1.39, converged under 1.2: False)
+drift           -29.07 +/- 8.06 across the primary window (-8.3 block errors; the slope error is scaled 2.0x for correlated residuals)
+fraction          0.57 calibrated over the window (0.53 to 0.61, baselines 0.045 and 1.000)
+verdict: not a plateau; window mean = 1442.6 +/- 9.1
+  because the temperature drifts -29.1 over the window, 8.3 block errors
+  because the two halves of the window differ by 18.2 against a combined error of 3.7, more than 2 combined errors
+warning: the block error has not converged: over 16, 8, 4 blocks it reads 2.97, 4.21, 5.85, and the last ratio is 1.39, not under 1.2. The series correlates over the block, so the error is a lower bound and the drift in errors is an upper bound. Lengthen the run, and settle it against the other enthalpies' plateaus
 ```
 
 Read that verdict as it stands. Both phases survived the whole window,
-and the two window means agree, so the cell is in coexistence near
-1440 K. The temperature still wanders 30 K over 35 ps, because the
-latent-heat reservoir of 5120 atoms is small, and the warning says the
-block error has not converged, so the drift of 5.8 errors is an upper
-bound on how bad the drift is.
+so the cell is in coexistence near 1440 K. The temperature still
+wanders 30 K over 35 ps, because the latent-heat reservoir of 5120
+atoms is small. The two halves of the window read 1451.7 and 1433.5 K,
+nearly five combined errors apart, so they do not agree. The block
+error still grows at four blocks of 9 ps, so the drift of 8.3 errors is
+an upper bound on how bad the drift is.
 
-The same cell run to 200 ps is bundled beside it, and it drifts the
-other way:
+The same run continued to 200 ps is bundled beside it:
 
 ```text
 lammps-lj-coex-nph-200ps-yaml.log: 3 thermo table(s), 1001 rows in the one read; cross section 8.0 unit cells
-primary      1440.39 +/- 4.14 (500 rows, 100.2 to 200.0 ps)
-secondary    1445.86 +/- 3.28 (250 rows, 150.2 to 200.0 ps)
-drift         +20.16 +/- 2.60 across the primary window (+4.9 block errors)
-fraction        0.58 calibrated over the window (0.52 to 0.62, baselines 0.04 and 1.00)
-verdict: not a plateau; T_m = 1440.4 +/- 4.1
-  because the temperature drifts +20.2 over the window, 4.9 block errors
+primary        1440.39 +/- 3.35 (500 rows, 100.2 to 200.0 ps)
+first half     1434.92 +/- 3.53 (250 rows, 100.2 to 150.0 ps)
+second half    1445.86 +/- 2.74 (250 rows, 150.2 to 200.0 ps)
+halves       gap 10.94 against a combined error of 4.47; they agree within 2 combined errors: False
+block error  over 16, 8, 4 blocks: 2.80, 3.90, 4.88 (last ratio 1.25, converged under 1.2: False)
+drift           +20.16 +/- 9.40 across the primary window (+6.0 block errors; the slope error is scaled 3.6x for correlated residuals)
+fraction          0.58 calibrated over the window (0.52 to 0.62, baselines 0.045 and 1.000)
+verdict: not a plateau; window mean = 1440.4 +/- 5.5
+  because the temperature drifts +20.2 over the window, 6.0 block errors
+  because the two halves of the window differ by 10.9 against a combined error of 4.5, more than 2 combined errors
+warning: the block error has not converged: over 16, 8, 4 blocks it reads 2.80, 3.90, 4.88, and the last ratio is 1.25, not under 1.2. The series correlates over the block, so the error is a lower bound and the drift in errors is an upper bound. Lengthen the run, and settle it against the other enthalpies' plateaus
 ```
 
-The drift changed sign, its block error has converged, and the window
-mean is 1440.4 +/- 4.1 K against the shorter run's 1442.6 +/- 5.0 K. The
-two agree. The cell wanders on the timescale of the run rather than
-trending, and neither run of this cell passes the drift gate. T_m comes
-from the agreement of the three enthalpies' means, and the reported
-error is their spread. A wider gate is not the fix. More atoms are,
-because the wander is a finite-size fluctuation, and a cell of ten
-thousand atoms or more settles where this one cannot. Do not report a
-plateau the script refused, and do not narrow the window until it
-passes.
+The drift changed sign, and the block error still grows at four blocks
+of 25 ps. The window mean is 1440.4 +/- 3.4 K against the shorter
+window's 1442.6 +/- 3.5 K, and the two agree. The halves of each window
+do not. The cell wanders on the timescale of the run rather than
+trending, and neither window of this run passes the drift gate or the
+halves gate. T_m comes from the agreement of the three enthalpies'
+means, and the reported error is their spread. A wider gate is not the
+fix. More atoms are, because the wander is a finite-size fluctuation,
+and a cell of ten thousand atoms or more settles where this one cannot.
+Do not report a plateau the script refused, and do not narrow the
+window until it passes.
 
 Interface pinning, a harmonic bias on the crystalline order parameter,
 gives the chemical-potential difference at each temperature and is the

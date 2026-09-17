@@ -1534,7 +1534,7 @@ COEXISTENCE = SKILLS / "two-phase-melting" / "scripts" / "coexistence_fraction.p
 #: unit cells across, with the solid-like count written by ``fix ave/time``.
 COEX_LOG = DATA / "lammps-lj-coex-nph-70ps-yaml.log"
 COEX_FRACTION = DATA / "lammps-lj-coex-70ps-fraction.dat"
-#: The same cell released for 200 ps, the run the skill sets beside it.
+#: The same run continued to 200 ps, which the skill sets beside it.
 COEX_LOG_LONG = DATA / "lammps-lj-coex-nph-200ps-yaml.log"
 COEX_FRACTION_LONG = DATA / "lammps-lj-coex-200ps-fraction.dat"
 #: The pure-phase legs of the same system at the same temperature.
@@ -1600,30 +1600,41 @@ def test_coexistence_fraction_reads_the_plateau_of_the_bundled_nph_log(
     assert result["cells"] == 8.0 and result["small_cell"] is False
 
     plateau = result["plateau"]
-    # The primary window is the last 35 ps of the 70 ps leg, the secondary the
-    # last 17.5 ps of that.
-    assert plateau["primary"]["rows"] == 176 and plateau["secondary"]["rows"] == 88
+    # The primary window is the last 35 ps of the 70 ps leg, and its two
+    # disjoint halves are 17.5 ps each.
+    assert plateau["primary"]["rows"] == 176
+    assert plateau["first_half"]["rows"] == 88 and plateau["second_half"]["rows"] == 88
     assert plateau["primary"]["ps"] == [35.0, 70.0]
-    assert plateau["secondary"]["ps"] == [52.6, 70.0]
+    assert plateau["first_half"]["ps"] == [35.0, 52.4]
+    assert plateau["second_half"]["ps"] == [52.6, 70.0]
     assert abs(plateau["primary"]["mean"] - 1442.6) < 0.5
-    assert abs(plateau["secondary"]["mean"] - 1433.5) < 0.5
-    assert abs(plateau["primary"]["block_error"] - 5.0) < 0.5
-    # Half as many blocks, twice as long, give a wider error, so the series
-    # still correlates over one block and the error is a lower bound.
-    assert abs(plateau["primary"]["block_error_half"] - 9.1) < 0.5
+    assert abs(plateau["first_half"]["mean"] - 1451.7) < 0.5
+    assert abs(plateau["second_half"]["mean"] - 1433.5) < 0.5
+    assert abs(plateau["primary"]["block_error"] - 3.48) < 0.05
+    # The doubling series still grows at the coarsest level, so the series
+    # correlates over one block and the error is a lower bound.
+    assert plateau["primary"]["block_error_blocks"] == [16, 8, 4]
+    series = plateau["primary"]["block_error_series"]
+    assert [round(value, 2) for value in series] == [2.97, 4.21, 5.85]
+    assert abs(plateau["primary"]["block_error_last_ratio"] - 1.39) < 0.01
     assert plateau["primary"]["error_converged"] is False
     # The cell wanders: the temperature falls 29 K over the primary window,
-    # far wider than the block error, so 70 ps is not yet a plateau here.
+    # far wider than the block error, so 70 ps is not yet a plateau here. The
+    # slope error carries the correlation scale of the residuals.
     assert abs(plateau["primary"]["change"] + 29.1) < 0.5
-    assert abs(plateau["primary"]["change_error"] - 4.1) < 0.5
+    assert abs(plateau["primary"]["change_error"] - 8.06) < 0.05
+    assert abs(plateau["primary"]["change_error_scale"] - 2.0) < 0.05
     assert plateau["primary"]["drift_in_errors"] < -3.0
     assert plateau["settled"] is False
-    # The two window means still agree inside their combined error.
-    assert plateau["windows_agree"] is True
-    assert abs(plateau["window_gap"] - 9.1) < 0.5
+    # The two disjoint halves sit nearly five combined errors apart, so they
+    # do not agree, and the verdict says so with the rule.
+    assert plateau["windows_agree"] is False
+    assert abs(plateau["window_gap"] - 18.2) < 0.5
+    assert abs(plateau["window_gap_error"] - 3.73) < 0.05
     assert abs(plateau["t_plateau"] - 1442.6) < 0.5
     assert result["verdict"] == "not a plateau"
     assert any("the temperature drifts" in r for r in result["verdict_reasons"])
+    assert any("more than 2 combined errors" in r for r in result["verdict_reasons"])
 
     # Both phases survived the whole window, against the measured baselines.
     fraction = result["fraction"]
@@ -1639,19 +1650,47 @@ def test_coexistence_fraction_reads_the_plateau_of_the_bundled_nph_log(
         monkeypatch=monkeypatch, capsys=capsys,
     )
     assert code == 0
-    assert "primary      1442.58 +/- 5.01 (176 rows, 35.0 to 70.0 ps)" in out
-    assert "secondary    1433.50 +/- 2.81 (88 rows, 52.6 to 70.0 ps)" in out
-    assert "drift         -29.07 +/- 4.07" in out and "(-5.8 block errors)" in out
-    assert "verdict: not a plateau; T_m = 1442.6 +/- 5.0" in out
+    assert "primary        1442.58 +/- 3.48 (176 rows, 35.0 to 70.0 ps)" in out
+    assert "first half     1451.66 +/- 2.33 (88 rows, 35.0 to 52.4 ps)" in out
+    assert "second half    1433.50 +/- 2.91 (88 rows, 52.6 to 70.0 ps)" in out
+    assert (
+        "halves       gap 18.16 against a combined error of 3.73; they agree within 2 "
+        "combined errors: False"
+    ) in out
+    assert (
+        "block error  over 16, 8, 4 blocks: 2.97, 4.21, 5.85 (last ratio 1.39, converged "
+        "under 1.2: False)"
+    ) in out
+    assert "drift           -29.07 +/- 8.06" in out
+    assert "(-8.3 block errors; the slope error is scaled 2.0x for correlated residuals)" in out
+    assert "baselines 0.045 and 1.000" in out
+    # A refused plateau labels its number as the window mean, not as T_m.
+    assert "verdict: not a plateau; window mean = 1442.6 +/- 9.1" in out
+    assert "T_m" not in out
     assert "because the temperature drifts" in out
-    assert "half as many blocks, twice as long, give 9.08 against 5.01" in out
+    assert (
+        "because the two halves of the window differ by 18.2 against a combined error of "
+        "3.7, more than 2 combined errors"
+    ) in out
+    assert (
+        "over 16, 8, 4 blocks it reads 2.97, 4.21, 5.85, and the last ratio is 1.39, not "
+        "under 1.2"
+    ) in out
 
 
 def test_coexistence_fraction_shows_the_same_cell_wandering_over_200_ps(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The skill says the cell wanders rather than trends, and that neither run
-    passes the drift gate. Both readings hold that claim up."""
+    """The skill says the cell wanders rather than trends, and that neither
+    window of the run passes the drift gate. Both readings hold that claim
+    up. The 200 ps log is the same run continued, so its first 351 NPH rows
+    are the 70 ps log's rows."""
+    short_rows = [line for line in COEX_LOG.read_text().splitlines() if line.startswith("  - [")]
+    long_rows = [
+        line for line in COEX_LOG_LONG.read_text().splitlines() if line.startswith("  - [")
+    ]
+    assert len(short_rows) == 351 and long_rows[:351] == short_rows
+
     code, out, _ = _run_err(
         COEXISTENCE, str(COEX_LOG_LONG), "--cells", "8", "--plateau", "--timestep-fs", "2",
         "--fraction", str(COEX_FRACTION_LONG), "--natoms", "5120", *COEX_BASELINES,
@@ -1663,19 +1702,58 @@ def test_coexistence_fraction_shows_the_same_cell_wandering_over_200_ps(
     assert long_run["rows"] == 1001
     assert plateau["primary"]["ps"] == [100.2, 200.0]
     assert abs(plateau["primary"]["mean"] - 1440.4) < 0.5
-    assert abs(plateau["secondary"]["mean"] - 1445.9) < 0.5
-    # The drift changed sign against the 70 ps run, and this time the block
-    # error has converged, so the ratio is not an artefact of a short block.
+    assert abs(plateau["first_half"]["mean"] - 1434.9) < 0.5
+    assert abs(plateau["second_half"]["mean"] - 1445.9) < 0.5
+    # The drift changed sign against the 70 ps window, and the block error
+    # still grows at four blocks of 25 ps, so this error is a lower bound too.
     assert abs(plateau["primary"]["change"] - 20.2) < 0.5
     assert plateau["primary"]["drift_in_errors"] > 3.0
-    assert plateau["primary"]["error_converged"] is True
-    assert not any("block error has not converged" in w for w in long_run["warnings"])
-    # Neither run passes the gate, and the two window means agree, which is
-    # the wander the skill describes.
+    series = plateau["primary"]["block_error_series"]
+    assert [round(value, 2) for value in series] == [2.80, 3.90, 4.88]
+    assert abs(plateau["primary"]["block_error_last_ratio"] - 1.25) < 0.01
+    assert plateau["primary"]["error_converged"] is False
+    assert any("block error has not converged" in w for w in long_run["warnings"])
+    # Neither window passes the gate, the halves of this window disagree, and
+    # the two window means agree, which is the wander the skill describes.
     assert long_run["verdict"] == "not a plateau"
-    assert plateau["windows_agree"] is True
+    assert plateau["windows_agree"] is False
+    assert abs(plateau["window_gap"] - 10.9) < 0.5
+    assert abs(plateau["window_gap_error"] - 4.47) < 0.05
     assert long_run["fraction"]["both_phases"] is True
     assert abs(plateau["primary"]["mean"] - 1442.58) < 2.0 + plateau["primary"]["block_error"]
+
+    code, out, _ = _run_err(
+        COEXISTENCE, str(COEX_LOG_LONG), "--cells", "8", "--plateau", "--timestep-fs", "2",
+        "--fraction", str(COEX_FRACTION_LONG), "--natoms", "5120", *COEX_BASELINES,
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    assert "primary        1440.39 +/- 3.35 (500 rows, 100.2 to 200.0 ps)" in out
+    assert "first half     1434.92 +/- 3.53 (250 rows, 100.2 to 150.0 ps)" in out
+    assert "second half    1445.86 +/- 2.74 (250 rows, 150.2 to 200.0 ps)" in out
+    assert "block error  over 16, 8, 4 blocks: 2.80, 3.90, 4.88 (last ratio 1.25" in out
+    assert "drift           +20.16 +/- 9.40" in out and "(+6.0 block errors" in out
+    assert "verdict: not a plateau; window mean = 1440.4 +/- 5.5" in out
+
+
+def test_coexistence_fraction_convergence_does_not_follow_the_blocks_flag(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The doubling series is fixed at 16, 8, and 4 blocks, so the convergence
+    verdict is the same under any --blocks; only the reported error moves."""
+    readings = {}
+    for blocks in ("5", "10", "20"):
+        code, out, _ = _run_err(
+            COEXISTENCE, str(COEX_LOG), "--cells", "8", "--plateau", "--blocks", blocks,
+            "--json", monkeypatch=monkeypatch, capsys=capsys,
+        )
+        assert code == 0
+        readings[blocks] = json.loads(out)["plateau"]["primary"]
+    for primary in readings.values():
+        assert primary["block_error_blocks"] == [16, 8, 4]
+        assert primary["error_converged"] is False
+        assert abs(primary["block_error_last_ratio"] - 1.39) < 0.01
+    assert readings["5"]["block_error"] != readings["10"]["block_error"]
 
 
 def test_coexistence_fraction_holds_the_gates_to_the_calibrated_baselines(
