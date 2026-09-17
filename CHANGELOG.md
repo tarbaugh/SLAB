@@ -5,6 +5,31 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- A machine memory rests on a run that finished, and a fact that is only
+  true today expires. `remember` counts a piece of evidence only when it
+  names a run in the completed status. A run that is still going, a run
+  the workspace does not hold, a failed run, and a dry-run record id are
+  kept in the text and mark the memory unverified, and the reply names
+  which cited ids counted and which did not. `remember` also takes
+  `kind`: `build` for how this machine's software behaves, `resource` for
+  what its hardware does, and `outage` for something that is broken now.
+  An outage carries `where`, the host its evidence ran on, and
+  `expires_at`, a week out by default. `recall` puts that line in front
+  of the fact, the prompt catalog drops an outage after its day, and
+  `slab memory review` lists it for deletion. Nothing deletes a memory
+  except the person. A memory that restates what a bundled skill
+  documents is refused with the skill section that holds the real answer;
+  the table of subjects is `foundation.documented`, and it covers the
+  `cna/atom` codes, `dilate`, `fix_modify energy`, `velocity create` and
+  `scale`, and `fix halt`. The list a delegate hands its lead carries
+  each memory's kind, the state of its evidence runs, and an outage's
+  host and expiry, so the lead's forget decision needs no `recall` call.
+  `slab memory review` re-judges the evidence of every verified memory
+  against a workspace's runs, which is how the rule reaches the memories
+  written before it, and a memory with no kind reads as `build`. The
+  same rules reach the MCP `remember` and `recall`, and `slab memory add`
+  gained `--kind`, `--where`, and `--expires`.
+
 - A lead continues a specialist it already briefed, and sizes each brief.
   `delegate` takes `continues`, the handle from an earlier report's
   harness line, and gives that specialist another turn with its messages

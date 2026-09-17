@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
 
 from foundation import memory as memory_store
+from foundation.models import Run
 from mason.client import ToolCall
 from mason.config import AgentConfig
 from mason.prompts import system_messages
@@ -248,7 +250,7 @@ def test_remember_stamps_the_software_the_fact_names(
             evidence="the second fit failed without it and ran with it",
         )
     )
-    assert answer.endswith("(stamped against gracemaker 0.6.0)")
+    assert "(stamped against gracemaker 0.6.0)" in answer
     memory = memory_store.discover(memory_root)["grace-gpu-growth"]
     assert memory.against == {"gracemaker": "0.6.0"}
     # A second write in the same session reuses the probe.
@@ -319,3 +321,157 @@ def test_a_delegate_shares_the_parent_probe(
     child = parent.spawn("dft-expert", AgentConfig())
     assert child.software_versions() == {"gracemaker": "0.6.0"}
     assert calls == [1]
+
+
+# -- what counts as evidence -------------------------------------------------
+
+
+def _run(session: MasonSession, name: str, status: str, host: str | None = None) -> str:
+    """One run in the session's workspace, left in *status*."""
+    from foundation.runtime import Workspace
+
+    with Workspace(session.workspace_root) as ws:
+        run = ws.runs.create(Run(name=name))
+        # The host is stamped when a run starts and stays with it after.
+        ws.runs.set_status(run.id, "running", host=host)
+        if status != "running":
+            ws.runs.set_status(run.id, status)
+        return run.id
+
+
+def test_a_running_run_is_no_evidence_and_the_reply_names_it(
+    tmp_path: Path, memory_root: Path
+) -> None:
+    session = _session(tmp_path, auto_approve=True)
+    run_id = _run(session, "melt", "running")
+    answer = build_toolbox(session).dispatch(
+        _call(
+            "remember",
+            name="device-init-fails",
+            description="A node refuses to initialise its GPUs.",
+            body="Every launch there dies before the first step.",
+            evidence=f"run {run_id} died at once",
+        )
+    )
+    assert "marked unverified until a completed run confirms it" in answer
+    assert f"{run_id} does not (running, so it has not confirmed anything)" in answer
+    assert memory_store.discover(memory_root)["device-init-fails"].unverified is True
+
+
+def test_a_completed_run_verifies_the_memory(tmp_path: Path, memory_root: Path) -> None:
+    session = _session(tmp_path, auto_approve=True)
+    run_id = _run(session, "melt", "completed")
+    answer = build_toolbox(session).dispatch(
+        _call(
+            "remember",
+            name="scratch-quota",
+            description="The scratch filesystem here fills at 80 percent.",
+            body="Writes fail above it until the sweep runs.",
+            evidence=f"run {run_id} completed after the sweep",
+        )
+    )
+    assert "unverified" not in answer
+    assert f"{run_id} counts (completed)" in answer
+    assert memory_store.discover(memory_root)["scratch-quota"].unverified is False
+
+
+def test_a_dry_run_id_is_kept_in_the_text_and_counts_for_nothing(
+    tmp_path: Path, memory_root: Path
+) -> None:
+    session = _session(tmp_path, auto_approve=True)
+    answer = build_toolbox(session).dispatch(
+        _call(
+            "remember",
+            name="loader-fails",
+            description="The GPU build cannot find its libraries.",
+            body="The loader error names the missing object.",
+            evidence="dry-20260917-121314-ab12 kept the screen file",
+        )
+    )
+    assert "dry-20260917-121314-ab12 does not (a dry run, which confirms nothing)" in answer
+    memory = memory_store.discover(memory_root)["loader-fails"]
+    assert memory.unverified is True
+    assert "dry-20260917-121314-ab12" in (memory.evidence or "")
+
+
+def test_an_outage_takes_the_host_from_its_evidence_and_expires(
+    tmp_path: Path, memory_root: Path
+) -> None:
+    session = _session(tmp_path, auto_approve=True)
+    run_id = _run(session, "melt", "completed", host="n1")
+    answer = build_toolbox(session).dispatch(
+        _call(
+            "remember",
+            name="device-init-fails",
+            description="A node refuses to initialise its GPUs.",
+            body="Every launch there dies before the first step.",
+            evidence=f"run {run_id} failed to initialise the device",
+            kind="outage",
+        )
+    )
+    assert "recorded as an outage (outage recorded " in answer
+    memory = memory_store.discover(memory_root)["device-init-fails"]
+    assert memory.kind == "outage"
+    assert memory.where == "n1"
+    assert memory.expires_at is not None
+
+    read = build_toolbox(session).dispatch(_call("recall", name="device-init-fails"))
+    assert read.startswith("outage recorded ")
+    assert "on n1;" in read.splitlines()[0]
+
+
+def test_the_catalog_stops_carrying_an_outage_after_its_day(
+    tmp_path: Path, memory_root: Path
+) -> None:
+    memory_store.write(
+        "device-init-fails", "A node refuses to initialise its GPUs.", "Body.",
+        evidence="run 01k2x7abcd", kind="outage", where="n1",
+        expires_at=date.today() - timedelta(days=1), directory=memory_root,
+    )
+    (content,) = [m["content"] for m in system_messages(_session(tmp_path))]
+    assert "device-init-fails" not in content
+
+
+def test_a_memory_that_restates_a_skill_is_refused_by_the_tool(
+    tmp_path: Path, memory_root: Path
+) -> None:
+    session = _session(tmp_path, auto_approve=True)
+    run_id = _run(session, "melt", "completed")
+    answer = build_toolbox(session).dispatch(
+        _call(
+            "remember",
+            name="cna-codes",
+            description="The build shifts the cna/atom codes.",
+            body="Here 1 is hcp and 2 is fcc, not the documented mapping.",
+            evidence=f"run {run_id} showed it",
+        )
+    )
+    assert answer.startswith("not recorded: this is documented behaviour")
+    assert "two-phase-melting section 3" in answer
+    assert memory_store.discover(memory_root) == {}
+
+
+def test_the_memories_written_block_carries_the_kind_and_the_evidence_states(
+    tmp_path: Path, memory_root: Path
+) -> None:
+    from mason.tools import memories_written_block
+
+    session = _session(tmp_path, auto_approve=True)
+    run_id = _run(session, "melt", "running", host="n1")
+    box = build_toolbox(session)
+    box.dispatch(
+        _call(
+            "remember",
+            name="device-init-fails",
+            description="A node refuses to initialise its GPUs.",
+            body="Every launch there dies before the first step.",
+            evidence=f"run {run_id} died at once",
+            kind="outage",
+        )
+    )
+    block = memories_written_block(session, session.memories_written)
+    (_, line) = block.splitlines()
+    assert line.startswith("- device-init-fails (pi, outage): A node refuses")
+    assert "[on an unrecorded host, expires " in line
+    assert "[unverified]" in line
+    assert f"[runs now: {run_id}: melt, running," in line

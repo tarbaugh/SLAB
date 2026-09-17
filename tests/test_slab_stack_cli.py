@@ -507,6 +507,66 @@ def test_memory_review_lists_what_a_person_should_check(memories: Path) -> None:
     assert "The gpu build's command works. [unverified]" in listed.output
 
 
+def test_memory_review_rejudges_the_evidence_against_a_workspace(
+    tmp_path: Path, memories: Path
+) -> None:
+    """The rule that evidence is a finished run reaches the memories written before it."""
+    from foundation import memory as memory_store
+    from foundation.models import Run
+    from foundation.runtime import Workspace
+
+    root = tmp_path / "ws"
+    with Workspace(root) as ws:
+        going = ws.runs.create(Run(name="melt"))
+        ws.runs.set_status(going.id, "running")
+        done = ws.runs.create(Run(name="quench"))
+        ws.runs.set_status(done.id, "running")
+        ws.runs.set_status(done.id, "completed")
+    memory_store.write(
+        "device-init-fails", "A node refuses to initialise its GPUs.", "Body.",
+        agent="md-expert", evidence=f"run {going.id} died at once", directory=memories,
+    )
+    memory_store.write(
+        "scratch-quota", "The scratch filesystem here fills at 80 percent.", "Body.",
+        agent="md-expert", evidence=f"run {done.id} completed after the sweep",
+        directory=memories,
+    )
+    result = runner.invoke(app, ["memory", "review", "--workspace", str(root)])
+    assert result.exit_code == 0, result.output
+    assert "device-init-fails" in result.output
+    assert "no completed run confirms it" in result.output
+    assert "scratch-quota" not in result.output
+    # The memories seeded by the fixture cite no run at all, so they are
+    # listed too: nothing is deleted, the person decides.
+    assert "3 of 4 memory(s) to review" in result.output
+
+    rows = json.loads(
+        runner.invoke(app, ["memory", "review", "--workspace", str(root), "--json"]).output
+    )
+    (row,) = [r for r in rows if r["name"] == "device-init-fails"]
+    assert row["kind"] == "build"
+    assert f"{going.id} does not (running" in row["reasons"][0]
+
+
+def test_memory_review_lists_an_expired_outage_for_deletion(memories: Path) -> None:
+    from datetime import date, timedelta
+
+    from foundation import memory as memory_store
+
+    memory_store.write(
+        "device-init-fails", "A node refuses to initialise its GPUs.", "Body.",
+        agent="md-expert", evidence="run 01k2x7abcd", kind="outage", where="n1",
+        expires_at=date.today() - timedelta(days=1), directory=memories,
+    )
+    result = runner.invoke(app, ["memory", "review"])
+    assert result.exit_code == 0, result.output
+    assert "device-init-fails" in result.output
+    assert "[expired outage, recorded " in result.output
+    # It is still on the machine until the person removes it.
+    assert "device-init-fails" in runner.invoke(app, ["memory", "list"]).output
+    assert (memories / "device-init-fails.md").is_file()
+
+
 @pytest.mark.usefixtures("_live")
 def test_memory_confirm_records_the_evidence_and_restamps(memories: Path) -> None:
     from foundation import memory as memory_store

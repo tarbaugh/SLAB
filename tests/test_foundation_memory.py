@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import re
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -393,22 +395,26 @@ def test_a_memory_without_evidence_is_refused(memory_root: Path) -> None:
 
 def test_an_unverified_memory_is_stamped_and_marked(memory_root: Path) -> None:
     written = memory_store.write(
-        "fix-halt", "fix halt has no error keyword here.", "Seen in one probe.",
-        unverified=True, directory=memory_root,
+        "scratch-quota", "The scratch filesystem here fills at 80 percent.",
+        "Seen in one probe.", unverified=True, directory=memory_root,
     )
     assert written.unverified is True and written.evidence is None
     assert "unverified: true\n" in written.path.read_text(encoding="utf-8")
     assert written.provenance().endswith("no evidence recorded")
     block = memory_store.catalog_block(memory_store.discover(memory_root))
-    assert "- fix-halt: fix halt has no error keyword here. [unverified]" in block.splitlines()
+    assert (
+        "- scratch-quota: The scratch filesystem here fills at 80 percent. [unverified]"
+        in block.splitlines()
+    )
 
     checked = memory_store.write(
-        "fix-halt", "fix halt takes error continue.", "The run halted cleanly.",
-        evidence="run 01k2x7abcd completed with error continue", directory=memory_root,
+        "scratch-quota", "The scratch filesystem here fills at 80 percent.",
+        "Writes fail above it.",
+        evidence="run 01k2x7abcd completed after the sweep", directory=memory_root,
     )
     assert checked.unverified is False
     assert "unverified" not in checked.path.read_text(encoding="utf-8")
-    assert checked.provenance().endswith("evidence: run 01k2x7abcd completed with error continue")
+    assert checked.provenance().endswith("evidence: run 01k2x7abcd completed after the sweep")
 
 
 def test_a_memory_with_no_evidence_reads_as_unverified(memory_root: Path) -> None:
@@ -520,3 +526,159 @@ def test_run_ids_are_read_out_of_the_evidence() -> None:
     evidence = "run 01k2x7abcdefghjkmnpqrstv failed; see 01k2x7ab too; 5000000 steps"
     assert memory_store.run_ids(evidence) == ["01k2x7abcdefghjkmnpqrstv", "01k2x7ab"]
     assert memory_store.run_ids("checked by hand") == []
+
+
+# -- kinds, outages, and documented behaviour --------------------------------
+
+
+def test_a_memory_carries_its_kind_and_an_unmarked_file_is_a_build_memory(
+    memory_root: Path,
+) -> None:
+    written = memory_store.write(
+        "gpu-bandwidth", "The GPUs here share one link.", "So two fits contend.",
+        evidence="run 01k2x7abcd", kind="resource", directory=memory_root,
+    )
+    assert written.kind == "resource"
+    assert "kind: resource\n" in written.path.read_text(encoding="utf-8")
+
+    (memory_root / "from-before.md").write_text(
+        "---\ndescription: An older fact.\ncreated: 2026-09-01\n---\nThe fact.\n",
+        encoding="utf-8",
+    )
+    found = memory_store.discover(memory_root)
+    assert found["from-before"].kind == "build"
+    assert found["from-before"].expires_at is None
+    # A build memory says nothing about kinds in its file, so nothing moves.
+    assert "kind:" not in found["gpu-bandwidth"].path.read_text(encoding="utf-8").replace(
+        "kind: resource", ""
+    )
+
+
+def test_an_unknown_kind_is_refused_on_the_way_in_and_out(memory_root: Path) -> None:
+    with pytest.raises(MemoryStoreError, match="not a kind of memory"):
+        memory_store.write("a-fact", "A fact.", "Body.", evidence="e", kind="rumour",
+                           directory=memory_root)
+    (memory_root / "odd.md").write_text(
+        "---\ndescription: A fact.\nkind: rumour\n---\nBody.\n", encoding="utf-8"
+    )
+    with pytest.raises(MemoryStoreError, match="'kind' must be one of"):
+        memory_store.discover(memory_root)
+
+
+def test_an_outage_expires_a_week_out_and_names_its_host(memory_root: Path) -> None:
+    written = memory_store.write(
+        "device-init-fails", "One node refuses to initialise its GPUs.",
+        "Every launch there dies before the first step.",
+        evidence="run 01k2x7abcd", kind="outage", where="n1", directory=memory_root,
+    )
+    today = datetime.now(UTC).date()
+    assert written.expires_at == (today + timedelta(days=memory_store.OUTAGE_DAYS)).isoformat()
+    assert written.where == "n1"
+    assert written.outage_note().startswith("outage recorded ")
+    assert "on n1;" in written.outage_note()
+    assert not written.expired()
+
+
+def test_only_an_outage_may_expire(memory_root: Path) -> None:
+    with pytest.raises(MemoryStoreError, match="only an outage expires"):
+        memory_store.write("a-fact", "A fact.", "Body.", evidence="e",
+                           expires_at="2026-10-01", directory=memory_root)
+    with pytest.raises(MemoryStoreError, match="not a date"):
+        memory_store.write("a-fact", "A fact.", "Body.", evidence="e", kind="outage",
+                           expires_at="next tuesday", directory=memory_root)
+
+
+def test_the_catalog_drops_an_expired_outage_and_review_lists_it(memory_root: Path) -> None:
+    memory_store.write(
+        "device-init-fails", "One node refuses to initialise its GPUs.", "Body.",
+        evidence="run 01k2x7abcd", kind="outage", where="n1",
+        expires_at=date.today() - timedelta(days=1), directory=memory_root,
+    )
+    memory_store.write("a-build-fact", "A build fact.", "Body.", evidence="run 01k2x7efgh",
+                       directory=memory_root)
+    found = memory_store.discover(memory_root)
+    assert found["device-init-fails"].expired()
+
+    block = memory_store.catalog_block(found)
+    assert "- a-build-fact: A build fact." in block
+    assert "device-init-fails" not in block
+
+    listed = memory_store.needs_review(found, {})
+    assert [(m.name, reasons) for m, reasons in listed] == [
+        ("device-init-fails", [f"expired outage, recorded {date.today().isoformat()}"]),
+    ]
+
+
+def test_a_live_outage_carries_its_host_and_expiry_into_the_catalog(memory_root: Path) -> None:
+    memory_store.write(
+        "device-init-fails", "One node refuses to initialise its GPUs.", "Body.",
+        evidence="run 01k2x7abcd", kind="outage", where="n1", directory=memory_root,
+    )
+    line = memory_store.catalog_block(memory_store.discover(memory_root)).splitlines()[-1]
+    assert line.startswith("- device-init-fails: One node refuses to initialise its GPUs.")
+    assert "[outage recorded " in line and "on n1;" in line
+
+
+def test_a_memory_that_restates_the_documented_codes_is_refused(memory_root: Path) -> None:
+    with pytest.raises(MemoryStoreError) as raised:
+        memory_store.write(
+            "cna-codes",
+            "The LAMMPS build here shifts the cna/atom codes.",
+            "On this build 1 is hcp and 2 is fcc, not the documented mapping.",
+            evidence="run 01k2x7abcd", directory=memory_root,
+        )
+    message = str(raised.value)
+    assert "documented behaviour, not a fact about this machine" in message
+    assert "two-phase-melting section 3" in message
+    assert memory_store.discover(memory_root) == {}
+
+
+@pytest.mark.parametrize(
+    ("description", "body", "skill"),
+    [
+        ("dilate all in fix nph.", "dilate all remaps every atom's position.",
+         "two-phase-melting section 2"),
+        ("fix_modify on a thermostat.", "fix_modify energy yes is refused; use econserve.",
+         "lammps-scripting section 8"),
+        ("velocity create here.", "velocity all create sets the temperature of the group.",
+         "lammps-scripting section 3"),
+        ("fix halt syntax.", "fix guard all halt 10 v_x > 5 error continue stops the run.",
+         "lammps-scripting section 7"),
+    ],
+)
+def test_each_documented_subject_is_refused_with_its_skill(
+    memory_root: Path, description: str, body: str, skill: str
+) -> None:
+    with pytest.raises(MemoryStoreError, match=re.escape(skill)):
+        memory_store.write("a-fact", description, body, evidence="run 01k2x7abcd",
+                           directory=memory_root)
+
+
+def test_a_crash_the_skills_do_not_document_is_recorded(memory_root: Path) -> None:
+    written = memory_store.write(
+        "cna-threads",
+        "compute cna/atom segfaults above eight threads on this build.",
+        "Run the compute on one thread until the build is replaced.",
+        evidence="run 01k2x7abcd", directory=memory_root,
+    )
+    assert written.name == "cna-threads"
+
+
+def test_every_documented_entry_names_a_skill_section_that_exists() -> None:
+    from foundation.documented import DOCUMENTED
+    from foundation.skills import discover_skills
+
+    catalog = discover_skills(Path(__file__).resolve().parent)
+    for entry in DOCUMENTED:
+        assert entry.skill in catalog, f"{entry.command} names a skill that is gone"
+        body = catalog[entry.skill].body()
+        assert f"\n## {entry.section}. " in body, (
+            f"{entry.skill} has no section {entry.section} for {entry.command}"
+        )
+        assert entry.command in body
+
+
+def test_dry_run_ids_are_read_out_of_the_evidence() -> None:
+    evidence = "dry-20260917-121314-ab12 kept the log; run 01k2x7abcd is still going"
+    assert memory_store.dry_run_ids(evidence) == ["dry-20260917-121314-ab12"]
+    assert memory_store.run_ids(evidence) == ["01k2x7abcd"]

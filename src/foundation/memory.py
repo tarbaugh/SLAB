@@ -46,7 +46,24 @@ so the agent re-checks those and trusts the rest without probing.
 record. A write without it is refused unless the writer says the fact is
 unverified, which stamps ``unverified: true``. A memory with no evidence
 reads as unverified whatever its frontmatter says, so a file written before
-this rule, or by hand, is flagged for review rather than trusted.
+this rule, or by hand, is flagged for review rather than trusted. The store
+records the evidence the writer gives; whether it counts is judged where a
+run store is open, by :func:`foundation._ops.evidence_rows`, which the
+``remember`` tools and ``slab memory review`` call. Only a run in a completed
+status counts, because a run that is still going has not shown anything yet.
+
+``kind`` says what sort of fact this is, and the sorts age differently. A
+``build`` memory describes how this machine's software behaves, a
+``resource`` memory what the hardware does, and an ``outage`` memory says
+something is broken now. An outage carries ``expires_at`` and ``where``, the
+host its evidence came from, because a reset node makes it false and nobody
+would think to delete it. The catalog drops an expired outage, and
+``slab memory review`` lists it for deletion. A memory written before this
+rule reads as ``build``, which is what those memories are.
+
+A memory may not restate what the bundled skills document. The table in
+:mod:`foundation.documented` holds the subjects, and a write that touches one
+is refused with the skill section that holds the real answer.
 
 Replacing a memory keeps the replaced file under ``.history/<name>/``, so a
 contradiction is visible: recall shows the previous body beside the new
@@ -66,12 +83,13 @@ import tempfile
 from collections.abc import Iterable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from foundation.documented import documented, refusal
 from foundation.errors import MemoryStoreError
 from slab.config import user_config_path
 
@@ -104,6 +122,20 @@ EVIDENCE_REQUIRED = (
     "confirmed the fact. Pass evidence, or pass unverified=true to record it as an "
     "unverified claim that recall flags and 'slab memory review' lists"
 )
+
+#: What a memory may be about. ``build`` is how this machine's software
+#: behaves, ``resource`` what its hardware does, ``outage`` something that is
+#: broken now. A memory whose file names no kind is a ``build`` memory.
+KINDS: tuple[str, ...] = ("build", "resource", "outage")
+
+#: The kind a memory has when nobody chose one, which is every memory written
+#: before kinds existed.
+DEFAULT_KIND = "build"
+
+#: How long an outage stands before the catalog drops it and review lists it.
+#: A week is long enough to cover a repair and short enough that a memory
+#: nobody revisits stops steering sessions.
+OUTAGE_DAYS = 7
 
 _NAME = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
@@ -141,9 +173,59 @@ class Memory:
     #: Whether the fact is an unconfirmed claim: the writer said so, or no
     #: evidence was recorded.
     unverified: bool = True
+    #: What sort of fact this is: one of :data:`KINDS`.
+    kind: str = DEFAULT_KIND
+    #: The day an outage stops being read, as ``YYYY-MM-DD``. None for a
+    #: memory that does not expire.
+    expires_at: str | None = None
+    #: The host the evidence came from, for a fact about one machine in a
+    #: pool. None when nobody recorded it.
+    where: str | None = None
     #: Set by :func:`write` only: the history file holding the version this
     #: write replaced, or None when the write created the memory.
     replaced: Path | None = None
+
+    def expired(self, today: date | None = None) -> bool:
+        """Whether this memory's day has passed.
+
+        A memory with no ``expires_at`` never expires. A date nobody can
+        parse never expires either, because a typo must not silently delete
+        a fact.
+
+        Examples:
+            >>> m = Memory("x", "d", Path("x.md"), kind="outage", expires_at="2026-09-24")
+            >>> m.expired(date(2026, 9, 24)), m.expired(date(2026, 9, 25))
+            (False, True)
+            >>> Memory("x", "d", Path("x.md")).expired(date(2030, 1, 1))
+            False
+        """
+        if not self.expires_at:
+            return False
+        try:
+            until = date.fromisoformat(self.expires_at)
+        except ValueError:
+            return False
+        return (today or datetime.now(UTC).date()) > until
+
+    def outage_note(self, today: date | None = None) -> str:
+        """The line that goes in front of an outage when it is read.
+
+        Examples:
+            >>> broken = Memory("x", "d", Path("x.md"), kind="outage", created="2026-09-17",
+            ...                 where="n1", expires_at="2026-09-24")
+            >>> broken.outage_note(date(2026, 9, 18))
+            'outage recorded 2026-09-17 on n1; expires 2026-09-24'
+            >>> broken.outage_note(date(2026, 10, 1))
+            'outage recorded 2026-09-17 on n1; expired 2026-09-24'
+            >>> Memory("x", "d", Path("x.md"), kind="outage").outage_note()
+            'outage recorded at an unknown date; no expiry recorded'
+        """
+        when = self.created or "at an unknown date"
+        where = f" on {self.where}" if self.where else ""
+        until = f"expires {self.expires_at}" if self.expires_at else "no expiry recorded"
+        if self.expires_at and self.expired(today):
+            until = f"expired {self.expires_at}"
+        return f"outage recorded {when}{where}; {until}"
 
     def body(self) -> str:
         """The fact itself: everything in the file after the frontmatter."""
@@ -271,7 +353,8 @@ def _provenance(meta: dict[str, Any], key: str) -> str | None:
     if value is None:
         return None
     if isinstance(value, date | datetime):
-        return value.isoformat()[:10] if key in ("created", "updated") else value.isoformat()
+        dated = ("created", "updated", "expires_at")
+        return value.isoformat()[:10] if key in dated else value.isoformat()
     if isinstance(value, str) and value.strip():
         return value.strip()
     raise MemoryStoreError(f"frontmatter {key!r} must be a date or a non-empty string")
@@ -294,6 +377,40 @@ def _against(meta: dict[str, Any]) -> dict[str, str]:
         # (2024, 1.5); keep the text, since only equality matters.
         stamp[name.strip()] = str(version).strip()
     return stamp
+
+
+def _expiry(kind: str, given: str | date | None, today: date) -> date | None:
+    """The day a memory stops being read, as :func:`write` stores it.
+
+    An outage expires: on the day the caller names, or a week from today.
+    Nothing else expires, so a date on another kind is a refusal rather than
+    a silently ignored argument.
+
+    Examples:
+        >>> _expiry("outage", None, date(2026, 9, 17))
+        datetime.date(2026, 9, 24)
+        >>> _expiry("outage", "2026-10-01", date(2026, 9, 17))
+        datetime.date(2026, 10, 1)
+        >>> _expiry("build", None, date(2026, 9, 17)) is None
+        True
+    """
+    if kind != "outage":
+        if given is not None:
+            raise MemoryStoreError(
+                f"only an outage expires, and this memory is of kind {kind!r}; drop "
+                f"the expiry, or record it as an outage"
+            )
+        return None
+    if given is None:
+        return today + timedelta(days=OUTAGE_DAYS)
+    if isinstance(given, date):
+        return given
+    try:
+        return date.fromisoformat(str(given).strip())
+    except ValueError:
+        raise MemoryStoreError(
+            f"the expiry {given!r} is not a date; write it as YYYY-MM-DD"
+        ) from None
 
 
 def _as_date(value: str) -> date | str:
@@ -340,6 +457,11 @@ def parse_memory(path: Path) -> Memory:
         if not isinstance(flagged, bool):
             raise MemoryStoreError("frontmatter 'unverified' must be true or false")
         evidence = _provenance(meta, "evidence")
+        kind = _provenance(meta, "kind") or DEFAULT_KIND
+        if kind not in KINDS:
+            raise MemoryStoreError(
+                f"frontmatter 'kind' must be one of {', '.join(KINDS)}, not {kind!r}"
+            )
         return Memory(
             name=name,
             description=" ".join(description.split()),
@@ -351,6 +473,9 @@ def parse_memory(path: Path) -> Memory:
             against=_against(meta),
             evidence=evidence,
             unverified=flagged or evidence is None,
+            kind=kind,
+            expires_at=_provenance(meta, "expires_at"),
+            where=_provenance(meta, "where"),
         )
     except MemoryStoreError as e:
         raise MemoryStoreError(f"{path}: {e}") from None
@@ -414,6 +539,9 @@ def write(
     against: Mapping[str, str] | None = None,
     evidence: str | None = None,
     unverified: bool = False,
+    kind: str = DEFAULT_KIND,
+    expires_at: str | date | None = None,
+    where: str | None = None,
     directory: Path | None = None,
 ) -> Memory:
     """Record a fact, creating the memory or replacing it whole.
@@ -421,6 +549,14 @@ def write(
     *evidence* is what confirmed the fact: a run id, a dry run, a failure
     record. Without it the write is refused unless *unverified* is true,
     which records the fact as a claim that recall flags and review lists.
+
+    *kind* is one of :data:`KINDS`. An ``outage`` expires: it takes
+    *expires_at*, or :data:`OUTAGE_DAYS` from today when the caller gives
+    none, and *where* names the host its evidence came from. Only an outage
+    expires, so *expires_at* on another kind is refused.
+
+    A write that restates what the bundled skills document is refused, and
+    the refusal names the skill section (see :mod:`foundation.documented`).
 
     Replacing is how an agent consolidates: the ``created`` date survives,
     ``updated`` moves to today, and the writer's attribution is refreshed.
@@ -468,6 +604,17 @@ def write(
             f"the body is {len(body)} characters, over the {MAX_BODY_CHARS}-character "
             f"limit; split it into separate memories, or fold it into an existing one"
         )
+    if kind not in KINDS:
+        raise MemoryStoreError(
+            f"{kind!r} is not a kind of memory: use 'build' for how this machine's "
+            f"software behaves, 'resource' for what its hardware does, or 'outage' "
+            f"for something that is broken now"
+        )
+    restated = documented(collapsed, f"{name}\n{collapsed}\n{body}")
+    if restated is not None:
+        raise MemoryStoreError(refusal(restated))
+    today = datetime.now(UTC).date()
+    until = _expiry(kind, expires_at, today)
     path = root / f"{name}.md"
     existing = discover(root)
     if name not in existing and len(existing) >= MAX_MEMORIES:
@@ -476,7 +623,6 @@ def write(
             f"({MAX_MEMORIES}); update an existing memory instead, or ask the user to "
             f"prune with 'slab memory forget <name>'"
         )
-    today = datetime.now(UTC).date()
     previous = existing.get(name)
     frontmatter: dict[str, Any] = {
         "description": collapsed,
@@ -485,6 +631,12 @@ def write(
         "created": _as_date(previous.created) if previous and previous.created else today,
         "updated": today,
     }
+    if kind != DEFAULT_KIND:
+        frontmatter["kind"] = kind
+    if until is not None:
+        frontmatter["expires_at"] = until
+    if where:
+        frontmatter["where"] = where
     if agent:
         frontmatter["agent"] = agent
     if model:
@@ -679,27 +831,57 @@ def run_ids(evidence: str | None) -> list[str]:
     return found
 
 
+#: A dry-run record id, as :func:`foundation._ops.keep_dry_run_record` mints
+#: it: the ``dry-`` prefix, a stamp, and the random tail.
+_DRY_RUN_ID = re.compile(r"(?<![A-Za-z0-9_])dry-\d{8}-\d{6}-[0-9a-f]+(?![A-Za-z0-9_])")
+
+
+def dry_run_ids(evidence: str | None) -> list[str]:
+    """The dry-run record ids an evidence line cites, in order, once each.
+
+    A dry run rehearses a script and never produces a result, so it names a
+    failure well and confirms nothing. The ids are read out so a reply can
+    say why they do not count.
+
+    Examples:
+        >>> dry_run_ids("dry-20260917-121314-ab12 kept the log")
+        ['dry-20260917-121314-ab12']
+        >>> dry_run_ids("run 01k2x7abcd")
+        []
+    """
+    found: list[str] = []
+    for token in _DRY_RUN_ID.findall(evidence or ""):
+        if token not in found:
+            found.append(token)
+    return found
+
+
 def needs_review(
     memories: Mapping[str, Memory], live: Mapping[str, str]
 ) -> list[tuple[Memory, list[str]]]:
     """The memories a person should confirm or forget, each with its reasons.
 
-    A memory needs review when it is unverified or when software it is
-    stamped against has changed since it was written. *live* is the
-    software present now. Name order.
+    A memory needs review when it is unverified, when software it is
+    stamped against has changed since it was written, or when it has
+    expired. *live* is the software present now. Name order.
 
     Examples:
         >>> checked = Memory("a", "d", Path("a.md"), evidence="run 01abc", unverified=False)
         >>> claim = Memory("b", "d", Path("b.md"))
         >>> old = Memory("c", "d", Path("c.md"), evidence="run 01def", unverified=False,
         ...              against={"lammps": "2Aug2023"})
+        >>> gone = Memory("d", "d", Path("d.md"), evidence="run 01ghi", unverified=False,
+        ...               kind="outage", created="2026-09-01", expires_at="2026-09-08")
         >>> [(m.name, why) for m, why in needs_review(
-        ...     {"a": checked, "b": claim, "c": old}, {"lammps": "22Jul2025"})]
-        [('b', ['unverified']), ('c', ['lammps was 2Aug2023, now 22Jul2025'])]
+        ...     {"a": checked, "b": claim, "c": old, "d": gone}, {"lammps": "22Jul2025"})]
+        [('b', ['unverified']), ('c', ['lammps was 2Aug2023, now 22Jul2025']), \
+('d', ['expired outage, recorded 2026-09-01'])]
     """
     listed = []
     for _, memory in sorted(memories.items()):
         reasons = (["unverified"] if memory.unverified else []) + memory.drift(live)
+        if memory.expired():
+            reasons.append(f"expired {memory.kind}, recorded {memory.created or 'undated'}")
         if reasons:
             listed.append((memory, reasons))
     return listed
@@ -823,7 +1005,7 @@ def catalog_block(memories: dict[str, Memory], live: Mapping[str, str] | None = 
         >>> catalog_block({"grace-gpu": stamped}, live={"gracemaker": "0.6.0"}).splitlines()[-1]
         '- grace-gpu: gracemaker needs X. [changed since: gracemaker was 0.5.2, now 0.6.0]'
     """
-    listed = [memory for _, memory in sorted(memories.items())]
+    listed = [memory for _, memory in sorted(memories.items()) if not memory.expired()]
     if not listed:
         return "\n".join(
             [
@@ -849,7 +1031,11 @@ def catalog_block(memories: dict[str, Memory], live: Mapping[str, str] | None = 
         "found now, is a memory you must confirm before you build on it. A "
         "line that reports none names software that is unchanged, so rely "
         "on that memory without probing. A line marked [unverified] is a "
-        "claim no run confirmed; test it before you rely on it. When you find "
+        "claim no run confirmed; test it before you rely on it. A line "
+        "marked [outage ...] says one host was broken when the memory was "
+        "written, and it names that host and the day the memory expires; "
+        "check the host before you plan around it, and record the repair. "
+        "When you find "
         "a quirk of this machine or its software worth keeping, record it "
         "with remember once a run has confirmed it, and cite that run as the "
         "evidence. Machine facts only: results belong in runs, project "
@@ -858,7 +1044,8 @@ def catalog_block(memories: dict[str, Memory], live: Mapping[str, str] | None = 
     ]
     for m in listed:
         changed = m.drift(live) if live is not None else []
-        note = " [unverified]" if m.unverified else ""
+        note = f" [{m.outage_note()}]" if m.kind == "outage" else ""
+        note += " [unverified]" if m.unverified else ""
         note += f" [changed since: {'; '.join(changed)}]" if changed else ""
         lines.append(f"- {m.name}: {m.description}{note}")
     return "\n".join(lines)
