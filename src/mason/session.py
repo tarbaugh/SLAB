@@ -440,6 +440,10 @@ class MasonSession:
         # and the ordinal its parent gave it, which is also the tail of its
         # transcript name. A lead's own session has none.
         self.handle: str | None = None
+        # The model call the current turn has reached, kept by the loop. A
+        # specialist's delegate tool reads it to size a helper's brief to
+        # the calls its own brief has left.
+        self.steps_taken = 0
         # The conversation transcript this session replayed at start, when
         # it was resumed. The specialists of that conversation write beside
         # it, so a continue after a resume finds them there and not beside
@@ -810,6 +814,13 @@ class MasonSession:
         child's handle. Pass *handle* to take an existing one instead of a
         new ordinal, which is how a specialist continued in a later process
         writes on into its own transcript.
+
+        A new child's transcript opens with a ``session`` header naming its
+        agent and its ``parent``: the handle of the session that spawned
+        it, or None for a lead's child. A helper a specialist briefs is the
+        specialist's child, so its transcript is
+        ``<stem>-<specialist handle>-<helper>-<n>.jsonl`` and a reader
+        takes the nesting from the header, not from the name.
         """
         child = MasonSession(
             self.cwd,
@@ -836,6 +847,19 @@ class MasonSession:
         child.transcript_path = self.transcript_path.with_name(
             f"{self.transcript_path.stem}-{handle}.jsonl"
         )
+        if not child.transcript_path.exists():
+            child.record(
+                {
+                    "type": "session",
+                    "agent": agent_name,
+                    "handle": handle,
+                    "parent": self.handle,
+                    "model": agent.model,
+                    "provider": agent.provider,
+                    "max_turns": agent.max_turns,
+                    "effort": agent.effort,
+                }
+            )
         return child
 
     def resume_from_transcript(self, transcript: Path) -> None:

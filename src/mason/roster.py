@@ -21,8 +21,12 @@ so a typo is refused even when the tool it misspells is absent from the
 current session. ``skills`` is ``matching`` (the skills whose
 ``mason-agents`` include this card, plus the unrestricted ones) or ``all``
 (the full catalog; the PI uses this so solo mode loses nothing).
-``delegates`` grants the ``delegate`` tool — only ever at delegation depth
-zero, so no combination of cards can recurse. ``reviews`` makes the card a
+``delegates`` grants the ``delegate`` tool to a lead at delegation depth
+zero. ``helper`` makes the card a helper: it takes briefs from a lead or
+from a specialist the lead briefed, and it never delegates, so the tree is
+at most lead, specialist, helper and no combination of cards can recurse.
+A specialist at depth one gets a ``delegate`` tool whose team is the
+helpers only. ``reviews`` makes the card a
 critic: read-only by construction (the toolbox keeps only
 :data:`mason.tools.READ_ONLY_TOOLS`, whatever the allowlist says), reached
 through the ``review`` tool rather than ``delegate``, its findings kept as
@@ -38,8 +42,8 @@ Cards are discovered like skills, and a name in a higher layer shadows the
 lower ones whole: project ``<cwd>/agents/*.md``, then user
 ``~/.config/slab/agents/*.md``, then the built-ins shipped in the package
 (``pi``, ``planner``, ``worker``, ``critic``, ``dft-expert``,
-``md-expert``, ``analysis-expert``, and the two condition cards ``protocol``
-and ``bare``). A project card named ``pi.md``
+``md-expert``, ``analysis-expert``, the helper ``coding-expert``, and the
+two condition cards ``protocol`` and ``bare``). A project card named ``pi.md``
 therefore replaces the default agent entirely.
 
 Two cards lead: ``pi`` runs what is small and delegates what is separable,
@@ -72,7 +76,17 @@ from slab.config import user_config_path
 Source = Literal["built-in", "user", "project"]
 
 _KNOWN_KEYS = frozenset(
-    {"name", "description", "tools", "skills", "delegates", "reviews", "review_first", "core"}
+    {
+        "name",
+        "description",
+        "tools",
+        "skills",
+        "delegates",
+        "reviews",
+        "review_first",
+        "core",
+        "helper",
+    }
 )
 
 
@@ -93,6 +107,7 @@ class AgentSpec:
     reviews: bool  # a critic: read-only, reached with the review tool
     review_first: bool  # spends no compute before a critic approves the plan
     core: bool  # False: the body is the whole prompt; a harness condition's entry card
+    helper: bool  # takes briefs from a lead or a specialist, never delegates
     source: Source
     path: Path
 
@@ -184,6 +199,21 @@ def parse_agent_card(path: Path, source: Source) -> AgentSpec:
             raise RosterError(
                 "a card that reviews spends no compute, so 'review_first' has nothing to gate"
             )
+        helper = _flag(meta, "helper")
+        for key, value in (
+            ("delegates", delegates),
+            ("reviews", reviews),
+            ("review_first", review_first),
+        ):
+            if helper and value:
+                raise RosterError(
+                    f"a helper takes briefs and sends none: 'helper' and {key!r} "
+                    f"cannot both be true"
+                )
+        if helper and not core:
+            raise RosterError(
+                "a helper is on a team: 'helper' cannot be combined with 'core: false'"
+            )
         tools = _tools_allowlist(meta)
         if review_first and tools is not None and "review" not in tools:
             raise RosterError(
@@ -210,6 +240,7 @@ def parse_agent_card(path: Path, source: Source) -> AgentSpec:
             reviews=reviews,
             review_first=review_first,
             core=core,
+            helper=helper,
             source=source,
             path=path.resolve(),
         )
@@ -253,12 +284,19 @@ def discover_roster(cwd: Path) -> dict[str, AgentSpec]:
     return roster
 
 
-def hands(spec: AgentSpec, roster: dict[str, AgentSpec]) -> dict[str, AgentSpec]:
-    """The cards *spec* may delegate to: everyone who neither leads nor reviews.
+def hands(
+    spec: AgentSpec, roster: dict[str, AgentSpec], depth: int = 0
+) -> dict[str, AgentSpec]:
+    """The cards *spec* may delegate to at *depth*.
 
-    A card that delegates leads a group of its own. Delegation goes one
-    level down, so a lead handed a task would run as an executor stripped
-    of its one distinguishing tool, which the worker already is by design.
+    At depth zero, a lead's team: everyone who neither leads nor reviews,
+    helpers included. At depth one, a specialist's team: the helpers only,
+    and nobody when *spec* is itself a helper. Deeper than that, nobody:
+    the tree is at most lead, specialist, helper.
+
+    A card that delegates leads a group of its own. A lead handed a task
+    would run as an executor stripped of its one distinguishing tool,
+    which the worker already is by design.
     A card that reviews takes reviews, not briefs: it reaches the roster
     through the ``review`` tool, so its findings are always recorded. A
     card without the core prompt (``core: false``) is a harness
@@ -266,10 +304,16 @@ def hands(spec: AgentSpec, roster: dict[str, AgentSpec]) -> dict[str, AgentSpec]
     *spec* itself is excluded. Name order, so the team list and the
     delegate tool's refusals read the same.
     """
+    if depth >= 2 or (depth == 1 and spec.helper):
+        return {}
     return {
         name: card
         for name, card in sorted(roster.items())
-        if name != spec.name and not card.delegates and not card.reviews and card.core
+        if name != spec.name
+        and not card.delegates
+        and not card.reviews
+        and card.core
+        and (depth == 0 or card.helper)
     }
 
 

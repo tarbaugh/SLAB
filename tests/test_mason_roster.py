@@ -325,7 +325,7 @@ def test_builtin_roster_holds_two_leads_and_a_worker(tmp_path: Path) -> None:
     assert roster["planner"].delegates and roster["planner"].skills_scope == "all"
     assert not roster["worker"].delegates and roster["worker"].tools is None
     # A lead is never a hand: neither lead is on the other's team.
-    team = ["analysis-expert", "dft-expert", "md-expert", "worker"]
+    team = ["analysis-expert", "coding-expert", "dft-expert", "md-expert", "worker"]
     assert list(hands(roster["planner"], roster)) == team
     assert list(hands(roster["pi"], roster)) == team
 
@@ -368,3 +368,44 @@ def test_the_planner_refuses_to_run_without_a_team(tmp_path: Path) -> None:
         Mason(_session(tmp_path), client=_Idle(), spec=roster["planner"], roster=leads)
     # The pi can still run alone: it has a shell of its own.
     Mason(_session(tmp_path / "solo", delegation=False), client=_Idle(), roster=leads)
+
+
+# -- helpers ------------------------------------------------------------------
+
+
+def test_the_helper_flag_parses(tmp_path: Path) -> None:
+    path = _write_card(tmp_path / "agents", "scripter", frontmatter="helper: true\n")
+    spec = parse_agent_card(path, "project")
+    assert spec.helper and not spec.delegates
+    assert not discover_roster(tmp_path)["md-expert"].helper
+    assert discover_roster(tmp_path)["coding-expert"].helper
+
+
+@pytest.mark.parametrize("key", ["delegates", "reviews", "review_first"])
+def test_a_helper_that_also_leads_or_reviews_is_refused(tmp_path: Path, key: str) -> None:
+    path = _write_card(tmp_path / "agents", "scripter", frontmatter=f"helper: true\n{key}: true\n")
+    with pytest.raises(RosterError, match=f"'helper' and '{key}' cannot both be true"):
+        parse_agent_card(path, "project")
+
+
+def test_hands_at_each_depth(tmp_path: Path) -> None:
+    from mason.roster import hands
+
+    roster = discover_roster(tmp_path)
+    # A lead's team takes the helper too.
+    assert "coding-expert" in hands(roster["pi"], roster)
+    # A specialist's team is the helpers only.
+    assert list(hands(roster["md-expert"], roster, 1)) == ["coding-expert"]
+    assert list(hands(roster["worker"], roster, 1)) == ["coding-expert"]
+    # A helper briefs nobody, and nothing below a specialist does.
+    assert hands(roster["coding-expert"], roster, 1) == {}
+    assert hands(roster["md-expert"], roster, 2) == {}
+
+
+def test_cli_roster_tags_the_helper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "slab.toml").write_text('[agent]\nmodel = "m"\n')
+    result = runner.invoke(app, ["roster"])
+    assert result.exit_code == 0
+    (line,) = [line for line in result.output.splitlines() if line.startswith("coding-expert")]
+    assert line.endswith("[helper]")

@@ -485,6 +485,7 @@ def mason_roster() -> None:
             label
             for flag, label in (
                 (spec.delegates, "delegates"),
+                (spec.helper, "helper"),
                 (spec.reviews, "reviews"),
                 (spec.review_first, "review first"),
                 (not spec.core, "own prompt"),
@@ -1091,6 +1092,21 @@ def _follow(transcript: Path, full: bool, usage: _Usage) -> None:
         pass
 
 
+def _nested(delegations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The delegations with each helper right after the specialist that briefed it.
+
+    A helper whose specialist is not in the list keeps its own place, at
+    the top level, so nothing a report counted goes unprinted.
+    """
+    handles = {child["handle"] for child in delegations}
+    top = [c for c in delegations if not c.get("parent") or c["parent"] not in handles]
+    ordered: list[dict[str, Any]] = []
+    for child in top:
+        ordered.append({**child, "parent": None} if child.get("parent") else child)
+        ordered.extend(c for c in delegations if c.get("parent") == child["handle"])
+    return ordered
+
+
 @app.command("read")
 def mason_read(
     transcript: Annotated[
@@ -1364,7 +1380,15 @@ def mason_report(
         if summary["brief_budget_stops"]:
             line += f"; stopped at brief budget: {summary['brief_budget_stops']}"
         typer.echo(line)
-    for child in summary["delegations"]:
+    for child in _nested(summary["delegations"]):
+        if child["parent"]:
+            # A helper sits under the specialist that briefed it.
+            name = child["handle"].removeprefix(f"{child['parent']}-")
+            typer.echo(
+                f"    helper {name}: {child['steps']} call(s), "
+                f"tokens {child['prompt_tokens']}+{child['completion_tokens']}"
+            )
+            continue
         typer.echo(
             f"  delegation {child['handle']}: {child['turns']} turn(s), "
             f"{child['steps']} step(s), "

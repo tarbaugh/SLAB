@@ -38,8 +38,24 @@ _ERRORED = re.compile(r"^tool \S+ failed: ")
 _FINISH_HEAD_CHARS = 200
 
 
-def _delegation_agent(conversation_stem: str, sibling: Path) -> str:
-    """The agent name inside ``<stem>-<agent>-<n>.jsonl``."""
+def _delegation_agent(
+    conversation_stem: str, sibling: Path, header: dict[str, Any] | None = None
+) -> str:
+    """The agent of a delegation transcript: its header's, else the file name's.
+
+    A transcript spawned since helpers exist names its agent in its
+    header, and a helper's file name holds two agent names. An older
+    transcript has no header, and its name is ``<stem>-<agent>-<n>.jsonl``.
+
+    Examples:
+        >>> _delegation_agent("s", Path("s-md-expert-2.jsonl"))
+        'md-expert'
+        >>> _delegation_agent("s", Path("s-md-expert-1-coding-expert-1.jsonl"),
+        ...                   {"agent": "coding-expert"})
+        'coding-expert'
+    """
+    if header and header.get("agent"):
+        return str(header["agent"])
     tail = sibling.stem.removeprefix(f"{conversation_stem}-")
     name, _, ordinal = tail.rpartition("-")
     return name if name and ordinal.isdigit() else tail
@@ -201,6 +217,7 @@ def _tally(transcript: Path) -> dict[str, Any]:
                 wave_spent[wave] += float(event.get("elapsed_s") or 0.0)
 
     return {
+        "header": header,
         "model": header.get("model"),
         "provider": header.get("provider"),
         "endpoint_origin": header.get("endpoint_origin"),
@@ -269,6 +286,8 @@ def summarize(
     *siblings* are the ``<stem>-<agent>-<n>.jsonl`` files the conversation's
     delegations wrote (:func:`mason.session.transcript_groups` finds them).
     Their steps and tokens are reported per child and rolled into totals.
+    A helper a specialist briefed is one of them, and its ``parent`` names
+    that specialist's handle; a lead's own child has None.
 
     *runs* are the session's run rows from :func:`session_runs`. With them
     the summary carries the resource hours those runs held
@@ -276,6 +295,8 @@ def summarize(
     "held nothing" and "not looked up" are different answers.
     """
     summary = _tally(transcript)
+    # The header's fields a summary reports are already its own keys.
+    summary.pop("header")
     summary["transcript"] = str(transcript)
     summary["session"] = transcript.stem
 
@@ -289,10 +310,12 @@ def summarize(
     cut_after: Counter[str] = Counter(summary["cut_after_tools"])
     for sibling in siblings or []:
         child = _tally(sibling)
+        parent = child["header"].get("parent")
         delegations.append(
             {
-                "agent": _delegation_agent(transcript.stem, sibling),
+                "agent": _delegation_agent(transcript.stem, sibling, child["header"]),
                 "handle": sibling.stem.removeprefix(f"{transcript.stem}-"),
+                "parent": str(parent) if parent else None,
                 "transcript": str(sibling),
                 "turns": child["turns"],
                 "steps": child["steps"],

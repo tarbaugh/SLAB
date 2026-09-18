@@ -612,8 +612,10 @@ SLAB-shaped:
   unit of work stays one ReAct loop; the roster is agent cards — markdown
   files whose body is the role prompt — and a `delegate` tool that runs a
   specialist's loop one level down, sequentially, and returns its report
-  with an honest harness footer. The depth limit, the child's loss of
-  `plan` and `delegate`, the shared approval gate with attributed
+  with an honest harness footer. A specialist may hand a script one level
+  further down to a helper card, which never delegates. The depth limit,
+  the child's loss of `plan`, the helper's loss of `delegate`, the shared
+  approval gate with attributed
   previews, and the delegation kill switch are all code, not prompt text,
   in the house style. So is the critic: a card that `reviews` is read-only
   by construction, is reached only through the `review` tool, and leaves

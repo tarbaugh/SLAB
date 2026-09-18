@@ -535,7 +535,9 @@ def _check_lead_can_delegate(
     the tools of a reader. Better to say so before the session lock is
     taken and the model is called.
     """
-    if spec.tools is None or "delegate" not in spec.tools:
+    # A specialist may name delegate for its helpers; only a lead's work
+    # stops without its team.
+    if not spec.delegates or spec.tools is None or "delegate" not in spec.tools:
         return
     if not enabled(agent, "delegation"):
         raise MasonError(
@@ -821,8 +823,10 @@ class Mason:
             config, and CLI flag overrides stay on top of them.
         roster: The full roster; discovered when omitted.
         depth: Delegation depth. At 0 the card's ``delegates`` flag can grant
-            the ``delegate`` tool; below that it never does, and ``plan`` is
-            withheld — the plan belongs to the turn owner.
+            the ``delegate`` tool. At 1 a specialist that is not a helper
+            gets one whose team is the helpers; at 2 and below nobody
+            does. Past depth 0, ``plan`` is withheld — the plan belongs to the
+            turn owner.
         resume_in_place: The replayed messages already sit in this session's
             transcript, so they are not written into it again. A lead's
             resume writes a new file and must copy them; a specialist a
@@ -910,6 +914,7 @@ class Mason:
                 delegate="delegate" in self.toolbox.tools,
                 review="review" in self.toolbox.tools,
                 parallel="delegate_many" in self.toolbox.tools,
+                depth=depth,
             )
             or None
         )
@@ -1102,7 +1107,7 @@ class Mason:
                     stop_reason="error",
                     steps=self.steps_taken,
                 )
-            self.steps_taken = step
+            self.steps_taken = self.session.steps_taken = step
             # One stamp per step: a session working through long tool calls
             # is never read as silent, whatever the heartbeat thread meets.
             self.session.beat_lease()

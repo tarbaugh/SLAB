@@ -206,6 +206,7 @@ def test_builtin_cards_and_skills_ship_inside_the_package() -> None:
     assert cards == [
         "analysis-expert.md",
         "bare.md",
+        "coding-expert.md",
         "critic.md",
         "dft-expert.md",
         "md-expert.md",

@@ -157,3 +157,18 @@ def no_gpus(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ("SLAB_CPUS", "SLAB_GPUS", "SLAB_NTASKS", "SLAB_THREADS", "SLURM_NTASKS"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+
+
+def test_a_specialist_team_block_lists_the_helpers_only(tmp_path: Path) -> None:
+    from mason.prompts import team_block
+
+    roster = discover_roster(tmp_path)
+    block = team_block(roster["md-expert"], roster, depth=1)
+    assert block.startswith("# Your team\n")
+    assert "Your team takes scripts, not studies." in block
+    assert "- coding-expert: Writes, fixes, and checks scripts" in block
+    assert "- worker:" not in block and "critic" not in block
+    # A helper has no team, and a lead's block is unchanged by helpers.
+    assert team_block(roster["coding-expert"], roster, depth=1) == ""
+    assert "Specialists you can hand a scoped task to" in team_block(roster["pi"], roster)
+    assert "- coding-expert:" in team_block(roster["pi"], roster)

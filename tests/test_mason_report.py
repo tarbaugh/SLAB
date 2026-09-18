@@ -134,6 +134,7 @@ def test_delegations_roll_into_the_totals(tmp_path: Path) -> None:
         {
             "agent": "dft-expert",
             "handle": "dft-expert-1",
+            "parent": None,
             "transcript": str(sibling),
             "turns": 1,
             "steps": 1,
@@ -530,3 +531,80 @@ def test_a_session_without_cuts_says_nothing_about_them(tmp_path: Path) -> None:
     assert summarize(conversation)["total_cuts"] == 0
     result = runner.invoke(app, ["report", "-w", str(tmp_path / "ws")])
     assert "replies cut at the ceiling" not in result.output
+
+
+# -- helpers under their specialist ------------------------------------------
+
+
+def _child_header(agent: str, handle: str, parent: str | None) -> dict[str, Any]:
+    return {
+        "at": "2026-08-31T10:02:00+00:00",
+        "type": "session",
+        "agent": agent,
+        "handle": handle,
+        "parent": parent,
+    }
+
+
+def test_a_helper_delegation_names_its_parent_and_its_agent_from_the_header(
+    tmp_path: Path,
+) -> None:
+    transcript = _campaign(tmp_path / "20260831-100000-11.jsonl")
+    specialist = _write(
+        tmp_path / "20260831-100000-11-md-expert-1.jsonl",
+        [
+            _child_header("md-expert", "md-expert-1", None),
+            _usage("2026-08-31T10:02:00+00:00", prompt=50, completion=5),
+        ],
+    )
+    helper = _write(
+        tmp_path / "20260831-100000-11-md-expert-1-coding-expert-1.jsonl",
+        [
+            _child_header("coding-expert", "coding-expert-1", "md-expert-1"),
+            _usage("2026-08-31T10:03:00+00:00", prompt=20, completion=2),
+        ],
+    )
+    old_style = _write(
+        tmp_path / "20260831-100000-11-dft-expert-2.jsonl",
+        [_usage("2026-08-31T10:04:00+00:00", prompt=10, completion=1)],
+    )
+    summary = summarize(transcript, [specialist, helper, old_style])
+    rows = {row["handle"]: row for row in summary["delegations"]}
+    assert rows["md-expert-1"]["agent"] == "md-expert"
+    assert rows["md-expert-1"]["parent"] is None
+    assert rows["md-expert-1-coding-expert-1"]["agent"] == "coding-expert"
+    assert rows["md-expert-1-coding-expert-1"]["parent"] == "md-expert-1"
+    # A transcript from before headers still reads its agent off the name.
+    assert rows["dft-expert-2"]["agent"] == "dft-expert"
+    assert rows["dft-expert-2"]["parent"] is None
+    # The helper's cost rolls up like any delegation's.
+    assert summary["total_prompt_tokens"] == 300 + 50 + 20 + 10
+    assert "header" not in summary
+
+
+def test_cli_prints_a_helper_under_its_specialist(tmp_path: Path) -> None:
+    root = tmp_path / "ws"
+    sessions = root / "mason" / "sessions"
+    _campaign(sessions / "20260831-100000-11.jsonl")
+    _write(
+        sessions / "20260831-100000-11-md-expert-1.jsonl",
+        [_child_header("md-expert", "md-expert-1", None), _usage("2026-08-31T10:03:00+00:00")],
+    )
+    _write(
+        sessions / "20260831-100000-11-md-expert-1-coding-expert-1.jsonl",
+        [
+            _child_header("coding-expert", "coding-expert-1", "md-expert-1"),
+            _usage("2026-08-31T10:04:00+00:00", prompt=20, completion=2),
+            _usage("2026-08-31T10:05:00+00:00", prompt=30, completion=3),
+        ],
+    )
+    _write(
+        sessions / "20260831-100000-11-worker-2.jsonl",
+        [_child_header("worker", "worker-2", None), _usage("2026-08-31T10:06:00+00:00")],
+    )
+    result = runner.invoke(app, ["report", "-w", str(root)])
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    at = lines.index("  delegation md-expert-1: 1 turn(s), 1 step(s), tokens 100+10")
+    assert lines[at + 1] == "    helper coding-expert-1: 2 call(s), tokens 50+5"
+    assert lines[at + 2] == "  delegation worker-2: 1 turn(s), 1 step(s), tokens 100+10"
