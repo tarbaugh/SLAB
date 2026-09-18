@@ -143,6 +143,16 @@ column per group. These are the first lines of
 -12.197200 0.000004 0.000000 0.000004
 ```
 
+`--png` draws an energy window and not the whole grid, because the grid
+covers every band of the run and the part near the Fermi level is what
+most questions need. The default window runs from 8 eV below the
+reference to 8 eV above the conduction band minimum, or above the Fermi
+level for a metal. The vertical axis fits the curves inside the window,
+and the report gives the window in `png_window_ev`. Set your own window
+with `--window LO HI`, in eV relative to the reference, when the
+question needs it. `--whole-grid` draws the whole grid. `--dat` always
+holds the whole grid.
+
 ## 5. Report it honestly
 
 - Report the broadening and both meshes with every number. A DOS at the

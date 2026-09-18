@@ -5,6 +5,10 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- `dos_table.py --png` draws an energy window about the gap and not the
+  whole grid, with the same default as `bands_table.py`. `--window LO HI`
+  sets it, `--whole-grid` draws the whole grid, the vertical axis fits
+  the window, and the report names the window.
 - `bands_table.py --png` draws an energy window about the gap and not
   every band. The default runs from 8 eV below the reference to 8 eV
   above the conduction band minimum. `--window LO HI` sets it,
