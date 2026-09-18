@@ -588,3 +588,48 @@ def test_the_record_carries_every_script_run(tmp_path: Path) -> None:
 
 def test_the_where_of_a_bug_without_a_frame_is_the_file_name() -> None:
     assert ScriptBug("KeyError", "k", "/w/md.py", None, "").where == "md.py"
+
+
+def test_an_engine_that_left_its_files_is_no_script_bug_whatever_the_type() -> None:
+    # A task keeps the engine's files and says so in a note when the engine
+    # ran and failed. The exception type may be a plain RuntimeError.
+    failure = {
+        "type": "RuntimeError",
+        "message": "pw.x exited 3",
+        "traceback": "Traceback (most recent call last):\n  File \"s.py\", line 4\nRuntimeError: x",
+        "notes": ["engine files kept as artifacts: 'si-failed.pwo'"],
+    }
+    assert script_bug({"status": "failed", "failure": failure}, "s.py") is None
+    failure["notes"] = ["relax failed after 3 steps"]
+    assert script_bug({"status": "failed", "failure": failure}, "s.py") is not None
+
+
+def test_every_engine_and_store_error_type_is_on_the_deny_list() -> None:
+    # A new error type in slab.errors must be sorted here: an engine,
+    # builder, scheduler, or store failure is no script bug.
+    import inspect
+
+    import slab.errors
+    from foundation.errors import StorageError
+    from mason.scriptbugs import NOT_A_SCRIPT_BUG
+
+    declared = {
+        name
+        for name, value in inspect.getmembers(slab.errors, inspect.isclass)
+        if issubclass(value, slab.errors.SlabError) and value is not slab.errors.SlabError
+    }
+    assert declared <= NOT_A_SCRIPT_BUG, sorted(declared - NOT_A_SCRIPT_BUG)
+    assert StorageError.__name__ in NOT_A_SCRIPT_BUG
+
+
+def test_an_answer_in_a_conversation_is_not_gated(tmp_path: Path) -> None:
+    # A person at the keyboard reads the answer and decides what is next.
+    (tmp_path / "gap.py").write_text(BUGGY)
+    mason, _ = _mason(
+        tmp_path,
+        [_reply("launch_workflow", script="gap.py"), _text("the script failed; what next?")],
+    )
+    mason.session.interactive = True
+    result = mason.run_turn("measure the gap")
+    assert result.stop_reason == "answer" and "what next" in result.text
+    assert not [m for m in mason.messages if "finish refused:" in str(m.get("content") or "")]

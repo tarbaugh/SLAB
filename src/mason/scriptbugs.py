@@ -19,6 +19,9 @@ The rule, stated once:
 * The exception type must not be one of :data:`NOT_A_SCRIPT_BUG`: an
   engine that ran and failed, a pseudopotential family that is missing, a
   slice that was refused, a timeout, an interrupt, a ``sys.exit``.
+* The failure record must not carry the note a task attaches when it kept
+  an engine's files (:data:`ENGINE_FILES_NOTE`). An engine that ran and
+  wrote output is an engine question, whatever exception type carried it.
 
 Everything else with a traceback is a script bug, the exceptions SLAB's
 own tasks raise for wrong arguments included. A ``ValueError`` from a
@@ -62,6 +65,10 @@ NOT_A_SCRIPT_BUG: frozenset[str] = frozenset(
         "SchedulerError",
         "SchedulerNotAvailableError",
         "JobSizeError",
+        "QeToolError",
+        # The store failed, which no edit to the script repairs.
+        "StorageError",
+        "SchemaVersionError",
         # ASE's own names for a calculator that ran and failed.
         "CalculationFailed",
         "ReadError",
@@ -256,7 +263,29 @@ def script_bug(result: Mapping[str, Any], script: str | Path) -> ScriptBug | Non
         kind, message = exception_of(trace)
     if not trace or not kind or kind in NOT_A_SCRIPT_BUG:
         return None
+    if isinstance(failure, Mapping) and _engine_ran(failure):
+        return None
     return ScriptBug(kind, message, str(script), line_in(trace, script), trace.strip())
+
+
+#: The note a task attaches when it kept the files of an engine that ran
+#: and failed (``foundation.tasks._attach_engine_evidence``). An engine
+#: that wrote output is an engine or science question, whatever exception
+#: type carried it.
+ENGINE_FILES_NOTE = "engine files kept as artifacts:"
+
+
+def _engine_ran(failure: Mapping[str, Any]) -> bool:
+    """Whether the failure record says an engine ran and left its files.
+
+    Examples:
+        >>> _engine_ran({"notes": ["engine files kept as artifacts: 'si-failed.pwo'"]})
+        True
+        >>> _engine_ran({"notes": ["relax failed after 3 steps"]})
+        False
+    """
+    notes = failure.get("notes") or []
+    return any(str(note).startswith(ENGINE_FILES_NOTE) for note in notes)
 
 
 def python_script_in(command: str) -> str | None:

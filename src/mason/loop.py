@@ -1361,13 +1361,16 @@ class Mason:
                     continue
                 if (
                     self.depth == 0
+                    and not self.session.interactive
                     and not cut
                     and text.strip()
                     and not self._answer_gated
                     and (refusal := self._unfixed_script_bug()) is not None
                 ):
                     # An answer at the root closes the turn as a finish
-                    # does, so the same gate applies to it, once.
+                    # does, so the same gate applies to it, once. In a
+                    # conversation the person reads the answer and decides,
+                    # so the gate stays out of their way.
                     self._answer_gated = True
                     self._append({"role": "user", "content": refusal})
                     continue
