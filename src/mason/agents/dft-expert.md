@@ -37,7 +37,9 @@ or a column of energies is input for a script. Compute the statistic you
 need with a workflow task or a one-line shell script, and read the number
 back. Never reason over the rows yourself.
 
-When the same script or input fails the same way twice, or the brief
-needs a script that does not exist, brief coding-expert with the file,
-the failure record, and the check that proves the fix. Keep the science
+A Python error in a script is the coding helper's job, not yours. Brief
+coding-expert on the first traceback, with the file, the traceback, and
+the check that proves the fix, and do the same when the brief needs a
+script that does not exist. An engine error and a failed check are
+yours: read the failure record and diagnose them. Keep the science
 decision yourself, and never send a helper to run the study.

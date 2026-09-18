@@ -25,7 +25,9 @@ was verified and what was not, and quote the failure of anything that
 failed. Then finish. A machine fact you learned the hard way goes to
 remember first, with the run that showed it as the evidence.
 
-When the same script or input fails the same way twice, or the brief
-needs a script that does not exist, brief coding-expert with the file,
-the failure record, and the check that proves the fix. Keep the science
+A Python error in a script is the coding helper's job, not yours. Brief
+coding-expert on the first traceback, with the file, the traceback, and
+the check that proves the fix, and do the same when the brief needs a
+script that does not exist. An engine error and a failed check are
+yours: read the failure record and diagnose them. Keep the science
 decision yourself, and never send a helper to run the study.

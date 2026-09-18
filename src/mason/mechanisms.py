@@ -136,6 +136,20 @@ MECHANISMS: tuple[Mechanism, ...] = (
         "one in turn while the budget sits half free.",
     ),
     Mechanism(
+        "script-bug-handoff",
+        "A Python failure in a script the agent wrote is named as a bug in the "
+        "script, and the tool result ends with the instruction to brief the "
+        "coding helper. The second failure of the same script, with no brief to "
+        "a helper in between, is briefed by the harness itself inside that tool "
+        "call, and the helper's report comes back in the result. A finish while "
+        "a script's latest launch is still a bug nobody was briefed about is "
+        "refused once. Off, a traceback from the agent's own code reads like any "
+        "other failed run.",
+        "A campaign ended its session on a Python error in a script the agent "
+        "wrote. The cards asked for the handoff in prose and nothing in the "
+        "runtime made it happen.",
+    ),
+    Mechanism(
         "table-nudge",
         "A read that returns a numeric table longer than table_nudge_rows ends "
         "with one harness line: a table this long is for a script, not for "

@@ -5,6 +5,44 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- A Python bug in a script the agent wrote goes to the coding helper, and
+  it never ends the session. The new `script-bug-handoff` mechanism
+  classifies every run of such a script: a launch, a dry run, a
+  background run collected by `wait_for_run`, and a `python x.py` in the
+  shell. A run counts as a script bug when it failed with a Python
+  traceback whose exception is not an engine, a builder, a scheduler, a
+  refused slice, a timeout, or an interrupt. A LAMMPS that ran and failed
+  and a `@check` that returned False are not bugs and stay with the
+  specialist. The mechanism has three tiers. The first adds one line to
+  the tool result, naming the exception, the script, the line, and the
+  helper to brief. The second briefs the helper itself, inside the tool
+  call, when the same script fails again with no helper briefed in
+  between; the brief carries the script, the launch, and both tracebacks,
+  and the helper's report comes back in the same result with its usual
+  footer. It goes through the path `delegate` uses, so it takes the same
+  depth, the same transcript name, the same `delegate` event, and the
+  same caps, and it falls back to the note with a reason when a cap stops
+  it. The third refuses, once, a finish over a script whose latest run is
+  still a bug nobody was briefed about; the same finish repeated stands.
+  No tier makes a script failure a harness failure, so the five-failure
+  streak never counts one. The new `mason.scriptbugs` module holds the
+  rule as pure functions, `slab mason report` counts the bugs and the
+  handoffs, and the transcript records `script_run` and
+  `script_bug_handoff` events. The specialist cards and the PI card now
+  send a Python error to the helper on the first traceback instead of the
+  second.
+- A session never signals its own process group. A foreground workflow
+  launch runs the script inside the calling process, so its run carries
+  that pid; `foundation.runtime.stop_process_group` now skips a run whose
+  pid is the caller's, and a process group the caller rides in. The run is
+  still marked failed. Before this, a session closing over such a run left
+  at `running` sent itself a TERM from inside its own cleanup, which reads
+  in the transcript as a SIGTERM from nowhere.
+- A signalled session says how close the signal was to its job's end. The
+  reason reads `terminated (SIGTERM), 3 min before the job's time limit`
+  inside a job, and stays `terminated (SIGTERM)` outside one, so a reader
+  can tell a time limit from a preemption or a cancel. The first close
+  still wins.
 - `band_structure` takes its k-point path from seekpath. seekpath finds
   the space group with spglib, builds the standardized primitive cell,
   and gives the recommended path in that cell's reciprocal basis, so the

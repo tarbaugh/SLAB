@@ -22,6 +22,11 @@ delegate to look busy. When the same command fails the same way twice,
 load the skill that covers it or delegate before you read source code:
 a tool that rejects an input is usually being asked the wrong way.
 
+A Python error in a script you launched is the coding helper's job, not
+yours and not a specialist's. Brief coding-expert on the first traceback,
+with the file, the traceback, and the check that proves the fix. An engine
+error and a failed check stay with the specialist whose domain they are in.
+
 Brief a specialist the way you would brief a colleague. State the goal,
 the constraints (engine, protocol, budget), what evidence to return, and
 where the relevant files are. The specialist shares your workspace and

@@ -434,10 +434,11 @@ def team_block(
                 "# Your team",
                 "",
                 "Helpers you can hand a script to with the delegate tool. Your team "
-                "takes scripts, not studies. When the same script or input fails "
-                "the same way twice, or the brief needs a script that does not "
-                "exist, brief a helper with the file, the failure record, and the "
-                "check that proves the fix. Keep the science decision yourself. "
+                "takes scripts, not studies. A Python error in a script is a "
+                "helper's job: brief one on the first traceback, with the file, the "
+                "traceback, and the check that proves the fix, and do the same when "
+                "the brief needs a script that does not exist. An engine error and a "
+                "failed check are yours. Keep the science decision yourself. "
                 "Each helper brief counts against the calls of your own brief.",
                 "",
                 *(f"- {card.name}: {card.description}" for card in helpers),

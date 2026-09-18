@@ -1375,6 +1375,11 @@ def mason_report(
     )
     for warning in summary["warnings"]:
         typer.secho(f"  warning: {warning}", fg=typer.colors.YELLOW)
+    if summary["total_script_bugs"]:
+        line = f"  script bugs: {summary['total_script_bugs']}"
+        if summary["total_script_bug_handoffs"]:
+            line += f"; handed to the helper: {summary['total_script_bug_handoffs']}"
+        typer.echo(line)
     if summary["briefs"]:
         line = f"  delegations: {summary['briefs']}"
         if summary["brief_budget_stops"]:

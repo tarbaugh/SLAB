@@ -74,6 +74,8 @@ from mason.tools import (
     Toolbox,
     build_toolbox,
     halved_clause,
+    helper_names,
+    open_script_bugs,
     times,
 )
 from slab._version import __version__
@@ -715,6 +717,43 @@ def _unverified_refusal(states: list[str]) -> str:
     )
 
 
+#: The one refusal a finish over an unfixed script bug gets. The gate is
+#: the third tier of ``script-bug-handoff``: the note asks, the automatic
+#: handoff acts, and this stops a campaign from closing over a Python
+#: error nobody read. Like the unverified-evidence gate, it refuses one
+#: signature once, and the same finish after it stands.
+_SCRIPT_BUG_REFUSAL = (
+    "finish refused: {headline}, in {where}, is the last this session heard of "
+    "that script, and no helper was briefed about it. A Python error in a "
+    "script is the coding helper's job, not the science's. Brief {helper} with "
+    "the script path, the traceback, and the check that proves the fix, or "
+    "finish again with a report that says the script was abandoned and why."
+)
+
+
+def _script_bug_refusal(event: dict[str, Any], helper: str) -> str:
+    """The refusal for one open script bug, naming the script and the bug.
+
+    Examples:
+        >>> event = {"script": "/w/md.py",
+        ...          "bug": {"exception": "NameError", "message": "name 'n' is not "
+        ...                  "defined", "where": "md.py line 3"}}
+        >>> refusal = _script_bug_refusal(event, "coding-expert")
+        >>> refusal.startswith("finish refused: NameError: name 'n' is not defined, "
+        ...                    "in md.py line 3, is")
+        True
+        >>> "Brief coding-expert" in refusal
+        True
+    """
+    bug = event.get("bug") or {}
+    kind = str(bug.get("exception") or "an exception")
+    message = str(bug.get("message") or "")
+    where = str(bug.get("where") or Path(str(event.get("script") or "")).name)
+    return _SCRIPT_BUG_REFUSAL.format(
+        headline=f"{kind}: {message}" if message else kind, where=where, helper=helper
+    )
+
+
 def _finish_signature(results: dict[str, Any], run_ids: tuple[str, ...]) -> str:
     """What makes two finishes the same one: the numbers and the runs cited."""
     return json.dumps([results, sorted(set(run_ids))], sort_keys=True, default=str)
@@ -763,6 +802,47 @@ _OPEN_SESSIONS: list[weakref.ref[MasonSession]] = []
 _HANDLERS_INSTALLED: set[int] = set()
 
 
+def _deadline_clause(ends_at: Any, now: Any) -> str:
+    """How close the job's time limit was, for a termination reason, or empty.
+
+    A batch job signals its processes before it kills them, and the reason
+    a session records is the only place a later reader learns why. The
+    clause says how far the signal was from the job's own end, so a time
+    limit reads differently from a preemption or a person's cancel.
+
+    Examples:
+        >>> from datetime import UTC, datetime, timedelta
+        >>> now = datetime(2026, 9, 18, 12, 0, tzinfo=UTC)
+        >>> _deadline_clause(now + timedelta(minutes=3), now)
+        ", 3 min before the job's time limit"
+        >>> _deadline_clause(now + timedelta(seconds=20), now)
+        ", less than a minute before the job's time limit"
+        >>> _deadline_clause(now - timedelta(minutes=2), now)
+        ", 2 min after the job's time limit"
+        >>> _deadline_clause(None, now)
+        ''
+    """
+    if ends_at is None:
+        return ""
+    seconds = (ends_at - now).total_seconds()
+    minutes = int(abs(seconds) // 60)
+    side = "before" if seconds >= 0 else "after"
+    if minutes < 1:
+        return f", less than a minute {side} the job's time limit"
+    return f", {minutes} min {side} the job's time limit"
+
+
+def _termination_reason(session: MasonSession, name: str) -> str:
+    """The reason a signalled session records, with the job clock when there is one."""
+    from datetime import UTC, datetime
+
+    try:
+        ends_at = session.job_ends_at()
+    except Exception:  # the reason must never fail the close
+        ends_at = None
+    return f"terminated ({name})" + _deadline_clause(ends_at, datetime.now(UTC))
+
+
 def _end_session_on_signal(session: MasonSession) -> None:
     """Close the lease and settle this session's runs when the job ends it.
 
@@ -773,6 +853,10 @@ def _end_session_on_signal(session: MasonSession) -> None:
     left alone in an interactive session, where Ctrl-C ends one turn and
     not the session, and the handlers are skipped outside the main thread
     (a delegated wave runs in threads, where signals cannot be installed).
+
+    The reason names how close the signal was to the job's own end
+    (:func:`_termination_reason`), because a reader of the record
+    otherwise cannot tell a time limit from a preemption or a cancel.
     """
     import signal
 
@@ -790,7 +874,7 @@ def _end_session_on_signal(session: MasonSession) -> None:
         for ref in list(_OPEN_SESSIONS):
             live = ref()
             if live is not None:
-                live.close(f"terminated ({name})")
+                live.close(_termination_reason(live, name))
         signal.signal(signum, previous.get(signum, signal.SIG_DFL))
         os.kill(os.getpid(), signum)
 
@@ -865,6 +949,10 @@ class Mason:
         #: The signature of the finish the unverified-evidence gate refused.
         #: An identical finish after it stands, and is recorded as unverified.
         self._finish_refused: str | None = None
+        #: The same, for the script-bug gate; and whether a plain-text
+        #: answer has already been sent back over one, this turn.
+        self._script_bug_refused: str | None = None
+        self._answer_gated = False
         if spec is None:
             spec = self.roster["pi"]  # the built-in layer guarantees pi exists
         self.spec = spec
@@ -1058,6 +1146,25 @@ class Mason:
 
     # -- the loop -------------------------------------------------------------
 
+    def _unfixed_script_bug(self) -> str | None:
+        """The refusal for a finish over an unfixed script bug, or None.
+
+        The gate reads the session's own record: a script whose latest
+        run in this session ended in a Python bug, with no later clean run
+        of it and no brief to a helper naming it. It runs for a lead and
+        for a specialist, and never for a helper, which is the agent the
+        brief would go to.
+        """
+        if not enabled(self.session.agent, "script-bug-handoff"):
+            return None
+        if self.depth > 1 or self.spec.helper:
+            return None
+        helpers = helper_names(self.spec, self.roster, self.depth)
+        if not helpers:
+            return None
+        open_bugs = open_script_bugs(self.session, helpers)
+        return _script_bug_refusal(open_bugs[0], helpers[0]) if open_bugs else None
+
     def _results_mismatch(self, results: dict[str, Any]) -> str | None:
         """The refusal for a finish whose result names miss the expected ones.
 
@@ -1080,6 +1187,7 @@ class Mason:
         # A cut names the tool this turn read last, not the turn before's.
         self._last_tool = None
         self._turn_cuts = []
+        self._answer_gated = False
         error_streak = 0
         empty_nudged = False
         cut_nudged = False
@@ -1251,6 +1359,18 @@ class Mason:
                     empty_nudged = True
                     self._append({"role": "user", "content": _EMPTY_REPLY_NUDGE})
                     continue
+                if (
+                    self.depth == 0
+                    and not cut
+                    and text.strip()
+                    and not self._answer_gated
+                    and (refusal := self._unfixed_script_bug()) is not None
+                ):
+                    # An answer at the root closes the turn as a finish
+                    # does, so the same gate applies to it, once.
+                    self._answer_gated = True
+                    self._append({"role": "user", "content": refusal})
+                    continue
                 if cut:
                     # The cut that ends the turn is recorded like the ones
                     # before it, so the mark, the partial outcome, and the
@@ -1331,6 +1451,16 @@ class Mason:
                                     call, _unverified_refusal(states), as_text=from_text
                                 )
                                 continue
+                    finish_sig = _finish_signature(results, run_ids)
+                    if finish_sig != self._script_bug_refused and (
+                        refusal := self._unfixed_script_bug()
+                    ):
+                        # A campaign must not close over a Python error in
+                        # its own script that nobody read. Said once; the
+                        # same finish after it stands.
+                        self._script_bug_refused = finish_sig
+                        self._append_tool_result(call, refusal, as_text=from_text)
+                        continue
                     self._append_tool_result(call, "task closed", as_text=from_text)
                     self._answer_unrun(calls[position + 1 :], from_text=from_text)
                     raw_verdict = call.arguments.get("verdict")

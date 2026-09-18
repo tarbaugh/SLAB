@@ -867,10 +867,18 @@ ends whatever ended it, and the report prints it as one line:
 session ended: the session stopped: finish
 ```
 
-A session that stopped at its job's time limit says `terminated
-(SIGTERM)` instead, and names the runs it ended with it. That line is
-the answer to "why did this campaign stop", which the transcript could
-not answer before.
+A session a signal ended says `terminated (SIGTERM)` instead, and names
+the runs it ended with it. Inside a job the reason also says how far the
+signal was from the job's own end, as `terminated (SIGTERM), 3 min
+before the job's time limit`, so a time limit reads differently from a
+preemption or a person's cancel. That line is the answer to "why did
+this campaign stop", which the transcript could not answer before.
+
+A session never signals itself. A foreground workflow launch runs the
+script inside the Mason process, so its run carries Mason's own pid, and
+the close that ends a session's runs skips a process group this process
+rides in. Such a run is still marked failed, which is the record that
+matters.
 
 A campaign that finished also carries a `retire` event, recorded right
 after the `finish`. It says what the finish kept: how many runs were
@@ -1340,6 +1348,77 @@ and recorded in the transcript. Every mechanism beyond the loop itself is a
 named switch (`[agent] mechanisms`), so the benchmark can turn it off and
 measure it; [the mechanism ledger](../benchmark.md#the-mechanism-ledger)
 lists them.
+
+### A Python bug in the agent's script
+
+A campaign writes Python, and the Python has bugs. A `NameError` in the
+post-processing of an MD run is not a physics question, so the harness
+sends it to the coding helper instead of leaving it with the specialist
+that owns the physics. This is the `script-bug-handoff` mechanism, and it
+has three tiers.
+
+The harness classifies each run of a script the agent wrote. A launch, a
+dry run, a background run collected by `wait_for_run`, and a
+`python x.py` in the shell all go through the same rule. A run counts as
+a script bug when it failed with a Python traceback and the exception is
+not an engine, a builder, a scheduler, a refused slice, a timeout, or an
+interrupt. A LAMMPS that ran and failed is a science question and stays
+with the specialist. A `@check` that returned False is not a bug either,
+because the run completed. A `ValueError` from a guard in a SLAB task is
+one, because the script called the API wrongly.
+
+The first bug adds one line to the tool result. The failure the agent
+asked for comes first, whole:
+
+```text
+[script bug: NameError: name 'row' is not defined, in gap.py line 2. This is a bug in the script, not in the science. Brief coding-expert with the script path, the traceback, and the check that proves the fix (a dry run); keep every science decision yourself.]
+```
+
+The line appears only for an agent that can reach a helper. A helper gets
+none, and neither does a card without a `delegate` tool.
+
+The second failure of the same script, with no brief to a helper in
+between, is briefed by the harness itself, inside that tool call. The
+brief carries the script path, the launch, and both tracebacks, and it
+tells the helper to prove the fix with a dry run, not to launch the
+production run, and to report a science decision back instead of making
+it. The helper's report comes back in the same tool result, with the
+harness footer a `delegate` returns:
+
+```text
+[script bug: NameError: name 'row' is not defined, in gap.py line 2, for the second time with no helper briefed in between, so the harness briefed coding-expert with the script, the launch, and both tracebacks. Its report follows.]
+gap.py line 2 read len(row); the list is rows. Fixed, and the dry run reached the end and printed mean 1.5.
+
+[coding-expert-1: answer after 1 step(s); tokens 3120+214; transcript 20260918-155720-89814-coding-expert-1.jsonl; continue with continues="coding-expert-1"]
+[harness] read what coding-expert changed in gap.py, then launch it again. The science decisions are still yours.
+```
+
+The brief runs through the path `delegate` uses, so it takes the same
+depth, the same transcript name, the same `delegate` event, and the same
+caps. It counts against `[agent] helper_briefs` and against the calls the
+specialist's own brief has left. When it cannot run, because the cap is
+used up or the brief has no calls left, the result carries the note with
+the reason in one clause instead.
+
+The third tier is a gate on `finish`. A lead or a specialist that
+finishes while some script's latest run in this session is still a bug
+nobody was briefed about is refused once, the way a finish citing no
+verified run is:
+
+```text
+finish refused: NameError: name 'row' is not defined, in gap.py line 2, is the last this session heard of that script, and no helper was briefed about it. A Python error in a script is the coding helper's job, not the science's. Brief coding-expert with the script path, the traceback, and the check that proves the fix, or finish again with a report that says the script was abandoned and why.
+```
+
+The same finish repeated after the refusal stands, so a script the agent
+decided to abandon does not trap the campaign. A later clean run of that
+script clears the bug, and so does a brief to a helper naming the file. A
+helper is never gated, because it is the agent the brief would go to.
+
+None of the three tiers turns a script failure into a harness failure. A
+traceback from the agent's own code is a tool result the model must read,
+and it never counts toward the five-failure streak. `slab mason report`
+counts the bugs and the automatic handoffs, and the transcript carries a
+`script_bug_handoff` event for each one.
 
 ## Design provenance
 

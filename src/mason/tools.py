@@ -57,6 +57,7 @@ from foundation.runtime import describe_liveness
 from mason.client import ToolCall
 from mason.mechanisms import enabled
 from mason.prior import prior_result_check, resolve_artifact_refs
+from mason.scriptbugs import ScriptBug, python_script_in, script_bug, shell_script_bug
 from mason.session import MasonSession
 from mason.skills import Skill, discover_skills, listing, visible_catalog
 from slab.errors import SlabError
@@ -470,10 +471,14 @@ def build_toolbox(
         + _installed_package_roots(session)
         + ((snapshot_root,) if snapshot_root is not None else ())
     )
+    # The script-bug handoff is shared by every tool that runs code the
+    # agent wrote; it is armed at the end, when the box is complete and
+    # the card's allowlist has decided whether delegate survived.
+    handoff = ScriptBugHandoff(session, spec, roster, skills, parent_client, depth=depth)
     _add_file_tools(box, session, read_roots, write_roots)
-    _add_shell_tool(box, session)
+    _add_shell_tool(box, session, handoff)
     if enabled(session.agent, "check-gating"):
-        _add_workflow_tools(box, session, read_roots)
+        _add_workflow_tools(box, session, read_roots, handoff)
     _add_engine_tools(box, session)
     if snapshot_root is not None:
         _add_mp_tools(box, snapshot_root)
@@ -569,6 +574,7 @@ def build_toolbox(
     gate_on = enabled(session.agent, "critic-gate")
     if spec is not None and spec.review_first and depth == 0 and gate_on:
         _gate_until_reviewed(box, session)
+    handoff.arm("delegate" in box.tools)
     return box
 
 
@@ -1264,7 +1270,7 @@ def _driver_in_shell(command: str) -> str | None:
 # -- shell -------------------------------------------------------------------
 
 
-def _add_shell_tool(box: Toolbox, session: MasonSession) -> None:
+def _add_shell_tool(box: Toolbox, session: MasonSession, handoff: ScriptBugHandoff) -> None:
     def shell(arguments: dict[str, Any]) -> str:
         command = str(arguments["command"])
         if refused := _rank_overcommit(command):
@@ -1345,7 +1351,18 @@ def _add_shell_tool(box: Toolbox, session: MasonSession) -> None:
         output = completed.stdout + (
             f"\n[stderr]\n{completed.stderr}" if completed.stderr.strip() else ""
         )
-        return f"exit {completed.returncode}\n{output.rstrip()}"
+        answer = f"exit {completed.returncode}\n{output.rstrip()}"
+        # `python analysis.py` is the other way the agent's own code runs.
+        # Only a command that names a .py file is judged, and only its
+        # traceback counts (mason.scriptbugs).
+        named = python_script_in(command)
+        if named is None:
+            return answer
+        bug = shell_script_bug(answer, command)
+        script = str(_resolve(session, bug.script if bug is not None else named))
+        if bug is not None:
+            bug = replace(bug, script=script)
+        return handoff.report(answer, bug, script=script, tool="shell", launch=command)
 
     box.add(
         Tool(
@@ -1576,6 +1593,22 @@ def _exclusion_hint(failure: dict[str, Any] | None) -> str | None:
     return None
 
 
+def _launch_call(arguments: dict[str, Any]) -> str:
+    """The ``launch_workflow`` call as one line, for a brief to quote.
+
+    Examples:
+        >>> _launch_call({"script": "md.py", "gpus": 1, "name": None, "args": ["300"]})
+        "launch_workflow script=md.py args=['300'] gpus=1"
+    """
+    parts = [f"launch_workflow script={arguments.get('script')}"]
+    for key in ("name", "intent", "args", "background", "dry_run", "from_run",
+                "ntasks", "threads", "gpus"):
+        value = arguments.get(key)
+        if value not in (None, False, "", []):
+            parts.append(f"{key}={value}")
+    return " ".join(parts)
+
+
 def _reserve_for(session: MasonSession, arguments: dict[str, Any]) -> Reservation | str:
     """Check out the slice a launch asks for, or the refusal text.
 
@@ -1607,7 +1640,10 @@ def _reserve_for(session: MasonSession, arguments: dict[str, Any]) -> Reservatio
 
 
 def _add_workflow_tools(
-    box: Toolbox, session: MasonSession, read_roots: tuple[Path, ...]
+    box: Toolbox,
+    session: MasonSession,
+    read_roots: tuple[Path, ...],
+    handoff: ScriptBugHandoff,
 ) -> None:
     # What this transcript already holds, so a resumed session does not
     # record a run twice or repeat a setup block.
@@ -2127,7 +2163,13 @@ def _add_workflow_tools(
         ok = _ops.dry_run_clean(result)
         digest = hashlib.sha256(script_text.encode("utf-8")).hexdigest()
         session.record({"type": "dry_run", "script": str(script), "digest": digest, "ok": ok})
-        return _dry_run_text(script, result, "nothing (no engine started)")
+        return handoff.report(
+            _dry_run_text(script, result, "nothing (no engine started)"),
+            script_bug(result, script),
+            script=str(script),
+            tool="launch_workflow",
+            launch=f"launch_workflow script={script} dry_run=true from_run={wanted}",
+        )
 
     def reverify_run(arguments: dict[str, Any]) -> str:
         script = _resolve(session, str(arguments["script"]))
@@ -2229,6 +2271,7 @@ def _add_workflow_tools(
             "command": shlex.join(driver),
             "script": str(script),
             "args": args,
+            "name": name,
             "cwd": str(session.cwd),
             "background": background,
             "sized": sized,
@@ -2290,7 +2333,15 @@ def _add_workflow_tools(
             session.record(
                 {"type": "dry_run", "script": str(script), "digest": digest, "ok": ok}
             )
-            return _dry_run_text(script, result, held)
+            # The reservation is already back (above), so the handoff's own
+            # brief never waits on a slice this launch still holds.
+            return handoff.report(
+                _dry_run_text(script, result, held),
+                script_bug(result, script),
+                script=str(script),
+                tool="launch_workflow",
+                launch=_launch_call(arguments),
+            )
         record_command(session, **launch_event, run_id=result.get("run_id"))
         _record_run_commands(result.get("run_id"), "launch_workflow")
         lines = []
@@ -2313,7 +2364,15 @@ def _add_workflow_tools(
         output = str(result.get("output") or "").rstrip()
         if output:
             lines.append(f"script output:\n{output}")
-        return "\n".join(lines)
+        # The run is over and its slice is released, so an automatic
+        # handoff here cannot wait on resources this launch still holds.
+        return handoff.report(
+            "\n".join(lines),
+            script_bug(result, script),
+            script=str(script),
+            tool="launch_workflow",
+            launch=_launch_call(arguments),
+        )
 
     box.add(
         Tool(
@@ -2405,6 +2464,46 @@ def _add_workflow_tools(
         )
     )
 
+    def _launched_script(run: Any) -> tuple[str, str] | None:
+        """The script a finished run ran, and the command that launched it.
+
+        Read from this session's own launch records. A foreground launch
+        records the run id; a background one records before the run
+        exists, so it is matched by the name the run took, which is the
+        launch's ``name`` or the script's stem.
+        """
+        by_id: dict[str, Any] | None = None
+        by_name: dict[str, Any] | None = None
+        for event in session.recorded("command"):
+            if event.get("kind") != "launch" or not event.get("script"):
+                continue
+            if event.get("run_id") == run.id:
+                by_id = event
+            elif not event.get("run_id"):
+                called = event.get("name") or Path(str(event["script"])).stem
+                if called == run.name:
+                    by_name = event
+        chosen = by_id or by_name
+        if chosen is None:
+            return None
+        return str(chosen["script"]), str(chosen.get("command") or "")
+
+    def _handoff_for_run(run: Any, answer: str) -> str:
+        """Give a finished background run's answer its script-bug handoff.
+
+        A run that failed with no traceback died for another reason (a
+        cancel, a reap, a job that ended), and is not recorded as a clean
+        run of the script: only a run that completed clears an open bug.
+        """
+        found = _launched_script(run)
+        if found is None:
+            return answer
+        script, launch = found
+        bug = script_bug({"status": run.status.value, "failure": run.failure}, script)
+        if bug is None and run.status.value != "completed":
+            return answer
+        return handoff.report(answer, bug, script=script, tool="wait_for_run", launch=launch)
+
     def wait_for_run(arguments: dict[str, Any]) -> str:
         wanted = arguments.get("run_id")
         asked = float(arguments.get("timeout_s", _ops.DEFAULT_WAIT_S))
@@ -2469,11 +2568,12 @@ def _add_workflow_tools(
                 if enabled(session.agent, "failure-records")
                 else None
             )
-            return (
+            return _handoff_for_run(
+                run,
                 f"{note}run {run.id} ({run.name}): state={_state_text(run)} "
                 f"status={run.status.value}; {waited['progress']}; "
                 f"read it with show_run{rest}\n{_others_line({run.id})}"
-                + (f"\n{hint}" if hint else "")
+                + (f"\n{hint}" if hint else ""),
             )
         if outcome == "no_runs":
             return (
@@ -2485,9 +2585,12 @@ def _add_workflow_tools(
             # for; the rest are a count. Every wait re-listed the whole
             # session record, and a campaign waits dozens of times.
             newest = waited["runs"][0]
-            return (
+            # A short background run can be over before the first wait, so
+            # this branch reports its end and carries the handoff too.
+            return _handoff_for_run(
+                newest,
                 f"no run of this session is running; the newest:\n{_run_line(newest)}\n"
-                f"{_others_line({newest.id})}"
+                f"{_others_line({newest.id})}",
             )
         # The tally answers "is it moving?" without a show_run of the whole
         # record: a real session queried the database by hand for this count.
@@ -4001,6 +4104,336 @@ def _brief_text(spec: AgentSpec, task: str, context: object) -> str:
     return task if not context else f"{task}\n\nContext from {spec.name}:\n{context}"
 
 
+#: The note a first script bug carries: what failed, that it is the code
+#: and not the science, and who fixes it. One bracketed line, like the
+#: repetition note and the table nudge.
+SCRIPT_BUG_NOTE = (
+    "[script bug: {headline}, in {where}. This is a bug in the script, not in "
+    "the science. Brief {helper} with the script path, the traceback, and the "
+    "check that proves the fix (a dry run); keep every science decision "
+    "yourself.]"
+)
+#: The same note when the harness would have briefed the helper itself and
+#: could not. The reason is one clause, so the agent knows what changed.
+SCRIPT_BUG_NOTE_AGAIN = (
+    "[script bug: {headline}, in {where}, for the second time with no helper "
+    "briefed in between. The harness would have briefed {helper} itself, but "
+    "{reason}. Brief {helper} with the script path, the traceback, and the "
+    "check that proves the fix (a dry run); keep every science decision "
+    "yourself.]"
+)
+#: What opens the automatic handoff's section of the tool result.
+SCRIPT_BUG_HANDED_OVER = (
+    "[script bug: {headline}, in {where}, for the second time with no helper "
+    "briefed in between, so the harness briefed {helper} with the script, the "
+    "launch, and both tracebacks. Its report follows.]"
+)
+#: What closes it.
+SCRIPT_BUG_AFTER = (
+    "[harness] read what {helper} changed in {name}, then launch it again. "
+    "The science decisions are still yours."
+)
+#: The brief the harness composes. It is the brief the cards ask a
+#: specialist to write, written by the harness instead.
+SCRIPT_BUG_BRIEF = """\
+{name} failed twice with a Python error, and the second failure is below.
+Fix the script.
+
+Find the line that fails and the reason it fails. Change one thing, then
+prove the fix with the smallest check: a dry run of a workflow script
+(launch_workflow with dry_run=true), or one command whose output shows the
+fix for a plain script. Do not launch the production run.
+
+When the fix needs a science decision, such as a cutoff, an ensemble, a
+potential, or a threshold, do not make it. Name the choice and report it
+back.
+
+Script: {script}
+Launched as: {launch}
+
+The first traceback:
+{first}
+
+The traceback now:
+{second}
+"""
+
+
+def open_script_bugs(
+    session: MasonSession, helpers: Sequence[str] = ()
+) -> list[dict[str, Any]]:
+    """The scripts of this session whose latest run is a bug nobody was briefed on.
+
+    One ``script_run`` event per script, in the order the failures
+    happened. A later run of the same script that carried no bug clears
+    it, and so does a brief to one of *helpers* whose task text names the
+    script's file name. An empty *helpers* counts every brief.
+    """
+    open_bugs: dict[str, dict[str, Any]] = {}
+    for event in _events(session.transcript_path):
+        kind = event.get("type")
+        if kind == "script_run":
+            script = str(event.get("script") or "")
+            if not script:
+                continue
+            if isinstance(event.get("bug"), dict):
+                open_bugs[script] = event
+            else:
+                open_bugs.pop(script, None)
+        elif kind == "delegate":
+            if helpers and str(event.get("agent") or "") not in helpers:
+                continue
+            task = str(event.get("task") or "")
+            for script in list(open_bugs):
+                if Path(script).name in task:
+                    open_bugs.pop(script)
+    return list(open_bugs.values())
+
+
+def helper_names(spec: AgentSpec | None, roster: dict[str, AgentSpec], depth: int) -> list[str]:
+    """The helper cards *spec* may hand a script to at *depth*, in name order."""
+    if spec is None:
+        return []
+    from mason.roster import hands
+
+    return [name for name, card in hands(spec, roster, depth).items() if card.helper]
+
+
+class ScriptBugHandoff:
+    """The ``script-bug-handoff`` mechanism, as one object the tools call.
+
+    A tool that ran code the agent wrote reports the outcome here. The
+    object records what happened, and gives the result its note or, on the
+    second failure of one script, the helper's own report. It is built
+    with the toolbox and armed once the box is complete, because whether
+    the acting agent can reach a helper depends on the card's allowlist.
+
+    An agent that is itself a helper, one whose card has no ``delegate``
+    tool, and one with no helper on its team, all get no note: there is
+    nobody for the note to send them to.
+    """
+
+    def __init__(
+        self,
+        session: MasonSession,
+        spec: AgentSpec | None,
+        roster: dict[str, AgentSpec] | None,
+        skills: dict[str, Skill],
+        parent_client: Any | None,
+        *,
+        depth: int = 0,
+    ) -> None:
+        self.session = session
+        self.spec = spec
+        self.roster = roster or {}
+        self.skills = skills
+        self.parent_client = parent_client
+        self.depth = depth
+        #: Set by :meth:`arm` once the toolbox is complete.
+        self.can_delegate = False
+
+    def arm(self, can_delegate: bool) -> None:
+        """Say whether the finished toolbox offers a ``delegate`` tool."""
+        self.can_delegate = can_delegate
+
+    @property
+    def on(self) -> bool:
+        return enabled(self.session.agent, "script-bug-handoff")
+
+    @property
+    def helper(self) -> AgentSpec | None:
+        """The helper this agent hands a script to, or None."""
+        if not self.can_delegate or self.spec is None or self.spec.helper:
+            return None
+        names = helper_names(self.spec, self.roster, self.depth)
+        return self.roster[names[0]] if names else None
+
+    def _cannot_hand_off(self) -> str | None:
+        """Why the harness may not brief the helper itself, or None.
+
+        A lead's briefs are not capped; a specialist's helper briefs are,
+        and the automatic one counts like any other.
+        """
+        if self.depth >= 1:
+            cap = self.session.agent.helper_briefs
+            if helper_briefs_this_turn(self.session) >= cap:
+                return f"the {cap} helper call(s) of this brief are used up"
+            if self.session.agent.max_turns - self.session.steps_taken < 1:
+                return "this brief has no calls left for a helper"
+        return None
+
+    def report(
+        self,
+        text: str,
+        bug: ScriptBug | None,
+        *,
+        script: str,
+        tool: str,
+        launch: str = "",
+    ) -> str:
+        """Record this run of *script* and give *text* its note or its handoff.
+
+        *text* is the tool result as the tool built it, and it is always
+        returned first: no tier ever replaces the failure the agent asked
+        for. *launch* is the call that ran the script, quoted in the brief
+        so the helper can rehearse it the same way.
+        """
+        if not self.on:
+            return text
+        prior = self._prior_bug(script)
+        self.session.record(
+            {
+                "type": "script_run",
+                "tool": tool,
+                "script": script,
+                "bug": None
+                if bug is None
+                else {
+                    "exception": bug.exception,
+                    "message": bug.message,
+                    "line": bug.line,
+                    "where": bug.where,
+                    # Kept whole: the brief the harness composes on a second
+                    # failure quotes the first traceback from here.
+                    "traceback": bug.traceback,
+                },
+            }
+        )
+        if bug is None:
+            return text
+        helper = self.helper
+        if helper is None:
+            return text
+        if prior is None:
+            return f"{text}\n" + SCRIPT_BUG_NOTE.format(
+                headline=bug.headline, where=bug.where, helper=helper.name
+            )
+        reason = self._cannot_hand_off()
+        if reason is not None:
+            return f"{text}\n" + SCRIPT_BUG_NOTE_AGAIN.format(
+                headline=bug.headline, where=bug.where, helper=helper.name, reason=reason
+            )
+        return self._hand_off(text, bug, helper, prior=prior, launch=launch)
+
+    def _prior_bug(self, script: str) -> dict[str, Any] | None:
+        """This script's open bug from earlier in the session, or None."""
+        helpers = helper_names(self.spec, self.roster, self.depth)
+        for event in open_script_bugs(self.session, helpers):
+            if str(event.get("script") or "") == script:
+                return event
+        return None
+
+    def _hand_off(
+        self,
+        text: str,
+        bug: ScriptBug,
+        helper: AgentSpec,
+        *,
+        prior: dict[str, Any],
+        launch: str,
+    ) -> str:
+        """Brief the helper inside this tool call and return its report with *text*.
+
+        The path is ``delegate``'s: the same child session, the same
+        transcript naming, the same depth, the same ``delegate`` event, so
+        a reader of the transcript and ``slab mason report`` count this
+        brief like any other. The child's own failures are held, so a
+        helper that crashes never raises into the tool that called it.
+        """
+        session = self.session
+        first = str((prior.get("bug") or {}).get("traceback") or "") or _prior_traceback(prior)
+        brief = SCRIPT_BUG_BRIEF.format(
+            name=Path(bug.script).name,
+            script=bug.script,
+            launch=launch or "not recorded",
+            first=first,
+            second=bug.traceback,
+        )
+        budget, _notes, refusal = brief_budget(
+            _child_config(session, helper),
+            session.flag_updates,
+            None,
+            None,
+            calls_left=(
+                session.agent.max_turns - session.steps_taken if self.depth >= 1 else None
+            ),
+        )
+        if refusal is not None:
+            return f"{text}\n" + SCRIPT_BUG_NOTE_AGAIN.format(
+                headline=bug.headline, where=bug.where, helper=helper.name, reason=refusal
+            )
+        child = _fresh_child(
+            session,
+            self.roster,
+            self.skills,
+            self.parent_client,
+            helper,
+            keep=True,
+            depth=self.depth + 1,
+        )
+        _apply_budget(child, budget)
+        child_session = child.session
+        turn = _turn_number(child_session)
+        seen = len(child_session.memories_written)
+        result = _turn_child(child, brief, hold_errors=True)
+        written = child_session.memories_written[seen:]
+        session.record(
+            {
+                "type": "delegate",
+                "agent": helper.name,
+                "handle": child_session.handle,
+                "task": brief,
+                "transcript": child_session.transcript_path.name,
+                "stop": result.stop_reason,
+                "steps": result.steps,
+                "memories": [e["name"] for e in written],
+                "turn": turn,
+                "script_bug": True,
+            }
+        )
+        session.record(
+            {
+                "type": "script_bug_handoff",
+                "script": bug.script,
+                "exception": bug.exception,
+                "tier": 2,
+                "agent": helper.name,
+                "transcript": child_session.transcript_path.name,
+            }
+        )
+        head = SCRIPT_BUG_HANDED_OVER.format(
+            headline=bug.headline, where=bug.where, helper=helper.name
+        )
+        report = _child_report(
+            session,
+            child_session.handle or helper.name,
+            result,
+            child_session,
+            [],
+            [],
+            turn=turn,
+            written=written,
+            stop=stop_text(result, child_session.agent, budget.get("max_turns")),  # type: ignore[arg-type]
+            continues=child_session.handle,
+        )
+        after = SCRIPT_BUG_AFTER.format(helper=helper.name, name=Path(bug.script).name)
+        return f"{text}\n{head}\n{report}\n{after}"
+
+
+def _prior_traceback(event: dict[str, Any]) -> str:
+    """The first failure in the words the recorded event kept.
+
+    The transcript keeps the exception and the line, not the whole
+    traceback, so a brief that has only the record quotes that.
+    """
+    bug = event.get("bug") or {}
+    where = str(bug.get("where") or "")
+    kind = str(bug.get("exception") or "an exception")
+    message = str(bug.get("message") or "")
+    headline = f"{kind}: {message}" if message else kind
+    return f"{headline}, in {where}" if where else headline
+
+
 def _add_delegate_tool(
     box: Toolbox,
     session: MasonSession,
@@ -4122,7 +4555,8 @@ def _add_delegate_tool(
     description = (
         "Hand a script to write or fix to a helper on your team. It returns a "
         "working file and the evidence it ran. It counts against this brief's "
-        "calls. Brief it with the file, the failure record, and the check that "
+        "calls. A Python error in a script goes here on the first traceback. "
+        "Brief it with the file, the traceback, and the check that "
         "proves the fix; keep the science decision yourself. Pass the handle "
         "from its harness line as continues= to send the same helper a follow-up."
         if helping
