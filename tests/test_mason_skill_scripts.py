@@ -2742,6 +2742,65 @@ def test_dos_table_draws_the_curves_when_matplotlib_is_there(
     assert png.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
 
 
+def test_dos_table_draws_a_window_about_the_gap_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pytest.importorskip("matplotlib")
+    code, out = _run(
+        DOS_TABLE, str(SI_DOS_JSON), "--png", str(tmp_path / "si.png"),
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    gap = json.loads(SI_DOS_JSON.read_text())["summary"]["gap"]
+    assert json.loads(out)["png_window_ev"] == [-8.0, round(gap + 8.0, 3)]
+    # A metal has no gap, so the window is 8 eV each side of the Fermi level.
+    code, out = _run(
+        DOS_TABLE, str(AL_DOS_JSON), "--png", str(tmp_path / "al.png"),
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    assert json.loads(out)["png_window_ev"] == [-8.0, 8.0]
+
+
+def test_dos_table_takes_the_window_the_caller_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pytest.importorskip("matplotlib")
+    code, out = _run(
+        DOS_TABLE, str(SI_DOS_JSON), "--png", str(tmp_path / "w.png"), "--window", "-4", "6",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    assert json.loads(out)["png_window_ev"] == [-4.0, 6.0]
+    code, out = _run(
+        DOS_TABLE, str(SI_DOS_JSON), "--png", str(tmp_path / "all.png"), "--whole-grid",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    data = json.loads(SI_DOS_JSON.read_text())
+    zero = data["summary"]["vbm"]
+    assert json.loads(out)["png_window_ev"] == [
+        round(data["energies"][0] - zero, 3),
+        round(data["energies"][-1] - zero, 3),
+    ]
+
+
+@pytest.mark.parametrize("window", [("6", "-4"), ("50", "60")])
+def test_dos_table_refuses_a_window_that_is_empty(
+    window: tuple[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    png = tmp_path / "w.png"
+    code, _ = _run(
+        DOS_TABLE, str(SI_DOS_JSON), "--png", str(png), "--window", *window,
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 2
+    assert not png.exists()
+
+
 def test_dos_table_refuses_a_return_value_without_the_grid(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

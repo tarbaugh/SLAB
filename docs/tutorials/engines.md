@@ -1036,6 +1036,8 @@ thousands of rows, and point at the json.
 
 The density-of-states skill gives the procedure and the reporting rules,
 and its `dos_table.py` writes the json as a table or a plot.
+The plot shows a window about the gap and not the whole grid. Set the
+window with `--window LO HI`, or draw the whole grid with `--whole-grid`.
 
 ## Builders: atomsk
 
