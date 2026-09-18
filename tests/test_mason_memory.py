@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -16,6 +16,12 @@ from mason.prompts import system_messages
 from mason.session import MasonSession
 from mason.tools import build_toolbox
 from slab.config import HpcConfig
+
+
+def _utc_today() -> date:
+    """Today in UTC, the day the memory store dates outages by."""
+    return datetime.now(UTC).date()
+
 
 
 @pytest.fixture()
@@ -426,7 +432,7 @@ def test_the_catalog_stops_carrying_an_outage_after_its_day(
     memory_store.write(
         "device-init-fails", "A node refuses to initialise its GPUs.", "Body.",
         evidence="run 01k2x7abcd", kind="outage", where="n1",
-        expires_at=date.today() - timedelta(days=1), directory=memory_root,
+        expires_at=_utc_today() - timedelta(days=1), directory=memory_root,
     )
     (content,) = [m["content"] for m in system_messages(_session(tmp_path))]
     assert "device-init-fails" not in content

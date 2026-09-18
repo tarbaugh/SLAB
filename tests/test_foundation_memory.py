@@ -13,6 +13,12 @@ from foundation import memory as memory_store
 from foundation.errors import MemoryStoreError
 
 
+def _utc_today() -> date:
+    """Today in UTC, the day the memory store dates outages by."""
+    return datetime.now(UTC).date()
+
+
+
 @pytest.fixture()
 def memory_root(tmp_path: Path) -> Path:
     """A memory directory of its own: the root conftest also uses tmp_path."""
@@ -614,7 +620,7 @@ def test_the_catalog_drops_an_expired_outage_and_review_lists_it(memory_root: Pa
     memory_store.write(
         "device-init-fails", "One node refuses to initialise its GPUs.", "Body.",
         evidence="run 01k2x7abcd", kind="outage", where="n1",
-        expires_at=date.today() - timedelta(days=1), directory=memory_root,
+        expires_at=_utc_today() - timedelta(days=1), directory=memory_root,
     )
     memory_store.write("a-build-fact", "A build fact.", "Body.", evidence="run 01k2x7efgh",
                        directory=memory_root)
@@ -627,7 +633,7 @@ def test_the_catalog_drops_an_expired_outage_and_review_lists_it(memory_root: Pa
 
     listed = memory_store.needs_review(found, {})
     assert [(m.name, reasons) for m, reasons in listed] == [
-        ("device-init-fails", [f"expired outage, recorded {date.today().isoformat()}"]),
+        ("device-init-fails", [f"expired outage, recorded {_utc_today().isoformat()}"]),
     ]
 
 
