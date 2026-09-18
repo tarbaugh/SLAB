@@ -72,7 +72,7 @@ from slab.lammps import (
     script_scratch_dir,
     yaml_thermo_supported,
 )
-from slab.mp import describe_mp, mp_root, structure_path
+from slab.mp import describe_mp, mp_root, resolve_material_id, structure_path
 from slab.outputs import lammps_ave_time, lammps_thermo, lammps_thermo_format
 from slab.resources import envelope
 
@@ -616,7 +616,15 @@ def build_structure(
 # cache_extra folds the snapshot's identity (release, material count) into the
 # cache key: installing a newer snapshot honestly invalidates fetched
 # structures, while the same release mounted at a different path still hits.
-@task(engines=("ase",), cache_extra=lambda arguments: describe_mp())
+# canonical= keys the call by the canonical material_id, so a numeric id and
+# its label are one cache entry.
+@task(
+    engines=("ase",),
+    cache_extra=lambda arguments: describe_mp(),
+    canonical=lambda arguments: {
+        "material_id": resolve_material_id(arguments["material_id"])
+    },
+)
 def fetch_structure(
     material_id: str, *, label: str | None = None
 ) -> tuple[Atoms, dict[str, Any]]:
@@ -635,6 +643,13 @@ def fetch_structure(
     absence is absence: a material id the snapshot does not hold raises
     with that statement, and nothing here falls back to an online lookup.
 
+    When the snapshot carries a ``material_id_numeric`` column, either id
+    form is accepted. The info, the kept CIF's name, and the cache key use
+    the canonical ``material_id``, so both forms are one cache entry, and
+    ``requested_id`` records the form given when it differed. A cache hit
+    returns the computing call's info, so its ``requested_id`` names the
+    form that call was given.
+
     Search before fetching: reduce candidates against ``metadata.sqlite``
     (``slab.mp.search_materials``, the ``slab mp search`` command, or the
     agent's search tools), then fetch the shortlisted ids one by one.
@@ -642,7 +657,8 @@ def fetch_structure(
     Returns ``(atoms, info)``: the structure, and an ``info`` dict with
     ``builder`` (``"mp"``), ``material_id``, ``release``, ``cif_path``
     (relative to the snapshot root), ``source`` (``"cif"``), ``n_atoms``,
-    ``formula``, and ``pbc``.
+    ``formula``, ``pbc``, and ``requested_id`` when the given id was not
+    the canonical one.
 
     Example::
 
@@ -650,22 +666,24 @@ def fetch_structure(
         relaxed, opt = relax(atoms, engine="mace-mp-0-medium")
 
     Args:
-        material_id: One Materials Project id, e.g. ``"mp-149"``.
-        label: Names the kept CIF artifact (default: the material id).
+        material_id: One material id: a ``material_id``, or a
+            ``material_id_numeric`` value when the snapshot has the column.
+        label: Names the kept CIF artifact (default: the canonical id).
     """
     # Snapshot identity resolves BEFORE the read, mirroring the engine
     # tasks: the tracer's cache_extra made the same resolution moments ago.
     described = describe_mp()
-    cif = structure_path(material_id)
+    canonical = resolve_material_id(material_id)
+    cif = structure_path(canonical)
     structure = ase_read(cif)
     if not isinstance(structure, Atoms):  # a multi-frame file
         structure = structure[-1]
     active = current_run()
     if active is not None:
-        _keep_unique(active, f"{label or material_id}.cif", cif)
+        _keep_unique(active, f"{label or canonical}.cif", cif)
     info: dict[str, Any] = {
         "builder": "mp",
-        "material_id": material_id,
+        "material_id": canonical,
         "release": described.get("release"),
         "cif_path": str(cif.relative_to(mp_root())),
         "source": "cif",
@@ -673,6 +691,8 @@ def fetch_structure(
         "formula": structure.get_chemical_formula(),
         "pbc": [bool(flag) for flag in structure.pbc],
     }
+    if canonical != material_id:
+        info["requested_id"] = material_id
     return structure, info
 
 

@@ -1290,6 +1290,20 @@ def test_mp_search_and_lookup_answer_from_the_snapshot(
     assert result["rows"] == [{"n": 4}]
 
 
+def test_mp_get_material_takes_a_numeric_id(tmp_path: Path) -> None:
+    import json
+
+    from conftest import build_mp_snapshot
+
+    snapshot = build_mp_snapshot(tmp_path / "mp-snapshot", numeric_ids="text")
+    (tmp_path / "slab.toml").write_text(f'[builders.mp]\nroot = "{snapshot}"\n')
+    box = build_toolbox(_session(tmp_path))
+    record = json.loads(box.dispatch(_call("get_material", material_id="mp-13")))
+    assert record["material_id"] == "fe-bcc"
+    assert record["requested_id"] == "mp-13"
+    assert record["elements"] == ["Fe"]
+
+
 def test_mp_tool_errors_are_observations(
     tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
 ) -> None:

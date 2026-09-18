@@ -870,6 +870,7 @@ $ slab mp info
 root: /tmp/you/mp-snapshot
 release: 2025.11.1
 materials: 4
+numeric ids: no
 manifest: 4 keys ('slab mp info --json' shows all)
 
 $ slab mp search -e Fe -f energy_above_hull__lte=0.05
@@ -904,6 +905,13 @@ different path still hits. Report every derived result as the pair
 compositions and releases revise records. `meta["release"]` carries the
 release, and `slab doctor` reports the snapshot's health (`--deep` adds a
 database integrity check and a sample of resolved CIFs).
+
+A snapshot may carry a second id column, `material_id_numeric`. When it
+does, `get_material`, `fetch_structure`, and `slab mp show` accept
+either id, and every record and run cites the canonical `material_id`.
+SLAB does not create the column. `slab mp info` and `slab doctor` say
+whether the column exists, and a record found by the numeric id carries
+`requested_id`.
 
 The snapshot also ships `metadata.parquet`, its canonical nested
 metadata. This install reads SQLite and CIF only, and says so when nested

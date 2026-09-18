@@ -152,8 +152,8 @@ def test_the_mp_snapshot_row_covers_all_three_states(
     healthy = runner.invoke(app, ["doctor", "--offline"])
     assert healthy.exit_code == 0, healthy.output
     assert (
-        f"[+] mp snapshot: release 2025.11.1, 4 materials at {snapshot}"
-        in healthy.output
+        f"[+] mp snapshot: release 2025.11.1, 4 materials at {snapshot}, "
+        "numeric ids: no" in healthy.output
     )
 
     (snapshot / "metadata.sqlite").unlink()

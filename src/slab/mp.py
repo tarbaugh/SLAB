@@ -44,6 +44,13 @@ from slab.errors import BuilderError, BuilderNotAvailableError
 _OPERATORS = {"lte": "<=", "gte": ">=", "lt": "<", "gt": ">", "ne": "!="}
 
 _MATERIAL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+_PREFIXED_NUMBER = re.compile(r"^[A-Za-z]+-(\d+)$")
+_NUMERIC_LOOKING = re.compile(r"^(?:[A-Za-z]+-)?\d+$")
+
+#: The optional second id column. A snapshot owner may add it beside
+#: ``material_id``; lookups then accept either form and resolve to the
+#: canonical ``material_id``. SLAB never creates or writes the column.
+NUMERIC_ID_COLUMN = "material_id_numeric"
 _ELEMENT_PATTERN = re.compile(r"^[A-Z][a-z]?$")
 _MAX_ROWS = 500
 
@@ -115,6 +122,8 @@ def snapshot_info(root: str | os.PathLike[str] | None = None) -> dict[str, Any]:
     the ``dataset_info`` table, and a count of ``materials`` rows. The
     extracted ``"release"`` is the string workflows must report with every
     result, and it may be None when the snapshot records none.
+    ``"numeric_ids"`` says whether the snapshot carries the
+    ``material_id_numeric`` column, so lookups accept either id form.
     """
     resolved = mp_root(root)
     info: dict[str, Any] = {"root": str(resolved)}
@@ -131,6 +140,7 @@ def snapshot_info(root: str | os.PathLike[str] | None = None) -> dict[str, Any]:
     with contextlib.closing(connect(resolved)) as connection:
         info["materials"] = _material_count(connection)
         info["dataset_info"] = _dataset_info(connection)
+        info["numeric_ids"] = NUMERIC_ID_COLUMN in _material_columns(connection)
     info["release"] = _release(info)
     return info
 
@@ -201,14 +211,20 @@ def get_material(
     resolves below the snapshot root, ``"cif_file"`` with the absolute
     path. Absence raises: the snapshot is the only source, and there is no
     online fallback.
+
+    *material_id* may be the canonical ``material_id`` or, when the
+    snapshot carries the column, a ``material_id_numeric`` value. The
+    record's ``"material_id"`` is always the canonical one, and
+    ``"requested_id"`` appears only when the given id differed from it.
     """
     _guard_material_id(material_id)
     resolved_root = mp_root(root)
     with contextlib.closing(connect(resolved_root)) as connection:
+        canonical = _resolve_material_id(connection, material_id, resolved_root)
         row = connection.execute(
-            "SELECT * FROM materials WHERE material_id = ?", (material_id,)
+            "SELECT * FROM materials WHERE material_id = ?", (canonical,)
         ).fetchone()
-        if row is None:
+        if row is None:  # resolved moments ago on the same read-only connection
             raise BuilderError(_absence_message(material_id, resolved_root))
         record = dict(row)
         record["elements"] = [
@@ -216,9 +232,11 @@ def get_material(
             for element_row in connection.execute(
                 "SELECT element FROM material_elements WHERE material_id = ? "
                 "ORDER BY element",
-                (material_id,),
+                (canonical,),
             )
         ]
+    if canonical != material_id:
+        record["requested_id"] = material_id
     cif_path = record.get("cif_path")
     if cif_path:
         record["cif_file"] = str(_resolve_cif(resolved_root, str(cif_path)))
@@ -233,13 +251,15 @@ def structure_path(
     The stored ``cif_path`` must resolve below the snapshot root (a path
     that escapes is refused, never resolved) and the file must exist — a
     listed-but-missing CIF means the ``cifs/`` tree did not transfer
-    completely, which is worth naming.
+    completely, which is worth naming. *material_id* takes either id form,
+    as :func:`get_material` does.
     """
     _guard_material_id(material_id)
     resolved_root = mp_root(root)
     with contextlib.closing(connect(resolved_root)) as connection:
+        canonical = _resolve_material_id(connection, material_id, resolved_root)
         row = connection.execute(
-            "SELECT cif_path FROM materials WHERE material_id = ?", (material_id,)
+            "SELECT cif_path FROM materials WHERE material_id = ?", (canonical,)
         ).fetchone()
     if row is None:
         raise BuilderError(_absence_message(material_id, resolved_root))
@@ -257,6 +277,23 @@ def structure_path(
             "been transferred completely"
         )
     return resolved
+
+
+def resolve_material_id(
+    material_id: str, *, root: str | os.PathLike[str] | None = None
+) -> str:
+    """The canonical ``material_id`` for an id given in either column's form.
+
+    The canonical column wins: an id that is a ``material_id`` is returned
+    unchanged, even when another row carries it as a numeric id. Otherwise,
+    when the snapshot has the ``material_id_numeric`` column, the id is
+    looked up there. Absence raises, and so does a numeric id that more
+    than one row carries.
+    """
+    _guard_material_id(material_id)
+    resolved_root = mp_root(root)
+    with contextlib.closing(connect(resolved_root)) as connection:
+        return _resolve_material_id(connection, material_id, resolved_root)
 
 
 def query_materials(
@@ -303,6 +340,65 @@ def _leading_keyword(sql: str) -> str:
     stripped = re.sub(r"--[^\n]*", " ", stripped)
     match = re.search(r"[A-Za-z]+", stripped)
     return match.group(0).upper() if match else ""
+
+
+def _resolve_material_id(
+    connection: sqlite3.Connection, given: str, root: Path
+) -> str:
+    row = connection.execute(
+        "SELECT material_id FROM materials WHERE material_id = ?", (given,)
+    ).fetchone()
+    if row is not None:
+        return str(row["material_id"])
+    if NUMERIC_ID_COLUMN not in _material_columns(connection):
+        raise BuilderError(_absence_message(given, root, numeric_ids=False))
+    candidates = _numeric_candidates(given)
+    marks = ", ".join("?" for _ in candidates)
+    rows = connection.execute(
+        f'SELECT material_id FROM materials WHERE "{NUMERIC_ID_COLUMN}" '
+        f"IN ({marks}) ORDER BY material_id",
+        candidates,
+    ).fetchall()
+    if not rows:
+        raise BuilderError(_absence_message(given, root, numeric_ids=True))
+    matches = [str(match["material_id"]) for match in rows]
+    if len(matches) > 1:
+        raise BuilderError(
+            f"{given} matches {len(matches)} rows by {NUMERIC_ID_COLUMN} "
+            f"({', '.join(matches)}); the snapshot does not keep that column "
+            "unique, so pass one material_id instead"
+        )
+    return matches[0]
+
+
+def _numeric_candidates(given: str) -> list[str | int]:
+    """Every storage form *given* may take in the numeric id column.
+
+    The column's storage form is the snapshot owner's choice, and SQLite
+    does not equate text ``'149'`` with integer ``149`` in an untyped
+    column, so the lookup asks for each form.
+
+    Examples:
+        >>> _numeric_candidates("mp-149")
+        ['mp-149', '149', 149]
+        >>> _numeric_candidates("149")
+        ['149', 149, 'mp-149']
+        >>> _numeric_candidates("si-diamond")
+        ['si-diamond']
+    """
+    candidates: list[str | int] = [given]
+    prefixed = _PREFIXED_NUMBER.match(given)
+    if prefixed:
+        candidates += [prefixed.group(1), int(prefixed.group(1))]
+    elif given.isdigit():
+        candidates += [int(given), f"mp-{given}"]
+    unique: list[str | int] = []
+    for candidate in candidates:
+        if not any(
+            type(candidate) is type(kept) and candidate == kept for kept in unique
+        ):
+            unique.append(candidate)
+    return unique
 
 
 def _material_columns(connection: sqlite3.Connection) -> tuple[str, ...]:
@@ -422,8 +518,9 @@ def _unknown_columns(unknown: list[str], known: tuple[str, ...]) -> str:
 def _guard_material_id(material_id: str) -> None:
     if not isinstance(material_id, str) or not _MATERIAL_ID_PATTERN.match(material_id):
         raise BuilderError(
-            f"{material_id!r} does not look like a material id (expected "
-            "forms like 'mp-149'); pass one material_id from a search result"
+            f"{material_id!r} does not look like a material id (letters, "
+            "digits, '.', '_' and '-', such as a material_id or a "
+            "material_id_numeric value); pass one id from a search result"
         )
 
 
@@ -438,18 +535,30 @@ def _resolve_cif(root: Path, cif_path: str) -> Path:
     return resolved
 
 
-def _absence_message(material_id: str, root: Path) -> str:
+def _absence_message(
+    material_id: str, root: Path, *, numeric_ids: bool | None = None
+) -> str:
     release: str | None
     try:  # a second open, on the error path only
-        release = snapshot_info(root)["release"]
+        info = snapshot_info(root)
+        release = info["release"]
+        numeric_ids = info["numeric_ids"] if numeric_ids is None else numeric_ids
     except BuilderError:
         release = None
     named = f"release {release}" if release else "release unknown"
-    return (
+    message = (
         f"{material_id} is not in the installed snapshot ({named}). The "
         "snapshot is the only source here; there is no online fallback — "
-        "report absence as absence"
+        "report absence as absence."
     )
+    if numeric_ids:
+        message += " Both material_id and material_id_numeric were checked."
+    elif _NUMERIC_LOOKING.match(material_id):
+        message += (
+            " This snapshot labels materials differently; find the label "
+            "with search_materials."
+        )
+    return message
 
 
 def _material_count(connection: sqlite3.Connection) -> int:

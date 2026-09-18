@@ -674,6 +674,7 @@ def mp_info(
     typer.echo(f"root: {info['root']}")
     typer.echo(f"release: {info['release'] or 'not recorded'}")
     typer.echo(f"materials: {info['materials']}")
+    typer.echo(f"numeric ids: {'yes' if info['numeric_ids'] else 'no'}")
     manifest = info.get("manifest")
     if isinstance(manifest, dict):
         typer.echo(f"manifest: {len(manifest)} keys ('slab mp info --json' shows all)")
@@ -750,7 +751,7 @@ def mp_search(
 
 @mp_app.command("show")
 def mp_show(
-    material_id: Annotated[str, typer.Argument(help="One material id, e.g. mp-149.")],
+    material_id: Annotated[str, typer.Argument(help="One material id, in either column's form.")],
     as_json: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
 ) -> None:
     """Show one material's full metadata record and its CIF path."""

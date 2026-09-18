@@ -745,7 +745,10 @@ def build_server(
         'cif_file' — the absolute path of its archived CIF, readable by
         ase.io.read (or fetched traced via foundation.tasks.fetch_structure
         inside a workflow). Raises when the id is absent: the snapshot is
-        the only source, and there is no online fallback."""
+        the only source, and there is no online fallback. Pass the
+        material_id, or the material_id_numeric form such as 'mp-149' when
+        the snapshot carries that column; the record's material_id is the
+        canonical label to cite."""
         from slab.mp import get_material as mp_get
 
         return mp_get(material_id)

@@ -108,3 +108,25 @@ def test_fetch_feeds_relax_directly(configured_snapshot: Path) -> None:
     relaxed, info = relax(atoms, engine="lj", fmax=0.1)
     assert info["converged"] is True
     assert len(relaxed) == 1
+
+
+def test_a_numeric_id_and_its_label_are_one_cache_entry(
+    ws: Workspace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot = build_mp_snapshot(tmp_path / "snap", numeric_ids="text")
+    _point_config_at(tmp_path, monkeypatch, snapshot)
+    with ws.start_run() as first:
+        _, by_number = fetch_structure("mp-149")
+    with ws.start_run() as second:
+        _, by_label = fetch_structure("si-diamond")
+    assert by_number["material_id"] == by_label["material_id"] == "si-diamond"
+    assert by_number["requested_id"] == "mp-149"
+    (computed,) = ws.runs.list_tasks(first.id)
+    (hit,) = ws.runs.list_tasks(second.id)
+    assert computed.cache_hit is False and hit.cache_hit is True
+    assert hit.cache_key == computed.cache_key
+    # A hit restores the computing call's info, so requested_id names the
+    # form that call was given, not the form the hit was given.
+    assert by_label["requested_id"] == "mp-149"
+    (artifact,) = ws.runs.list_artifacts(first.id)
+    assert artifact.name == "si-diamond.cif"

@@ -9,7 +9,7 @@ import time
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
@@ -248,6 +248,15 @@ _MP_ROWS: tuple[tuple[Any, ...], ...] = (
     ),
 )
 
+#: The alphabetical labels a snapshot with numeric ids gives the four
+#: materials, keyed by their Materials Project numbers.
+_MP_LABELS = {
+    "mp-149": "si-diamond",
+    "mp-13": "fe-bcc",
+    "mp-1271068": "fe-fcc",
+    "mp-22862": "nacl-rocksalt",
+}
+
 _MP_COLUMNS = (
     "material_id",
     "formula_pretty",
@@ -281,6 +290,7 @@ def build_mp_snapshot(
     release: str | None = "2025.11.1",
     manifest: bool = True,
     extra_materials: tuple[dict[str, Any], ...] = (),
+    numeric_ids: Literal[None, "text", "int"] = None,
 ) -> Path:
     """Build a miniature but structurally real Materials Project snapshot.
 
@@ -290,6 +300,13 @@ def build_mp_snapshot(
     *release* ``None`` omits the release everywhere (the fingerprint
     fallback); *extra_materials* rows are inserted as given, with no CIF
     written — how tests plant corrupt or incomplete records.
+
+    *numeric_ids* adds the ``material_id_numeric`` column, as an untyped
+    column the way a snapshot owner might. The four materials then carry
+    alphabetical labels (``_MP_LABELS``) as their ``material_id``, and the
+    column holds their Materials Project numbers as ``"mp-<n>"`` text
+    (``"text"``) or as bare integers (``"int"``). An extra row's
+    ``material_id_numeric`` key is stored as given.
     """
     from ase.io import write as ase_write
 
@@ -320,10 +337,20 @@ def build_mp_snapshot(
             """
         )
         placeholders = ", ".join("?" for _ in _MP_COLUMNS)
+        numbers: dict[str, Any] = {}
         for row in _MP_ROWS:
-            connection.execute(f"INSERT INTO materials VALUES ({placeholders})", row)
             record = dict(zip(_MP_COLUMNS, row, strict=True))
             atoms = atoms_by_id[str(record["material_id"])]
+            if numeric_ids is not None:
+                number = str(record["material_id"])
+                record["material_id"] = _MP_LABELS[number]
+                numbers[record["material_id"]] = (
+                    number if numeric_ids == "text" else int(number.split("-")[1])
+                )
+            connection.execute(
+                f"INSERT INTO materials VALUES ({placeholders})",
+                [record[column] for column in _MP_COLUMNS],
+            )
             cif = dest / str(record["cif_path"])
             cif.parent.mkdir(parents=True, exist_ok=True)
             ase_write(cif, atoms, format="cif")
@@ -335,6 +362,14 @@ def build_mp_snapshot(
         for extra in extra_materials:
             values = [extra.get(column) for column in _MP_COLUMNS]
             connection.execute(f"INSERT INTO materials VALUES ({placeholders})", values)
+            if "material_id_numeric" in extra:
+                numbers[str(extra["material_id"])] = extra["material_id_numeric"]
+        if numeric_ids is not None or numbers:
+            connection.execute("ALTER TABLE materials ADD COLUMN material_id_numeric")
+            connection.executemany(
+                "UPDATE materials SET material_id_numeric = ? WHERE material_id = ?",
+                [(number, label) for label, number in numbers.items()],
+            )
         if release is not None:
             connection.execute(
                 "INSERT INTO dataset_info VALUES (?, ?)", ("database_release", release)

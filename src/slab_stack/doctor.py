@@ -539,8 +539,15 @@ def _mp_rows(slab_cfg: SlabConfig | None) -> tuple[list[tuple[str, str]], Path |
     except _ERRORS as e:
         return [("x", f"mp snapshot: {e}")], None
     release = f"release {info['release']}" if info["release"] else "release unknown"
+    numeric = "yes" if info["numeric_ids"] else "no"
     return (
-        [("+", f"mp snapshot: {release}, {info['materials']} materials at {info['root']}")],
+        [
+            (
+                "+",
+                f"mp snapshot: {release}, {info['materials']} materials at "
+                f"{info['root']}, numeric ids: {numeric}",
+            )
+        ],
         Path(str(info["root"])),
     )
 
