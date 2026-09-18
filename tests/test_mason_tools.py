@@ -393,7 +393,15 @@ def test_list_and_describe_task_expose_the_vocabulary(box: Toolbox) -> None:
     lines = listing.splitlines()
     assert any(line.startswith("relax(atoms, ") for line in lines)
     assert any(line.startswith("single_point(atoms, ") for line in lines)
+    assert any(line.startswith("band_structure(atoms, ") for line in lines)
     import json as _json
+
+    describe_bands = ToolCall(
+        id="t", name="describe_task",
+        arguments={"name": "band_structure"},
+        arguments_raw=_json.dumps({"name": "band_structure"}),
+    )
+    assert "the gap verdict" in box.dispatch(describe_bands)
 
     describe_relax = ToolCall(
         id="t", name="describe_task",

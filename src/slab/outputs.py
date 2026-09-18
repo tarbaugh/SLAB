@@ -130,6 +130,9 @@ _PW_BFGS = re.compile(r"bfgs converged in\s*(\d+)\s*scf cycles and\s*(\d+)\s*bfg
 _PW_WALL = re.compile(r"^\s*PWSCF\s*:\s*(.+?)\s+CPU\s+(.+?)\s+WALL")
 _PW_ERROR_FENCE = re.compile(r"^\s*%{10,}")
 _PW_CARD_IGNORED = re.compile(r"Warning: card .* ignored")
+_PW_BANDS_END = "End of band structure calculation"
+_PW_BANDS_K = re.compile(r"^\s*k =.*bands \(ev\):")
+_PW_BANDS_STOP = re.compile(r"^\s*(Writing|highest|the Fermi|PWSCF\s*:)")
 
 
 @dataclass
@@ -242,7 +245,10 @@ def pwscf_digest(name: str, text: str) -> str:
         out.append("system: " + ", ".join(system))
     if settings:
         out.append("settings: " + "; ".join(settings))
-    if not cycles:
+    bands = _bands_listing(lines) if _PW_BANDS_END in text else None
+    if bands is not None:
+        out.append(_bands_line(name, *bands))
+    elif not cycles:
         out.append("scf: no iteration found (the run may have stopped before the first step)")
     elif len(cycles) == 1:
         out.append("scf: 1 cycle (single point)")
@@ -259,7 +265,9 @@ def pwscf_digest(name: str, text: str) -> str:
             out.append(f"  bfgs converged in {bfgs[0]} scf cycles and {bfgs[1]} bfgs steps")
     if fermi:
         out.append(f"fermi energy: {fermi} eV")
-    if forces_seen:
+    if bands is not None:
+        pass  # a bands run computes no forces, and saying so is noise
+    elif forces_seen:
         force = (
             f"forces: max |component| {forces_max:.6f} Ry/bohr "
             f"({forces_max * _RY_PER_BOHR_TO_EV_PER_A:.4f} eV/Å)"
@@ -277,6 +285,41 @@ def pwscf_digest(name: str, text: str) -> str:
     if wall:
         out.append(f"wall: {wall} (PWSCF total)")
     return "\n".join(out)
+
+
+def _bands_listing(lines: list[str]) -> tuple[int, int, float, float] | None:
+    """k-point count, band count, and energy range of a bands run's listing."""
+    start = next((i for i, line in enumerate(lines) if _PW_BANDS_END in line), None)
+    if start is None:
+        return None
+    kpoints, per_k, current = 0, 0, 0
+    low, high = float("inf"), float("-inf")
+    for line in lines[start + 1 :]:
+        if _PW_BANDS_STOP.match(line):
+            break
+        if _PW_BANDS_K.match(line):
+            kpoints += 1
+            per_k, current = max(per_k, current), 0
+            continue
+        values = line.replace("-", " -").split()
+        try:
+            numbers = [float(v) for v in values]
+        except ValueError:
+            continue
+        current += len(numbers)
+        if numbers:
+            low, high = min(low, *numbers), max(high, *numbers)
+    per_k = max(per_k, current)
+    return (kpoints, per_k, low, high) if kpoints else None
+
+
+def _bands_line(name: str, kpoints: int, n_bands: int, low: float, high: float) -> str:
+    stem = name[: -len(".pwo")] if name.endswith(".pwo") else name
+    table = f"{stem}.json" if stem.endswith("-bands") else "the run's -bands.json"
+    return (
+        f"bands: {kpoints} k-points, {n_bands} bands, eigenvalues {low:.4f} to "
+        f"{high:.4f} eV; the numbers are in {table} (band_structure's result file)"
+    )
 
 
 def _cycle_line(cycle: _ScfCycle) -> str:

@@ -444,8 +444,11 @@ def test_every_builtin_skill_validates_and_maps_to_its_specialists(tmp_path: Pat
         "interface-adhesion",
         "nucleation-cnt",
         "two-phase-melting",
+        "band-structure",
     } <= set(skills)
     assert skills["convergence-study"].agents == frozenset({"dft-expert"})
+    assert skills["band-structure"].agents == frozenset({"dft-expert"})
+    assert (skills["band-structure"].root / "scripts" / "bands_table.py").is_file()
     assert skills["surface-energy"].agents == frozenset({"dft-expert"})
     assert skills["radial-distribution"].agents == frozenset({"md-expert", "analysis-expert"})
     assert skills["msd-diffusion"].agents == frozenset({"md-expert", "analysis-expert"})
@@ -2388,3 +2391,123 @@ def test_pushoff_recipe_separates_random_overlaps(tmp_path: Path) -> None:
     np.fill_diagonal(distances, np.inf)
     assert distances.min() > 3.0
     assert len(atoms) == 108
+
+
+# -- bands_table (band-structure) --------------------------------------------------------
+
+BANDS_TABLE = SKILLS / "band-structure" / "scripts" / "bands_table.py"
+SI_BANDS_JSON = DATA / "qe-si-bands.json"
+AL_BANDS_JSON = DATA / "qe-al-bands.json"
+
+
+def test_bands_table_prints_the_summary_of_the_real_si_run(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out = _run(BANDS_TABLE, str(SI_BANDS_JSON), monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 0
+    report = json.loads(out)
+    assert (report["path"], report["lattice"]) == ("GXWKGLUWLK,UX", "FCC")
+    assert (report["n_kpoints"], report["n_bands"]) == (60, 8)
+    assert report["is_metal"] is False and report["gap_kind"] == "indirect"
+    assert report["vbm_at"]["label"] == "G"
+    assert report["gap"] == json.loads(SI_BANDS_JSON.read_text())["summary"]["gap"]
+
+
+def test_bands_table_writes_a_table_relative_to_the_vbm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dat = tmp_path / "si.dat"
+    code, out = _run(
+        BANDS_TABLE, str(SI_BANDS_JSON), "--dat", str(dat), monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert code == 0 and json.loads(out)["dat"] == str(dat)
+    lines = dat.read_text().splitlines()
+    header = [line for line in lines if line.startswith("#")]
+    rows = [line.split() for line in lines if not line.startswith("#")]
+    assert header[1] == "# energies in eV relative to the valence band maximum (6.1597 eV)"
+    assert header[2].startswith("# special points (label x): G 0.000000 X 1.157124 W ")
+    assert header[2].endswith("K 7.018704 U 7.018704 X 7.427810")
+    assert len(rows) == 60 and all(len(row) == 9 for row in rows)  # x and 8 bands
+    top_valence = max(float(row[4]) for row in rows)  # band 4 is the highest valence band
+    assert top_valence == 0.0
+    assert min(float(row[5]) for row in rows) == json.loads(out)["gap"]
+
+
+def test_bands_table_takes_the_fermi_level_as_zero_for_a_metal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dat = tmp_path / "al.dat"
+    code, out = _run(
+        BANDS_TABLE, str(AL_BANDS_JSON), "--dat", str(dat), monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert code == 0 and json.loads(out)["is_metal"] is True
+    assert "relative to the Fermi level" in dat.read_text().splitlines()[1]
+
+
+def test_bands_table_png_without_matplotlib_names_the_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setitem(sys.modules, "matplotlib", None)  # import raises ImportError
+    code, _, err = _run_err(
+        BANDS_TABLE,
+        str(SI_BANDS_JSON),
+        "--png",
+        str(tmp_path / "si.png"),
+        monkeypatch=monkeypatch,
+        capsys=capsys,
+    )
+    assert code == 2
+    assert err.strip() == (
+        "error: --png needs the matplotlib package, which is not installed; "
+        "write --dat and plot that table instead"
+    )
+    assert not (tmp_path / "si.png").exists()
+
+
+def test_bands_table_draws_the_diagram_when_matplotlib_is_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pytest.importorskip("matplotlib")
+    png = tmp_path / "si.png"
+    code, _ = _run(
+        BANDS_TABLE, str(SI_BANDS_JSON), "--png", str(png), monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert code == 0
+    assert png.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_bands_table_refuses_a_return_value_without_energies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    data = json.loads(SI_BANDS_JSON.read_text())
+    del data["energies"]
+    data["energies_in"] = "si-bands.json"
+    short = tmp_path / "returned.json"
+    short.write_text(json.dumps(data))
+    code, _ = _run(
+        BANDS_TABLE,
+        str(short),
+        "--dat",
+        str(tmp_path / "x.dat"),
+        monkeypatch=monkeypatch,
+        capsys=capsys,
+    )
+    assert "they are in si-bands.json" in str(code)
+    missing = str(tmp_path / "missing.json")
+    code, _ = _run(BANDS_TABLE, missing, monkeypatch=monkeypatch, capsys=capsys)
+    assert "cannot read" in str(code)
+
+
+def test_band_structure_skill_states_the_limits(tmp_path: Path) -> None:
+    skill = discover_skills(tmp_path)["band-structure"]
+    text = (skill.root / "SKILL.md").read_text()
+    for phrase in (
+        "Use the primitive cell",
+        "is a lower bound",
+        "the smearing does not",
+        "A metal has no gap",
+        "@check",
+        "info[\"is_metal\"] is True",
+        "Cite the run id",
+    ):
+        assert phrase in text, phrase

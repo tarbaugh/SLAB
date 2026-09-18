@@ -761,6 +761,18 @@ def _scratch_dir(prefix: str) -> Path:
     return made
 
 
+def engine_scratch(prefix: str) -> Path:
+    """A fresh slab-managed scratch directory that a task owns across engine calls.
+
+    A task that runs one engine several times in one directory (an SCF,
+    then a bands run that reads its charge density) makes the directory
+    here and passes it as ``directory=``. The directory sits under
+    ``[paths] scratch`` and carries the ``.slab-owner`` marker, so the
+    sweep rules for engine scratch apply to it. The caller removes it.
+    """
+    return _scratch_dir(prefix)
+
+
 _POTENTIAL_FILE_SUFFIXES = (
     ".eam",
     ".eam.alloy",

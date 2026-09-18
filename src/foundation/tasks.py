@@ -479,6 +479,273 @@ def single_point(
     return evaluated, info
 
 
+#: Above this many eigenvalues (k-points times bands) the task's return
+#: value leaves the energies in the ``-bands.json`` artifact and names it,
+#: because the return value is read by an agent and 1000 numbers are
+#: already more than a reader takes in.
+_BANDS_INLINE_LIMIT = 1000
+
+#: Spin and relativistic settings a bands run with this task does not read
+#: correctly yet, with the reason each is refused.
+_BANDS_UNSUPPORTED = {
+    "nspin": (
+        2,
+        "a spin-polarized run prints two eigenvalue channels, and the gap verdict reads one",
+    ),
+    "noncolin": (True, "a noncollinear run has spinor bands the verdict does not count"),
+    "lspinorb": (True, "spin-orbit coupling needs noncollinear spinor bands"),
+}
+
+
+@task(
+    engines=("ase",),
+    cache_extra=lambda arguments: describe_engine(
+        arguments.get("engine", "qe"), arguments.get("calculator_options")
+    ),
+)
+def band_structure(
+    atoms: Atoms,
+    *,
+    engine: str = "qe",
+    calculator_options: dict[str, Any] | None = None,
+    path: str | None = None,
+    npoints: int | None = None,
+    density: float = 20.0,
+    nbands: int | None = None,
+    label: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The Kohn-Sham bands along a high-symmetry path, and the gap verdict.
+
+    Two pw.x executions share one slab-managed scratch directory: an SCF
+    on the caller's mesh, then ``calculation='bands'`` on the path, which
+    reads the SCF's charge density. Quantum ESPRESSO only. Relax the
+    structure first, and pass the primitive cell: a supercell folds its
+    bands and the diagram stops being readable.
+
+    The path comes from :func:`slab.bands.band_path` (ASE's Bravais
+    analysis). The verdict comes from :func:`slab.bands.band_summary`
+    against the SCF Fermi level. A band that crosses it makes the system a
+    metal, and a metal has no gap. A semilocal functional (PBE, PBEsol)
+    places the conduction bands too low, so its gap is below the measured
+    one.
+
+    Returns ``(bands, info)``. ``bands`` is the content of the kept
+    ``{label}-bands.json``: the path, the lattice, the special points and
+    their x positions, the distances, the k-points, the energies in eV,
+    the Fermi level, and the summary. When the listing holds more than
+    1000 eigenvalues the energies stay in the artifact and ``bands``
+    carries ``energies_in``, its name. ``info`` carries ``engine``,
+    ``engine_source``, ``engine_version``, ``scf_energy``,
+    ``energy_unit``, ``fermi``, the summary fields (``is_metal``,
+    ``vbm``, ``cbm``, ``gap``, ``direct_gap``, ``gap_kind``, ``vbm_at``,
+    ``cbm_at``, ``n_valence_bands``), ``path``, ``lattice``, ``npoints``,
+    ``n_bands``, ``n_atoms``, and ``artifacts``.
+
+    Inside a run the task keeps ``{label}-scf.pwo`` and
+    ``{label}-bands.pwo`` as intermediates and ``{label}-bands.json`` as
+    the result file (``label`` defaults to ``"bands"``). On a failure the
+    engine's own error report is attached to the exception, and its files
+    are kept as ``{label}-scf-failed.*`` or ``{label}-bands-failed.*``, so
+    the name says which step failed. The scratch directory is removed in
+    every case.
+
+    Args:
+        atoms: The relaxed primitive cell (calculator-free). Never mutated.
+        engine: ``"qe"`` or a registry alias built on
+            ``slab.backends.qe_calculator``.
+        calculator_options: The SCF's options, for example
+            ``qe_protocol_options(atoms, protocol="balanced")``. They need
+            a k-point mesh. ``calculation`` may be absent or ``"scf"``.
+            Spin-polarized, noncollinear, and spin-orbit runs are refused.
+        path: A path in the lattice's own labels, such as ``"GXWKGLUWLK"``.
+            None takes ASE's default path for the lattice.
+        npoints: The number of k-points on the path. It wins over
+            *density*.
+        density: The k-points per inverse angstrom along the path.
+        nbands: The number of bands the bands step computes. None takes
+            the SCF's state count or the occupied bands plus 20 percent
+            (at least 4 more), whichever is larger. A caller value must
+            hold at least the occupied bands.
+        label: Names the kept artifacts.
+
+    Examples:
+        >>> from ase.build import bulk
+        >>> band_structure(bulk("Cu", "fcc", a=3.6), engine="emt")
+        Traceback (most recent call last):
+        ...
+        ValueError: band_structure needs a Quantum ESPRESSO engine; 'emt' is not one
+    """
+    import json
+    from math import ceil
+
+    from slab.backends import engine_scratch
+    from slab.bands import band_path, band_summary, path_distances, read_bands, scf_levels
+
+    if not _qe_shaped(engine, calculator_options):
+        raise ValueError(f"band_structure needs a Quantum ESPRESSO engine; {engine!r} is not one")
+    if calculator_options and "directory" in calculator_options:
+        raise ValueError(
+            "band_structure makes its own scratch directory for both steps; "
+            "drop directory= from calculator_options"
+        )
+    _guard_qe_kpoints(atoms, calculator_options, task="band_structure")
+    _refuse_unsupported_bands(calculator_options)
+    scf_options = _qe_scf_options(calculator_options, task="band_structure")
+    found = band_path(atoms, path=path, npoints=npoints, density=density)
+    described = describe_engine(engine, calculator_options)
+    name = label or "bands"
+    system = atoms.copy()
+    active = current_run()
+    kept: list[str] = []
+
+    scratch = engine_scratch("slab-bands-")
+    try:
+        # Both steps read and write the same save directory: pin prefix and
+        # outdir so pw.x finds the SCF's charge density, and so an
+        # ESPRESSO_TMPDIR set for the machine cannot send two concurrent
+        # band structures into one shared save directory.
+        input_data = scf_options["input_data"]
+        control = input_data.setdefault("control", {})
+        for key, default in (("prefix", "pwscf"), ("outdir", "./")):
+            if key not in input_data and key not in control:
+                control[key] = default
+        scf = get_calculator(engine, directory=scratch, **scf_options)
+        try:
+            system.calc = scf
+            try:
+                scf_energy = float(system.get_potential_energy())
+                scf_text = (scratch / "espresso.pwo").read_text()
+                levels = scf_levels(scf_text)
+            except Exception as e:
+                e.add_note("band_structure failed in its scf step")
+                _attach_engine_evidence(e, scf, f"{name}-scf", task_name="band_structure")
+                raise
+            if active is not None:
+                for suffix, produced in collect_engine_outputs(scf):
+                    kept.append(_keep_unique(active, f"{name}-scf.{suffix}", produced))
+        finally:
+            system.calc = None
+            close_calculator(scf)
+
+        occupied = ceil(levels["n_electrons"] / 2)
+        if nbands is None:
+            margin = max(4, ceil(0.2 * levels["n_electrons"] / 2))
+            nbnd = max(levels["n_states"] or 0, occupied + margin)
+        elif nbands < occupied:
+            raise ValueError(
+                f"nbands={nbands} holds fewer bands than the {occupied} occupied "
+                f"by {levels['n_electrons']:g} electrons; ask for at least "
+                f"{occupied + 4} so the listing holds conduction bands"
+            )
+        else:
+            nbnd = nbands
+
+        bands_options = _bands_step_options(scf_options, found["bandpath"], nbnd)
+        step = get_calculator(engine, directory=scratch, **bands_options)
+        try:
+            try:
+                # properties=[]: a bands run yields eigenvalues only, so
+                # ASE must not ask pw.x for forces or stress.
+                step.calculate(system, properties=[], system_changes=["positions"])
+                bands_text = (scratch / "espresso.pwo").read_text()
+                read = read_bands(bands_text)
+                if len(read["energies"]) != found["npoints"]:
+                    raise ValueError(
+                        f"pw.x listed {len(read['energies'])} k-points, but the "
+                        f"path has {found['npoints']}"
+                    )
+            except Exception as e:
+                e.add_note("band_structure failed in its bands step")
+                _attach_engine_evidence(e, step, f"{name}-bands", task_name="band_structure")
+                raise
+            if active is not None:
+                for suffix, produced in collect_engine_outputs(step):
+                    kept.append(_keep_unique(active, f"{name}-bands.{suffix}", produced))
+        finally:
+            close_calculator(step)
+
+        summary = band_summary(
+            read["energies"], levels["fermi"], found["kpts"], found["special_points"]
+        )
+        axis = path_distances(found["kpts"], atoms.cell, found["special_points"])
+        result: dict[str, Any] = {
+            "path": found["path"],
+            "lattice": found["lattice"],
+            "special_points": found["special_points"],
+            "ticks": [
+                {"label": tick, "x": x}
+                for tick, x in zip(axis["labels"], axis["special_x"], strict=True)
+            ],
+            "distances": axis["x"],
+            "kpoints": found["kpts"],
+            "n_bands": read["n_bands"],
+            "energy_unit": "eV",
+            "fermi": levels["fermi"],
+            "fermi_source": levels["fermi_source"],
+            "energies": read["energies"],
+            "summary": summary,
+        }
+        if active is not None:
+            written = scratch / f"{name}-bands.json"
+            written.write_text(json.dumps(result, indent=1) + "\n")
+            kept.append(_keep_unique(active, written.name, written, role=ArtifactRole.TERMINAL))
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+    bands = dict(result)
+    if active is not None and len(read["energies"]) * read["n_bands"] > _BANDS_INLINE_LIMIT:
+        del bands["energies"]
+        bands["energies_in"] = kept[-1]
+    info: dict[str, Any] = {
+        "engine": engine,
+        "engine_source": described["source"],
+        "engine_version": described.get("version"),
+        "scf_energy": scf_energy,
+        "energy_unit": "eV",
+        **summary,
+        "path": found["path"],
+        "lattice": found["lattice"],
+        "npoints": found["npoints"],
+        "n_bands": read["n_bands"],
+        "n_atoms": len(atoms),
+        "artifacts": kept,
+    }
+    return bands, info
+
+
+def _refuse_unsupported_bands(options: dict[str, Any] | None) -> None:
+    """Refuse the spin and relativistic settings band_structure cannot read yet."""
+    input_data = dict((options or {}).get("input_data") or {})
+    system = input_data.get("system")
+    declared = {**input_data, **(system if isinstance(system, dict) else {})}
+    for key, (value, reason) in _BANDS_UNSUPPORTED.items():
+        if key in declared and declared[key] == value:
+            raise ValueError(
+                f"band_structure does not support {key}={value!r} yet, because {reason}"
+            )
+
+
+def _bands_step_options(scf_options: dict[str, Any], bandpath: Any, nbnd: int) -> dict[str, Any]:
+    """The SCF's options turned into the bands step's: same prefix and outdir,
+    ``calculation='bands'``, ``verbosity='high'``, the path, and ``nbnd``."""
+    from copy import deepcopy
+
+    options = deepcopy(scf_options)
+    input_data = options["input_data"]
+    control = dict(input_data.get("control") or {})
+    settings = {"calculation": "bands", "verbosity": "high", "tprnfor": False, "tstress": False}
+    control.update(settings)
+    for key in (*settings, "nbnd"):
+        input_data.pop(key, None)  # a flat key would compete with the section's
+    input_data["control"] = control
+    system = dict(input_data.get("system") or {})
+    system["nbnd"] = nbnd
+    input_data["system"] = system
+    options["kpts"] = bandpath
+    options.pop("kspacing", None)
+    return options
+
+
 # cache_extra folds the atomsk install's identity (resolved command, detected
 # version) into the cache key: pointing at a different binary, or upgrading
 # it, honestly invalidates cached structures.
@@ -2302,7 +2569,20 @@ def _guard_qe_kpoints(atoms: Atoms, options: dict[str, Any] | None, *, task: str
     )
 
 
-def _qe_scf_options(options: dict[str, Any] | None) -> dict[str, Any]:
+#: What each task that pins calculation='scf' says when a caller declares
+#: another calculation.
+_SCF_PIN_REASONS = {
+    "single_point": ("single_point runs exactly one SCF", "use relax for optimization"),
+    "band_structure": (
+        "band_structure runs its own SCF and then its own bands step",
+        "relax the structure first and pass the result",
+    ),
+}
+
+
+def _qe_scf_options(
+    options: dict[str, Any] | None, *, task: str = "single_point"
+) -> dict[str, Any]:
     """``calculator_options`` with ``calculation`` pinned to ``'scf'``, loudly.
 
     A recycled dict carrying ``calculation='relax'``/``'vc-relax'`` would
@@ -2320,10 +2600,11 @@ def _qe_scf_options(options: dict[str, Any] | None) -> dict[str, Any]:
     if isinstance(control, dict) and "calculation" in control:
         declared = control["calculation"]
     if declared is not None and str(declared) != "scf":
+        runs, instead = _SCF_PIN_REASONS[task]
         raise ValueError(
-            f"single_point runs exactly one SCF, but calculator_options "
-            f"declares calculation={str(declared)!r} — drop the key, or use "
-            f"relax for optimization"
+            f"{runs}, but calculator_options "
+            f"declares calculation={str(declared)!r} — drop the key, or "
+            f"{instead}"
         )
     if isinstance(control, dict):
         input_data["control"] = {**control, "calculation": "scf"}
@@ -2456,8 +2737,11 @@ def _projected_smax(filt: Any, stress: Any, mask: list[bool]) -> float:
     return float(np.abs(masked).max()) if masked.size else 0.0
 
 
-def _keep_unique(active: Any, name: str, path: Path) -> str:
-    """Store *path* as an intermediate artifact, suffixing the name on collision.
+def _keep_unique(
+    active: Any, name: str, path: Path, *, role: ArtifactRole = ArtifactRole.INTERMEDIATE
+) -> str:
+    """Store *path* as an artifact (intermediate unless *role* says otherwise),
+    suffixing the name on collision.
 
     Returns the name actually used.
     """
@@ -2470,7 +2754,7 @@ def _keep_unique(active: Any, name: str, path: Path) -> str:
         else:  # no extension (TensorFlow's bare 'checkpoint', a plain label)
             candidate = f"{name}-{attempt}"
         try:
-            active.keep(candidate, path, role=ArtifactRole.INTERMEDIATE)
+            active.keep(candidate, path, role=role)
             return candidate
         except ArtifactExistsError:
             continue
