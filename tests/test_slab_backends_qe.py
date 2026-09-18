@@ -1399,9 +1399,39 @@ def test_qe_builds_list_the_plain_and_gpu_builds(
     assert builds["gpu"]["command"] == str(gpu)
     assert builds["gpu"]["setup"] == ["export FAKE_MARK=gpu-module"]
     (tmp_path / "slab.toml").write_text(
-        f'[engines.qe]\nbin = "{tmp_path}"\n'
-        '[engines.qe.gpu]\ncommand = "mpirun -np {ntasks} pw.x"\n'
+        f'[engines.qe]\nbin = "{tmp_path}/cpu"\n'
+        f'[engines.qe.gpu]\nbin = "{tmp_path}/gpu"\n'
     )
     builds = qe_builds()
-    assert builds["cpu"]["command"] == f"mpirun -np {{ntasks}} {tmp_path}/pw.x"
+    assert builds["cpu"]["command"] == f"mpirun -np {{ntasks}} {tmp_path}/cpu/pw.x"
+    assert builds["gpu"]["command"] == f"mpirun -np {{ntasks}} {tmp_path}/gpu/pw.x"
     assert builds["gpu"]["placeholders"] == ["ntasks"]
+
+
+def test_the_qe_gpu_build_by_bin_runs_the_gpu_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """[engines.qe.gpu] bin constructs the command exactly as [engines.qe] bin
+    does, a bundled mpirun included, and a launch that holds gpus runs it."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    gpu_bin = tmp_path / "qe-gpu" / "bin"
+    gpu_bin.mkdir(parents=True)
+    _fake_pw_success(tmp_path, FIXTURE_PWO).rename(gpu_bin / "pw.x")
+    _script(gpu_bin / "mpirun", 'shift 2\nexec "$@"\n')
+    (tmp_path / "slab.toml").write_text(
+        f'[engines.qe]\ncommand = "pw.x"\npseudo_dir = "{tmp_path}"\n'
+        f'[engines.qe.gpu]\nbin = "{gpu_bin}"\n'
+    )
+    monkeypatch.setenv("SLAB_CPUS", "0,1")
+    monkeypatch.setenv("SLAB_NTASKS", "1")
+    monkeypatch.setenv("SLAB_GPUS", "0")
+    identity = describe_engine("qe", _QE_OPTIONS)
+    assert identity["command"] == f"{gpu_bin}/mpirun -np {{ntasks}} {gpu_bin}/pw.x"
+    assert identity["build"] == "gpu" and identity["version"] == "7.4.1"
+    assert identity["provenance"]["command"] == f"{gpu_bin}/mpirun -np 1 {gpu_bin}/pw.x"
+    calculator = get_calculator("qe", **_QE_OPTIONS)
+    try:
+        assert calculator.profile.command == f"{gpu_bin}/mpirun -np 1 {gpu_bin}/pw.x"
+    finally:
+        close_calculator(calculator)

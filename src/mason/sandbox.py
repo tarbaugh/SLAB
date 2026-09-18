@@ -1244,6 +1244,27 @@ def _ldd(binary: str) -> str:
     return result.stdout + "\n"
 
 
+def _snapshot_payload(engine: str, table: Any) -> tuple[str, tuple[str, ...]]:
+    """The binary a setup snapshot resolves for *table*, and the launchers beside it.
+
+    The qe bin form, in ``[engines.qe]`` or ``[engines.qe.gpu]``, keeps
+    pw.x off PATH on purpose. Its setup lines exist for the runtime
+    libraries, so the binary resolves by its absolute path rather than
+    through a setup that exports it. The constructed command launches
+    through mpirun, which must resolve too unless the install bundles its
+    own.
+    """
+    command = getattr(table, "command", None)
+    tokens = shlex.split(command) if command else []
+    extras = tuple(t for t in tokens if t in ("mpirun", "mpiexec"))
+    bin_dir = getattr(table, "bin", None) if engine == "qe" else None
+    if bin_dir:
+        if not (Path(bin_dir) / "mpirun").is_file():
+            extras = ("mpirun",)
+        return str(Path(bin_dir) / "pw.x"), extras
+    return payload_name(engine, command), extras
+
+
 #: The engines whose table may declare a gpu build as ``[engines.<name>.gpu]``.
 _GPU_BUILD_ENGINES = ("lammps", "qe")
 
@@ -1261,20 +1282,7 @@ def snapshot_engines(slab_cfg: SlabConfig) -> dict[str, SetupSnapshot]:
         table = getattr(slab_cfg.engines, engine)
         if not table.setup:
             continue
-        command = getattr(table, "command", None)
-        tokens = shlex.split(command) if command else []
-        extras = tuple(t for t in tokens if t in ("mpirun", "mpiexec"))
-        if engine == "qe" and getattr(table, "bin", None):
-            # The bin form keeps pw.x off PATH on purpose; the setup lines
-            # exist for its runtime libraries, so resolve the binary by its
-            # absolute path rather than expecting the setup to export it.
-            # The constructed command launches through mpirun, which must
-            # resolve too unless the install bundles its own.
-            payload = str(Path(table.bin) / "pw.x")
-            if not (Path(table.bin) / "mpirun").is_file():
-                extras = ("mpirun",)
-        else:
-            payload = payload_name(engine, command)
+        payload, extras = _snapshot_payload(engine, table)
         snapshots[engine] = snapshot_setup(engine, table.setup, payload, extras=extras)
     # A gpu build (LAMMPS with KOKKOS, a GPU-enabled pw.x) is a second
     # binary with setup lines of its own. It is snapshotted under
@@ -1285,11 +1293,8 @@ def snapshot_engines(slab_cfg: SlabConfig) -> dict[str, SetupSnapshot]:
         gpu = getattr(getattr(slab_cfg.engines, engine), "gpu", None)
         if gpu is None or not gpu.setup:
             continue
-        tokens = shlex.split(gpu.command)
-        extras = tuple(t for t in tokens if t in ("mpirun", "mpiexec"))
-        snapshots[f"{engine}.gpu"] = snapshot_setup(
-            engine, gpu.setup, payload_name(engine, gpu.command), extras=extras
-        )
+        payload, extras = _snapshot_payload(engine, gpu)
+        snapshots[f"{engine}.gpu"] = snapshot_setup(engine, gpu.setup, payload, extras=extras)
     # Builders are executables too, and gracemaker's is a whole python
     # installation reached through setup lines the container cannot run.
     # A configured builder is snapshotted the same way, so its install is
@@ -1422,10 +1427,12 @@ def default_binds(
         binds.append(f"{slab_cfg.builders.mp.root}:{slab_cfg.builders.mp.root}:ro")
     for snapshot in (snapshots or {}).values():
         binds.extend(_snapshot_binds(snapshot))
-    if slab_cfg.engines.qe.bin:
-        # The whole install, not just bin/: pw.x usually links ../lib.
-        prefix = Path(slab_cfg.engines.qe.bin).parent
-        binds.append(f"{prefix}:{prefix}:ro")
+    qe_gpu = slab_cfg.engines.qe.gpu
+    for qe_bin in (slab_cfg.engines.qe.bin, qe_gpu.bin if qe_gpu is not None else None):
+        if qe_bin:
+            # The whole install, not just bin/: pw.x usually links ../lib.
+            prefix = Path(qe_bin).parent
+            binds.append(f"{prefix}:{prefix}:ro")
     rootstock = slab_cfg.engines.rootstock
     if rootstock.root:
         binds.append(f"{rootstock.root}:{rootstock.root}:ro")

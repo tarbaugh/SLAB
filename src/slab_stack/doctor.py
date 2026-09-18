@@ -32,6 +32,7 @@ from mason import doctor as mason_doctor
 from mason.errors import MasonError
 from mason.session import stale_locks, transcript_groups
 from slab._ops import engines_overview
+from slab.backends import qe_builds
 from slab.errors import SlabError
 from slab.lammps import (
     describe_lammps,
@@ -412,10 +413,13 @@ def _qe_gpu_launcher_row(slab_cfg: SlabConfig | None) -> tuple[str, str] | None:
     No row when the table is not declared.
     """
     qe = getattr(getattr(slab_cfg, "engines", None), "qe", None)
-    gpu = getattr(qe, "gpu", None)
-    if gpu is None:
+    if getattr(qe, "gpu", None) is None:
         return None
-    found = launcher_after_setup(gpu.command, gpu.setup)
+    try:
+        gpu = qe_builds()["gpu"]
+    except (*_ERRORS, KeyError) as e:
+        return ("x", f"qe builds: {e}")
+    found = launcher_after_setup(gpu["command"], gpu["setup"])
     launcher = found["launcher"]
     if found["path"] is not None:
         where = "" if found["path"] == launcher else f" ({found['path']})"

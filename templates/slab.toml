@@ -66,8 +66,8 @@ schema_version = 1
 #                                      # the launch with gpus= and never names a
 #                                      # build. pw.x has no GPU switch: this is a
 #                                      # GPU-enabled install, one MPI rank per GPU
-# command = "mpirun -np {ntasks} pw.x" # {ntasks}, {threads}, {gpus} are filled
-#                                      # from the launch's reservation
+# bin = "/shared/sw/qe-7.4-gpu/bin"    # the GPU install, as [engines.qe] bin;
+#                                      # or command = "...", never both
 # setup = ["module purge", "module load qe/7.4-gpu"]
 
 [engines.lammps]
