@@ -839,3 +839,71 @@ def test_the_wait_tool_tells_the_agent_the_run_was_settled(tmp_path: Path) -> No
     )
     assert "this run is over: session gone ended (time limit) at " in answer
     assert "launch again if the work is still wanted" in answer
+
+
+# -- the session never signals itself ------------------------------------------
+
+
+def test_a_session_never_signals_its_own_process_group(tmp_path: Path) -> None:
+    """A foreground workflow launch runs the script inside this process, so
+    the run carries this pid. A close over such a run left at ``running``
+    must fail the run and send no signal: Mason used to TERM its own group
+    from inside its own cleanup, which reads as a SIGTERM from nowhere."""
+    session = _session(tmp_path)
+    session.open_lease()
+    with Workspace(session.workspace_root) as ws:
+        run = _running(ws, session=session.session_id, pid=os.getpid(), host=this_host())
+    received: list[int] = []
+    previous = signal.signal(signal.SIGTERM, lambda signum, frame: received.append(signum))
+    try:
+        ended = session.close("finished")
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    assert received == []
+    # The run is still settled: the record is what matters, not the signal.
+    assert [r.id for r in ended] == [run.id]
+    with Workspace(session.workspace_root) as ws:
+        assert ws.runs.get(run.id).status.value == "failed"
+
+
+def test_stop_process_group_skips_a_pid_in_this_group(tmp_path: Path) -> None:
+    from foundation.runtime import stop_process_group
+
+    here = Run(status="running", pid=os.getpid(), host=this_host())
+    assert stop_process_group(here) is False
+
+
+# -- the reason a signalled session records ------------------------------------
+
+
+def test_the_termination_reason_names_the_job_clock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mason.loop import _termination_reason
+
+    session = _session(tmp_path)
+    ends_at = datetime.now(UTC) + timedelta(minutes=3, seconds=20)
+    monkeypatch.setenv("SLAB_JOB_END", str(int(ends_at.timestamp())))
+    session._deadline = ...  # read again under the fake job clock
+    assert _termination_reason(session, "SIGTERM") == (
+        "terminated (SIGTERM), 3 min before the job's time limit"
+    )
+
+
+def test_the_termination_reason_outside_a_job_is_unchanged(tmp_path: Path) -> None:
+    from mason.loop import _termination_reason
+
+    session = _session(tmp_path)
+    session._deadline = None
+    assert _termination_reason(session, "SIGINT") == "terminated (SIGINT)"
+
+
+def test_the_first_close_still_wins_with_a_job_clock(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    session.open_lease()
+    session.close("terminated (SIGTERM), 3 min before the job's time limit")
+    assert session.close("finished") == []
+    with Workspace(session.workspace_root) as ws:
+        lease = ws.runs.get_lease(session.session_id)
+    assert lease is not None
+    assert lease.end_reason == "terminated (SIGTERM), 3 min before the job's time limit"

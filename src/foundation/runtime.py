@@ -830,10 +830,21 @@ def stop_process_group(run: Run, *, grace_s: float = 5.0) -> bool:
     False. A process this user may not signal counts as stopped, because
     nothing here can do more about it.
 
+    The caller's own process group is never signalled. A foreground
+    workflow launch executes the script inside the calling process, so the
+    run carries that process's pid. A session closing over such a run,
+    left at ``running`` by a crash or an interrupt, would otherwise send
+    itself a TERM and die inside its own cleanup. The run is still marked
+    failed by the caller, which is the record that matters. Every process
+    this layer starts for a run gets a session of its own
+    (``start_new_session``), so a real child is never skipped by the rule.
+
     Examples:
         >>> stop_process_group(Run(status="running", pid=1, host="another-node"))
         False
         >>> stop_process_group(Run(status="running"))
+        False
+        >>> stop_process_group(Run(status="running", pid=os.getpid(), host=this_host()))
         False
     """
     import signal
@@ -841,9 +852,14 @@ def stop_process_group(run: Run, *, grace_s: float = 5.0) -> bool:
 
     if run.pid is None or run.host != this_host() or not process_alive(run.pid):
         return False
+    if run.pid == os.getpid():
+        return False
     try:
         group = os.getpgid(run.pid)
     except (ProcessLookupError, PermissionError):
+        return False
+    if group == os.getpgrp():
+        # This process rides in that group: a signal to it kills the caller.
         return False
     with suppress(ProcessLookupError, PermissionError):
         os.killpg(group, signal.SIGTERM)

@@ -89,6 +89,10 @@ def _tally(transcript: Path) -> dict[str, Any]:
     # A specialist's transcript marks each turn its lead gave it; a lead's
     # transcript records each brief and the budget the brief set.
     turns = briefs = brief_budget_stops = 0
+    # Python bugs in scripts the agent wrote, and the ones the harness
+    # handed to the coding helper itself (the script-bug-handoff
+    # mechanism's second tier).
+    script_bugs = script_bug_handoffs = 0
     started: str | None = None
     ended: str | None = None
     tools: Counter[str] = Counter()
@@ -203,6 +207,11 @@ def _tally(transcript: Path) -> dict[str, Any]:
                 cut_after[str(event["after_tool"])] += 1
         elif kind == "turn":
             turns += 1
+        elif kind == "script_run":
+            if isinstance(event.get("bug"), dict):
+                script_bugs += 1
+        elif kind == "script_bug_handoff":
+            script_bug_handoffs += 1
         elif kind == "delegate":
             briefs += 1
             if event.get("stop") == "max_turns" and event.get("steps_budget"):
@@ -250,6 +259,8 @@ def _tally(transcript: Path) -> dict[str, Any]:
         # exactly one turn, which is what a lead reading it should see.
         "turns": turns or 1,
         "briefs": briefs,
+        "script_bugs": script_bugs,
+        "script_bug_handoffs": script_bug_handoffs,
         "brief_budget_stops": brief_budget_stops,
         "malformed_lines": malformed,
         "first_launch_step": first_launch_step,
@@ -306,6 +317,8 @@ def summarize(
     total_completion = summary["completion_tokens"]
     total_cached = summary["cached_prompt_tokens"]
     total_cuts = summary["cuts"]
+    total_script_bugs = summary["script_bugs"]
+    total_handoffs = summary["script_bug_handoffs"]
     total_cut_tokens = summary["cut_tokens"]
     cut_after: Counter[str] = Counter(summary["cut_after_tools"])
     for sibling in siblings or []:
@@ -328,12 +341,18 @@ def summarize(
         total_completion += child["completion_tokens"]
         total_cached += child["cached_prompt_tokens"]
         total_cuts += child["cuts"]
+        total_script_bugs += child["script_bugs"]
+        total_handoffs += child["script_bug_handoffs"]
         total_cut_tokens += child["cut_tokens"]
         cut_after.update(child["cut_after_tools"])
     summary["delegations"] = delegations
     # A lead's cuts and its specialists': the ceiling costs the session
     # whichever loop paid for it.
     summary["total_cuts"] = total_cuts
+    # A specialist's script bug costs the session too, so the totals carry
+    # the whole tree's.
+    summary["total_script_bugs"] = total_script_bugs
+    summary["total_script_bug_handoffs"] = total_handoffs
     summary["total_cut_tokens"] = total_cut_tokens
     summary["total_cut_after_tools"] = dict(cut_after.most_common())
     summary["total_steps"] = total_steps

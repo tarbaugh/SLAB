@@ -265,9 +265,21 @@ The rules are code:
 - The helper's tokens count toward the specialist's total and then the
   lead's.
 
-md-expert, dft-expert, analysis-expert, and worker brief `coding-expert`
-when the same script or input fails the same way twice, or when the
-brief needs a script that does not exist yet.
+The PI, md-expert, dft-expert, analysis-expert, and worker brief
+`coding-expert` on the first traceback a script raises, and when the
+brief needs a script that does not exist yet. An engine error and a
+failed check stay with the card whose domain they are in.
+
+The harness enforces that division, so it does not rest on the cards
+alone. Under the `script-bug-handoff` mechanism, every tool result that
+reports a Python failure of a script the agent wrote ends with a line
+naming the helper, the second failure of one script is briefed by the
+harness itself inside that tool call, and a finish over an unfixed script
+bug is refused once. The three tiers are described in
+[Mason](mason.md#a-python-bug-in-the-agents-script). The automatic brief
+is an ordinary helper brief: it takes a handle, it counts against
+`[agent] helper_briefs`, and the lead reads it in the footer with the
+rest.
 
 The lead reads each helper brief under the specialist's own harness
 line. This capture is the end of a real `delegate` result from a run
