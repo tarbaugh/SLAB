@@ -445,10 +445,13 @@ def test_every_builtin_skill_validates_and_maps_to_its_specialists(tmp_path: Pat
         "nucleation-cnt",
         "two-phase-melting",
         "band-structure",
+        "density-of-states",
     } <= set(skills)
     assert skills["convergence-study"].agents == frozenset({"dft-expert"})
     assert skills["band-structure"].agents == frozenset({"dft-expert"})
     assert (skills["band-structure"].root / "scripts" / "bands_table.py").is_file()
+    assert skills["density-of-states"].agents == frozenset({"dft-expert"})
+    assert (skills["density-of-states"].root / "scripts" / "dos_table.py").is_file()
     assert skills["surface-energy"].agents == frozenset({"dft-expert"})
     assert skills["radial-distribution"].agents == frozenset({"md-expert", "analysis-expert"})
     assert skills["msd-diffusion"].agents == frozenset({"md-expert", "analysis-expert"})
@@ -2513,3 +2516,173 @@ def test_band_structure_skill_states_the_limits(tmp_path: Path) -> None:
         "Cite the run id",
     ):
         assert phrase in text, phrase
+
+
+PBANDS_JSON = DATA / "qe-si-pbands.json"
+
+
+def test_bands_table_adds_a_projection_column_per_band(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dat = tmp_path / "fat.dat"
+    code, out = _run(
+        BANDS_TABLE,
+        str(PBANDS_JSON),
+        "--projection",
+        "Si-p",
+        "--dat",
+        str(dat),
+        monkeypatch=monkeypatch,
+        capsys=capsys,
+    )
+    assert code == 0
+    report = json.loads(out)
+    assert report["projection"] == "Si-p"
+    assert report["projection_groups"] == ["Si-p", "Si-s"]
+    lines = dat.read_text().splitlines()
+    header = [line for line in lines if line.startswith("#")]
+    rows = [line.split() for line in lines if not line.startswith("#")]
+    assert header[-1] == "# then the weight of Si-p in band 1 to band 8, one column each"
+    assert len(rows) == 20 and all(len(row) == 17 for row in rows)  # x, 8 energies, 8 weights
+    # The valence band top at Γ is p, and the lowest band is not.
+    assert float(rows[0][12]) == pytest.approx(0.9613, abs=1e-4)
+    assert float(rows[0][9]) == pytest.approx(0.0, abs=1e-4)
+
+
+def test_bands_table_refuses_a_group_the_run_does_not_have(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _ = _run(
+        BANDS_TABLE, str(PBANDS_JSON), "--projection", "O-p", monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert "is not a group of this run; it has Si-p, Si-s" in str(code)
+    code, _ = _run(
+        BANDS_TABLE, str(SI_BANDS_JSON), "--projection", "Si-p", monkeypatch=monkeypatch,
+        capsys=capsys,
+    )
+    assert "carries no projections" in str(code)
+
+
+def test_bands_table_draws_a_fat_band_diagram(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pytest.importorskip("matplotlib")
+    png = tmp_path / "fat.png"
+    code, _ = _run(
+        BANDS_TABLE,
+        str(PBANDS_JSON),
+        "--projection",
+        "Si-p",
+        "--png",
+        str(png),
+        monkeypatch=monkeypatch,
+        capsys=capsys,
+    )
+    assert code == 0
+    assert png.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+# -- dos_table (density-of-states) -------------------------------------------------------
+
+DOS_TABLE = SKILLS / "density-of-states" / "scripts" / "dos_table.py"
+SI_DOS_JSON = DATA / "qe-si-dos.json"
+AL_DOS_JSON = DATA / "qe-al-dos.json"
+
+
+def test_dos_table_prints_the_summary_of_the_real_si_run(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out = _run(DOS_TABLE, str(SI_DOS_JSON), monkeypatch=monkeypatch, capsys=capsys)
+    assert code == 0
+    report = json.loads(out)
+    assert report["is_metal"] is False and report["gap"] == 0.5061
+    assert report["dos_at_fermi"] < 1e-4
+    assert (report["degauss_ry"], report["delta_e"]) == (0.005, 0.05)
+    assert report["projection_groups"] == ["Si-p", "Si-s"]
+    assert report["n_points"] == 450
+
+
+def test_dos_table_writes_a_table_with_one_column_per_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dat = tmp_path / "si.dat"
+    code, out = _run(
+        DOS_TABLE, str(SI_DOS_JSON), "--dat", str(dat), monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert code == 0 and json.loads(out)["dat"] == str(dat)
+    lines = dat.read_text().splitlines()
+    header = [line for line in lines if line.startswith("#")]
+    rows = [line.split() for line in lines if not line.startswith("#")]
+    assert header[1] == "# energies in eV relative to the valence band maximum (6.1642 eV)"
+    assert header[-1] == "# columns: E, total dos, Si-p, Si-s"
+    assert len(rows) == 450 and all(len(row) == 4 for row in rows)
+    # The groups sum to near the total, and never above it.
+    grouped = [float(row[2]) + float(row[3]) for row in rows]
+    total = [float(row[1]) for row in rows]
+    assert max(grouped) <= max(total)
+    assert max(grouped) > 0.8 * max(total)
+
+
+def test_dos_table_takes_the_fermi_level_as_zero_for_a_metal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dat = tmp_path / "al.dat"
+    code, out = _run(
+        DOS_TABLE, str(AL_DOS_JSON), "--dat", str(dat), monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert code == 0 and json.loads(out)["is_metal"] is True
+    lines = dat.read_text().splitlines()
+    assert "relative to the Fermi level" in lines[1]
+    assert lines[2].endswith("Fermi level at 0.0000 eV")
+
+
+def test_dos_table_png_without_matplotlib_names_the_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setitem(sys.modules, "matplotlib", None)  # import raises ImportError
+    code, _, err = _run_err(
+        DOS_TABLE,
+        str(SI_DOS_JSON),
+        "--png",
+        str(tmp_path / "si.png"),
+        monkeypatch=monkeypatch,
+        capsys=capsys,
+    )
+    assert code == 2
+    assert err.strip() == (
+        "error: --png needs the matplotlib package, which is not installed; "
+        "write --dat and plot that table instead"
+    )
+    assert not (tmp_path / "si.png").exists()
+
+
+def test_dos_table_draws_the_curves_when_matplotlib_is_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pytest.importorskip("matplotlib")
+    png = tmp_path / "si.png"
+    code, _ = _run(
+        DOS_TABLE, str(SI_DOS_JSON), "--png", str(png), monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert code == 0
+    assert png.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_dos_table_refuses_a_return_value_without_the_grid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    data = json.loads(SI_DOS_JSON.read_text())
+    for key in ("energies", "dos", "integrated_dos", "projected_dos"):
+        del data[key]
+    data["dos_in"] = "si-dos.json"
+    short = tmp_path / "returned.json"
+    short.write_text(json.dumps(data))
+    code, _ = _run(
+        DOS_TABLE, str(short), "--dat", str(tmp_path / "x.dat"), monkeypatch=monkeypatch,
+        capsys=capsys,
+    )
+    assert "it is in si-dos.json" in str(code)
+    code, _ = _run(
+        DOS_TABLE, str(tmp_path / "missing.json"), monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert "cannot read" in str(code)

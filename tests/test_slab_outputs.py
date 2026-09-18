@@ -107,6 +107,61 @@ def test_pwscf_digest_of_the_bands_scf_is_an_ordinary_scf() -> None:
     assert "bands:" not in out
 
 
+def test_qe_tool_digest_reads_the_dos_and_projwfc_captures() -> None:
+    dos = digest("qe-si-dos-dos.out", (DATA / "qe-si-dos-dos.out").read_text())
+    assert dos.splitlines() == [
+        "dos.x digest: qe-si-dos-dos.out (v.7.5)",
+        "broadening: Gaussian, ngauss=0, degauss=0.005000 Ry (read from input)",
+        "status: finished",
+    ]
+    projwfc = digest("qe-si-dos-projwfc.out", (DATA / "qe-si-dos-projwfc.out").read_text())
+    assert projwfc.splitlines() == [
+        "projwfc.x digest: qe-si-dos-projwfc.out (v.7.5)",
+        "sizes: k-points 29, bands 8, atomic wavefunctions 8",
+        "states: Si-p (6), Si-s (2)",
+        "broadening: Gaussian, ngauss=0, degauss=0.005000 Ry (read from input)",
+        "spilling parameter: 0.0080",
+        "status: finished",
+    ]
+    # Thousands of projection rows, and not one of them in the digest.
+    assert "psi =" not in projwfc
+
+
+def test_qe_tool_digest_names_a_failure() -> None:
+    fence = " " + "%" * 40
+    text = "\n".join(
+        [
+            "     Program PROJWFC v.7.5 starts on 18Sep2026",
+            fence,
+            "     Error in routine projwave (1):",
+            "     Cannot project on zero atomic wavefunctions!",
+            fence,
+        ]
+    )
+    shown = digest("si-projwfc.out", text)
+    assert "errors: Error in routine projwave (1)" in shown
+    assert shown.endswith("status: did not finish")
+
+
+def test_dos_table_digest_reads_the_real_table() -> None:
+    shown = digest("qe-si-dos.dat", (DATA / "qe-si-dos.dat").read_text())
+    assert shown.splitlines() == [
+        "density of states digest: qe-si-dos.dat (450 rows)",
+        "energy: -6.033 to 16.417 eV, step 0.050 eV",
+        "Fermi level: 6.436 eV; dos there: 0.0000 states/eV/cell",
+        "integrated dos: 0.000 to 16.000 states/cell",
+        "the task's -dos.json holds this table with the verdict; read that instead",
+    ]
+    metal = digest("qe-al-dos.dat", (DATA / "qe-al-dos.dat").read_text())
+    assert "dos there: 0.3893 states/eV/cell" in metal
+
+
+def test_dos_table_digest_says_when_the_table_is_unreadable() -> None:
+    lines = (DATA / "qe-si-dos.dat").read_text().splitlines()
+    shown = digest("cut-dos.dat", "\n".join(lines[:2]))
+    assert shown.startswith("density of states digest: cut-dos.dat\nunreadable:")
+
+
 def test_lammps_log_digest_reads_the_ase_driven_capture() -> None:
     text = (DATA / "lammps-cu-relax-final.log").read_text()
     shown = lammps_log_digest("lammps-cu-relax-final.log", text)

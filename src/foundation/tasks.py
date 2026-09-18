@@ -54,6 +54,7 @@ from slab.backends import (
     collect_engine_outputs,
     collect_failure_evidence,
     describe_engine,
+    engine_options,
     get_calculator,
 )
 from slab.errors import BuilderError, LammpsScriptError
@@ -496,6 +497,37 @@ _BANDS_UNSUPPORTED = {
     "lspinorb": (True, "spin-orbit coupling needs noncollinear spinor bands"),
 }
 
+#: Above this many numbers (grid rows times the curves on the grid) the
+#: DOS task's return value leaves the arrays in the ``-dos.json``
+#: artifact and names it, for the reason :data:`_BANDS_INLINE_LIMIT`
+#: gives.
+_DOS_INLINE_LIMIT = 1000
+
+#: The Gaussian broadening a DOS uses when the SCF ran with fixed
+#: occupations and set no ``degauss``, in Ry. dos.x needs a width, and an
+#: insulator's SCF declares none. 0.01 Ry is 0.136 eV, narrow enough to
+#: leave a semiconductor gap open and wide enough to make a mesh of a few
+#: hundred k-points give a smooth curve.
+_DOS_FIXED_DEGAUSS_RY = 0.01
+
+#: How far two grid energies may differ and still be the same row, in
+#: eV. dos.x and projwfc.x both print the grid to 3 decimals, so rows
+#: that agree to 1 meV are the same rows.
+_DOS_GRID_TOLERANCE_EV = 1e-3
+
+#: How many broadening widths of margin the default energy window keeps
+#: on each side of the eigenvalues. dos.x and projwfc.x choose their own
+#: default ranges, and the two do not agree to the last grid row, so this
+#: task names the window itself and gives both tools the same one.
+_DOS_WINDOW_WIDTHS = 3.0
+
+#: How much denser than the SCF the NSCF mesh is per direction, when the
+#: caller names no mesh of its own. A DOS integrates over the Brillouin
+#: zone, and the mesh that converges a total energy is too coarse for
+#: it. Doubling each direction is eight times the k-points, which is the
+#: usual first step and is cheap because the charge density is fixed.
+_DOS_MESH_FACTOR = 2
+
 
 @task(
     engines=("ase",),
@@ -512,6 +544,7 @@ def band_structure(
     npoints: int | None = None,
     density: float = 20.0,
     nbands: int | None = None,
+    projected: bool = False,
     symprec: float = 1e-5,
     label: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -555,12 +588,24 @@ def band_structure(
     ``cell_changed``, ``scf_kpts`` when the task replaced the mesh, and
     ``artifacts``.
 
+    With ``projected=True`` a third execution runs ``projwfc.x`` on the
+    same save directory and projects every band on the path onto the
+    pseudo-atomic orbitals of the pseudopotentials. The result file then
+    also carries ``projection_groups``, the group names, and
+    ``projections``, a weight per k-point and band for each group. A
+    group is one element and one angular momentum, such as ``"Si-s"``.
+    These are the numbers a fat-band diagram draws. The weights of one
+    band sum to near one and not to one, because pseudo-atomic orbitals
+    are neither a complete basis nor orthogonal between atoms.
+
     Inside a run the task keeps ``{label}-scf.pwo`` and
     ``{label}-bands.pwo`` as intermediates and ``{label}-bands.json`` as
-    the result file (``label`` defaults to ``"bands"``). On a failure the
-    engine's own error report is attached to the exception, and its files
-    are kept as ``{label}-scf-failed.*`` or ``{label}-bands-failed.*``, so
-    the name says which step failed. The scratch directory is removed in
+    the result file (``label`` defaults to ``"bands"``). With
+    ``projected=True`` it also keeps ``{label}-projwfc.out``. On a
+    failure the engine's own error report is attached to the exception,
+    and its files are kept as ``{label}-scf-failed.*``,
+    ``{label}-bands-failed.*``, or ``{label}-projwfc-failed.out``, so the
+    name says which step failed. The scratch directory is removed in
     every case.
 
     Args:
@@ -582,6 +627,9 @@ def band_structure(
             the SCF's state count or the occupied bands plus 20 percent
             (at least 4 more), whichever is larger. A caller value must
             hold at least the occupied bands.
+        projected: Also run ``projwfc.x`` on the bands step's save
+            directory, and return the weight of every element and
+            angular momentum in every band.
         symprec: The symmetry tolerance seekpath and spglib use, in
             angstrom. Raise it for a structure with numerical noise.
         label: Names the kept artifacts.
@@ -696,6 +744,18 @@ def band_structure(
         finally:
             close_calculator(step)
 
+        projections: dict[str, list[list[float]]] = {}
+        if projected:
+            projections = _projected_bands(
+                scratch,
+                engine_options(engine, scf_options),
+                name,
+                kept,
+                task_name="band_structure",
+                npoints=found["npoints"],
+                n_bands=read["n_bands"],
+            )
+
         # Fixed occupations print the SCF mesh's highest occupied level, not
         # a Fermi energy. That level touches the valence band, so the
         # verdict counts bands there.
@@ -735,6 +795,9 @@ def band_structure(
             "energies": read["energies"],
             "summary": summary,
         }
+        if projected:
+            result["projection_groups"] = sorted(projections)
+            result["projections"] = projections
         if active is not None:
             written = scratch / f"{name}-bands.json"
             written.write_text(json.dumps(result, indent=1) + "\n")
@@ -743,8 +806,13 @@ def band_structure(
         shutil.rmtree(scratch, ignore_errors=True)
 
     bands = dict(result)
-    if active is not None and len(read["energies"]) * read["n_bands"] > _BANDS_INLINE_LIMIT:
+    # The projections are one more number per band and group, and they are
+    # read by the same reader as the energies, so they count against the
+    # same limit and leave with them.
+    listed = len(read["energies"]) * read["n_bands"] * (1 + len(projections))
+    if active is not None and listed > _BANDS_INLINE_LIMIT:
         del bands["energies"]
+        bands.pop("projections", None)
         bands["energies_in"] = kept[-1]
     info: dict[str, Any] = {
         "engine": engine,
@@ -762,23 +830,120 @@ def band_structure(
         "n_atoms": len(system),
         "n_atoms_input": len(atoms),
         "cell_changed": found["cell_changed"],
+        "projected": projected,
         "artifacts": kept,
     }
+    if projected:
+        info["projection_groups"] = sorted(projections)
     if scf_kpts is not None:
         info["scf_kpts"] = list(scf_kpts)
     return bands, info
 
 
-def _refuse_unsupported_bands(options: dict[str, Any] | None) -> None:
-    """Refuse the spin and relativistic settings band_structure cannot read yet."""
+def _refuse_unsupported_bands(
+    options: dict[str, Any] | None, *, task: str = "band_structure"
+) -> None:
+    """Refuse the spin and relativistic settings these tasks cannot read yet."""
+    for key, (value, reason) in _BANDS_UNSUPPORTED.items():
+        if _qe_declared(options).get(key) == value:
+            raise ValueError(f"{task} does not support {key}={value!r} yet, because {reason}")
+
+
+def _qe_declared(options: dict[str, Any] | None) -> dict[str, Any]:
+    """Every ``input_data`` key of *options*, flat keys and ``system`` keys together."""
     input_data = dict((options or {}).get("input_data") or {})
     system = input_data.get("system")
-    declared = {**input_data, **(system if isinstance(system, dict) else {})}
-    for key, (value, reason) in _BANDS_UNSUPPORTED.items():
-        if key in declared and declared[key] == value:
+    return {**input_data, **(system if isinstance(system, dict) else {})}
+
+
+def _qe_save(options: dict[str, Any]) -> tuple[str, str]:
+    """The ``prefix`` and ``outdir`` the task pinned, as the tools need them.
+
+    The post-processing tools read the save directory pw.x wrote, so they
+    must be given the same two values. The defaults are pw.x's own.
+    """
+    input_data = dict(options.get("input_data") or {})
+    control = input_data.get("control")
+    control = control if isinstance(control, dict) else {}
+    prefix = control.get("prefix", input_data.get("prefix", "pwscf"))
+    outdir = control.get("outdir", input_data.get("outdir", "./"))
+    return str(prefix), str(outdir)
+
+
+def _attach_tool_evidence(e: Exception, produced: Path, label: str) -> None:
+    """Keep a post-processing tool's captured output as failure evidence.
+
+    The tool writes its standard output to a file before it raises, so the
+    evidence exists whatever killed it. Never raises.
+    """
+    try:
+        active = current_run()
+        if active is None or not (produced.is_file() and produced.stat().st_size > 0):
+            return
+        kept = _keep_unique(active, f"{label}-failed{produced.suffix}", produced)
+        e.add_note(f"engine files kept as artifacts: {kept!r}")
+    except Exception as diagnostics_error:  # pragma: no cover - defensive
+        with suppress(Exception):
+            e.add_note(f"(engine failure evidence unavailable: {diagnostics_error})")
+
+
+def _projected_bands(
+    scratch: Path,
+    options: dict[str, Any],
+    name: str,
+    kept: list[str],
+    *,
+    task_name: str,
+    npoints: int,
+    n_bands: int,
+) -> dict[str, list[list[float]]]:
+    """Run projwfc.x on the bands step's save directory, and group its weights.
+
+    ``lsym=.false.`` is required: with symmetrization on, projwfc.x
+    projects onto symmetrized combinations and refuses a k-point list
+    that is not a symmetry-reduced mesh, which a high-symmetry path never
+    is.
+
+    The projections must cover the same k-points and bands the bands step
+    listed. A save directory left by an earlier calculation would give a
+    weight per band that belongs to other eigenvalues, so the shape is
+    checked before the weights are grouped.
+    """
+    from slab.dos import group_projections, read_projection_states, read_projections
+    from slab.qe_tools import run_qe_tool
+
+    prefix, outdir = _qe_save(options)
+    active = current_run()
+    try:
+        outcome = run_qe_tool(
+            "projwfc.x",
+            {"prefix": prefix, "outdir": outdir, "lsym": False},
+            cwd=scratch,
+            options=options,
+            setup=options.get("setup"),
+        )
+    except Exception as e:
+        e.add_note(f"{task_name} failed in its projwfc step")
+        _attach_tool_evidence(e, scratch / "projwfc.out", f"{name}-projwfc")
+        raise
+    if active is not None:
+        kept.append(_keep_unique(active, f"{name}-projwfc.out", outcome.output_path))
+    try:
+        states = read_projection_states(outcome.output)
+        written = scratch / outdir / f"{prefix}.save" / "atomic_proj.xml"
+        read = read_projections(written.read_text(encoding="utf-8"))
+        if (read["n_kpoints"], read["n_bands"]) != (npoints, n_bands):
             raise ValueError(
-                f"band_structure does not support {key}={value!r} yet, because {reason}"
+                f"projwfc.x projected {read['n_kpoints']} k-point(s) and "
+                f"{read['n_bands']} band(s), but the bands step listed "
+                f"{npoints} and {n_bands}; the save directory is not the "
+                f"one that step wrote"
             )
+        return group_projections(read["weights"], states)
+    except (OSError, ValueError) as e:
+        e.add_note(f"{task_name} failed in its projwfc step")
+        _attach_tool_evidence(e, scratch / "projwfc.out", f"{name}-projwfc")
+        raise
 
 
 def _bands_step_options(scf_options: dict[str, Any], bandpath: Any, nbnd: int) -> dict[str, Any]:
@@ -800,6 +965,487 @@ def _bands_step_options(scf_options: dict[str, Any], bandpath: Any, nbnd: int) -
     options["kpts"] = bandpath
     options.pop("kspacing", None)
     return options
+
+
+# cache_extra folds the resolved pw.x identity into the cache key, as it
+# does for band_structure. dos.x and projwfc.x are siblings of that pw.x
+# in the same install (:func:`slab.qe_tools.qe_tool_command`), so the
+# pw.x identity is their identity too. A caller that points one of them
+# elsewhere does it with a dos_command or projwfc_command key inside
+# calculator_options, which is a traced argument already.
+@task(
+    engines=("ase",),
+    cache_extra=lambda arguments: describe_engine(
+        arguments.get("engine", "qe"), arguments.get("calculator_options")
+    ),
+)
+def density_of_states(
+    atoms: Atoms,
+    *,
+    engine: str = "qe",
+    calculator_options: dict[str, Any] | None = None,
+    dos_kpts: Sequence[int] | None = None,
+    dos_kspacing: float | None = None,
+    projected: bool = False,
+    emin: float | None = None,
+    emax: float | None = None,
+    delta_e: float = 0.01,
+    degauss: float | None = None,
+    nbands: int | None = None,
+    label: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The density of states of a crystal, and its band edges.
+
+    Three or four executables share one slab-managed scratch directory:
+    an SCF on the caller's mesh, an NSCF on a denser mesh that reads the
+    SCF's charge density, ``dos.x`` on the NSCF's eigenvalues, and with
+    ``projected=True`` also ``projwfc.x``. Quantum ESPRESSO only. Relax
+    the structure first.
+
+    The task runs on the cell it is given. A density of states is an
+    integral over the Brillouin zone and needs no high-symmetry path, so
+    there is no standardized cell here and no seekpath. Pass the cell you
+    want the answer for, and remember that the result is per cell: a
+    supercell gives a curve that is a multiple of the primitive cell's.
+
+    The NSCF mesh is the denser one. ``dos_kpts`` or ``dos_kspacing``
+    names it, and giving both is refused. Without either, an explicit
+    mesh is multiplied by :data:`_DOS_MESH_FACTOR` in each direction, and
+    a ``kspacing`` is divided by it.
+
+    The broadening is a Gaussian of width *degauss*, in Ry as Quantum
+    ESPRESSO takes it. It defaults to the SCF's own ``degauss``, and to
+    :data:`_DOS_FIXED_DEGAUSS_RY` when the SCF used fixed occupations.
+    A Gaussian wider than a gap fills the gap with states, so the verdict
+    never reads the curve. It reads the NSCF eigenvalues, through
+    :func:`slab.bands.band_summary`, exactly as ``band_structure`` does.
+    ``dos_at_fermi`` is the broadened curve at the Fermi level and is a
+    number to report, not a verdict.
+
+    With ``projected=True`` ``projwfc.x`` also writes one curve per
+    element and angular momentum, such as ``"Si-s"`` and ``"Si-p"``.
+    The projections are onto pseudo-atomic orbitals, so the group curves
+    sum to near the total and not to it.
+
+    Returns ``(dos, info)``. ``dos`` is the content of the kept
+    ``{label}-dos.json``: ``energy_unit``, ``dos_unit``, ``energies``,
+    ``dos``, ``integrated_dos``, ``fermi``, ``fermi_source``,
+    ``scf_fermi``, ``delta_e``, ``degauss_ry``, ``scf_kpts``,
+    ``dos_kpts``, ``dos_kspacing``, ``n_bands``, ``n_kpoints``,
+    ``summary``, and with ``projected`` also
+    ``projection_groups`` and ``projected_dos``. Above
+    :data:`_DOS_INLINE_LIMIT` numbers the arrays stay in the artifact and
+    ``dos`` carries ``dos_in``, its name. ``info`` carries ``engine``,
+    ``engine_source``, ``engine_version``, ``scf_energy``,
+    ``energy_unit``, the summary fields (``fermi``, ``dos_at_fermi``,
+    ``is_metal``, ``vbm``, ``cbm``, ``gap``, ``direct_gap``,
+    ``gap_kind``, ``n_valence_bands``, ``energy_range``, ``delta_e``,
+    ``n_points``), ``scf_kpts``, ``dos_kpts``, ``dos_kspacing``,
+    ``degauss_ry``, ``n_bands``, ``n_atoms``, ``projected``,
+    ``projection_groups`` when projected, and ``artifacts``.
+
+    Inside a run the task keeps ``{label}-scf.pwo``, ``{label}-nscf.pwo``,
+    ``{label}-dos.dat``, ``{label}-dos.out``, and with ``projected``
+    ``{label}-projwfc.out`` as intermediates, and ``{label}-dos.json`` as
+    the result file (``label`` defaults to ``"dos"``). A failed step
+    keeps its files as ``{label}-scf-failed.*``, ``{label}-nscf-failed.*``,
+    ``{label}-dos-failed.out``, or ``{label}-projwfc-failed.out``, and a
+    note names the step. The scratch directory is removed in every case.
+
+    Args:
+        atoms: The relaxed structure (calculator-free). Never mutated.
+        engine: ``"qe"`` or a registry alias built on
+            ``slab.backends.qe_calculator``.
+        calculator_options: The SCF's options, for example
+            ``qe_protocol_options(atoms, protocol="balanced")``. They need
+            a k-point mesh. ``calculation`` may be absent or ``"scf"``.
+            Spin-polarized, noncollinear, and spin-orbit runs are refused.
+        dos_kpts: The NSCF mesh, as three integers.
+        dos_kspacing: The NSCF k-point spacing, in 1/angstrom. Pass this
+            or *dos_kpts*, not both.
+        projected: Also run ``projwfc.x`` and return the density of
+            states per element and angular momentum.
+        emin: The lowest energy of the grid, in eV. None covers every
+            NSCF eigenvalue with a margin of
+            :data:`_DOS_WINDOW_WIDTHS` broadening widths.
+        emax: The highest energy of the grid, in eV.
+        delta_e: The grid step, in eV.
+        degauss: The Gaussian broadening, in Ry.
+        nbands: The number of bands the NSCF computes. None takes the
+            SCF's state count or the occupied bands plus 20 percent (at
+            least 4 more), whichever is larger.
+        label: Names the kept artifacts.
+
+    Examples:
+        >>> from ase.build import bulk
+        >>> density_of_states(bulk("Cu", "fcc", a=3.6), engine="emt")
+        Traceback (most recent call last):
+        ...
+        ValueError: density_of_states needs a Quantum ESPRESSO engine; 'emt' is not one
+    """
+    import json
+    from math import ceil
+
+    from slab.backends import engine_scratch
+    from slab.bands import read_bands, scf_levels
+    from slab.dos import dos_summary, read_dos
+    from slab.qe_tools import run_qe_tool
+
+    if not _qe_shaped(engine, calculator_options):
+        raise ValueError(
+            f"density_of_states needs a Quantum ESPRESSO engine; {engine!r} is not one"
+        )
+    if calculator_options and "directory" in calculator_options:
+        raise ValueError(
+            "density_of_states makes its own scratch directory for every step; "
+            "drop directory= from calculator_options"
+        )
+    if dos_kpts is not None and dos_kspacing is not None:
+        raise ValueError(
+            "density_of_states takes dos_kpts or dos_kspacing for its denser "
+            "mesh, not both; drop one"
+        )
+    _guard_qe_kpoints(atoms, calculator_options, task="density_of_states")
+    _refuse_unsupported_bands(calculator_options, task="density_of_states")
+    scf_options = _qe_scf_options(calculator_options, task="density_of_states")
+    described = describe_engine(engine, calculator_options)
+    name = label or "dos"
+    system = atoms.copy()
+    dense_kpts, dense_kspacing = _dos_mesh(scf_options, dos_kpts, dos_kspacing)
+    active = current_run()
+    kept: list[str] = []
+
+    scratch = engine_scratch("slab-dos-")
+    try:
+        # Every step reads and writes one save directory, so prefix and
+        # outdir are pinned here exactly as band_structure pins them.
+        input_data = scf_options["input_data"]
+        control = input_data.setdefault("control", {})
+        for key, default in (("prefix", "pwscf"), ("outdir", "./")):
+            if key not in input_data and key not in control:
+                control[key] = default
+        scf = get_calculator(engine, directory=scratch, **scf_options)
+        try:
+            system.calc = scf
+            try:
+                scf_energy = float(system.get_potential_energy())
+                scf_text = (scratch / "espresso.pwo").read_text()
+                levels = scf_levels(scf_text)
+            except Exception as e:
+                e.add_note("density_of_states failed in its scf step")
+                _attach_engine_evidence(e, scf, f"{name}-scf", task_name="density_of_states")
+                raise
+            if active is not None:
+                for suffix, produced in collect_engine_outputs(scf):
+                    kept.append(_keep_unique(active, f"{name}-scf.{suffix}", produced))
+        finally:
+            system.calc = None
+            close_calculator(scf)
+
+        occupied = ceil(levels["n_electrons"] / 2)
+        if nbands is None:
+            margin = max(4, ceil(0.2 * levels["n_electrons"] / 2))
+            nbnd = max(levels["n_states"] or 0, occupied + margin)
+        elif nbands < occupied:
+            raise ValueError(
+                f"nbands={nbands} holds fewer bands than the {occupied} occupied "
+                f"by {levels['n_electrons']:g} electrons; ask for at least "
+                f"{occupied + 4} so the listing holds conduction bands"
+            )
+        else:
+            nbnd = nbands
+
+        nscf_options = _nscf_step_options(scf_options, dense_kpts, dense_kspacing, nbnd)
+        step = get_calculator(engine, directory=scratch, **nscf_options)
+        try:
+            try:
+                # properties=[]: an NSCF yields eigenvalues only, so ASE
+                # must not ask pw.x for forces or stress.
+                step.calculate(system, properties=[], system_changes=["positions"])
+                nscf_text = (scratch / "espresso.pwo").read_text()
+                nscf_levels = scf_levels(nscf_text)
+                read = read_bands(nscf_text)
+            except Exception as e:
+                e.add_note("density_of_states failed in its nscf step")
+                _attach_engine_evidence(e, step, f"{name}-nscf", task_name="density_of_states")
+                raise
+            if active is not None:
+                for suffix, produced in collect_engine_outputs(step):
+                    kept.append(_keep_unique(active, f"{name}-nscf.{suffix}", produced))
+        finally:
+            close_calculator(step)
+
+        tool_options = engine_options(engine, scf_options)
+        prefix, outdir = _qe_save(tool_options)
+        fixed = nscf_levels["fermi_source"] != "fermi energy"
+        broadening = _dos_degauss(degauss, scf_options)
+        window = _dos_window(read["energies"], broadening, emin, emax)
+        grid = {
+            "prefix": prefix,
+            "outdir": outdir,
+            "DeltaE": float(delta_e),
+            "Emin": window[0],
+            "Emax": window[1],
+            # ngauss=0 with an explicit degauss: the broadening this task
+            # reports is the broadening dos.x applied, whatever smearing
+            # the SCF used.
+            "degauss": broadening,
+            "ngauss": 0,
+        }
+        table = scratch / f"{name}-dos.dat"
+        try:
+            outcome = run_qe_tool(
+                "dos.x",
+                {**grid, "fildos": table.name},
+                cwd=scratch,
+                options=tool_options,
+                setup=tool_options.get("setup"),
+            )
+        except Exception as e:
+            e.add_note("density_of_states failed in its dos step")
+            _attach_tool_evidence(e, scratch / "dos.out", f"{name}-dos")
+            raise
+        curve = read_dos(table.read_text(encoding="utf-8"))
+        if active is not None:
+            kept.append(_keep_unique(active, table.name, table))
+            kept.append(_keep_unique(active, f"{name}-dos.out", outcome.output_path))
+
+        groups: dict[str, list[float]] = {}
+        if projected:
+            groups = _projected_dos(
+                scratch, tool_options, name, kept, grid=grid, energies=curve["energies"]
+            )
+
+        summary = dos_summary(
+            curve["energies"],
+            curve["dos"],
+            nscf_levels["fermi"],
+            eigenvalues=read["energies"],
+            kpoints=read["kpoints"],
+            n_occupied=occupied if fixed else None,
+        )
+        result: dict[str, Any] = {
+            "energy_unit": "eV",
+            "dos_unit": curve["dos_unit"],
+            "energies": curve["energies"],
+            "dos": curve["dos"],
+            "integrated_dos": curve["integrated_dos"],
+            "fermi": nscf_levels["fermi"],
+            "fermi_source": f"the nscf step's {nscf_levels['fermi_source']}",
+            "scf_fermi": levels["fermi"],
+            "delta_e": curve["delta_e"],
+            "degauss_ry": broadening,
+            "scf_kpts": _mesh_record(scf_options),
+            "dos_kpts": list(dense_kpts) if dense_kpts is not None else None,
+            "dos_kspacing": dense_kspacing,
+            "n_bands": read["n_bands"],
+            "n_kpoints": len(read["energies"]),
+            "summary": summary,
+        }
+        if projected:
+            result["projection_groups"] = sorted(groups)
+            result["projected_dos"] = groups
+        if active is not None:
+            written = scratch / f"{name}-dos.json"
+            written.write_text(json.dumps(result, indent=1) + "\n")
+            kept.append(_keep_unique(active, written.name, written, role=ArtifactRole.TERMINAL))
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+    dos = dict(result)
+    if active is not None and len(curve["energies"]) * (3 + len(groups)) > _DOS_INLINE_LIMIT:
+        for key in ("energies", "dos", "integrated_dos", "projected_dos"):
+            dos.pop(key, None)
+        dos["dos_in"] = kept[-1]
+    info: dict[str, Any] = {
+        "engine": engine,
+        "engine_source": described["source"],
+        "engine_version": described.get("version"),
+        "scf_energy": scf_energy,
+        "energy_unit": "eV",
+        **{key: value for key, value in summary.items() if key != "dos_unit"},
+        "scf_kpts": result["scf_kpts"],
+        "dos_kpts": result["dos_kpts"],
+        "dos_kspacing": dense_kspacing,
+        "degauss_ry": broadening,
+        "n_bands": read["n_bands"],
+        "n_atoms": len(system),
+        "projected": projected,
+        "artifacts": kept,
+    }
+    if projected:
+        info["projection_groups"] = sorted(groups)
+    return dos, info
+
+
+def _projected_dos(
+    scratch: Path,
+    options: dict[str, Any],
+    name: str,
+    kept: list[str],
+    *,
+    grid: dict[str, Any],
+    energies: Sequence[float],
+) -> dict[str, list[float]]:
+    """Run projwfc.x on the same grid, and sum its files per element and l."""
+    from slab.dos import read_pdos
+    from slab.qe_tools import run_qe_tool
+
+    active = current_run()
+    try:
+        outcome = run_qe_tool(
+            "projwfc.x",
+            {**grid, "filpdos": name},
+            cwd=scratch,
+            options=options,
+            setup=options.get("setup"),
+        )
+    except Exception as e:
+        e.add_note("density_of_states failed in its projwfc step")
+        _attach_tool_evidence(e, scratch / "projwfc.out", f"{name}-projwfc")
+        raise
+    if active is not None:
+        kept.append(_keep_unique(active, f"{name}-projwfc.out", outcome.output_path))
+    try:
+        files = {
+            path.name: path.read_text(encoding="utf-8")
+            for path in sorted(scratch.glob(f"{name}.pdos_*"))
+        }
+        read = read_pdos(files)
+        rows = _aligned_rows(read["energies"], energies)
+        return {group: curve[:rows] for group, curve in read["groups"].items()}
+    except (OSError, ValueError) as e:
+        e.add_note("density_of_states failed in its projwfc step")
+        _attach_tool_evidence(e, scratch / "projwfc.out", f"{name}-projwfc")
+        raise
+
+
+def _dos_mesh(
+    scf_options: dict[str, Any],
+    dos_kpts: Sequence[int] | None,
+    dos_kspacing: float | None,
+) -> tuple[tuple[int, int, int] | None, float | None]:
+    """The NSCF's mesh: the caller's, else the SCF's made denser.
+
+    Returns ``(kpts, kspacing)``, exactly one of which is set, or two
+    Nones for a Γ-only run the caller opted into with ``kpts=None``.
+    """
+    if dos_kpts is not None:
+        mesh = [int(n) for n in dos_kpts]
+        if len(mesh) != 3 or any(n < 1 for n in mesh):
+            raise ValueError(f"dos_kpts must be three positive integers, not {dos_kpts!r}")
+        return (mesh[0], mesh[1], mesh[2]), None
+    if dos_kspacing is not None:
+        return None, float(dos_kspacing)
+    declared = scf_options.get("kpts")
+    if isinstance(declared, (list, tuple)) and len(declared) == 3:
+        dense = [max(1, int(n) * _DOS_MESH_FACTOR) for n in declared]
+        return (dense[0], dense[1], dense[2]), None
+    spacing = scf_options.get("kspacing")
+    if spacing is not None:
+        return None, float(spacing) / _DOS_MESH_FACTOR
+    # kpts=None is the explicit opt-in to a Γ-only run (a molecule in a
+    # box); _guard_qe_kpoints already refused the silent case.
+    return None, None
+
+
+def _nscf_step_options(
+    scf_options: dict[str, Any],
+    dense_kpts: tuple[int, int, int] | None,
+    dense_kspacing: float | None,
+    nbnd: int,
+) -> dict[str, Any]:
+    """The SCF's options turned into the NSCF's: same prefix and outdir,
+    ``calculation='nscf'``, ``verbosity='high'``, the denser mesh, and ``nbnd``."""
+    from copy import deepcopy
+
+    options = deepcopy(scf_options)
+    input_data = options["input_data"]
+    control = dict(input_data.get("control") or {})
+    settings = {"calculation": "nscf", "verbosity": "high", "tprnfor": False, "tstress": False}
+    control.update(settings)
+    for key in (*settings, "nbnd"):
+        input_data.pop(key, None)  # a flat key would compete with the section's
+    input_data["control"] = control
+    system = dict(input_data.get("system") or {})
+    system["nbnd"] = nbnd
+    input_data["system"] = system
+    options.pop("kspacing", None)
+    if dense_kpts is not None:
+        options["kpts"] = list(dense_kpts)
+    elif dense_kspacing is not None:
+        options.pop("kpts", None)
+        options["kspacing"] = dense_kspacing
+    return options
+
+
+def _aligned_rows(projected: Sequence[float], total: Sequence[float]) -> int:
+    """How many rows of projwfc.x's grid sit on dos.x's grid.
+
+    Both tools are given one energy window and one step, and both start
+    at the window's low end. They round the row count differently, so
+    projwfc.x writes one row more than dos.x. The shared rows hold the
+    same energies, and the extra row is dropped.
+    """
+    rows = len(total)
+    if len(projected) < rows:
+        raise ValueError(
+            f"projwfc.x wrote {len(projected)} grid rows and dos.x wrote "
+            f"{rows}; the two runs used different energy windows"
+        )
+    drift = np.abs(np.asarray(projected[:rows]) - np.asarray(total)).max() if rows else 0.0
+    if drift > _DOS_GRID_TOLERANCE_EV:
+        raise ValueError(
+            f"the projwfc.x grid and the dos.x grid differ by up to "
+            f"{drift:.4f} eV; the two runs used different energy windows"
+        )
+    return rows
+
+
+def _dos_window(
+    eigenvalues: Sequence[Sequence[float]],
+    degauss_ry: float,
+    emin: float | None,
+    emax: float | None,
+) -> tuple[float, float]:
+    """The energy window for dos.x and projwfc.x, in eV.
+
+    A caller value wins. The default covers every eigenvalue with
+    :data:`_DOS_WINDOW_WIDTHS` broadening widths of margin. The task
+    names the window instead of letting each tool choose, because dos.x
+    and projwfc.x choose ranges that differ by one grid row, and the
+    projected curves must sit on the total's grid.
+    """
+    from slab.dos import RY_TO_EV
+
+    bands = np.asarray(eigenvalues, dtype=float)
+    margin = _DOS_WINDOW_WIDTHS * degauss_ry * RY_TO_EV
+    low = float(bands.min()) - margin if emin is None else float(emin)
+    high = float(bands.max()) + margin if emax is None else float(emax)
+    if not high > low:
+        raise ValueError(
+            f"the DOS energy window is empty: emin={low} is not below emax={high}"
+        )
+    return low, high
+
+
+def _dos_degauss(degauss: float | None, scf_options: dict[str, Any]) -> float:
+    """The Gaussian broadening for dos.x, in Ry: the caller's, else the SCF's."""
+    if degauss is not None:
+        return float(degauss)
+    declared = _qe_declared(scf_options).get("degauss")
+    if declared is not None:
+        return float(declared)
+    return _DOS_FIXED_DEGAUSS_RY
+
+
+def _mesh_record(scf_options: dict[str, Any]) -> Any:
+    """The SCF's mesh as the result file records it: the mesh, else the spacing."""
+    mesh = scf_options.get("kpts")
+    if isinstance(mesh, (list, tuple)) and len(mesh) == 3:
+        return [int(n) for n in mesh]
+    spacing = scf_options.get("kspacing")
+    return None if spacing is None else float(spacing)
 
 
 # cache_extra folds the atomsk install's identity (resolved command, detected
@@ -2651,6 +3297,10 @@ _SCF_PIN_REASONS = {
     "single_point": ("single_point runs exactly one SCF", "use relax for optimization"),
     "band_structure": (
         "band_structure runs its own SCF and then its own bands step",
+        "relax the structure first and pass the result",
+    ),
+    "density_of_states": (
+        "density_of_states runs its own SCF and then its own NSCF step",
         "relax the structure first and pass the result",
     ),
 }

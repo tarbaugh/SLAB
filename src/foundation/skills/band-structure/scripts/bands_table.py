@@ -8,13 +8,20 @@ Fermi level, and the summary.
     bands_table.py si-bands.json
     bands_table.py si-bands.json --dat si-bands.dat
     bands_table.py si-bands.json --png si-bands.png
+    bands_table.py si-bands.json --projection Si-p --dat si-fat.dat
 
-With no option the script prints the summary as JSON. ``--dat`` writes a
-whitespace table: the distance along the path in 1/Å, then one column
-per band, in eV relative to the valence band maximum (or to the Fermi
-level for a metal). Comment lines at the top give the reference energy
-and the x position of each special point. ``--png`` draws the same
-diagram when matplotlib is installed and exits 2 when it is not.
+With no option the script prints the summary as JSON. ``--projection``
+names a group of a projected run, such as ``Si-p``. In ``--dat`` it adds
+one weight column per band after the energy columns, so a row holds x,
+then n energies, then the n weights in the same band order. In ``--png``
+it sizes each marker by the weight, which is the fat-band diagram.
+
+``--dat`` writes a whitespace table: the distance along the path in 1/Å,
+then one column per band, in eV relative to the valence band maximum (or
+to the Fermi level for a metal). Comment lines at the top give the
+reference energy and the x position of each special point. ``--png``
+draws the same diagram when matplotlib is installed and exits 2 when it
+is not.
 """
 
 from __future__ import annotations
@@ -58,9 +65,29 @@ def energies(data: dict[str, Any]) -> list[list[float]]:
     return [[float(e) for e in row] for row in rows]
 
 
-def write_dat(data: dict[str, Any], out: Path) -> None:
+def projection(data: dict[str, Any], group: str | None) -> list[list[float]] | None:
+    """The weight of *group* per k-point and band, or None without a group."""
+    if group is None:
+        return None
+    groups = data.get("projections")
+    if not groups:
+        names = ", ".join(data.get("projection_groups", [])) or "none"
+        raise SystemExit(
+            f"error: this file carries no projections (groups: {names}); run "
+            f"band_structure with projected=True, and read the -bands.json it keeps"
+        )
+    if group not in groups:
+        raise SystemExit(
+            f"error: {group!r} is not a group of this run; it has "
+            f"{', '.join(sorted(groups))}"
+        )
+    return [[float(w) for w in row] for row in groups[group]]
+
+
+def write_dat(data: dict[str, Any], out: Path, group: str | None = None) -> None:
     zero, name = reference(data)
     rows = energies(data)
+    weights = projection(data, group)
     ticks = " ".join(f"{t['label']} {t['x']:.6f}" for t in data["ticks"])
     lines = [
         f"# band structure along {data['path']} ({data['lattice']}), "
@@ -69,12 +96,20 @@ def write_dat(data: dict[str, Any], out: Path) -> None:
         f"# special points (label x): {ticks}",
         "# columns: x (1/A), then band 1 to band " + str(len(rows[0])),
     ]
-    for x, row in zip(data["distances"], rows, strict=True):
-        lines.append(" ".join([f"{x:.6f}", *(f"{e - zero:.4f}" for e in row)]))
+    if weights is not None:
+        lines.append(
+            f"# then the weight of {group} in band 1 to band {len(rows[0])}, "
+            f"one column each"
+        )
+    for index, (x, row) in enumerate(zip(data["distances"], rows, strict=True)):
+        columns = [f"{x:.6f}", *(f"{e - zero:.4f}" for e in row)]
+        if weights is not None:
+            columns += [f"{w:.4f}" for w in weights[index]]
+        lines.append(" ".join(columns))
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def write_png(data: dict[str, Any], out: Path) -> None:
+def write_png(data: dict[str, Any], out: Path, group: str | None = None) -> None:
     try:
         import matplotlib
 
@@ -89,10 +124,16 @@ def write_png(data: dict[str, Any], out: Path) -> None:
         raise SystemExit(2) from None
     zero, name = reference(data)
     rows = energies(data)
+    weights = projection(data, group)
     x = data["distances"]
     fig, ax = plt.subplots(figsize=(6, 4))
     for band in range(len(rows[0])):
-        ax.plot(x, [row[band] - zero for row in rows], color="black", linewidth=1)
+        values = [row[band] - zero for row in rows]
+        ax.plot(x, values, color="black", linewidth=1)
+        if weights is not None:
+            # The marker area is the weight, which is what a fat-band
+            # diagram draws.
+            ax.scatter(x, values, s=[80 * w[band] for w in weights], color="tab:red", alpha=0.6)
     for tick in data["ticks"]:
         ax.axvline(tick["x"], color="grey", linewidth=0.5)
     ax.axhline(0.0, color="grey", linestyle="--", linewidth=0.5)
@@ -100,7 +141,8 @@ def write_png(data: dict[str, Any], out: Path) -> None:
     ax.set_xticklabels([_GREEK.get(t["label"], t["label"]) for t in data["ticks"]])
     ax.set_xlim(x[0], x[-1])
     ax.set_ylabel(f"E - E({'VBM' if name.startswith('the valence') else 'Fermi'}) (eV)")
-    ax.set_title(f"{data['lattice']} {data['path']}")
+    title = f"{data['lattice']} {data['path']}"
+    ax.set_title(title if group is None else f"{title}, {group}")
     fig.tight_layout()
     fig.savefig(out, dpi=150)
     plt.close(fig)
@@ -111,6 +153,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("bands", type=Path, help="a -bands.json file from band_structure")
     parser.add_argument("--dat", type=Path, help="write the band table here")
     parser.add_argument("--png", type=Path, help="draw the band diagram here (needs matplotlib)")
+    parser.add_argument(
+        "--projection",
+        metavar="GROUP",
+        help="add the weight of this group, such as Si-p, from a projected run",
+    )
     args = parser.parse_args(argv)
 
     data = load(args.bands)
@@ -120,13 +167,17 @@ def main(argv: list[str] | None = None) -> int:
         "lattice": data["lattice"],
         "n_kpoints": len(data["kpoints"]),
         "n_bands": data["n_bands"],
+        "projection_groups": data.get("projection_groups", []),
         **summary,
     }
+    if args.projection is not None:
+        projection(data, args.projection)  # refuse an unknown group before any file is written
+        report["projection"] = args.projection
     if args.dat is not None:
-        write_dat(data, args.dat)
+        write_dat(data, args.dat, args.projection)
         report["dat"] = str(args.dat)
     if args.png is not None:
-        write_png(data, args.png)
+        write_png(data, args.png, args.projection)
         report["png"] = str(args.png)
     print(json.dumps(report, indent=2))
     return 0

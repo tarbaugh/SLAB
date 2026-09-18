@@ -30,6 +30,11 @@ SI_BANDS = DATA / "qe-si-bands-bands.pwo"
 AL_SCF = DATA / "qe-al-bands-scf.pwo"
 AL_BANDS = DATA / "qe-al-bands-bands.pwo"
 SI_JSON = DATA / "qe-si-bands.json"
+PB_SCF = DATA / "qe-si-pbands-scf.pwo"
+PB_BANDS = DATA / "qe-si-pbands-bands.pwo"
+PB_PROJWFC = DATA / "qe-si-pbands-projwfc.out"
+PB_XML = DATA / "qe-si-pbands-atomic_proj.xml"
+PB_JSON = DATA / "qe-si-pbands.json"
 
 FENCE = " " + "%" * 40
 
@@ -70,6 +75,41 @@ fi
     )
     script.chmod(0o755)
     return script
+
+
+def _fake_bin(tmp_path: Path, *, fail: str | None = None) -> Path:
+    """A directory holding a fake pw.x and a fake projwfc.x, named as the real
+    ones are: band_structure derives projwfc.x from the pw.x command by naming
+    its sibling. The pair replays the 20-k-point projected run."""
+    root = tmp_path / "bin"
+    root.mkdir(exist_ok=True)
+    inputs = tmp_path / "inputs"
+    inputs.mkdir(exist_ok=True)
+    failing = f"""echo "     Program PROJWFC v.7.5 starts on 18Sep2026"
+echo "{FENCE}"
+echo "     Error in routine projwave (1):"
+echo "     Cannot project on zero atomic wavefunctions!"
+echo "{FENCE}"
+exit 3"""
+    scripts = {
+        "pw.x": f"""
+if grep -q "calculation *= *'bands'" "$2"; then step=bands; else step=scf; fi
+cp "$2" "{inputs}/$step.pwi"
+if [ "$step" = bands ]; then cat "{PB_BANDS}"; else cat "{PB_SCF}"; fi
+""",
+        "projwfc.x": f"""
+cp "$2" "{inputs}/projwfc.in"
+{failing if fail == "projwfc" else ""}
+mkdir -p ./pwscf.save
+cp "{PB_XML}" ./pwscf.save/atomic_proj.xml
+cat "{PB_PROJWFC}"
+""",
+    }
+    for name, body in scripts.items():
+        script = root / name
+        script.write_text("#!/bin/sh\n" + body.strip() + "\n")
+        script.chmod(0o755)
+    return root
 
 
 def _options(script: Path, tmp_path: Path) -> dict:
@@ -291,6 +331,110 @@ def test_a_registry_alias_on_the_qe_factory_is_accepted(
     assert info["gap_kind"] == "indirect"
 
 
+def test_projected_bands_add_the_fat_band_weights(
+    ws: Workspace, tmp_path: Path, scratches: list[Path]
+) -> None:
+    options = _options(_fake_bin(tmp_path) / "pw.x", tmp_path)
+    with ws.start_run(name="si-projected", intent="projected bands") as run:
+        bands, info = band_structure(
+            _si(), calculator_options=options, npoints=20, projected=True, label="si"
+        )
+
+    assert info["projected"] is True
+    assert info["projection_groups"] == ["Si-p", "Si-s"]
+    assert info["artifacts"] == ["si-scf.pwo", "si-bands.pwo", "si-projwfc.out", "si-bands.json"]
+    # projwfc.x cannot symmetrize a high-symmetry path, so the task asks
+    # it not to.
+    projwfc = (tmp_path / "inputs" / "projwfc.in").read_text()
+    assert projwfc.startswith("&PROJWFC")
+    assert "lsym = .false." in projwfc
+    assert "prefix = 'pwscf'" in projwfc and "outdir = './'" in projwfc
+
+    written = json.loads(ws.artifacts.get(
+        {a.name: a for a in ws.runs.list_artifacts(run.id)}["si-bands.json"].hash
+    ).read_text())
+    assert written == json.loads(PB_JSON.read_text())
+    assert written["projection_groups"] == ["Si-p", "Si-s"]
+    weights = written["projections"]
+    assert len(weights["Si-p"]) == 20 and len(weights["Si-p"][0]) == 8
+    # The valence band top at Γ is p, and the lowest band is s.
+    assert weights["Si-p"][0][3] == pytest.approx(0.961, abs=1e-3)
+    assert weights["Si-s"][0][0] == pytest.approx(0.996, abs=1e-3)
+    # 20 k-points times 8 bands times three curves is 480 numbers, under
+    # the inline limit, so they travel with the return value.
+    assert bands == written
+    assert not scratches[0].exists()
+
+
+def test_the_projections_count_against_the_inline_limit(
+    ws: Workspace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 20 k-points times 8 bands is 160 eigenvalues, under a limit of 200.
+    # The two projection curves are 320 numbers more, and they push the
+    # listing over, so both leave the return value together.
+    monkeypatch.setattr(tasks, "_BANDS_INLINE_LIMIT", 200)
+    options = _options(_fake_bin(tmp_path) / "pw.x", tmp_path)
+    with ws.start_run(name="plain", intent="under the limit"):
+        plain, _ = band_structure(_si(), calculator_options=options, npoints=20, label="si")
+    assert len(plain["energies"]) == 20
+    with ws.start_run(name="projected", intent="over the limit"):
+        bands, _ = band_structure(
+            _si(), calculator_options=options, npoints=20, projected=True, label="si"
+        )
+    assert "energies" not in bands and "projections" not in bands
+    assert bands["energies_in"] == "si-bands.json"
+    assert bands["projection_groups"] == ["Si-p", "Si-s"]
+
+
+def test_an_unprojected_run_names_no_groups(ws: Workspace, tmp_path: Path) -> None:
+    options = _options(_fake_bin(tmp_path) / "pw.x", tmp_path)
+    with ws.start_run(name="si-plain", intent="not projected"):
+        bands, info = band_structure(_si(), calculator_options=options, npoints=20, label="si")
+    assert info["projected"] is False and "projection_groups" not in info
+    assert "projections" not in bands and info["artifacts"] == [
+        "si-scf.pwo",
+        "si-bands.pwo",
+        "si-bands.json",
+    ]
+    assert not (tmp_path / "inputs" / "projwfc.in").exists()
+
+
+def test_projected_splits_the_cache(ws: Workspace, tmp_path: Path) -> None:
+    options = _options(_fake_bin(tmp_path) / "pw.x", tmp_path)
+    call = {"calculator_options": options, "npoints": 20, "label": "si"}
+    with ws.start_run(name="plain", intent="plain"):
+        band_structure(_si(), **call)
+    with ws.start_run(name="plain-again", intent="cache hit") as again:
+        band_structure(_si(), **call)
+    assert ws.runs.list_tasks(again.id)[0].cache_hit is True
+    with ws.start_run(name="projected", intent="cache split") as third:
+        _, info = band_structure(_si(), projected=True, **call)
+    assert ws.runs.list_tasks(third.id)[0].cache_hit is False
+    assert info["projection_groups"] == ["Si-p", "Si-s"]
+
+
+def test_a_failing_projwfc_step_keeps_its_evidence(
+    ws: Workspace, tmp_path: Path, scratches: list[Path]
+) -> None:
+    from slab.errors import QeToolError
+
+    options = _options(_fake_bin(tmp_path, fail="projwfc") / "pw.x", tmp_path)
+    with (
+        pytest.raises(QeToolError) as excinfo,
+        ws.start_run(name="si-fail", intent="projwfc fails") as run,
+    ):
+        band_structure(
+            _si(), calculator_options=options, npoints=20, projected=True, label="si"
+        )
+    assert "Cannot project on zero atomic wavefunctions" in str(excinfo.value)
+    assert "band_structure failed in its projwfc step" in " ".join(excinfo.value.__notes__)
+    names = {a.name for a in ws.runs.list_artifacts(run.id)}
+    assert "si-projwfc-failed.out" in names
+    assert {"si-scf.pwo", "si-bands.pwo"} <= names
+    assert "si-bands.json" not in names
+    assert not scratches[0].exists()
+
+
 def test_band_structure_is_in_the_task_catalog() -> None:
     from foundation._ops import task_catalog
 
@@ -328,6 +472,38 @@ def test_band_structure_qe_real_integration(ws: Workspace) -> None:
     assert len(bands["energies"]) == 20
     names = {a.name for a in ws.runs.list_artifacts(run.id)}
     assert names == {"si-scf.pwo", "si-bands.pwo", "si-bands.json"}
+
+
+@pytest.mark.skipif(
+    not (os.environ.get("SLAB_TEST_PW") and os.environ.get("SLAB_TEST_PSEUDO_DIR")),
+    reason="set SLAB_TEST_PW and SLAB_TEST_PSEUDO_DIR to test against a real pw.x",
+)
+def test_projected_bands_qe_real_integration(ws: Workspace) -> None:
+    pw = os.environ["SLAB_TEST_PW"]
+    pseudo_dir = os.environ["SLAB_TEST_PSEUDO_DIR"]
+    atoms = _si()
+    with ws.start_run(name="qe-real-projected", intent="real projwfc.x") as run:
+        bands, info = band_structure(
+            atoms,
+            npoints=12,
+            projected=True,
+            label="si",
+            calculator_options={
+                "command": pw,
+                "pseudo_dir": pseudo_dir,
+                "pseudopotentials": resolve_pseudopotentials(atoms, pseudo_dir),
+                "kpts": [4, 4, 4],
+                "input_data": {"system": {"ecutwfc": 20.0}},
+            },
+        )
+    assert info["projection_groups"] == ["Si-p", "Si-s"]
+    weights = bands["projections"]
+    assert len(weights["Si-p"]) == 12
+    # The valence band top at Γ is p in diamond-structure Si.
+    assert weights["Si-p"][0][3] > 0.9
+    assert weights["Si-s"][0][3] < 0.01
+    names = {a.name for a in ws.runs.list_artifacts(run.id)}
+    assert names == {"si-scf.pwo", "si-bands.pwo", "si-projwfc.out", "si-bands.json"}
 
 
 def test_fixed_occupations_still_read_si_as_an_insulator(

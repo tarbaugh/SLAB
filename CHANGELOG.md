@@ -5,6 +5,46 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- A Quantum ESPRESSO density of states is one traced task.
+  `density_of_states(atoms, calculator_options=..., dos_kpts=,
+  dos_kspacing=, projected=, emin=, emax=, delta_e=, degauss=, nbands=,
+  label=)` in `foundation.tasks` runs an SCF, an NSCF on a denser mesh,
+  and `dos.x` in one scratch directory, and with `projected=True` also
+  `projwfc.x`. It returns the curve on its energy grid, the Fermi level,
+  the density of states there, and the band edges and the gap as the NSCF
+  eigenvalues give them. The verdict comes from the eigenvalues and never
+  from the broadened curve. Without `dos_kpts` or `dos_kspacing` the task
+  doubles the SCF mesh in each direction. The broadening is a Gaussian of
+  width `degauss`, in Ry, defaulting to the SCF's own. With `projected`
+  the result file carries one curve per element and angular momentum,
+  such as `Si-s` and `Si-p`. The task keeps `{label}-scf.pwo`,
+  `{label}-nscf.pwo`, `{label}-dos.dat`, `{label}-dos.out`,
+  `{label}-projwfc.out`, and the result file `{label}-dos.json`, and a
+  failed step keeps its files under the step's name. It follows
+  `band_structure`'s contracts for k-points, the scf pin, the cache, the
+  gpu build, and the spin refusals.
+- `band_structure` gains `projected=`. With `projected=True` it runs
+  `projwfc.x` on the bands step's save directory and returns, per k-point
+  and band, the weight of each element and angular momentum, which is the
+  data of a fat-band diagram. The result file gains `projection_groups`
+  and `projections`, and the projections count against the same inline
+  limit as the eigenvalues. `bands_table.py` gains `--projection GROUP`,
+  which adds one weight column per band to `--dat` and sizes the markers
+  of `--png`.
+- `dos.x` and `projwfc.x` are reached through `slab.qe_tools`. Each
+  command is the resolved `pw.x` line with the `pw.x` token replaced by
+  its sibling in the same directory, so a tool follows the same install,
+  the same build, the same launcher, and the same setup lines as `pw.x`.
+  Flags only `pw.x` takes are dropped, and `dos_command` or
+  `projwfc_command` in `calculator_options` overrides the line.
+  `slab.dos` reads what the tools write: the table, the per-state files,
+  the state list, and `atomic_proj.xml`. `slab.outputs.digest` gains
+  digests for both tools' output and for the `.dat` table, so `read_file`
+  and `read_artifact` never print thousands of rows.
+- The new `density-of-states` skill covers the procedure, the mesh and
+  broadening trade-off, the limits of the projections, and the reporting
+  rules, and its `dos_table.py` writes a `-dos.json` as a table or a
+  plot. The band-structure skill gains a projected-bands section.
 - `band_structure` takes its k-point path from seekpath. seekpath finds
   the space group with spglib, builds the standardized primitive cell,
   and gives the recommended path in that cell's reciprocal basis, so the

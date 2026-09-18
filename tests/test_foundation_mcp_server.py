@@ -486,8 +486,12 @@ def test_tasks_are_listed_and_described(root: Path) -> None:
     server = build_server(root)
     names = {entry["name"] for entry in _call(server, "list_tasks")}
     assert {"relax", "relax_cell", "single_point", "band_structure"} <= names
+    assert "density_of_states" in names
     bands = _call(server, "describe_task", {"name": "band_structure"})
     assert "npoints" in bands["signature"] and "gap verdict" in bands["doc"]
+    assert "projected" in bands["signature"]
+    dos = _call(server, "describe_task", {"name": "density_of_states"})
+    assert "dos_kpts" in dos["signature"] and "density of states" in dos["doc"]
     described = _call(server, "describe_task", {"name": "relax"})
     assert described["name"] == "relax" and "engine" in described["signature"]
     assert described["doc"]

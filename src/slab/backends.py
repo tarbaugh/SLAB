@@ -185,6 +185,28 @@ def get_calculator(engine: str, **options: Any) -> Any:
     raise EngineNotAvailableError(f"unknown engine {engine!r}; available: {known}{detail}")
 
 
+def engine_options(engine: str, options: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The options *engine* is built with: a registry entry's under the caller's.
+
+    :func:`get_calculator` merges a registry entry's declared options under
+    the caller's, key by key. A caller that must resolve the same command
+    outside the calculator (a post-processing tool that follows the same
+    install) asks here, so an alias and the built-in engine resolve alike.
+
+    Examples:
+        >>> engine_options("qe", {"command": "pw.x"})
+        {'command': 'pw.x'}
+    """
+    merged = dict(options or {})
+    normalized = engine.strip().lower()
+    if normalized in ("emt", "lj", "lammps", "qe", "rootstock"):
+        return merged
+    registry = load_registry()
+    if registry is not None and normalized in registry.engines:
+        return {**registry.engines[normalized].options, **merged}
+    return merged
+
+
 def describe_engine(
     engine: str, calculator_options: dict[str, Any] | None = None
 ) -> dict[str, Any]:

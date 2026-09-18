@@ -10,8 +10,11 @@ would give first: the system, the convergence trace, the final numbers,
 the warnings, and whether the job finished. The raw text stays one
 argument away.
 
-Three formats are recognised: pw.x output (any name; the header says
-``Program PWSCF``), a LAMMPS log (the first lines say ``LAMMPS (``, or open
+Five formats are recognised: pw.x output (any name; the header says
+``Program PWSCF``), the standard output of ``dos.x`` or ``projwfc.x``
+(the header says ``Program DOS`` or ``Program PROJWFC``), the table
+``dos.x`` writes (its first line names the energy, the dos, and the
+integrated dos), a LAMMPS log (the first lines say ``LAMMPS (``, or open
 with the commands an ASE-driven run echoes), and extended XYZ (a frame
 count line, then a comment line with ``Lattice=`` or ``Properties=``).
 :func:`digest` returns ``None`` for anything else, and the caller shows
@@ -33,6 +36,7 @@ import yaml
 __all__ = [
     "THERMO_FORMATS",
     "digest",
+    "dos_table_digest",
     "extxyz_digest",
     "lammps_log_digest",
     "lammps_run_progress",
@@ -40,6 +44,7 @@ __all__ = [
     "lammps_thermo_format",
     "lammps_yaml_thermo",
     "pwscf_digest",
+    "qe_tool_digest",
 ]
 
 #: Ry/bohr to eV/Å, for the force line.
@@ -79,6 +84,10 @@ def digest(name: str, text: str) -> str | None:
     head = text[:_SNIFF_CHARS]
     if "Program PWSCF" in head:
         return pwscf_digest(name, text)
+    if _TOOL_VERSION.search(head):
+        return qe_tool_digest(name, text)
+    if _DOS_TABLE_HEADER.search(head):
+        return dos_table_digest(name, text)
     if _looks_like_lammps_log(head):
         return lammps_log_digest(name, text)
     if _looks_like_ave_time(head):
@@ -344,6 +353,144 @@ def _elide(items: list[str], ends: int = _TRACE_ENDS) -> str:
         return ", ".join(items)
     head, tail = ", ".join(items[:ends]), ", ".join(items[-ends:])
     return f"{head} ... ({len(items) - 2 * ends} more) ... {tail}"
+
+
+# -- dos.x and projwfc.x -------------------------------------------------------
+
+_TOOL_VERSION = re.compile(r"Program (DOS|PROJWFC) v\.(\S+) starts on")
+_TOOL_BROADENING = re.compile(
+    r"(\w+) broadening \(read from (\w+)\): ngauss,degauss=\s*(-?\d+)\s+([\d.]+)"
+)
+_TOOL_DONE = "JOB DONE."
+_PROJWFC_COUNT = re.compile(r"^\s*(natomwfc|nbnd|nkstot)\s*=\s*(\d+)", re.MULTILINE)
+_PROJWFC_SPILLING = re.compile(r"Spilling Parameter:\s*([\d.]+)")
+_DOS_TABLE_HEADER = re.compile(r"^#\s*E\s*\(eV\)\s+dos\(E\)\s+Int dos\(E\)")
+
+#: The name of the result file each tool's numbers belong in. A reader
+#: that wants the curve reads the task's own json, where the curve sits
+#: beside the verdict, and not the tool's raw output.
+_DOS_RESULT_HINT = "the task's -dos.json holds this table with the verdict; read that instead"
+
+
+def qe_tool_digest(name: str, text: str) -> str:
+    """The digest of one dos.x or projwfc.x standard output.
+
+    Examples:
+        >>> out = (
+        ...     "     Program DOS v.7.5 starts on 18Sep2026\\n"
+        ...     "     Gaussian broadening (read from input): ngauss,degauss=   0    0.005000\\n"
+        ...     "   JOB DONE.\\n"
+        ... )
+        >>> print(qe_tool_digest("si-dos.out", out))
+        dos.x digest: si-dos.out (v.7.5)
+        broadening: Gaussian, ngauss=0, degauss=0.005000 Ry (read from input)
+        status: finished
+    """
+    found = _TOOL_VERSION.search(text)
+    program = "dos.x" if (found and found.group(1) == "DOS") else "projwfc.x"
+    version = found.group(2) if found else "unknown"
+    lines = [f"{program} digest: {name} (v.{version})"]
+    counts = dict(_PROJWFC_COUNT.findall(text))
+    if counts:
+        lines.append(
+            "sizes: "
+            + ", ".join(
+                f"{label} {counts[key]}"
+                for key, label in (
+                    ("nkstot", "k-points"),
+                    ("nbnd", "bands"),
+                    ("natomwfc", "atomic wavefunctions"),
+                )
+                if key in counts
+            )
+        )
+    groups = _projwfc_groups(text)
+    if groups:
+        lines.append("states: " + ", ".join(f"{group} ({n})" for group, n in groups))
+    if broadening := _TOOL_BROADENING.search(text):
+        kind, source, ngauss, degauss = broadening.groups()
+        lines.append(
+            f"broadening: {kind}, ngauss={ngauss}, degauss={degauss} Ry (read from {source})"
+        )
+    if spilling := _PROJWFC_SPILLING.search(text):
+        lines.append(f"spilling parameter: {spilling.group(1)}")
+    errors = _fenced_errors(text)
+    if errors:
+        lines.append("errors: " + "; ".join(errors))
+    lines.append("status: finished" if _TOOL_DONE in text else "status: did not finish")
+    return "\n".join(lines)
+
+
+def dos_table_digest(name: str, text: str) -> str:
+    """The digest of one dos.x table: the grid, the Fermi level, and the DOS there.
+
+    Examples:
+        >>> table = (
+        ...     "#  E (eV)   dos(E)     Int dos(E) EFermi =    6.193 eV\\n"
+        ...     "  -6.646  0.2908E-07  0.1454E-08\\n"
+        ...     "   6.204  0.1132E+01  0.7116E+01\\n"
+        ... )
+        >>> print(dos_table_digest("si-dos.dat", table))
+        density of states digest: si-dos.dat (2 rows)
+        energy: -6.646 to 6.204 eV, step 12.850 eV
+        Fermi level: 6.193 eV; dos there: 1.1310 states/eV/cell
+        integrated dos: 0.000 to 7.116 states/cell
+        the task's -dos.json holds this table with the verdict; read that instead
+    """
+    import numpy as np
+
+    from slab.dos import read_dos
+
+    try:
+        table = read_dos(text)
+    except ValueError as e:
+        return f"density of states digest: {name}\nunreadable: {e}"
+    energies, values = table["energies"], table["dos"]
+    step = "n/a" if table["delta_e"] is None else f"{table['delta_e']:.3f} eV"
+    lines = [
+        f"density of states digest: {name} ({len(energies)} rows)",
+        f"energy: {energies[0]:.3f} to {energies[-1]:.3f} eV, step {step}",
+    ]
+    if table["fermi"] is None:
+        lines.append("Fermi level: not in the header")
+    else:
+        at_fermi = float(np.interp(table["fermi"], energies, values))
+        lines.append(
+            f"Fermi level: {table['fermi']:.3f} eV; dos there: "
+            f"{at_fermi:.4f} states/eV/cell"
+        )
+    integrated = table["integrated_dos"]
+    lines.append(f"integrated dos: {integrated[0]:.3f} to {integrated[-1]:.3f} states/cell")
+    lines.append(_DOS_RESULT_HINT)
+    return "\n".join(lines)
+
+
+def _fenced_errors(text: str) -> list[str]:
+    """The lines QE fenced in ``%%%%`` as an error block, at most :data:`_MAX_NOTES`."""
+    found: list[str] = []
+    inside = False
+    for line in text.splitlines():
+        if _PW_ERROR_FENCE.match(line):
+            inside = not inside
+            continue
+        if inside and line.strip() and len(found) < _MAX_NOTES:
+            found.append(line.strip())
+    return found
+
+
+def _projwfc_groups(text: str) -> list[tuple[str, int]]:
+    """``(group, count)`` per element and l in a projwfc.x state list, sorted."""
+    from slab.dos import read_projection_states
+
+    try:
+        states = read_projection_states(text)
+    except ValueError:
+        return []
+    counted: dict[str, int] = {}
+    for state in states:
+        group = str(state["group"])
+        counted[group] = counted.get(group, 0) + 1
+    return sorted(counted.items())
 
 
 # -- LAMMPS log ----------------------------------------------------------------

@@ -326,14 +326,16 @@ def band_summary(
     energies: Sequence[Sequence[float]] | np.ndarray,
     fermi: float,
     kpoints: Sequence[Sequence[float]] | np.ndarray,
-    labels: Mapping[str, Sequence[float]],
+    labels: Mapping[str, Sequence[float]] | None = None,
     n_occupied: int | None = None,
 ) -> dict[str, Any]:
     """The gap verdict of a band structure against the SCF Fermi level.
 
     *energies* is n_k by n_bands in eV, *fermi* is the SCF's Fermi level in
     eV, *kpoints* are the fractional k-points of the rows, and *labels*
-    maps each special point to its fractional coordinates.
+    maps each special point to its fractional coordinates. On a mesh
+    there are no special points to name, so *labels* may be None or
+    empty, and ``vbm_at`` and ``cbm_at`` then carry the k-point alone.
 
     A band is valence when every energy lies below *fermi* and conduction
     when every energy lies above it. A band that crosses *fermi* makes the
@@ -425,14 +427,24 @@ def band_summary(
     return summary
 
 
-def _nearest_label(k: np.ndarray, labels: Mapping[str, Sequence[float]]) -> dict[str, Any]:
-    """The special point nearest *k*, with the distance in fractional units."""
+def _nearest_label(
+    k: np.ndarray, labels: Mapping[str, Sequence[float]] | None
+) -> dict[str, Any]:
+    """The special point nearest *k*, with the distance in fractional units.
+
+    With no labels the answer is the k-point alone: a mesh run names no
+    special point, and a made-up nearest label would read as one.
+    """
     best, distance = None, float("inf")
-    for label, coords in labels.items():
+    for label, coords in (labels or {}).items():
         d = float(np.linalg.norm(k - np.asarray(coords, dtype=float)))
         if d < distance:
             best, distance = label, d
-    return {"label": best, "distance": distance, "k": [float(c) for c in k]}
+    return {
+        "label": best,
+        "distance": None if best is None else distance,
+        "k": [float(c) for c in k],
+    }
 
 
 def path_distances(
