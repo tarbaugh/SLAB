@@ -5,6 +5,13 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- A Materials Project snapshot may carry a second id column,
+  `material_id_numeric`. When it does, `get_material`, `fetch_structure`,
+  and `slab mp show` accept either id and resolve it to the canonical
+  `material_id`, which every record, run, and cache key uses. A numeric id
+  that two rows carry is refused. `slab mp info`, `slab doctor`, and the
+  `list_engines` overview report `numeric ids`. SLAB never writes the
+  column.
 - Quantum ESPRESSO gains a gpu build, as LAMMPS has. `[engines.qe.gpu]`
   names a GPU-enabled `pw.x` with the same keys as `[engines.qe]`: `bin`
   (SLAB constructs `mpirun -np {ntasks} <bin>/pw.x`) or `command`, never

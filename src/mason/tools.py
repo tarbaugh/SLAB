@@ -2857,10 +2857,21 @@ def _add_mp_tools(box: Toolbox, snapshot_root: Path) -> None:
                 "of its archived CIF, readable here or via "
                 "fetch_structure(material_id) in a workflow script. Absence is "
                 "absence: an id the snapshot lacks is an error, not a reason "
-                "to look elsewhere."
+                "to look elsewhere. Pass the material_id, or the "
+                "material_id_numeric form such as 'mp-149' when the snapshot "
+                "carries that column; the record's material_id is the "
+                "canonical label to cite."
             ),
             parameters=_schema(
-                {"material_id": {"type": "string", "description": "e.g. 'mp-149'"}},
+                {
+                    "material_id": {
+                        "type": "string",
+                        "description": (
+                            "a material_id or, when the snapshot has the "
+                            "column, a material_id_numeric value"
+                        ),
+                    }
+                },
                 ["material_id"],
             ),
             handler=get_material,

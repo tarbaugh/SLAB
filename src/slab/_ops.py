@@ -277,6 +277,7 @@ def _mp_overview() -> dict[str, Any] | None:
         "root": info["root"],
         "release": info["release"],
         "materials": info["materials"],
+        "numeric_ids": info["numeric_ids"],
     }
 
 

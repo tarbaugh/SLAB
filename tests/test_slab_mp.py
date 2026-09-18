@@ -24,6 +24,7 @@ from slab.mp import (
     get_material,
     mp_root,
     query_materials,
+    resolve_material_id,
     search_materials,
     snapshot_info,
     structure_path,
@@ -218,6 +219,103 @@ def test_a_record_with_no_cif_says_so(tmp_path: Path) -> None:
     with pytest.raises(BuilderError, match="records no CIF"):
         structure_path("mp-888", root=root)
     assert "cif_file" not in get_material("mp-888", root=root)
+
+
+# -- material_id_numeric -----------------------------------------------------
+
+
+def test_without_the_column_a_numeric_looking_miss_points_at_search(
+    mp_snapshot: Path,
+) -> None:
+    assert snapshot_info(mp_snapshot)["numeric_ids"] is False
+    record = get_material("mp-149", root=mp_snapshot)
+    assert record["material_id"] == "mp-149"
+    assert "requested_id" not in record
+    with pytest.raises(BuilderError, match="labels materials differently") as excinfo:
+        get_material("mp-404", root=mp_snapshot)
+    assert "search_materials" in str(excinfo.value)
+    assert "were checked" not in str(excinfo.value)
+
+
+def test_without_the_column_a_label_resolves_as_today(tmp_path: Path) -> None:
+    root = build_mp_snapshot(
+        tmp_path / "snap", extra_materials=({"material_id": "si-label"},)
+    )
+    assert get_material("si-label", root=root)["material_id"] == "si-label"
+    with pytest.raises(BuilderError) as excinfo:
+        get_material("no-such-label", root=root)
+    assert "labels materials differently" not in str(excinfo.value)
+
+
+def test_a_text_numeric_id_resolves_to_the_canonical_label(tmp_path: Path) -> None:
+    root = build_mp_snapshot(tmp_path / "snap", numeric_ids="text")
+    assert snapshot_info(root)["numeric_ids"] is True
+    record = get_material("mp-149", root=root)
+    assert record["material_id"] == "si-diamond"
+    assert record["requested_id"] == "mp-149"
+    assert record["elements"] == ["Si"]
+    assert Path(record["cif_file"]).is_file()
+    assert "requested_id" not in get_material("si-diamond", root=root)
+    assert get_material("149", root=root)["material_id"] == "si-diamond"
+
+
+def test_an_integer_numeric_id_resolves_from_either_form(tmp_path: Path) -> None:
+    root = build_mp_snapshot(tmp_path / "snap", numeric_ids="int")
+    assert get_material("mp-149", root=root)["material_id"] == "si-diamond"
+    assert get_material("149", root=root)["material_id"] == "si-diamond"
+    assert get_material("22862", root=root)["elements"] == ["Cl", "Na"]
+
+
+def test_the_canonical_column_wins_over_a_numeric_match(tmp_path: Path) -> None:
+    # "mp-13" is fe-bcc's numeric id and also another row's material_id.
+    root = build_mp_snapshot(
+        tmp_path / "snap",
+        numeric_ids="text",
+        extra_materials=({"material_id": "mp-13", "formula_pretty": "X"},),
+    )
+    record = get_material("mp-13", root=root)
+    assert record["formula_pretty"] == "X"
+    assert "requested_id" not in record
+    assert resolve_material_id("mp-13", root=root) == "mp-13"
+
+
+def test_a_numeric_id_on_two_rows_is_refused_naming_both(tmp_path: Path) -> None:
+    root = build_mp_snapshot(
+        tmp_path / "snap",
+        numeric_ids="text",
+        extra_materials=(
+            {"material_id": "si-copy", "material_id_numeric": "mp-149"},
+        ),
+    )
+    with pytest.raises(BuilderError, match="pass one material_id") as excinfo:
+        get_material("mp-149", root=root)
+    assert "si-copy" in str(excinfo.value)
+    assert "si-diamond" in str(excinfo.value)
+
+
+def test_absence_in_both_columns_says_both_were_checked(tmp_path: Path) -> None:
+    root = build_mp_snapshot(tmp_path / "snap", numeric_ids="int")
+    with pytest.raises(BuilderError, match=r"release 2025\.11\.1") as excinfo:
+        get_material("mp-404", root=root)
+    message = str(excinfo.value)
+    assert "Both material_id and material_id_numeric were checked" in message
+    assert "report absence as absence" in message
+    assert "labels materials differently" not in message
+
+
+def test_a_nonsense_id_is_refused_before_resolution(tmp_path: Path) -> None:
+    root = build_mp_snapshot(tmp_path / "snap", numeric_ids="text")
+    with pytest.raises(BuilderError, match="does not look like a material id"):
+        resolve_material_id("149' OR 1=1", root=root)
+
+
+def test_structure_path_resolves_a_numeric_id(tmp_path: Path) -> None:
+    root = build_mp_snapshot(tmp_path / "snap", numeric_ids="text")
+    assert resolve_material_id("mp-22862", root=root) == "nacl-rocksalt"
+    assert resolve_material_id("nacl-rocksalt", root=root) == "nacl-rocksalt"
+    assert structure_path("mp-22862", root=root) == structure_path(
+        "nacl-rocksalt", root=root
+    )
 
 
 # -- raw SQL ------------------------------------------------------------------

@@ -383,6 +383,22 @@ def test_mp_info_reports_the_snapshot(
     assert f"root: {root}" in result.output
     assert "release: 2025.11.1" in result.output
     assert "materials: 4" in result.output
+    assert "numeric ids: no" in result.output
+
+
+def test_mp_show_accepts_a_numeric_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from conftest import build_mp_snapshot
+
+    root = build_mp_snapshot(tmp_path / "snap", numeric_ids="int")
+    (tmp_path / "slab.toml").write_text(f'[builders.mp]\nroot = "{root}"\n')
+    monkeypatch.chdir(tmp_path)
+    assert "numeric ids: yes" in runner.invoke(app, ["mp", "info"]).output
+    result = runner.invoke(app, ["mp", "show", "mp-22862"])
+    assert result.exit_code == 0, result.output
+    assert "material_id: nacl-rocksalt" in result.output
+    assert "requested_id: mp-22862" in result.output
 
 
 def test_mp_search_filters_and_shows_rows(

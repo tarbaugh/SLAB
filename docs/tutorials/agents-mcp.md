@@ -55,6 +55,8 @@ Twenty-seven tools, each a thin wrapper over the operations layer, and three mor
 | `report_results` | Record the session's answer: results with units, and the run ids that produced them. |
 | `retire_session` | Call it last. Promote the verified runs the answer rests on, anchors from earlier sessions included, and expire this session's other runs. A cited run that is not verified is reported, never forced. `uncited` is `keep`, `expire`, or `purge`; `dry_run=True` only reports. |
 
+A snapshot may carry a second id column, `material_id_numeric`. When it does, `get_material`, `fetch_structure`, and `slab mp show` accept either id, and every record and run cites the canonical `material_id`. SLAB does not create the column.
+
 The server holds one session id for its lifetime, `mcp-<stamp>-<pid>`, and states it in its instructions. Every run it launches carries that id, so `list_runs(session=...)` and `promote_session` see the session whole. The project directory is the one the server was started in: its `slab.toml`, its notebook and plan, and its `skills/` directory apply.
 
 ## What stays in Mason

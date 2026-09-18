@@ -387,6 +387,22 @@ def test_materials_tools_answer_from_the_snapshot(
     assert Path(record["cif_file"]).is_file()
     overview = _call(server, "list_engines")
     assert overview["mp"]["materials"] == 4
+    assert overview["mp"]["numeric_ids"] is False
+
+
+def test_get_material_takes_a_numeric_id(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from conftest import build_mp_snapshot
+
+    snapshot = build_mp_snapshot(tmp_path / "mp-snapshot", numeric_ids="int")
+    (tmp_path / "slab.toml").write_text(f'[builders.mp]\nroot = "{snapshot}"\n')
+    monkeypatch.chdir(tmp_path)
+    server = build_server(root)
+    record = _call(server, "get_material", {"material_id": "13"})
+    assert record["material_id"] == "fe-bcc"
+    assert record["requested_id"] == "13"
+    assert _call(server, "list_engines")["mp"]["numeric_ids"] is True
 
 
 def test_materials_tools_unconfigured_surface_the_fix(
