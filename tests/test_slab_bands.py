@@ -29,10 +29,16 @@ def _si() -> Atoms:
 # -- band_path ----------------------------------------------------------------------
 
 
-def test_band_path_takes_the_fcc_default_path_and_labels() -> None:
+def test_band_path_takes_seekpaths_fcc_path_and_labels() -> None:
     found = band_path(_si(), npoints=60)
-    assert found["path"] == "GXWKGLUWLK,UX"
-    assert found["lattice"] == "FCC"
+    assert found["path"] == "GXU,KGLWX"
+    assert (found["lattice"], found["spacegroup"], found["spacegroup_number"]) == (
+        "cF2",
+        "Fd-3m",
+        227,
+    )
+    assert found["seekpath_labels"]["G"] == "GAMMA"
+    assert found["cell_changed"] is False and len(found["atoms"]) == 2
     assert sorted(found["special_points"]) == ["G", "K", "L", "U", "W", "X"]
     assert found["special_points"]["G"] == [0.0, 0.0, 0.0]
     assert found["npoints"] == len(found["kpts"]) == 60
@@ -47,7 +53,7 @@ def test_band_path_follows_a_caller_path() -> None:
 
 
 def test_band_path_refuses_an_unknown_label_and_lists_the_lattice_labels() -> None:
-    with pytest.raises(ValueError, match=r"names 'M'.*its labels are G, K, L, U, W, X"):
+    with pytest.raises(ValueError, match=r"names 'M'.*its labels are G, K, L, U, W, W2, X"):
         band_path(_si(), path="GXM")
 
 
@@ -68,12 +74,12 @@ def test_band_path_npoints_beats_density() -> None:
 def test_path_distances_put_the_comma_break_at_zero_length() -> None:
     atoms = _si()
     found = band_path(atoms, npoints=60)
-    axis = path_distances(found["kpts"], atoms.cell, found["special_points"])
-    assert axis["labels"] == ["G", "X", "W", "K", "G", "L", "U", "W", "L", "K", "U", "X"]
+    axis = path_distances(found["kpts"], found["atoms"].cell, found["special_points"])
+    assert axis["labels"] == ["G", "X", "U", "K", "G", "L", "W", "X"]
     assert len(axis["x"]) == 60
     assert np.all(np.diff(axis["x"]) >= 0)
-    # K,U is a break in the path: both corners sit at the same x.
-    assert axis["special_x"][9] == axis["special_x"][10]
+    # U,K is a break in the path: both corners sit at the same x.
+    assert axis["special_x"][2] == axis["special_x"][3]
     assert axis["special_x"][1] == pytest.approx(2 * np.pi / 5.43, abs=1e-9)  # |GX| = 2pi/a
 
 
@@ -227,3 +233,43 @@ def test_counted_bands_that_overlap_are_a_metal() -> None:
     assert counted["is_metal"] is True
     assert counted["gap"] is None
     assert "overlap" in counted["note"]
+
+
+def test_a_conventional_cell_reduces_to_the_standardized_primitive_cell() -> None:
+    cubic = bulk("Si", "diamond", a=5.43, cubic=True)
+    found = band_path(cubic, npoints=60)
+    assert len(cubic) == 8 and len(found["atoms"]) == 2
+    assert found["cell_changed"] is True
+    assert found["atoms"].get_volume() == pytest.approx(cubic.get_volume() / 4)
+    # The path and its k-points are the primitive cell's own.
+    primitive = band_path(_si(), npoints=60)
+    assert found["path"] == primitive["path"]
+    assert np.allclose(found["kpts"], primitive["kpts"])
+    positions = found["atoms"].get_scaled_positions()
+    assert np.all((positions >= 0) & (positions < 1))
+
+
+def test_seekpath_labels_with_a_suffix_fit_a_path_string() -> None:
+    # Body-centred tetragonal cells carry points such as SIGMA_0 and S_0.
+    tetragonal = Atoms("In", cell=[3.25, 3.25, 4.95], pbc=True, scaled_positions=[[0, 0, 0]])
+    tetragonal += Atoms("In", positions=[[1.625, 1.625, 2.475]])
+    found = band_path(tetragonal, npoints=40)
+    assert found["lattice"].startswith("tI")
+    suffixed = {k: v for k, v in found["seekpath_labels"].items() if "_" in v}
+    assert suffixed, found["seekpath_labels"]
+    for label, name in suffixed.items():
+        assert "_" not in label and label[0] == name[0]
+    again = band_path(tetragonal, path=found["path"], npoints=40)
+    assert np.allclose(again["kpts"], found["kpts"])
+
+
+def test_matching_mesh_keeps_the_density_on_another_cell() -> None:
+    from slab.bands import matching_mesh
+
+    cubic = bulk("Si", "diamond", a=5.43, cubic=True)
+    assert matching_mesh((6, 6, 6), cubic.cell, _si().cell) == (11, 11, 11)
+    assert matching_mesh((8, 8, 8), _si().cell, _si().cell) == (8, 8, 8)
+    # A permuted orthorhombic cell takes the permuted mesh.
+    one = Atoms("Cu", cell=[3.0, 4.0, 6.0], pbc=True)
+    other = Atoms("Cu", cell=[6.0, 3.0, 4.0], pbc=True)
+    assert matching_mesh((8, 6, 4), one.cell, other.cell) == (4, 8, 6)

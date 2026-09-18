@@ -7,7 +7,7 @@ and clean up, all in plain Python with no daemon and no configuration.
 ## Install
 
 SLAB needs Python ≥ 3.11. The core install brings `pydantic`, `typer`,
-`pyyaml`, and `ase`, which is enough for everything on this page because the EMT engine
+`pyyaml`, `ase`, and `seekpath`, which is enough for everything on this page because the EMT engine
 ships with ASE:
 
 <!-- no-verify -->

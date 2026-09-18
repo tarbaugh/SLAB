@@ -796,8 +796,15 @@ output hash.
 task. It runs two `pw.x` executions in one scratch directory. The first
 is an SCF on the options' k-point mesh, and the second is
 `calculation='bands'` along a high-symmetry path, reading the SCF's
-charge density. The path comes from ASE's Bravais analysis of the cell,
-so pass the relaxed primitive cell:
+charge density.
+
+The path comes from [seekpath](https://seekpath.readthedocs.io/). seekpath
+finds the space group with spglib, builds the standardized primitive cell
+of Hinuma et al., and gives the recommended path in the reciprocal basis
+of that cell. The path is valid for that cell only, so the task runs both
+steps on it and not on the cell you pass. A conventional cell or a
+supercell of a perfect crystal reduces to the primitive cell. Pass the
+relaxed structure:
 
 <!-- no-verify -->
 ```python
@@ -826,9 +833,9 @@ verified:
 
 <!-- no-verify -->
 ```text
-gap 0.468 eV (indirect), is_metal=False
-VBM 6.1597 eV at G, CBM 6.6277 eV at k=[0.4375, 0.0, 0.4375] near X
-path GXWKGLUWLK,UX (FCC), 60 k-points, 8 bands
+gap 0.4639 eV (indirect), is_metal=False
+VBM 6.1597 eV at G, CBM 6.6236 eV at k=[0.41666666666666663, 0.0, 0.41666666666666663] near X
+path GXU,KGLWX (cF2), 60 k-points, 8 bands
 artifacts: ['si-scf.pwo', 'si-bands.pwo', 'si-bands.json']
 verified 1/1 checks passed
 ```
@@ -837,11 +844,19 @@ The verdict reads band crossings against the SCF Fermi level. A band is
 valence when all its energies lie below the level, and conduction when
 all lie above it. A band that crosses the level makes the system a metal,
 and the gap fields are then None. With `occupations='fixed'` pw.x prints
-no Fermi energy, so the task counts the occupied bands. The PBEsol gap of Si is 0.468 eV here,
+no Fermi energy, so the task counts the occupied bands. The PBEsol gap of Si is 0.4639 eV here,
 and the measured gap is 1.17 eV, because a semilocal functional places
 the conduction bands too low. The conduction band minimum lies between
 two path points near X, so `cbm_at` gives the nearest special point with
 its distance.
+
+When the standardized lattice differs from the lattice you passed, an
+explicit `kpts` mesh no longer fits the cell. The task then replaces it
+with a mesh that is at least as dense, and `info["scf_kpts"]` names it.
+`info` also carries `spacegroup`, `lattice` (seekpath's extended Bravais
+symbol), `n_atoms`, `n_atoms_input`, and `cell_changed`. A `path=` uses
+seekpath's labels with `G` for GAMMA and the underscore dropped, so
+`SIGMA_0` is `Sigma0`.
 
 The task follows `single_point`'s contracts:
 

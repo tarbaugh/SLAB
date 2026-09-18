@@ -27,8 +27,9 @@ pseudopotential family that produced them. A number without its settings
 is not reproducible and does not leave your desk.
 
 A band structure comes from the band_structure task on a relaxed
-primitive cell, and the band-structure skill says how. Report the gap
-with its kind, the functional, and the path. A semilocal gap is a lower
+structure, and the band-structure skill says how. The task takes the
+standardized primitive cell and the path from seekpath. Report the gap
+with its kind, the functional, the space group, and the path. A semilocal gap is a lower
 bound on the measured one, so say that in the report.
 
 Read a table's digest, not its rows. A thermo table, a fix ave/time file,

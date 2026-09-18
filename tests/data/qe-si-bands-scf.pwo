@@ -1,5 +1,5 @@
 
-     Program PWSCF v.7.5 starts on 18Sep2026 at 10: 1:18 
+     Program PWSCF v.7.5 starts on 18Sep2026 at 11: 1:17 
 
      This program is part of the open-source Quantum ESPRESSO suite
      for quantum simulation of materials; please cite
@@ -10,9 +10,9 @@
      in publications or presentations arising from this work. More details at
      http://www.quantum-espresso.org/quote
 
-     Parallel version (MPI & OpenMP), running on       4 processor cores
+     Parallel version (MPI & OpenMP), running on      14 processor cores
      Number of MPI processes:                 1
-     Threads/MPI process:                     4
+     Threads/MPI process:                    14
 
      MPI processes distributed on     1 nodes
      0 MiB available memory on the printing compute node when the environment starts
@@ -96,8 +96,8 @@ Warning: card &RISM ignored
    Cartesian axes
 
      site n.     atom                  positions (alat units)
-         1        Si     tau(   1) = (   0.0000000   0.0000000   0.0000000  )
-         2        Si     tau(   2) = (   0.3535534   0.3535534   0.3535534  )
+         1        Si     tau(   1) = (   0.7071068   0.7071068   0.7071068  )
+         2        Si     tau(   2) = (   1.0606602   1.0606602   1.0606602  )
 
      number of k points=   104  Marzari-Vanderbilt smearing, width (Ry)=  0.0200
 
@@ -114,7 +114,7 @@ Warning: card &RISM ignored
      starting charge       7.9989, renormalised to       8.0000
      Starting wfcs are    8 randomized atomic wfcs
 
-     total cpu time spent up to now is        1.3 secs
+     total cpu time spent up to now is        1.8 secs
 
      Self-consistent Calculation
 
@@ -128,7 +128,7 @@ Warning: card &RISM ignored
      Davidson diagonalization with overlap
      ethr =  6.30E-04,  avg # of iterations =  2.0
 
-     total cpu time spent up to now is        3.0 secs
+     total cpu time spent up to now is        4.4 secs
 
      WARNING: integrated charge=     8.00027615, expected=     8.00000000
 
@@ -139,7 +139,7 @@ Warning: card &RISM ignored
      Davidson diagonalization with overlap
      ethr =  6.81E-04,  avg # of iterations =  1.0
 
-     total cpu time spent up to now is        3.6 secs
+     total cpu time spent up to now is        5.4 secs
 
      WARNING: integrated charge=     8.00176899, expected=     8.00000000
 
@@ -152,7 +152,7 @@ Warning: card &RISM ignored
      Minimization algorithm failed to find Fermi energy: reverting to bisection
      Possible cause: smearing is larger than the electronic band-gap.
 
-     total cpu time spent up to now is        4.3 secs
+     total cpu time spent up to now is        6.5 secs
 
      WARNING: integrated charge=     8.00014819, expected=     8.00000000
 
@@ -163,7 +163,7 @@ Warning: card &RISM ignored
      Davidson diagonalization with overlap
      ethr =  3.14E-06,  avg # of iterations =  6.6
 
-     total cpu time spent up to now is        5.4 secs
+     total cpu time spent up to now is        8.3 secs
 
      WARNING: integrated charge=     8.00012411, expected=     8.00000000
 
@@ -174,7 +174,7 @@ Warning: card &RISM ignored
      Davidson diagonalization with overlap
      ethr =  1.63E-07,  avg # of iterations =  1.7
 
-     total cpu time spent up to now is        6.1 secs
+     total cpu time spent up to now is        9.4 secs
 
      WARNING: integrated charge=     7.99997361, expected=     8.00000000
 
@@ -185,7 +185,7 @@ Warning: card &RISM ignored
      Davidson diagonalization with overlap
      ethr =  4.50E-09,  avg # of iterations =  2.2
 
-     total cpu time spent up to now is        6.8 secs
+     total cpu time spent up to now is       10.6 secs
 
      WARNING: integrated charge=     7.99999570, expected=     8.00000000
 
@@ -196,7 +196,7 @@ Warning: card &RISM ignored
      Davidson diagonalization with overlap
      ethr =  5.06E-10,  avg # of iterations =  2.2
 
-     total cpu time spent up to now is        7.5 secs
+     total cpu time spent up to now is       11.7 secs
 
      WARNING: integrated charge=     8.00000258, expected=     8.00000000
 
@@ -207,7 +207,7 @@ Warning: card &RISM ignored
      Davidson diagonalization with overlap
      ethr =  6.34E-12,  avg # of iterations =  3.9
 
-     total cpu time spent up to now is        8.4 secs
+     total cpu time spent up to now is       13.1 secs
 
      End of self-consistent calculation
 
@@ -230,8 +230,8 @@ Warning: card &RISM ignored
 
      Forces acting on atoms (cartesian axes, Ry/au):
 
-     atom    1 type  1   force =    -0.00000000   -0.00000000    0.00000000
-     atom    2 type  1   force =     0.00000000    0.00000000   -0.00000000
+     atom    1 type  1   force =    -0.00000000    0.00000000   -0.00000000
+     atom    2 type  1   force =     0.00000000   -0.00000000    0.00000000
 
      Total force =     0.000000     Total SCF correction =     0.000000
 
@@ -239,60 +239,60 @@ Warning: card &RISM ignored
      Computing stress (Cartesian axis) and pressure
 
           total   stress  (Ry/bohr**3)                   (kbar)     P=        1.40
-   0.00000949   0.00000000   0.00000000            1.40        0.00        0.00
-   0.00000000   0.00000949   0.00000000            0.00        1.40        0.00
-   0.00000000   0.00000000   0.00000949            0.00        0.00        1.40
+   0.00000949  -0.00000000  -0.00000000            1.40       -0.00       -0.00
+  -0.00000000   0.00000949  -0.00000000           -0.00        1.40       -0.00
+  -0.00000000  -0.00000000   0.00000949           -0.00       -0.00        1.40
 
 
      Writing all to output data dir ./pwscf.save/ :
      XML data file, charge density, pseudopotentials, collected wavefunctions
 
-     init_run     :      4.45s CPU      1.23s WALL (       1 calls)
-     electrons    :     28.05s CPU      7.15s WALL (       1 calls)
-     forces       :      0.21s CPU      0.05s WALL (       1 calls)
-     stress       :      1.76s CPU      0.45s WALL (       1 calls)
+     init_run     :     16.54s CPU      1.68s WALL (       1 calls)
+     electrons    :    122.98s CPU     11.37s WALL (       1 calls)
+     forces       :      0.68s CPU      0.06s WALL (       1 calls)
+     stress       :      5.06s CPU      0.48s WALL (       1 calls)
 
      Called by init_run:
-     wfcinit      :      1.83s CPU      0.47s WALL (       1 calls)
-     potinit      :      1.09s CPU      0.28s WALL (       1 calls)
-     hinit0       :      1.42s CPU      0.45s WALL (       1 calls)
+     wfcinit      :      7.59s CPU      0.70s WALL (       1 calls)
+     potinit      :      3.95s CPU      0.37s WALL (       1 calls)
+     hinit0       :      4.69s CPU      0.56s WALL (       1 calls)
 
      Called by electrons:
-     c_bands      :     22.70s CPU      5.79s WALL (       9 calls)
-     sum_band     :      4.65s CPU      1.18s WALL (       9 calls)
-     v_of_rho     :      0.13s CPU      0.03s WALL (       9 calls)
-     newd         :      0.66s CPU      0.17s WALL (       9 calls)
-     mix_rho      :      0.01s CPU      0.00s WALL (       9 calls)
+     c_bands      :    100.52s CPU      9.28s WALL (       9 calls)
+     sum_band     :     20.47s CPU      1.90s WALL (       9 calls)
+     v_of_rho     :      0.37s CPU      0.04s WALL (       9 calls)
+     newd         :      1.81s CPU      0.18s WALL (       9 calls)
+     mix_rho      :      0.05s CPU      0.01s WALL (       9 calls)
 
      Called by c_bands:
-     init_us_2    :      1.03s CPU      0.26s WALL (    2184 calls)
-     cegterg      :     21.02s CPU      5.36s WALL (     936 calls)
+     init_us_2    :      3.26s CPU      0.31s WALL (    2184 calls)
+     cegterg      :     95.64s CPU      8.81s WALL (     936 calls)
 
      Called by *egterg:
-     cdiaghg      :      0.72s CPU      0.16s WALL (    3517 calls)
-     h_psi        :     19.89s CPU      5.12s WALL (    3725 calls)
-     s_psi        :      0.28s CPU      0.10s WALL (    3725 calls)
-     g_psi        :      0.09s CPU      0.02s WALL (    2685 calls)
+     cdiaghg      :      2.06s CPU      0.19s WALL (    3517 calls)
+     h_psi        :     93.13s CPU      8.56s WALL (    3725 calls)
+     s_psi        :      1.46s CPU      0.14s WALL (    3725 calls)
+     g_psi        :      0.28s CPU      0.03s WALL (    2685 calls)
 
      Called by h_psi:
-     h_psi:calbec :      0.19s CPU      0.10s WALL (    3725 calls)
-     vloc_psi     :     19.19s CPU      4.87s WALL (    3725 calls)
+     h_psi:calbec :      1.46s CPU      0.15s WALL (    3725 calls)
+     vloc_psi     :     89.57s CPU      8.20s WALL (    3725 calls)
                                         0.00s GPU  (    3725 calls)
-     add_vuspsi   :      0.47s CPU      0.12s WALL (    3725 calls)
+     add_vuspsi   :      1.76s CPU      0.16s WALL (    3725 calls)
 
      General routines
-     calbec       :      0.29s CPU      0.19s WALL (    6429 calls)
-     fft          :      1.30s CPU      0.34s WALL (     141 calls)
-     ffts         :      1.04s CPU      0.26s WALL (      18 calls)
-     fftw         :     17.41s CPU      4.82s WALL (   48438 calls)
-     interpolate  :      1.04s CPU      0.27s WALL (       9 calls)
+     calbec       :      2.43s CPU      0.27s WALL (    6429 calls)
+     fft          :      4.64s CPU      0.45s WALL (     141 calls)
+     ffts         :      3.80s CPU      0.36s WALL (      18 calls)
+     fftw         :     80.56s CPU      8.52s WALL (   48438 calls)
+     interpolate  :      3.81s CPU      0.36s WALL (       9 calls)
 
      Parallel routines
 
-     PWSCF        :     34.74s CPU      9.01s WALL
+     PWSCF        :   2m26.13s CPU     13.77s WALL
 
 
-   This run was terminated on:  10: 1:27  18Sep2026            
+   This run was terminated on:  11: 1:31  18Sep2026            
 
 =------------------------------------------------------------------------------=
    JOB DONE.

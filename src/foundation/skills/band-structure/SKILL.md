@@ -21,10 +21,17 @@ engine identity, and it keeps the outputs as artifacts of the run.
 - Relax the structure first under the same functional and pseudopotential
   family. A band structure on an unrelaxed cell reports the gap of a
   strained crystal.
-- Use the primitive cell. A supercell folds its bands back into a smaller
-  zone, and the diagram then shows many more bands than the crystal has.
-  `ase.build.bulk` gives the primitive cell for fcc, bcc, diamond,
-  zincblende, and rocksalt.
+- Pass the relaxed structure in any setting. The task asks seekpath for
+  the space group, the standardized primitive cell, and the recommended
+  path, and it runs both steps on that cell. A conventional cell or a
+  supercell of a perfect crystal reduces to the primitive cell.
+- A cell with a defect has no smaller cell. Its bands stay folded, and
+  the diagram shows many more bands than the host crystal has.
+- When the standardized lattice differs from yours, the task replaces an
+  explicit `kpts` mesh with one at least as dense on the new cell.
+  `info["scf_kpts"]` names it, and `info["cell_changed"]` says so.
+- Raise `symprec=` (1e-5 Å by default) when numerical noise hides the
+  symmetry. Check `info["spacegroup"]` against the one you expect.
 - Pass a cell that is periodic in all three directions. The task refuses
   a slab or a molecule.
 
@@ -78,10 +85,11 @@ def aluminium_is_a_metal():
     return info["is_metal"] is True
 ```
 
-- `path=` takes a path in the lattice's own labels, such as `"GXL"`. A
-  comma starts a new segment. With no `path=` the task takes ASE's
-  default path for the lattice, and an unknown label is refused with the
-  lattice's labels.
+- `path=` takes a path in seekpath's labels, such as `"GXL"`. `G` stands
+  for GAMMA, and the underscore is dropped, so `SIGMA_0` is `Sigma0`. A
+  comma starts a new segment. With no `path=` the task takes seekpath's
+  recommended path, and an unknown label is refused with the lattice's
+  labels.
 - `npoints=` sets the number of k-points on the path. Without it,
   `density=` sets the points per inverse angstrom (20 by default).
 - `nbands=` sets the number of bands. The default holds the occupied
@@ -100,6 +108,8 @@ def aluminium_is_a_metal():
 | `vbm`, `cbm` | The band edges in eV, on the SCF's energy scale |
 | `vbm_at`, `cbm_at` | The fractional k of each edge, the nearest special point, and its distance |
 | `fermi` | The SCF Fermi level in eV |
+| `path`, `lattice`, `spacegroup` | The path, seekpath's extended Bravais symbol, and the space group |
+| `n_atoms`, `n_atoms_input` | The atoms in the standardized primitive cell and in your cell |
 | `artifacts` | The kept files, named by the label |
 
 A band is valence when all its energies lie below the SCF Fermi level,
@@ -130,9 +140,9 @@ Fermi level for a metal. These are the first lines of
 above:
 
 ```
-# band structure along GXWKGLUWLK,UX (FCC), 60 k-points, 8 bands
+# band structure along GXU,KGLWX (cF2), 60 k-points, 8 bands
 # energies in eV relative to the valence band maximum (6.1597 eV)
-# special points (label x): G 0.000000 X 1.157124 W 1.735687 K 2.144792 G 3.372108 L 4.374207 U 5.082798 W 5.491903 L 6.310113 K 7.018704 U 7.018704 X 7.427810
+# special points (label x): G 0.000000 X 1.157124 U 1.566230 K 1.566230 G 2.793545 L 3.795644 W 4.613855 X 5.192417
 # columns: x (1/A), then band 1 to band 8
 0.000000 -11.9916 0.0000 0.0000 0.0000 2.5225 2.5225 2.5225 3.3149
 ```
@@ -140,9 +150,10 @@ above:
 ## 5. Report it honestly
 
 - Report the gap with its kind, the functional, the pseudopotential
-  family, the protocol, and the path.
+  family, the protocol, the space group, and the path. Cite seekpath
+  (Hinuma et al., Comput. Mater. Sci. 128, 140, 2017) for the path.
 - A PBE or PBEsol gap is a lower bound. Semilocal functionals place the
-  conduction bands too low. The Si run above gives 0.468 eV, and
+  conduction bands too low. The Si run above gives 0.4639 eV, and
   the measured gap is 1.17 eV. Do not report a semilocal gap as the
   material's gap.
 - The band edges are found on the path only. The conduction band minimum

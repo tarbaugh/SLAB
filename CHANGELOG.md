@@ -5,6 +5,19 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- `band_structure` takes its k-point path from seekpath. seekpath finds
+  the space group with spglib, builds the standardized primitive cell,
+  and gives the recommended path in that cell's reciprocal basis, so the
+  task runs both pw.x steps on that cell. A conventional cell or a
+  supercell of a perfect crystal reduces to the primitive cell. When the
+  lattice changes, the task replaces an explicit `kpts` mesh with
+  `slab.bands.matching_mesh`, which is at least as dense, and
+  `info["scf_kpts"]` names it. `info` and the result file gain
+  `spacegroup`, `spacegroup_number`, `n_atoms_input`, `cell_changed`, the
+  primitive cell, and `seekpath_labels`. A `path=` uses seekpath's labels
+  with `G` for GAMMA and the underscore dropped. The task gains
+  `symprec=`. `seekpath` is a new dependency, and it brings `spglib`. The
+  Si and Al fixtures are new real pw.x 7.5 runs on the seekpath path.
 - A Quantum ESPRESSO band structure is one traced task.
   `band_structure(atoms, calculator_options=..., path=, npoints=,
   density=, nbands=, label=)` in `foundation.tasks` runs an SCF and then
