@@ -525,7 +525,8 @@ def band_structure(
     The path comes from :func:`slab.bands.band_path` (ASE's Bravais
     analysis). The verdict comes from :func:`slab.bands.band_summary`
     against the SCF Fermi level. A band that crosses it makes the system a
-    metal, and a metal has no gap. A semilocal functional (PBE, PBEsol)
+    metal, and a metal has no gap. Under fixed occupations pw.x prints no
+    Fermi energy, and the verdict counts the occupied bands. A semilocal functional (PBE, PBEsol)
     places the conduction bands too low, so its gap is below the measured
     one.
 
@@ -664,8 +665,16 @@ def band_structure(
         finally:
             close_calculator(step)
 
+        # Fixed occupations print the SCF mesh's highest occupied level, not
+        # a Fermi energy. That level touches the valence band, so the
+        # verdict counts bands there.
+        fixed = levels["fermi_source"] != "fermi energy"
         summary = band_summary(
-            read["energies"], levels["fermi"], found["kpts"], found["special_points"]
+            read["energies"],
+            levels["fermi"],
+            found["kpts"],
+            found["special_points"],
+            n_occupied=occupied if fixed else None,
         )
         axis = path_distances(found["kpts"], atoms.cell, found["special_points"])
         result: dict[str, Any] = {

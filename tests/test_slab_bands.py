@@ -197,3 +197,33 @@ def test_a_direct_gap_is_called_direct() -> None:
     summary = band_summary([[-1.0, 1.0], [-2.0, 2.0]], 0.0, k, {"G": [0, 0, 0]})
     assert summary["gap_kind"] == "direct"
     assert summary["gap"] == summary["direct_gap"] == 2.0
+
+
+def test_fixed_occupations_count_bands_because_the_level_touches_the_valence_band() -> None:
+    # Under fixed occupations pw.x prints the SCF mesh's highest occupied
+    # level. On a mesh that holds G it equals the valence band maximum, and
+    # on a shifted mesh it lies below it.
+    found = band_path(_si(), npoints=60)
+    read = read_bands(SI_BANDS.read_text())
+    smeared = _summary(SI_SCF, SI_BANDS)
+    for level in (smeared["vbm"], smeared["vbm"] - 0.05):
+        crossed = band_summary(read["energies"], level, read["kpoints"], found["special_points"])
+        assert crossed["is_metal"] is True  # the crossing rule cannot read this level
+        counted = band_summary(
+            read["energies"], level, read["kpoints"], found["special_points"], n_occupied=4
+        )
+        assert counted["is_metal"] is False
+        assert counted["n_valence_bands"] == 4
+        for key in ("gap", "direct_gap", "gap_kind", "vbm", "cbm"):
+            assert counted[key] == smeared[key]
+
+
+def test_counted_bands_that_overlap_are_a_metal() -> None:
+    read = read_bands(AL_BANDS.read_text())
+    found = band_path(bulk("Al", "fcc", a=4.05), npoints=60)
+    counted = band_summary(
+        read["energies"], 0.0, read["kpoints"], found["special_points"], n_occupied=2
+    )
+    assert counted["is_metal"] is True
+    assert counted["gap"] is None
+    assert "overlap" in counted["note"]

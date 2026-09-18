@@ -107,6 +107,11 @@ and conduction when all lie above it. For a metal every gap field is
 None. When the listing holds no conduction band the gap fields are also
 None, and `note` says to raise `nbands`.
 
+With `occupations='fixed'` pw.x prints no Fermi energy, only the highest
+occupied level of the SCF mesh. The task then counts bands. The lowest
+bands that hold the electrons are the valence bands, and the system is a
+metal when they overlap the next band in energy.
+
 The run keeps three artifacts. `{label}-scf.pwo` and
 `{label}-bands.pwo` are the two pw.x outputs, and `{label}-bands.json`
 is the result file with every eigenvalue. When the listing holds more

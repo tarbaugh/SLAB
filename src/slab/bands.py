@@ -14,6 +14,12 @@ when every energy lies above it. One band that crosses the level makes
 the system a metal. Smearing in the SCF moves the Fermi level inside the
 gap of an insulator but never across a band, so the verdict holds with
 the smearing a protocol sets for every system.
+
+Under fixed occupations pw.x prints no Fermi energy, only the highest
+occupied level of the SCF mesh. That level equals the valence band
+maximum or lies below it, so it cannot separate the bands. The verdict
+then counts bands: :func:`band_summary` takes ``n_occupied``, and the
+lowest ``n_occupied`` bands are the valence bands.
 """
 
 from __future__ import annotations
@@ -226,6 +232,7 @@ def band_summary(
     fermi: float,
     kpoints: Sequence[Sequence[float]] | np.ndarray,
     labels: Mapping[str, Sequence[float]],
+    n_occupied: int | None = None,
 ) -> dict[str, Any]:
     """The gap verdict of a band structure against the SCF Fermi level.
 
@@ -242,6 +249,12 @@ def band_summary(
     fractional units. ``gap_kind`` is ``"direct"`` when the smallest gap
     at one k-point is within :data:`DIRECT_GAP_TOLERANCE_EV` of the gap.
 
+    Pass *n_occupied* when the SCF ran with fixed occupations. *fermi* is
+    then the highest occupied level of the SCF mesh, which touches the
+    valence band or cuts it, so the lowest *n_occupied* bands are the
+    valence bands and the rest are conduction bands. The system is a
+    metal when the two sets overlap in energy.
+
     Examples:
         >>> k = [[0, 0, 0], [0.5, 0, 0.5]]
         >>> labels = {"G": [0, 0, 0], "X": [0.5, 0, 0.5]}
@@ -250,14 +263,27 @@ def band_summary(
         (False, 2.0, 'indirect', 'G', 'X')
         >>> band_summary([[-1.0, 0.5], [-2.0, -0.5]], 0.0, k, {"G": [0, 0, 0]})["is_metal"]
         True
+        >>> s = band_summary([[-1.0, 2.0], [-2.0, 1.0]], -1.0, k, labels, n_occupied=1)
+        >>> s["is_metal"], s["gap"]
+        (False, 2.0)
     """
     bands = np.asarray(energies, dtype=float)
     points = np.asarray(kpoints, dtype=float)
-    valence = [n for n in range(bands.shape[1]) if bool(np.all(bands[:, n] < fermi))]
-    conduction = [n for n in range(bands.shape[1]) if bool(np.all(bands[:, n] > fermi))]
-    crossing = bands.shape[1] - len(valence) - len(conduction)
+    overlap = False
+    if n_occupied is None:
+        valence = [n for n in range(bands.shape[1]) if bool(np.all(bands[:, n] < fermi))]
+        conduction = [n for n in range(bands.shape[1]) if bool(np.all(bands[:, n] > fermi))]
+        crossing = bands.shape[1] - len(valence) - len(conduction)
+    else:
+        valence = list(range(min(n_occupied, bands.shape[1])))
+        conduction = list(range(len(valence), bands.shape[1]))
+        crossing = 0
+        overlap = bool(
+            valence and conduction
+            and np.max(bands[:, valence[-1]]) >= np.min(bands[:, conduction[0]])
+        )
     summary: dict[str, Any] = {
-        "is_metal": crossing > 0,
+        "is_metal": crossing > 0 or overlap,
         "fermi": float(fermi),
         "vbm": None,
         "cbm": None,
@@ -270,6 +296,12 @@ def band_summary(
     }
     if crossing:
         summary["note"] = f"{crossing} band(s) cross the Fermi level, so the system is a metal"
+        return summary
+    if overlap:
+        summary["note"] = (
+            f"band {len(valence)} and band {len(valence) + 1} overlap in energy, "
+            f"so the system is a metal"
+        )
         return summary
     if not valence:
         summary["note"] = "no band lies wholly below the Fermi level"

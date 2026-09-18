@@ -328,3 +328,24 @@ def test_band_structure_qe_real_integration(ws: Workspace) -> None:
     assert len(bands["energies"]) == 20
     names = {a.name for a in ws.runs.list_artifacts(run.id)}
     assert names == {"si-scf.pwo", "si-bands.pwo", "si-bands.json"}
+
+
+def test_fixed_occupations_still_read_si_as_an_insulator(
+    ws: Workspace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # pw.x prints the highest occupied level of the SCF mesh under fixed
+    # occupations, and that level is the valence band maximum itself.
+    import slab.bands
+
+    original = slab.bands.scf_levels
+
+    def fixed(text: str) -> dict:
+        return {**original(text), "fermi": 6.1597, "fermi_source": "highest occupied level"}
+
+    monkeypatch.setattr(slab.bands, "scf_levels", fixed)
+    options = _options(_fake_pw(tmp_path, SI_SCF, SI_BANDS), tmp_path)
+    with ws.start_run(name="si-fixed", intent="fixed occupations"):
+        _, info = band_structure(_si(), calculator_options=options, npoints=60, label="si")
+    assert info["is_metal"] is False
+    assert info["gap"] == 0.468 and info["gap_kind"] == "indirect"
+    assert info["n_valence_bands"] == 4

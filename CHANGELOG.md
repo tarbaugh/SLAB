@@ -13,7 +13,8 @@ All notable changes to SLAB, newest first. Dates are commit dates on
   returns the bands and a gap verdict: `is_metal`, `gap`, `direct_gap`,
   `gap_kind`, the band edges, and where on the path they sit. The verdict
   reads band crossings against the SCF Fermi level, so smearing on an
-  insulator does not change it. The task keeps `{label}-scf.pwo`,
+  insulator does not change it. Under fixed occupations it counts the
+  occupied bands. The task keeps `{label}-scf.pwo`,
   `{label}-bands.pwo`, and the result file `{label}-bands.json`. A failed
   step keeps its files as `{label}-scf-failed.*` or
   `{label}-bands-failed.*`, and a note names the step. It follows

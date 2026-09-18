@@ -836,7 +836,8 @@ verified 1/1 checks passed
 The verdict reads band crossings against the SCF Fermi level. A band is
 valence when all its energies lie below the level, and conduction when
 all lie above it. A band that crosses the level makes the system a metal,
-and the gap fields are then None. The PBEsol gap of Si is 0.468 eV here,
+and the gap fields are then None. With `occupations='fixed'` pw.x prints
+no Fermi energy, so the task counts the occupied bands. The PBEsol gap of Si is 0.468 eV here,
 and the measured gap is 1.17 eV, because a semilocal functional places
 the conduction bands too low. The conduction band minimum lies between
 two path points near X, so `cbm_at` gives the nearest special point with
