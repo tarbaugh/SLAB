@@ -5,6 +5,18 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- Quantum ESPRESSO gains a gpu build, as LAMMPS has. `[engines.qe.gpu]`
+  takes a `command` and `setup` lines for a GPU-enabled `pw.x`, and a
+  launch whose reservation holds gpus runs it. An unsized launch runs the
+  plain build from `[engines.qe]`. The gpu build refuses more MPI ranks
+  than gpus before `pw.x` starts, and its cache identity carries
+  `build: gpu`. `list_engines` (Mason and MCP) lists a `qe` entry with
+  both builds, `slab engines list` and `slab engines show qe` print them,
+  `slab doctor` checks the gpu build's launcher, and the sandbox render
+  snapshots the gpu build as `qe.gpu`. A command that asks for `{gpus}`
+  on a launch without one now names the QE build in its refusal, where
+  it named LAMMPS before.
+
 - A specialist may hand a script to a helper card, one level further
   down. The new card flag `helper: true` marks a card that takes briefs
   and never delegates, so the tree is at most lead, specialist, helper.

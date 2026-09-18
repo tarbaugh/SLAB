@@ -405,6 +405,28 @@ def _lammps_launcher_rows(slab_cfg: SlabConfig | None) -> list[tuple[str, str]]:
     return rows
 
 
+def _qe_gpu_launcher_row(slab_cfg: SlabConfig | None) -> tuple[str, str] | None:
+    """The QE gpu build's launcher resolves after its setup lines ran.
+
+    The same check as :func:`_lammps_launcher_rows`, for ``[engines.qe.gpu]``.
+    No row when the table is not declared.
+    """
+    qe = getattr(getattr(slab_cfg, "engines", None), "qe", None)
+    gpu = getattr(qe, "gpu", None)
+    if gpu is None:
+        return None
+    found = launcher_after_setup(gpu.command, gpu.setup)
+    launcher = found["launcher"]
+    if found["path"] is not None:
+        where = "" if found["path"] == launcher else f" ({found['path']})"
+        return ("+", f"qe gpu build: launcher {launcher} on PATH{where}")
+    detail = f" ({found['detail']})" if found["detail"] else ""
+    return (
+        "x",
+        f"qe gpu build: launcher {launcher} not found after setup; {_LAUNCHER_FIX}{detail}",
+    )
+
+
 def _context_window_row(agent: AgentConfig) -> tuple[str, str] | None:
     """Name the window the loop compacts against, or the default it assumed.
 
@@ -785,6 +807,9 @@ def run(
         rows.extend(_lammps_gpu_need_rows(slab_cfg))
         rows.append(_lammps_yaml_row(slab_cfg))
     rows.extend(_lammps_launcher_rows(slab_cfg))
+    qe_gpu_row = _qe_gpu_launcher_row(slab_cfg)
+    if qe_gpu_row is not None:
+        rows.append(qe_gpu_row)
     if agent is not None:
         window_row = _context_window_row(agent)
         if window_row is not None:

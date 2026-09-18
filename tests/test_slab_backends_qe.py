@@ -1269,3 +1269,139 @@ def test_an_explicit_command_still_wins_over_nothing(
     monkeypatch.delenv("SLAB_CONFIG", raising=False)
     monkeypatch.delenv("SLAB_SITE_CONFIG", raising=False)
     assert _qe_config_command() == "mpirun -np 4 pw.x"
+
+
+def _qe_gpu_table(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    """A slab.toml whose plain build and gpu build are two fake pw.x installs.
+
+    Each fake replays the captured output. Run with an input, as ASE runs it
+    and the version probe does not, it leaves a mark naming itself and the
+    FAKE_MARK its setup exported, so a test can tell which build ran.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    plain = _script(
+        tmp_path / "cpu-pw.x",
+        f'[ -n "$1" ] && echo "cpu $FAKE_MARK" > "{tmp_path}/ran"\ncat "{FIXTURE_PWO}"\n',
+    )
+    gpu = _script(
+        tmp_path / "gpu-pw.x",
+        f'[ -n "$1" ] && echo "gpu $FAKE_MARK" > "{tmp_path}/ran"\ncat "{FIXTURE_PWO}"\n',
+    )
+    (tmp_path / "slab.toml").write_text(
+        "[engines.qe]\n"
+        f'command = "{plain}"\n'
+        f'pseudo_dir = "{tmp_path}"\n'
+        "[engines.qe.gpu]\n"
+        f'command = "{gpu}"\n'
+        'setup = ["export FAKE_MARK=gpu-module"]\n'
+    )
+    monkeypatch.setenv("SLAB_CPUS", "0,1,2,3")
+    monkeypatch.setenv("SLAB_NTASKS", "1")
+    monkeypatch.setenv("SLAB_THREADS", "1")
+    return plain, gpu
+
+
+_QE_OPTIONS = {
+    "pseudopotentials": {"Si": "Si.pz-vbc.UPF"},
+    "kpts": None,
+    "input_data": {"system": {"ecutwfc": 30.0}},
+}
+
+
+def test_the_slice_chooses_the_qe_gpu_build(
+    ws: Workspace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A launch that holds gpus runs [engines.qe.gpu] with its own setup, and
+    the cache identity names the gpu build; the same call without gpus runs
+    the plain build and keeps the identity it always had. A per-call command
+    is the caller's own binary under the chosen build's setup, as for LAMMPS."""
+    from foundation.tasks import single_point
+
+    plain, gpu = _qe_gpu_table(tmp_path, monkeypatch)
+    atoms = bulk("Si", "diamond", a=5.43)
+
+    monkeypatch.setenv("SLAB_GPUS", "0")
+    identity = describe_engine("qe", _QE_OPTIONS)
+    assert identity["command"] == str(gpu) and identity["build"] == "gpu"
+    assert identity["setup"] == ["export FAKE_MARK=gpu-module"]
+    with ws.start_run(name="gpu") as run:
+        _, info = single_point(atoms, engine="qe", label="si", calculator_options=_QE_OPTIONS)
+    assert info["energy"] == pytest.approx(FIXTURE_ENERGY_EV)
+    assert (tmp_path / "ran").read_text() == "gpu gpu-module\n"
+    (task,) = ws.runs.list_tasks(run.id)
+    assert task.recipe["extra"]["build"] == "gpu"
+
+    monkeypatch.setenv("SLAB_GPUS", "")
+    identity = describe_engine("qe", _QE_OPTIONS)
+    assert identity["command"] == str(plain)
+    assert "build" not in identity and "setup" not in identity
+    with ws.start_run(name="cpu"):
+        single_point(atoms, engine="qe", label="si", calculator_options=_QE_OPTIONS)
+    assert (tmp_path / "ran").read_text() == "cpu \n"
+
+    monkeypatch.setenv("SLAB_GPUS", "0")
+    own = {**_QE_OPTIONS, "command": str(plain)}
+    assert describe_engine("qe", own)["build"] == "gpu"
+    with ws.start_run(name="own"):
+        single_point(atoms, engine="qe", label="own", calculator_options=own)
+    assert (tmp_path / "ran").read_text() == "cpu gpu-module\n"
+
+
+def test_the_qe_gpu_build_refuses_more_ranks_than_gpus_before_pw_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Four ranks on one gpu are refused on the gpu build, naming qe and both
+    counts; the cache identity under the same slice still answers."""
+    from slab.errors import ResourcesError
+
+    _qe_gpu_table(tmp_path, monkeypatch)
+    monkeypatch.setenv("SLAB_GPUS", "0")
+    monkeypatch.setenv("SLAB_NTASKS", "4")
+    assert describe_engine("qe", _QE_OPTIONS)["build"] == "gpu"
+    with pytest.raises(ResourcesError, match=r"4 rank\(s\) on 1 gpu\(s\): the qe build 'gpu'"):
+        get_calculator("qe", **_QE_OPTIONS)
+    assert not (tmp_path / "ran").exists()
+    monkeypatch.setenv("SLAB_NTASKS", "1")
+    close_calculator(get_calculator("qe", **_QE_OPTIONS))
+
+
+def test_a_qe_command_asking_for_gpus_without_one_names_the_qe_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal names the engine whose build asked, not LAMMPS."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    script = _fake_pw_success(tmp_path, FIXTURE_PWO)
+    (tmp_path / "slab.toml").write_text(
+        f'[engines.qe]\ncommand = "{script} -ngpu {{gpus}}"\npseudo_dir = "{tmp_path}"\n'
+    )
+    monkeypatch.setenv("SLAB_CPUS", "0")
+    monkeypatch.setenv("SLAB_GPUS", "")
+    monkeypatch.setenv("SLAB_NTASKS", "1")
+    with pytest.raises(EngineNotAvailableError, match="the qe build 'cpu' asks for"):
+        get_calculator("qe", **_QE_OPTIONS)
+
+
+def test_qe_builds_list_the_plain_and_gpu_builds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The listing names both builds whatever the slice, as written."""
+    from slab.backends import qe_builds
+
+    plain, gpu = _qe_gpu_table(tmp_path, monkeypatch)
+    monkeypatch.setenv("SLAB_GPUS", "")
+    builds = qe_builds()
+    assert list(builds) == ["cpu", "gpu"]
+    assert builds["cpu"] == {
+        "source": "builtin", "command": str(plain), "placeholders": [], "setup": [],
+    }
+    assert builds["gpu"]["command"] == str(gpu)
+    assert builds["gpu"]["setup"] == ["export FAKE_MARK=gpu-module"]
+    (tmp_path / "slab.toml").write_text(
+        f'[engines.qe]\nbin = "{tmp_path}"\n'
+        '[engines.qe.gpu]\ncommand = "mpirun -np {ntasks} pw.x"\n'
+    )
+    builds = qe_builds()
+    assert builds["cpu"]["command"] == f"mpirun -np {{ntasks}} {tmp_path}/pw.x"
+    assert builds["gpu"]["placeholders"] == ["ntasks"]

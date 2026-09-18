@@ -119,6 +119,42 @@ def test_engines_show_prints_a_builds_setup_block_on_request(
     assert "no LAMMPS build 'tpu'; the builds are: cpu, gpu" in missing.output
 
 
+def test_engines_list_and_show_name_the_qe_builds_when_a_gpu_build_is_declared(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With [engines.qe.gpu] the listing names both QE builds, and
+    'slab engines show qe' prints them with their setup digests."""
+    from slab._ops import setup_digest
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("SLAB_GPUS", "")
+    monkeypatch.delenv("SLAB_ENGINES", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "slab.toml").write_text(
+        '[engines.qe]\ncommand = "pw.x"\n'
+        '[engines.qe.gpu]\ncommand = "mpirun -np {ntasks} pw.x"\n'
+        'setup = ["module load qe/7.4-gpu"]\n'
+    )
+    listed = runner.invoke(app, ["engines", "list"])
+    assert listed.exit_code == 0, listed.output
+    block = listed.output.split("qe builds (gpu build chosen when the launch holds gpus):\n")[1]
+    assert block.startswith(
+        "  cpu            pw.x\n"
+        "  gpu            mpirun -np {ntasks} pw.x  (sized per launch: ntasks)\n"
+        "                 setup: module load qe/7.4-gpu\n"
+    )
+    shown = runner.invoke(app, ["engines", "show", "qe"])
+    assert shown.exit_code == 0, shown.output
+    assert shown.output == (
+        "cpu (builtin): pw.x\n"
+        "  setup: none\n"
+        "gpu (builtin): mpirun -np {ntasks} pw.x\n"
+        f"  setup: 1 lines, sha256 {setup_digest(['module load qe/7.4-gpu'])}\n"
+    )
+    (tmp_path / "slab.toml").write_text('[engines.qe]\ncommand = "pw.x"\n')
+    assert "qe builds" not in runner.invoke(app, ["engines", "list"]).output
+
+
 def test_engines_list_shows_no_gpu_build_when_none_is_declared(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

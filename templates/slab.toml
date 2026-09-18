@@ -61,6 +61,15 @@ schema_version = 1
 #                                      # build on the job's modules instead
 # pseudo_dir = "/shared/sw/pseudos"    # used when no pseudo_family is given
 
+# [engines.qe.gpu]                     # the build a launch runs when its
+#                                      # reservation holds gpus; the agent sizes
+#                                      # the launch with gpus= and never names a
+#                                      # build. pw.x has no GPU switch: this is a
+#                                      # GPU-enabled install, one MPI rank per GPU
+# command = "mpirun -np {ntasks} pw.x" # {ntasks}, {threads}, {gpus} are filled
+#                                      # from the launch's reservation
+# setup = ["module purge", "module load qe/7.4-gpu"]
+
 [engines.lammps]
 # command = "lmp"                      # login-node smoke tests / serial runs
 # command = "srun lmp"                 # inside batch jobs only (same srun rule)

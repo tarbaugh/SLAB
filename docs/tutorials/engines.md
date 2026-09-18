@@ -155,6 +155,45 @@ A cluster's curated QE setup (fixed module, shared pseudo library, MPI
 launcher) still belongs in the registry below, under a distinct alias like
 `qe-delta`, because entries may not shadow built-in names.
 
+### The QE gpu build
+
+A machine with a GPU-enabled `pw.x` declares it as a second build, the
+same way as [the LAMMPS gpu build](#lammps). `[engines.qe]` stays the
+plain build, and `[engines.qe.gpu]` names the GPU install and the module
+it needs:
+
+```toml
+[engines.qe]
+bin = "/shared/sw/qe-7.4/bin"
+
+[engines.qe.gpu]
+command = "mpirun -np {ntasks} pw.x"
+setup = ["module purge", "module load qe/7.4-gpu"]
+```
+
+| Table | Key | Meaning |
+|---|---|---|
+| `[engines.qe.gpu]` | `command` | The gpu build. It runs when a launch holds gpus. |
+| `[engines.qe.gpu]` | `setup` | The lines the gpu build's subprocess runs first. |
+
+The build follows the slice. A launch whose reservation holds gpus runs
+the gpu build, and a launch without runs the plain build. The agent
+passes `engine="qe"` and never names a build. A per-call `command` in
+`calculator_options` still wins, and it runs under the chosen build's
+setup lines.
+
+`pw.x` has no switch that asks for a GPU. A GPU build takes the devices
+it can see, one per MPI rank. So SLAB refuses a gpu-build launch that
+runs more ranks than it holds gpus, before `pw.x` starts. Size a GPU
+launch with `gpus=` alone, or with `ntasks` equal to `gpus`.
+
+The cache identity of a gpu-build calculation carries `build: gpu`
+beside the command and the setup lines, so a result from one build never
+answers for the other. `slab engines list` names both QE builds when a
+gpu build is declared, `slab engines show qe` prints them with their
+setup digests, and `slab doctor` checks that the gpu build's launcher
+resolves after its setup lines ran.
+
 ## LAMMPS
 
 `lammps` is a built-in on the same terms as `qe`. It drives the `lmp` binary

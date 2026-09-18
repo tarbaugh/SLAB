@@ -126,6 +126,36 @@ ExpandedPath = Annotated[str, AfterValidator(_expand_path)]
 """A config string holding a filesystem path: ``~`` and ``$VAR`` expand."""
 
 
+class QeBuild(BaseModel):
+    """The GPU build of Quantum ESPRESSO (``[engines.qe.gpu]``): its command and setup.
+
+    pw.x has no switch that asks for a GPU. A GPU-enabled build takes the
+    devices it can see, one per MPI rank. So this table is a second
+    install, a command such as ``mpirun -np {ntasks} pw.x`` and the setup
+    lines that load the GPU module.
+
+    Examples:
+        >>> QeBuild.model_validate({"command": "mpirun -np {ntasks} pw.x"}).setup
+        ()
+        >>> QeBuild.model_validate({"command": " "})
+        Traceback (most recent call last):
+        ...
+        pydantic_core._pydantic_core.ValidationError: ...
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    command: str
+    setup: tuple[str, ...] = ()
+
+    @field_validator("command")
+    @classmethod
+    def _names_a_program(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("[engines.qe.gpu] command is empty; name the GPU build's pw.x")
+        return value
+
+
 class QeEngineConfig(BaseModel):
     """Defaults for the built-in ``qe`` engine (``[engines.qe]``).
 
@@ -139,6 +169,11 @@ class QeEngineConfig(BaseModel):
     are exclusive — a command that names a different binary than ``bin``
     would silently win, so declaring both is refused.
 
+    ``gpu`` is the build a launch runs when its reservation holds gpus,
+    as for LAMMPS: a GPU-enabled pw.x and the module it needs. The agent
+    never names a build; the slice chooses. ``command``, ``bin``, and
+    ``setup`` here are the plain build.
+
     ``setup`` lines (module loads, exports) run in a private login-shell
     wrapper around THIS engine's subprocess only — the per-engine home for
     dependencies that must not apply job-wide the way ``[hpc] setup`` does.
@@ -151,6 +186,7 @@ class QeEngineConfig(BaseModel):
     bin: ExpandedPath | None = None
     pseudo_dir: ExpandedPath | None = None
     setup: tuple[str, ...] = ()
+    gpu: QeBuild | None = None
 
     @model_validator(mode="after")
     def _one_way_to_name_the_code(self) -> QeEngineConfig:
@@ -917,6 +953,15 @@ schema_version = 1
 #                                      # this engine starts from — drop it to
 #                                      # build on the job's modules instead
 # pseudo_dir = "/shared/sw/pseudos"    # used when no pseudo_family is given
+
+# [engines.qe.gpu]                     # the build a launch runs when its
+#                                      # reservation holds gpus; the agent sizes
+#                                      # the launch with gpus= and never names a
+#                                      # build. pw.x has no GPU switch: this is a
+#                                      # GPU-enabled install, one MPI rank per GPU
+# command = "mpirun -np {ntasks} pw.x" # {ntasks}, {threads}, {gpus} are filled
+#                                      # from the launch's reservation
+# setup = ["module purge", "module load qe/7.4-gpu"]
 
 [engines.lammps]
 # command = "lmp"                      # login-node smoke tests / serial runs
