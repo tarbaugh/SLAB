@@ -252,13 +252,13 @@ def placeholders(command: str) -> list[str]:
     return list(dict.fromkeys(_PLACEHOLDER.findall(command)))
 
 
-def fill(command: str, env: Envelope, *, route: str | None = None) -> str:
+def fill(command: str, env: Envelope, *, route: str | None = None, engine: str = "lammps") -> str:
     """Replace ``{ntasks}``, ``{threads}``, and ``{gpus}`` in an engine command.
 
     ``{gpus}`` becomes the number of gpus in the envelope. A command that
-    asks for it under an envelope with none is refused, naming the build
-    (*route*), because a GPU build launched with ``g 0`` would fail later
-    and less clearly. A command without a placeholder comes back unchanged, and
+    asks for it under an envelope with none is refused, naming the
+    *engine*'s build (*route*), because a GPU build launched with ``g 0``
+    would fail later and less clearly. A command without a placeholder comes back unchanged, and
     shell forms like ``${OMP_NUM_THREADS}`` are left alone.
 
     Examples:
@@ -273,7 +273,7 @@ def fill(command: str, env: Envelope, *, route: str | None = None) -> str:
         slab.errors.EngineNotAvailableError: the lammps build 'gpu' asks for {gpus} but ...
     """
     if "gpus" in placeholders(command) and not env.gpus:
-        who = f"the lammps build {route!r}" if route else f"the command {command!r}"
+        who = f"the {engine} build {route!r}" if route else f"the command {command!r}"
         raise EngineNotAvailableError(
             f"{who} asks for {{gpus}} but this launch holds no GPU (the budget "
             f"lists none, or the launch was not sized with gpus=); size the launch "
@@ -283,14 +283,15 @@ def fill(command: str, env: Envelope, *, route: str | None = None) -> str:
     return _PLACEHOLDER.sub(lambda match: values[match.group(1)], command)
 
 
-def one_rank_per_gpu(env: Envelope, *, build: str = "gpu") -> None:
+def one_rank_per_gpu(env: Envelope, *, build: str = "gpu", engine: str = "lammps") -> None:
     """Refuse a GPU launch that runs more MPI ranks than it holds gpus.
 
-    A KOKKOS build gives each MPI rank one device, so every rank past the
-    number of gpus opens a device another rank already holds, and a device
-    in exclusive compute mode refuses all but the first
-    (``cudaErrorDevicesUnavailable``). The rule is the KOKKOS package's
-    own: one MPI rank per GPU. A launch that holds no gpu is not judged
+    A KOKKOS build of LAMMPS and a GPU build of pw.x each give every MPI
+    rank one device, so every rank past the number of gpus opens a device
+    another rank already holds, and a device in exclusive compute mode
+    refuses all but the first (``cudaErrorDevicesUnavailable``). The rule
+    is the KOKKOS package's own and QE's advice: one MPI rank per GPU.
+    *engine* names the code in the refusal. A launch that holds no gpu is not judged
     here; :func:`fill` refuses that one when the build asks for ``{gpus}``.
 
     Examples:
@@ -302,7 +303,7 @@ def one_rank_per_gpu(env: Envelope, *, build: str = "gpu") -> None:
     """
     if env.gpus and env.ntasks > len(env.gpus):
         raise ResourcesError(
-            f"{env.ntasks} rank(s) on {len(env.gpus)} gpu(s): the lammps build {build!r} "
+            f"{env.ntasks} rank(s) on {len(env.gpus)} gpu(s): the {engine} build {build!r} "
             f"runs one MPI rank per GPU, and every rank past the first on a device "
             f"fails on an exclusive-mode device. Size the launch with gpus= alone "
             f"(one rank per gpu, the free cpus as threads) or with ntasks equal to gpus"

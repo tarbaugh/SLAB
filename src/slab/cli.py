@@ -118,6 +118,20 @@ def engines_list(registry_path: _RegistryOpt = None) -> None:
             )
             if build.get("setup"):
                 typer.echo(f"  {'':<14} setup: {'; '.join(build['setup'])}")
+    qe = overview.get("qe") or {}
+    if qe.get("error"):
+        typer.echo(f"qe builds: error — {qe['error']}")
+    elif "gpu" in (qe.get("builds") or {}):
+        typer.echo("qe builds (gpu build chosen when the launch holds gpus):")
+        for name, build in qe["builds"].items():
+            sized = (
+                f"  (sized per launch: {', '.join(build['placeholders'])})"
+                if build.get("placeholders")
+                else ""
+            )
+            typer.echo(f"  {name:<14} {build['command']}{sized}")
+            if build.get("setup"):
+                typer.echo(f"  {'':<14} setup: {'; '.join(build['setup'])}")
     typer.echo(f"qe protocols: {', '.join(overview['qe_protocols'])} ('slab protocols show')")
     families = overview["pseudo_families"]
     if overview.get("pseudo_families_error"):
@@ -159,25 +173,29 @@ def engines_list(registry_path: _RegistryOpt = None) -> None:
 def engines_show(
     name: Annotated[
         str,
-        typer.Argument(help="'lammps' for every LAMMPS build, or one build: cpu, gpu, an alias."),
+        typer.Argument(
+            help="'lammps' for every LAMMPS build, or one build: cpu, gpu, an alias. "
+            "'qe' for every QE build."
+        ),
     ],
     setup: Annotated[
         bool, typer.Option("--setup", help="Print each build's setup lines in full.")
     ] = False,
 ) -> None:
-    """Show the LAMMPS builds: command, KOKKOS switches, and the setup digest.
+    """Show the LAMMPS or QE builds: command, KOKKOS switches, and the setup digest.
 
     The agent's tools name a build's setup block by its line count and
     digest. --setup prints the lines themselves.
     """
     from slab._ops import setup_digest
+    from slab.backends import qe_builds
     from slab.lammps import lammps_builds
 
     try:
-        builds = lammps_builds()
+        builds = qe_builds() if name == "qe" else lammps_builds()
     except (SlabError, OSError, ValueError) as e:
         _fail(str(e))
-    if name != "lammps":
+    if name not in ("lammps", "qe"):
         if name not in builds:
             _fail(
                 f"no LAMMPS build {name!r}; the builds are: {', '.join(builds)} "
@@ -186,7 +204,8 @@ def engines_show(
         builds = {name: builds[name]}
     for build_name, build in builds.items():
         typer.echo(f"{build_name} ({build['source']}): {build['command']}")
-        typer.echo(f"  {_kokkos_text(build['kokkos'])}")
+        if "kokkos" in build:
+            typer.echo(f"  {_kokkos_text(build['kokkos'])}")
         lines = build.get("setup") or []
         if not lines:
             typer.echo("  setup: none")

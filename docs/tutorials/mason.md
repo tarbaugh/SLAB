@@ -794,8 +794,9 @@ the environment it changed, and each binary's library closure from `ldd`.
 The binaries are the payload and the launcher its command references,
 because `mpirun` must be bound as surely as `pw.x`. A size placeholder
 such as `{ntasks}` is never taken for a binary. The gpu LAMMPS build
-under `[engines.lammps.gpu]` is snapshotted as `lammps.gpu`, with its
-own binary and setup lines. The
+under `[engines.lammps.gpu]` is snapshotted as `lammps.gpu`, and the gpu
+QE build under `[engines.qe.gpu]` as `qe.gpu`, each with its own binary
+and setup lines. The
 snapshot becomes bind mounts in the script and explicit `export` lines in
 the rendered `slab.toml`. Site-prefix libraries bind by directory, and
 host system libraries the base image does not ship (an ordinary RPM such

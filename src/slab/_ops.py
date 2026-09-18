@@ -140,6 +140,7 @@ def engines_overview(registry_path: str | os.PathLike[str] | None = None) -> dic
     overview["mp"] = _mp_overview()
     overview["gracemaker"] = _gracemaker_overview()
     overview["lammps"] = _lammps_overview()
+    overview["qe"] = _qe_overview()
     overview["hpc"] = _hpc_overview(overview)
     return overview
 
@@ -164,6 +165,25 @@ def _lammps_overview() -> dict[str, Any]:
     try:
         return {"builds": lammps_builds()}
     except Exception as e:  # a malformed config or registry: report it, keep the overview
+        return {"error": str(e)}
+
+
+def _qe_overview() -> dict[str, Any]:
+    """Every QE build: the command each would run and its setup lines.
+
+    The ``cpu`` build, and the ``gpu`` build when ``[engines.qe.gpu]`` is
+    declared. A launch that holds gpus runs the gpu build. No binary is
+    probed.
+
+    Examples:
+        >>> list(_qe_overview()["builds"])[:1]
+        ['cpu']
+    """
+    from slab.backends import qe_builds
+
+    try:
+        return {"builds": qe_builds()}
+    except Exception as e:  # a malformed config: report it, keep the overview
         return {"error": str(e)}
 
 

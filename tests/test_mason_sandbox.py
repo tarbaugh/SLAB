@@ -2082,3 +2082,51 @@ def test_the_gpu_build_is_snapshotted_and_frozen(
     text, warnings = sandbox_toml(cfg, _agent(), tmp_path / "ws", {"lammps.gpu": bad})
     assert "module load lammps/2025.07-kokkos" in text
     assert any(w.startswith("[engines.lammps.gpu] has setup lines") for w in warnings)
+
+
+def test_the_qe_gpu_build_is_snapshotted_and_frozen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """[engines.qe.gpu] travels into the sandbox like the LAMMPS gpu build:
+    snapshotted under qe.gpu, its setup frozen in the rendered toml, and a
+    failed snapshot named by its table."""
+    import mason.sandbox as sandbox
+    from mason.sandbox import SetupSnapshot, snapshot_engines
+
+    cfg = _slab_cfg(
+        engines={
+            "qe": {
+                "command": "mpirun -np {ntasks} pw.x",
+                "setup": ["module load qe/7.4"],
+                "gpu": {
+                    "command": "mpirun -np {ntasks} pw.x",
+                    "setup": ["module load qe/7.4-gpu"],
+                },
+            }
+        }
+    )
+    calls: list[tuple[str, tuple[str, ...], str, tuple[str, ...]]] = []
+
+    def fake(
+        engine: str, setup: tuple[str, ...], payload: str, *, extras: tuple[str, ...] = ()
+    ) -> SetupSnapshot:
+        calls.append((engine, tuple(setup), payload, tuple(extras)))
+        return SetupSnapshot(engine, f"/apps/{setup[0].split('/')[-1]}/bin/{payload}", {}, ())
+
+    monkeypatch.setattr(sandbox, "snapshot_setup", fake)
+    assert set(snapshot_engines(cfg)) == {"qe", "qe.gpu"}
+    assert calls[1] == ("qe", ("module load qe/7.4-gpu",), "pw.x", ("mpirun",))
+
+    good = SetupSnapshot(
+        "qe", "/apps/qe-gpu/bin/pw.x", {}, (), path_prepends={"PATH": ("/apps/qe-gpu/bin",)}
+    )
+    text, warnings = sandbox_toml(cfg, _agent(), tmp_path / "ws", {"qe.gpu": good})
+    gpu_table = text.split("[engines.qe.gpu]")[1]
+    assert "module load" not in gpu_table
+    assert "/apps/qe-gpu/bin${PATH:+:$PATH}" in gpu_table
+    assert any(w.startswith("[engines.qe.gpu] setup snapshotted") for w in warnings)
+
+    bad = SetupSnapshot("qe", "", {}, (), error="module: command not found")
+    text, warnings = sandbox_toml(cfg, _agent(), tmp_path / "ws", {"qe.gpu": bad})
+    assert "module load qe/7.4-gpu" in text
+    assert any(w.startswith("[engines.qe.gpu] has setup lines") for w in warnings)

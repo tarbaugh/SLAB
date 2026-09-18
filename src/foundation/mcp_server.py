@@ -408,7 +408,7 @@ def build_server(
         the gpus asked and one MPI rank per gpu, each with its gpu's share
         of the free cpus as threads, so several one-gpu launches run side
         by side. Size a GPU launch with gpus alone, or with ntasks equal to
-        gpus; the gpu build refuses more ranks than gpus. Unsized: one
+        gpus; a gpu build (LAMMPS or QE) refuses more ranks than gpus. Unsized: one
         rank, the plain build, no GPU (on a host without gpus it takes
         every free cpu). Where list_engines shows the cpu build with
         requires_gpu, the plain build cannot run without a GPU, so size
@@ -646,21 +646,24 @@ def build_server(
         process may use on this host (cpu and gpu counts) and 'free' what
         no live reservation holds right now; size launch_workflow within
         'free'. When the run store cannot be opened, 'free' is null and
-        'resources_note' says why; the engines are still listed. Each LAMMPS
-        build's setup block (module loads and exports) is one line with its
-        line count and digest; setup=True returns the lines."""
+        'resources_note' says why; the engines are still listed. 'qe' lists
+        the QE builds the way 'lammps' does: a launch that holds gpus runs
+        the gpu build when one is declared. Each LAMMPS and QE build's
+        setup block (module loads and exports) is one line with its line
+        count and digest; setup=True returns the lines."""
         from slab._ops import fold_build_setups
         from slab.resources import budget as discover_budget
 
         overview = engines_overview()
-        lammps = overview.get("lammps")
-        if not setup and isinstance(lammps, dict) and isinstance(lammps.get("builds"), dict):
-            overview["lammps"] = {
-                **lammps,
-                "builds": fold_build_setups(
-                    lammps["builds"], "list_engines setup=True returns them"
-                ),
-            }
+        for engine in ("lammps", "qe"):
+            listed = overview.get(engine)
+            if not setup and isinstance(listed, dict) and isinstance(listed.get("builds"), dict):
+                overview[engine] = {
+                    **listed,
+                    "builds": fold_build_setups(
+                        listed["builds"], "list_engines setup=True returns them"
+                    ),
+                }
         try:
             with Workspace(root) as ws:
                 ws.reap_dead(caller="list_engines")

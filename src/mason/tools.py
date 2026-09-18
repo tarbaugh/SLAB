@@ -2331,7 +2331,7 @@ def _add_workflow_tools(
                 "ntasks takes the gpus asked and one MPI rank per gpu, each with its "
                 "gpu's share of the free cpus as threads, so several one-gpu launches "
                 "run side by side. Size a GPU launch with gpus alone, or with ntasks "
-                "equal to gpus; the gpu build refuses more ranks than gpus, because "
+                "equal to gpus; a gpu build (LAMMPS or QE) refuses more ranks than gpus, because "
                 "an exclusive-mode device serves one process. Unsized: one rank, the "
                 "plain build, no GPU (on a host without gpus it takes every free "
                 "cpu). Where list_engines shows the cpu build with requires_gpu, the "
@@ -2592,11 +2592,11 @@ def _listing_cap(session: MasonSession) -> int | None:
 #: The keys of the engine overview that lead the listing: the builds and
 #: the budget are what a launch is sized by, and the head of a capped
 #: result is the part the cap keeps.
-_LISTING_LEADS = ("builtin", "lammps", "budget", "free", "resources_note")
+_LISTING_LEADS = ("builtin", "lammps", "qe", "budget", "free", "resources_note")
 
 
 def _engines_listing(overview: dict[str, Any], cap: int | None) -> str:
-    """The list_engines answer: setup blocks folded, the LAMMPS builds whole.
+    """The list_engines answer: setup blocks folded, the LAMMPS and QE builds whole.
 
     A campaign's gpu build carried a 45-line environment block into this
     listing, and the listing reached the result cap and was cut inside
@@ -2617,13 +2617,18 @@ def _engines_listing(overview: dict[str, Any], cap: int | None) -> str:
         ('45 lines (', {'mace': '400 ids'})
         >>> json.loads(_engines_listing(overview, None))["rootstock"]["checkpoints"]["mace"][0]
         'm-0'
+        >>> qe = {"builds": {"gpu": {"command": "pw.x", "setup": ["module load qe-gpu"]}}}
+        >>> listed = json.loads(_engines_listing({**overview, "qe": qe}, None))
+        >>> list(listed)[:3], listed["qe"]["builds"]["gpu"]["setup"][:7]
+        (['builtin', 'lammps', 'qe'], '1 lines')
     """
     from slab._ops import fold_build_setups
 
     listing = dict(overview)
-    lammps = listing.get("lammps")
-    if isinstance(lammps, dict) and isinstance(lammps.get("builds"), dict):
-        listing["lammps"] = {**lammps, "builds": fold_build_setups(lammps["builds"])}
+    for engine in ("lammps", "qe"):
+        listed = listing.get(engine)
+        if isinstance(listed, dict) and isinstance(listed.get("builds"), dict):
+            listing[engine] = {**listed, "builds": fold_build_setups(listed["builds"])}
     listing = {key: listing[key] for key in _LISTING_LEADS if key in listing} | {
         key: value for key, value in listing.items() if key not in _LISTING_LEADS
     }
@@ -2734,8 +2739,9 @@ def _add_engine_tools(box: Toolbox, session: MasonSession) -> None:
                 "there is no in-process MLIP fallback, so the available checkpoint "
                 "ids are the entire runnable-MLIP surface on this machine "
                 "(training a new one is the train_potential task, not an engine). "
-                "Each LAMMPS build shows its whole command; its setup block is "
-                "one line with the line count and digest."
+                "Each LAMMPS and QE build shows its whole command; its setup block "
+                "is one line with the line count and digest. A launch that holds "
+                "gpus runs the gpu build of either engine when one is declared."
             ),
             parameters=_schema({}, []),
             handler=list_engines,

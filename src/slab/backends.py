@@ -291,7 +291,9 @@ def describe_engine(
             identity["pseudo_dir"] = None
             identity["pseudo_family"] = family.name
             identity["pseudo_family_digest"] = family_digest(family)
-        qe_setup = _engine_setup(options.get("setup"), "qe")
+        if _qe_gpu_chosen(options):
+            identity["build"] = "gpu"
+        qe_setup = _qe_setup(options.get("setup"))
         if qe_setup:
             identity["setup"] = list(qe_setup)
         if identity["version"] is None:
@@ -1837,7 +1839,8 @@ def _qe_calculator(**options: Any) -> Any:
     pseudo_dir = options.pop("pseudo_dir", None)
     pseudo_family = options.pop("pseudo_family", None)
     directory = options.pop("directory", None)
-    setup = _engine_setup(options.pop("setup", None), "qe")
+    gpu_chosen = _qe_gpu_chosen({"profile": profile, "command": command})
+    setup = _qe_setup(options.pop("setup", None))
     if profile is not None and (command is not None or pseudo_dir is not None):
         raise EngineNotAvailableError(
             "engine 'qe': pass either profile= or command=/pseudo_dir=, not both"
@@ -1876,7 +1879,15 @@ def _qe_calculator(**options: Any) -> Any:
         # always the binary that actually ran. Guarded before ASE sees it:
         # ASE's own parse failure would be a BadConfiguration whose message
         # points everywhere except the actual problem.
-        command = fill(command or _qe_config_command() or "pw.x", envelope(), route="qe")
+        if gpu_chosen and command is None:
+            # A per-call command is the caller's own shape, as for LAMMPS.
+            one_rank_per_gpu(envelope(), build="gpu", engine="qe")
+        command = fill(
+            command or _qe_config_command() or "pw.x",
+            envelope(),
+            route=_qe_route({"command": command}),
+            engine="qe",
+        )
         _payload_guard(command, "qe")
         run_command = command
         if setup:
@@ -1978,7 +1989,7 @@ def _qe_locator(options: dict[str, Any]) -> tuple[str, str | None]:
     and the launch holds none.
     """
     command, pseudo_dir = _qe_template(options)
-    return fill(command, envelope(), route="qe"), pseudo_dir
+    return fill(command, envelope(), route=_qe_route(options), engine="qe"), pseudo_dir
 
 
 def _qe_template(options: dict[str, Any]) -> tuple[str, str | None]:
@@ -2021,7 +2032,7 @@ def _qe_version(options: dict[str, Any]) -> str | None:
     """
     try:
         command, _pseudo_dir = _qe_locator(options)
-        setup = _engine_setup(options.get("setup"), "qe")
+        setup = _qe_setup(options.get("setup"))
         if setup:
             return _setup_shell_version(setup, command, kind="qe")
         return _banner_version(command)
@@ -2286,19 +2297,112 @@ def _qe_config_command() -> str | None:
     written, ``{ntasks}`` unfilled, enters cache identity exactly as a
     hand-written command with the placeholder would, and the filled line
     is provenance. The chain ends at ASE's ``[espresso]`` section, as before.
+    Ahead of all of them, ``[engines.qe.gpu] command`` wins when this
+    launch holds gpus (:func:`_qe_gpu_build`).
     """
     from slab.config import config_value
 
+    gpu = _qe_gpu_build()
+    if gpu is not None:
+        return gpu[0]
     explicit = config_value("engines.qe.command")
     if explicit is not None:
         return str(explicit)
     bin_dir = config_value("engines.qe.bin")
     if bin_dir is not None:
-        root = Path(str(bin_dir)).expanduser()
-        bundled = root / "mpirun"
-        launcher = shlex.quote(str(bundled)) if bundled.is_file() else "mpirun"
-        return f"{launcher} -np {{ntasks}} {shlex.quote(str(root / 'pw.x'))}"
+        return _qe_bin_command(str(bin_dir))
     return _qe_configured("command")
+
+
+def _qe_bin_command(bin_dir: str) -> str:
+    """``mpirun -np {ntasks} <bin>/pw.x``, preferring an ``mpirun`` bundled in *bin_dir*."""
+    root = Path(bin_dir).expanduser()
+    bundled = root / "mpirun"
+    launcher = shlex.quote(str(bundled)) if bundled.is_file() else "mpirun"
+    return f"{launcher} -np {{ntasks}} {shlex.quote(str(root / 'pw.x'))}"
+
+
+def _qe_gpu_build() -> tuple[str, tuple[str, ...]] | None:
+    """``[engines.qe.gpu]`` as ``(command, setup)`` when this launch holds gpus.
+
+    None when the table is not declared or the launch's
+    :func:`slab.resources.envelope` holds no gpu. The slice chooses the
+    build, exactly as it does for LAMMPS (:func:`_lammps_gpu_build`).
+    """
+    from slab.config import config_value
+
+    command = config_value("engines.qe.gpu.command")
+    if command is None or not envelope().gpus:
+        return None
+    setup = config_value("engines.qe.gpu.setup") or ()
+    return str(command), tuple(str(line) for line in setup)
+
+
+def _qe_gpu_chosen(options: dict[str, Any]) -> bool:
+    """True when the gpu build is chosen for *options*.
+
+    A ``profile`` carries its own command and setup, so no build is chosen
+    for it. A per-call ``command`` still runs under the chosen build's
+    setup lines, as a per-call LAMMPS command does.
+    """
+    if options.get("profile") is not None:
+        return False
+    return _qe_gpu_build() is not None
+
+
+def _qe_route(options: dict[str, Any]) -> str | None:
+    """The build name a refusal of *options*' command names, or None for a per-call command."""
+    if options.get("profile") is not None or options.get("command"):
+        return None
+    return "gpu" if _qe_gpu_build() is not None else "cpu"
+
+
+def _qe_setup(per_call: Any) -> tuple[str, ...]:
+    """The QE setup lines: per-call, else the chosen build's, else ``[engines.qe]``."""
+    if per_call is not None:
+        return _engine_setup(per_call, "qe")
+    gpu = _qe_gpu_build()
+    if gpu is not None:
+        return gpu[1]
+    return _engine_setup(None, "qe")
+
+
+def qe_builds() -> dict[str, dict[str, Any]]:
+    """Every QE build on this machine: its command as written, placeholders, and setup.
+
+    ``cpu`` is the plain build from ``[engines.qe]`` (``command``, or the
+    one ``bin`` constructs, else ASE's ``[espresso]`` section, else
+    ``pw.x``). ``gpu`` follows when ``[engines.qe.gpu]`` is declared; a
+    launch that holds gpus runs it. No binary is probed.
+
+    Examples:
+        >>> list(qe_builds())[:1]
+        ['cpu']
+    """
+    from slab.config import config_value
+    from slab.resources import placeholders
+
+    gpu_command = config_value("engines.qe.gpu.command")
+    entries: list[tuple[str, str, list[str]]] = []
+    explicit = config_value("engines.qe.command")
+    bin_dir = config_value("engines.qe.bin")
+    if explicit is not None or bin_dir is not None:
+        plain = str(explicit) if explicit is not None else _qe_bin_command(str(bin_dir))
+    else:
+        plain = _qe_configured("command") or "pw.x"
+    entries.append(("cpu", plain, list(_engine_setup(None, "qe"))))
+    if gpu_command is not None:
+        gpu_setup = [str(line) for line in (config_value("engines.qe.gpu.setup") or ())]
+        entries.append(("gpu", str(gpu_command), gpu_setup))
+    return {
+        name: {
+            "source": "builtin",
+            "command": command,
+            "placeholders": placeholders(command),
+            "setup": setup,
+        }
+        for name, command, setup in entries
+    }
 
 
 def _rootstock_setting(key: str) -> str | None:

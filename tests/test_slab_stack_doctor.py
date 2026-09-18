@@ -428,6 +428,38 @@ def test_the_doctor_runs_each_builds_setup_and_finds_its_launcher(
     assert "[x] lammps" not in result.output
 
 
+def test_the_doctor_finds_the_qe_gpu_builds_launcher_after_its_setup(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """[engines.qe.gpu] gets the same launcher row as a LAMMPS build, and no
+    row when the table is not declared."""
+    monkeypatch.delenv("SLAB_GPUS", raising=False)
+    bindir = project / "mpi" / "bin"
+    bindir.mkdir(parents=True)
+    launcher = bindir / "slab-test-mpirun"
+    launcher.write_text("#!/bin/sh\nexit 0\n")
+    launcher.chmod(0o755)
+    base = '[agent]\nmodel = "m"\n[hpc]\ndefault_partition = "cpu"\n[hpc.partitions.cpu]\n'
+    (project / "slab.toml").write_text(
+        base + '[engines.qe.gpu]\ncommand = "slab-test-mpirun -np {ntasks} pw.x"\n'
+    )
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert result.exit_code != 0
+    assert (
+        "[x] qe gpu build: launcher slab-test-mpirun not found after setup; put its "
+        "directory on PATH in setup or write the absolute path" in result.output
+    )
+    (project / "slab.toml").write_text(
+        base
+        + '[engines.qe.gpu]\ncommand = "slab-test-mpirun -np {ntasks} pw.x"\n'
+        + f'setup = ["export PATH={bindir}:$PATH"]\n'
+    )
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert f"[+] qe gpu build: launcher slab-test-mpirun on PATH ({launcher})" in result.output
+    (project / "slab.toml").write_text(base)
+    assert "qe gpu build" not in runner.invoke(app, ["doctor", "--offline"]).output
+
+
 def test_the_doctor_says_when_the_plain_lammps_build_needs_a_gpu(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

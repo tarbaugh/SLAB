@@ -1244,6 +1244,10 @@ def _ldd(binary: str) -> str:
     return result.stdout + "\n"
 
 
+#: The engines whose table may declare a gpu build as ``[engines.<name>.gpu]``.
+_GPU_BUILD_ENGINES = ("lammps", "qe")
+
+
 def snapshot_engines(slab_cfg: SlabConfig) -> dict[str, SetupSnapshot]:
     """A snapshot per engine whose config declares setup lines.
 
@@ -1272,17 +1276,19 @@ def snapshot_engines(slab_cfg: SlabConfig) -> dict[str, SetupSnapshot]:
         else:
             payload = payload_name(engine, command)
         snapshots[engine] = snapshot_setup(engine, table.setup, payload, extras=extras)
-    # The gpu LAMMPS build is a second binary with setup lines of its own
-    # (a KOKKOS module beside the plain one). It is snapshotted under
-    # ``lammps.gpu`` so its install is bound and its setup frozen too;
+    # A gpu build (LAMMPS with KOKKOS, a GPU-enabled pw.x) is a second
+    # binary with setup lines of its own. It is snapshotted under
+    # ``<engine>.gpu`` so its install is bound and its setup frozen too;
     # otherwise the first sized launch in the container would run
     # ``module load`` and die.
-    gpu = getattr(slab_cfg.engines.lammps, "gpu", None)
-    if gpu is not None and gpu.setup:
+    for engine in _GPU_BUILD_ENGINES:
+        gpu = getattr(getattr(slab_cfg.engines, engine), "gpu", None)
+        if gpu is None or not gpu.setup:
+            continue
         tokens = shlex.split(gpu.command)
         extras = tuple(t for t in tokens if t in ("mpirun", "mpiexec"))
-        snapshots["lammps.gpu"] = snapshot_setup(
-            "lammps", gpu.setup, payload_name("lammps", gpu.command), extras=extras
+        snapshots[f"{engine}.gpu"] = snapshot_setup(
+            engine, gpu.setup, payload_name(engine, gpu.command), extras=extras
         )
     # Builders are executables too, and gracemaker's is a whole python
     # installation reached through setup lines the container cannot run.
@@ -1514,14 +1520,18 @@ def sandbox_toml(
             "to an mpirun-style command sized to the job's allocation"
         )
     # (label in the rendered file, engine or builder name, its table, the
-    # snapshot key): the gpu LAMMPS build is a nested table with a binary
-    # and setup lines of its own, frozen exactly like a top-level engine.
+    # snapshot key): a gpu build is a nested table with a binary and setup
+    # lines of its own, frozen exactly like a top-level engine.
     targets: list[tuple[str, str, dict[str, Any], str]] = []
     for kind, tables in (("engines", engines), ("builders", builders)):
         for name, table in tables.items():
             targets.append((f"{kind}.{name}", name, table, name))
-            if kind == "engines" and name == "lammps" and isinstance(table.get("gpu"), dict):
-                targets.append(("engines.lammps.gpu", "lammps", table["gpu"], "lammps.gpu"))
+            if (
+                kind == "engines"
+                and name in _GPU_BUILD_ENGINES
+                and isinstance(table.get("gpu"), dict)
+            ):
+                targets.append((f"engines.{name}.gpu", name, table["gpu"], f"{name}.gpu"))
     for label, name, table, key in targets:
         snapshot = (snapshots or {}).get(key)
         if snapshot is not None and snapshot.error is None and not table.get("setup"):

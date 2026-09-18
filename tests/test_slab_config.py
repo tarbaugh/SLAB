@@ -20,6 +20,7 @@ from slab.config import (
     MpBuilderConfig,
     Partition,
     PathsConfig,
+    QeBuild,
     QeEngineConfig,
     RootstockEngineConfig,
     SlabConfig,
@@ -268,6 +269,7 @@ def test_every_key_the_template_shows_is_a_key_the_schema_accepts() -> None:
         "[workspace]": WorkspaceConfig,
         "[paths]": PathsConfig,
         "[engines.qe]": QeEngineConfig,
+        "[engines.qe.gpu]": QeBuild,
         "[engines.lammps]": LammpsEngineConfig,
         "[engines.lammps.gpu]": LammpsBuild,
         "[builders.atomsk]": AtomskBuilderConfig,
@@ -778,3 +780,21 @@ def test_memory_mb_rounds_kilobytes_up_and_refuses_zero() -> None:
     for text in ("0", "0K", "0G"):
         with pytest.raises(ValueError, match="memory must be positive"):
             memory_mb(text)
+
+
+def test_the_qe_gpu_build_is_a_nested_table(tmp_path: Path) -> None:
+    """[engines.qe.gpu] loads as the qe engine's gpu build; an empty command
+    and an unknown key are refused."""
+    (tmp_path / "slab.toml").write_text(
+        '[engines.qe]\ncommand = "pw.x"\n'
+        '[engines.qe.gpu]\ncommand = "mpirun -np {ntasks} pw.x"\nsetup = ["module load qe-gpu"]\n'
+    )
+    config = load_config(tmp_path)
+    assert config.engines.qe.gpu == QeBuild(
+        command="mpirun -np {ntasks} pw.x", setup=("module load qe-gpu",)
+    )
+    assert config_value("engines.qe.gpu.command", tmp_path) == "mpirun -np {ntasks} pw.x"
+    with pytest.raises(ValueError, match=r"\[engines.qe.gpu\] command is empty"):
+        QeBuild(command="  ")
+    with pytest.raises(ValueError, match="bin"):
+        QeBuild.model_validate({"command": "pw.x", "bin": "/opt/qe/bin"})

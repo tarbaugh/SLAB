@@ -6,6 +6,7 @@ because what these commands must get right is exactly what they touch.
 """
 
 import json
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,12 @@ from slab.hpc import SchedulerNotAvailableError
 from slab_stack.cli import app
 
 runner = CliRunner()
+
+
+def _utc_today() -> date:
+    """Today in UTC, the day the memory store dates outages by."""
+    return datetime.now(UTC).date()
+
 
 
 @pytest.fixture(autouse=True)
@@ -591,14 +598,14 @@ def test_memory_review_finds_the_workspace_the_environment_and_the_config_name(
 
 
 def test_memory_review_lists_an_expired_outage_for_deletion(memories: Path) -> None:
-    from datetime import date, timedelta
+    from datetime import timedelta
 
     from foundation import memory as memory_store
 
     memory_store.write(
         "device-init-fails", "A node refuses to initialise its GPUs.", "Body.",
         agent="md-expert", evidence="run 01k2x7abcd", kind="outage", where="n1",
-        expires_at=date.today() - timedelta(days=1), directory=memories,
+        expires_at=_utc_today() - timedelta(days=1), directory=memories,
     )
     result = runner.invoke(app, ["memory", "review"])
     assert result.exit_code == 0, result.output
@@ -707,14 +714,14 @@ def test_a_confirmed_memory_is_not_listed_again_and_the_warning_says_why(
 
 
 def test_memory_confirm_moves_an_outages_expiry_out(memories: Path) -> None:
-    from datetime import date, timedelta
+    from datetime import timedelta
 
     from foundation import memory as memory_store
 
     memory_store.write(
         "device-init-fails", "A node refuses to initialise its GPUs.", "Body.",
         agent="md-expert", evidence="run 01k2x7abcd", kind="outage", where="n1",
-        expires_at=date.today() - timedelta(days=1), directory=memories,
+        expires_at=_utc_today() - timedelta(days=1), directory=memories,
     )
     assert "[expired outage" in runner.invoke(app, ["memory", "review"]).output
 
@@ -723,7 +730,7 @@ def test_memory_confirm_moves_an_outages_expiry_out(memories: Path) -> None:
     )
     assert result.exit_code == 0, result.output
     memory = memory_store.discover()["device-init-fails"]
-    a_week = (date.today() + timedelta(days=memory_store.OUTAGE_DAYS)).isoformat()
+    a_week = (_utc_today() + timedelta(days=memory_store.OUTAGE_DAYS)).isoformat()
     assert memory.expires_at == a_week and memory.where == "n1"
     assert f"expires {a_week}" in result.output
     assert "nothing to review" in runner.invoke(app, ["memory", "review"]).output

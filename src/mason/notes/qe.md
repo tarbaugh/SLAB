@@ -21,3 +21,9 @@ point on tens of atoms takes minutes to hours on a node, so anything past a
 few minutes goes through `submit_job`. Each calculation runs in slab-managed
 scratch. On failure the input, output, and the parsed `Error in routine`
 message are kept as run evidence — read them with `show_run` before retrying.
+
+The build follows the slice, as for LAMMPS. Where the `qe` entry of
+`list_engines` shows a `gpu` build, a launch sized with `gpus=` runs it,
+and an unsized launch runs the plain build. The gpu build runs one MPI
+rank per GPU, so size a GPU launch with `gpus=` alone or with `ntasks`
+equal to `gpus`. Never name a build; `engine="qe"` is all you pass.
