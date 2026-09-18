@@ -158,6 +158,7 @@ class RosterOverride(BaseModel):
     clear_tool_results_at: float | None = Field(default=None, gt=0.0, le=1.0)
     shell_timeout_s: float | None = Field(default=None, gt=0)
     table_nudge_rows: int | None = Field(default=None, ge=1)
+    helper_briefs: int | None = Field(default=None, ge=1)
     tool_protocol: Literal["native", "fenced"] | None = None
 
     _key_env_name = field_validator("api_key_env")(lambda cls, v: _env_name(v))
@@ -260,6 +261,10 @@ class AgentConfig(BaseModel):
     # their loops at the same time in this process, so the cap is what the
     # machine and the model server can serve at once. 1 removes the tool.
     parallel_delegations: int = Field(default=3, ge=1)
+    # How many briefs one specialist turn may send to a helper card. A
+    # helper's calls count against the brief that called it, so the cap
+    # keeps a specialist from spending its brief on its helpers.
+    helper_briefs: int = Field(default=3, ge=1)
     roster: dict[str, RosterOverride] = Field(default_factory=dict)
     # The harness mechanisms this session runs with (mason.mechanisms):
     # unset means every one. A name outside the registry is refused, so a

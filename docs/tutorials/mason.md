@@ -405,7 +405,7 @@ more than model choice.
 | `notebook`, `plan` | the memory instruments (below). `plan` refuses a plan whose Goal names a quantity the notebook already reports, until it has a line `prior result: ...`, and it checks each `run:<id>/<name>` reference against the run store. A reference to a cache-hit run is rewritten to the run that produced the file |
 | `recall`, `remember`, `forget` | the machine's memory across sessions, described in [Memory](memory.md); `remember` takes the evidence that confirmed the fact, which counts only when it names a run that completed, and the `kind` of fact it is (`build`, `resource`, or `outage`, which expires in a week); `forget` undoes only a memory written in this session |
 | `skill` | load a skill: its instructions, root path, and bundled files; the catalog is per-agent |
-| `delegate` | hand one scoped task to a specialist's own loop; the PI only, one level deep; the specialist runs while the lead waits, so dependent steps go here one after the other; the result lists every machine memory the specialist wrote, with its evidence. `continues` takes the handle from an earlier report's harness line and gives that same specialist another turn, with everything it already read still in its context. `steps` and `effort` size one brief, and only downward from the agent's own budget |
+| `delegate` | hand one scoped task to a specialist's own loop; the PI's reaches its team, and a specialist's reaches the helper cards only, one level further down; the specialist runs while the lead waits, so dependent steps go here one after the other; the result lists every machine memory the specialist wrote, with its evidence. `continues` takes the handle from an earlier report's harness line and gives that same specialist another turn, with everything it already read still in its context. `steps` and `effort` size one brief, and only downward from the agent's own budget |
 | `delegate_many` | hand a wave of independent briefs to the team at once; two to `[agent] parallel_delegations` briefs (default 3); the specialists run their loops at the same time and every report comes back together, one section per brief, in brief order; a wave briefs fresh specialists, so a `continues` handle belongs to `delegate` |
 | `review` | hand the plan or a file to the read-only critic before compute is spent; the leads only; the findings persist as a review record |
 | `finish` | end the task with a report citing run ids; honored only as the sole call of its reply, and only with a report. When the caller named the expected result keys (`slab mason run --expect t_melt:K`, or a benchmark question), a finish whose `results` names differ is not honored either. The tool result names the keys and units the goal asks for, and the agent calls finish again. The cited runs are the keep decision: the harness promotes the verified ones and expires the session's other runs, so the agent cites every run a number rests on, anchors from earlier sessions included. A lead's finish whose cited runs hold none in a passing state is refused once, naming each run and how it stands, because a campaign is scored on verified runs and a traced analysis workflow over the evidence files produces one. The identical finish after that refusal stands, and the transcript marks it `unverified` |
@@ -1355,8 +1355,8 @@ onto SLAB's philosophy. The load-bearing choices and their sources:
   the case the same report endorses: context isolation for *separable*
   subtasks — a convergence ladder fills a context with tables when only its
   conclusion matters upstream. The composition stays deliberately austere
-  (one level deep, sequential, delegation always optional, a config
-  switch to off), and the PI-plus-specialists shape is now the domain
+  (a specialist may brief a helper and nobody goes deeper, delegation
+  always optional, a config switch to off), and the PI-plus-specialists shape is now the domain
   norm: Agent Laboratory below, the Virtual Lab's PI agent and specialist
   scientists with experimentally validated designs ([Swanson et al.
   2024](https://doi.org/10.1101/2024.11.11.623004)), and
@@ -1407,9 +1407,10 @@ rather than summarizing linearly, follows the context-folding line
 
 ## Limitations, honestly stated
 
-Mason's roster delegates one level deep: independent briefs run together
-in one wave, dependent ones in sequence, and there is no
-specialist-to-specialist messaging and no recursive team.
+Mason's roster delegates at most two levels deep. A lead briefs a
+specialist, and a specialist may hand a script to a helper. Independent
+briefs run together in one wave, dependent ones in sequence, and there is
+no specialist-to-specialist messaging and no recursive team.
 Delegation quality is bounded by the served model, and an 8B-class model
 handles only small, explicit briefs. Mason does not stream tokens,
 because an agent loop consumes whole turns. Its judgment is the served

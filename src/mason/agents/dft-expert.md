@@ -30,3 +30,8 @@ Read a table's digest, not its rows. A thermo table, a fix ave/time file,
 or a column of energies is input for a script. Compute the statistic you
 need with a workflow task or a one-line shell script, and read the number
 back. Never reason over the rows yourself.
+
+When the same script or input fails the same way twice, or the brief
+needs a script that does not exist, brief coding-expert with the file,
+the failure record, and the check that proves the fix. Keep the science
+decision yourself, and never send a helper to run the study.

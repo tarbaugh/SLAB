@@ -409,8 +409,9 @@ def team_block(
     delegate: bool = True,
     review: bool = True,
     parallel: bool = False,
+    depth: int = 0,
 ) -> str:
-    """The ``# Your team`` section for a lead, or empty.
+    """The ``# Your team`` section for a lead or a specialist, or empty.
 
     One line per card the agent may hand a task to — the descriptions are
     written as delegation triggers, so this list is what a lead reads when
@@ -420,7 +421,28 @@ def team_block(
     and *review* say which of the two tools the session actually offers:
     each list renders only behind its tool, so the prompt never promises
     an absent one. *parallel* adds the sentence for ``delegate_many``.
+
+    At *depth* 1 the section is a specialist's: its helpers, and no
+    critic, because a critic is reached by the lead.
     """
+    if depth >= 1:
+        helpers = list(hands(spec, roster, depth).values()) if delegate else []
+        if not helpers:
+            return ""
+        return "\n".join(
+            [
+                "# Your team",
+                "",
+                "Helpers you can hand a script to with the delegate tool. Your team "
+                "takes scripts, not studies. When the same script or input fails "
+                "the same way twice, or the brief needs a script that does not "
+                "exist, brief a helper with the file, the failure record, and the "
+                "check that proves the fix. Keep the science decision yourself. "
+                "Each helper brief counts against the calls of your own brief.",
+                "",
+                *(f"- {card.name}: {card.description}" for card in helpers),
+            ]
+        )
     others = list(hands(spec, roster).values()) if delegate else []
     reviewers = (
         [card for name, card in critics(roster).items() if name != spec.name] if review else []

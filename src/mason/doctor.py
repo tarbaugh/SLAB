@@ -241,7 +241,10 @@ def effort_notes(agent: AgentConfig, roster: dict[str, Any]) -> list[str]:
         )
     lead = roster.get("pi")
     if lead is not None:
-        reachable = {"pi", *hands(lead, roster), *critics(roster)}
+        team = hands(lead, roster)
+        # A specialist reaches its helpers, one level further down.
+        helpers = {name for card in team.values() for name in hands(card, roster, 1)}
+        reachable = {"pi", *team, *helpers, *critics(roster)}
         for name in sorted(tables):
             if name in roster and name not in reachable:
                 notes.append(

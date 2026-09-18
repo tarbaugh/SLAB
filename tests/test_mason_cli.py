@@ -329,6 +329,24 @@ def test_mason_doctor_probes_roster_connections(
     assert "[+] dft-expert: model 'bigger' is served" in result.output
 
 
+def test_mason_doctor_probes_the_helper_connection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, llm_server: tuple[str, LlmScript]
+) -> None:
+    """A helper pinned to its own model is probed like a specialist, and the
+    lead reaches it, so its table is no dead config."""
+    url, script = llm_server
+    script.get_response = (200, {"data": [{"id": "primary"}, {"id": "coder"}]})
+    script.responses.append(_tool_probe_response())
+    (tmp_path / "slab.toml").write_text(
+        '[agent]\nmodel = "primary"\n\n[agent.roster.coding-expert]\nmodel = "coder"\n'
+    )
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["doctor", "--endpoint", url])
+    assert result.exit_code == 0, result.output
+    assert "[+] coding-expert: model 'coder' is served" in result.output
+    assert "pi never delegates to it" not in result.output
+
+
 def test_mason_doctor_fails_a_specialist_pinned_to_an_unserved_model(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, llm_server: tuple[str, LlmScript]
 ) -> None:
@@ -590,6 +608,47 @@ def test_mason_read_live_follows_the_session_and_its_delegations(
     assert "not this session" not in out
     assert out.count("written in two parts") == 1
     assert "not valid JSON" not in out  # the half line waited for its newline
+
+
+def test_mason_read_live_follows_a_helper_a_specialist_briefs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A helper's transcript nests under its specialist's name; --live shows it too."""
+    import json
+    import time
+
+    def line(text: str) -> str:
+        return json.dumps({"at": "2026-09-17T10:00:00+00:00", "type": "message",
+                           "message": {"role": "assistant", "content": text}}) + "\n"
+
+    root = tmp_path / "20260917-100000-1.jsonl"
+    root.write_text(line("brief the md-expert"))
+    specialist = tmp_path / "20260917-100000-1-md-expert-1.jsonl"
+    helper = tmp_path / "20260917-100000-1-md-expert-1-coding-expert-1.jsonl"
+    steps = [
+        lambda: specialist.write_text(line("msd.py fails twice; brief coding-expert")),
+        lambda: helper.write_text(line("fixed the column index in msd.py")),
+    ]
+
+    def poll(seconds: float) -> None:
+        if not steps:
+            raise KeyboardInterrupt
+        steps.pop(0)()
+
+    monkeypatch.setattr(time, "sleep", poll)
+    result = runner.invoke(app, ["read", str(root), "--live"])
+    assert result.exit_code == 0, result.output
+    out = result.output
+    order = [
+        "brief the md-expert",
+        "--- delegation md-expert-1 (20260917-100000-1-md-expert-1.jsonl)",
+        "msd.py fails twice; brief coding-expert",
+        "--- delegation md-expert-1-coding-expert-1 "
+        "(20260917-100000-1-md-expert-1-coding-expert-1.jsonl)",
+        "fixed the column index in msd.py",
+    ]
+    positions = [out.index(text) for text in order]
+    assert positions == sorted(positions), out
 
 
 def test_mason_read_live_follows_two_siblings_growing_at_once(

@@ -13,9 +13,10 @@ are exact captures from real executions against a local Ollama.
 
 ## The roster
 
-Nine cards ship built in: two leads, `pi` and `planner`, three
-specialists, a `worker`, a `critic`, and two condition cards, `protocol`
-and `bare`, that [the benchmark](../benchmark.md) runs as harness arms. `slab mason roster` lists what is visible
+Ten cards ship built in: two leads, `pi` and `planner`, three
+specialists, a `worker`, a helper, `coding-expert`, a `critic`, and two
+condition cards, `protocol` and `bare`, that [the benchmark](../benchmark.md)
+runs as harness arms. `slab mason roster` lists what is visible
 from the current project, with the layer each card came from and the
 model it would use:
 
@@ -27,6 +28,7 @@ slab mason roster
 pi                 built-in  llama3.1:8b                  20 skill(s)  [delegates]
 analysis-expert    built-in  llama3.1:8b                  9 skill(s)
 bare               built-in  llama3.1:8b                  0 skill(s)  [own prompt]
+coding-expert      built-in  llama3.1:8b                  20 skill(s)  [helper]
 critic             built-in  llama3.1:8b                  20 skill(s)  [reviews]
 dft-expert         built-in  llama3.1:8b                  10 skill(s)
 md-expert          built-in  llama3.1:8b                  15 skill(s)
@@ -52,13 +54,16 @@ An unknown name fails and lists the roster.
 
 ## Delegation
 
-The PI has one tool the specialists lack: `delegate(agent, task,
-context?, continues?, steps?, effort?)`. It runs the named specialist's
-own tool loop against the shared workspace and returns the specialist's
-final report. The rules are code, not prompt text:
+The PI has the `delegate(agent, task, context?, continues?, steps?,
+effort?)` tool. It runs the named specialist's own tool loop against the
+shared workspace and returns the specialist's final report. The rules are
+code, not prompt text:
 
-- Delegation goes one level down. A delegated agent never has the
-  `delegate` tool, whatever its card says.
+- The tree is at most three levels deep: a lead, a specialist, a helper.
+  A lead may brief anyone on its team, helpers included. A specialist
+  may brief helpers only, one at a time, as [Helpers](#helpers)
+  describes. A helper never has the `delegate` tool, whatever its card
+  says.
 - A card that delegates is a lead, not a hand. The `pi` and the
   `planner` never appear on each other's team, and a brief sent to one
   is refused with the team named.
@@ -72,7 +77,8 @@ final report. The rules are code, not prompt text:
 - The specialist appends to the same `NOTEBOOK.md`, with its entries
   attributed. The notebook is the group's shared memory, so briefs stay
   short.
-- `[agent] delegation = false` removes the tool everywhere.
+- `[agent] delegation = false` removes the tool everywhere, at both
+  depths.
 - Independent briefs go out together with `delegate_many`, and their
   specialists run at the same time. The rules above hold for every
   brief in a wave.
@@ -224,6 +230,72 @@ The specialist's own budget hint reads `model call 1 of 8` under a brief
 of eight steps, and the harness line says which budget stopped it: `turn
 budget (8, set by the brief)` against `turn budget (60)`. The first is a
 brief to continue with more steps. The second is a task to cut down.
+
+### Helpers
+
+A specialist may hand a script to a helper, one level further down. A
+helper card sets `helper: true`. It takes briefs and never delegates, so
+the tree stops there. The one built-in helper is `coding-expert`. It
+writes, fixes, and checks scripts and inputs: analysis code, LAMMPS or QE
+input files, and shell pipelines. It reads the failing file and its
+failure record before it edits, changes one thing at a time, and returns
+the path, the change, and the run or command that proves the fix. It does
+not decide the science. When a fix needs a cutoff, an ensemble, or a
+potential, it stops and reports the choice back.
+
+The rules are code:
+
+- A specialist briefed by a lead gets a `delegate` tool whose team is the
+  helpers only. A brief to any other card is refused, and the refusal
+  names only the helpers. A specialist has no `delegate_many`, so its
+  helper briefs run one after the other.
+- A helper never gets a `delegate` tool, at any depth.
+- A lead's team takes the helper too, so the PI may brief `coding-expert`
+  directly.
+- A helper brief counts against the specialist's own brief. The helper
+  runs at most the calls the specialist's brief has left, even when its
+  own cap is larger. When the helper stops there, the specialist reads a
+  harness note that says so.
+- One specialist turn sends at most `[agent] helper_briefs` helper briefs,
+  3 by default. The next one is refused with `this brief has used its 3
+  helper calls; finish with what you have`. Raise it for one card in its
+  `[agent.roster.<name>]` table.
+- A helper's handle stays with the specialist that briefed it. The
+  specialist may pass it as `continues`, and the lead may not.
+- The helper's tokens count toward the specialist's total and then the
+  lead's.
+
+md-expert, dft-expert, analysis-expert, and worker brief `coding-expert`
+when the same script or input fails the same way twice, or when the
+brief needs a script that does not exist yet.
+
+The lead reads each helper brief under the specialist's own harness
+line. This capture is the end of a real `delegate` result from a run
+against `llama3.1:8b` on a local Ollama. The PI briefed md-expert about a
+broken analysis script, and md-expert briefed `coding-expert` three
+times:
+
+```text
+[md-expert-1: finish after 54 step(s); tokens 997038+2006; transcript 20260918-014119-55519-md-expert-1.jsonl; continue with continues="md-expert-1"]
+[harness] helper coding-expert-1: 7 calls, error_streak
+[harness] helper coding-expert-2: 7 calls, error_streak
+[harness] helper coding-expert-3: 7 calls, error_streak
+```
+
+A model of that size did not fix the script. Each helper repeated one
+failing call until the error streak stopped it, and md-expert then hit
+its cap of three helper briefs. The lead reads that outcome in the
+footer, next to what each helper cost, instead of reading a confident
+report.
+
+A helper's transcript is named after its specialist's:
+`<stem>-<specialist handle>-<helper>-<n>.jsonl`, for example
+`20260918-014119-55519-md-expert-1-coding-expert-1.jsonl`. Every delegated
+transcript opens with a `session` header that names its `agent` and its
+`parent`, the handle of the session that briefed it. `slab mason report`
+reads the header and prints each helper under its specialist.
+`slab mason read --live` follows the helper's transcript like any other
+delegation, and `slab purge` sweeps it with its conversation.
 
 ## A critic before compute
 
@@ -540,6 +612,9 @@ every claim. You do not compute and you do not speculate.
   `matching` (the default) shows the skills that name this card, plus
   the unrestricted ones.
 - `delegates: true` grants the `delegate` tool, at depth zero only.
+- `helper: true` makes the card a helper. It takes briefs from a lead or
+  from a specialist, and it never delegates. It cannot be combined with
+  `delegates`, `reviews`, or `review_first`.
 - `reviews: true` makes the card a critic: read-only by construction,
   reached with the `review` tool, never briefed. It cannot be combined
   with `delegates` or `review_first`.

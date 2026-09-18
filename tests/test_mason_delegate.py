@@ -1,4 +1,4 @@
-"""Delegation: the PI hands one scoped task down, one level, sequentially."""
+"""Delegation: the PI hands one scoped task down, and a specialist may hand a script on."""
 
 import json
 from pathlib import Path
@@ -95,7 +95,10 @@ def test_the_child_ran_as_the_specialist(tmp_path: Path) -> None:
     # specialist's, and the brief is the delegated task.
     child_system = client.requests[1][0]["content"]
     assert "molecular-dynamics specialist" in child_system
-    assert "# Your team" not in child_system  # no onward delegation promised
+    # A specialist's team is its helpers, and nobody else.
+    assert "Your team takes scripts, not studies." in child_system
+    assert "- coding-expert:" in child_system
+    assert "- worker:" not in child_system
     child_goal = client.requests[1][1]["content"]
     assert child_goal == "report the melting feel"
 
@@ -196,7 +199,11 @@ def test_unknown_and_self_targets_answer_with_the_team(tmp_path: Path) -> None:
 
 
 def test_depth_one_agents_never_delegate_or_plan(tmp_path: Path) -> None:
-    """The depth rule is structural: even the pi card, delegated to, loses both."""
+    """The depth rule is structural: even the pi card, delegated to, loses both.
+
+    A lead is never on a team, so it never runs at depth one outside a
+    test; if it did, it would not get the specialist's helper tool either.
+    """
     session = _session(tmp_path)
     roster = discover_roster(tmp_path)
     child_session = session.spawn("pi", session.agent)
@@ -363,7 +370,7 @@ def test_a_lead_takes_no_briefs(tmp_path: Path) -> None:
     mason.run_turn("go")
     seen = json.dumps(client.requests[1])
     assert "planner leads a group of its own and takes no briefs" in seen
-    assert "your team: analysis-expert, dft-expert, md-expert, worker" in seen
+    assert "your team: analysis-expert, coding-expert, dft-expert, md-expert, worker" in seen
 
 
 def test_a_child_cut_at_its_ceiling_hands_back_its_partial_outcome(tmp_path: Path) -> None:
@@ -793,3 +800,209 @@ def test_a_resumed_lead_never_reuses_a_handle_of_the_conversation_it_replays(
     Mason(resumed, client=client).run_turn("carry on")
     handed = _delegate_results(client)[0]
     assert 'continue with continues="md-expert-2"' in handed
+
+
+# -- helpers: a specialist hands a script on, one level further down -----------
+
+
+def _helped_turn(
+    tmp_path: Path, specialist: list[ChatReply], **agent: object
+) -> tuple[Mason, FakeClient, Any]:
+    """Lead -> md-expert -> coding-expert on one shared scripted client.
+
+    *specialist* is what md-expert and its helpers say, in order, between
+    the lead's brief and the lead's closing answer.
+    """
+    session = _session(tmp_path, **agent)
+    client = FakeClient(
+        [
+            _call("delegate", agent="md-expert", task="compute the MSD"),
+            *specialist,
+            _text("the MSD is in (run ab12cd)"),
+        ]
+    )
+    mason = Mason(session, client=client)
+    return mason, client, mason.run_turn("is it molten?")
+
+
+def _fix_msd() -> list[ChatReply]:
+    return [
+        _call("delegate", agent="coding-expert", task="fix msd.py", context="IndexError"),
+        _call("finish", report="msd.py fixed; the dry run passed"),
+        _call("finish", report="MSD 0.8 A^2 (run ab12cd)"),
+    ]
+
+
+def _tool_result(request: list[dict[str, Any]], call_id: str) -> str:
+    """The latest result of *call_id* in one request: the scripted calls share ids."""
+    results = [m for m in request if m.get("role") == "tool" and m.get("tool_call_id") == call_id]
+    return str(results[-1]["content"])
+
+
+def test_a_specialist_has_delegate_and_a_helper_has_none(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    roster = discover_roster(tmp_path)
+    specialist = Mason(
+        session.spawn("md-expert", session.agent),
+        client=FakeClient([]), spec=roster["md-expert"], roster=roster, depth=1,
+    )
+    assert "delegate" in specialist.toolbox.tools
+    assert "delegate_many" not in specialist.toolbox.tools
+    assert "a helper on your team" in specialist.toolbox.tools["delegate"].description
+    helper = Mason(
+        specialist.session.spawn("coding-expert", session.agent),
+        client=FakeClient([]), spec=roster["coding-expert"], roster=roster, depth=2,
+    )
+    assert "delegate" not in helper.toolbox.tools
+    # Even a specialist card run at depth two gets none.
+    deep = Mason(
+        specialist.session.spawn("md-expert", session.agent),
+        client=FakeClient([]), spec=roster["md-expert"], roster=roster, depth=2,
+    )
+    assert "delegate" not in deep.toolbox.tools
+
+
+def test_the_delegation_switch_removes_the_tool_at_both_depths(tmp_path: Path) -> None:
+    session = _session(tmp_path, delegation=False)
+    roster = discover_roster(tmp_path)
+    lead = Mason(session, client=FakeClient([]), roster=roster)
+    specialist = Mason(
+        session.spawn("md-expert", session.agent),
+        client=FakeClient([]), spec=roster["md-expert"], roster=roster, depth=1,
+    )
+    assert "delegate" not in lead.toolbox.tools
+    assert "delegate" not in specialist.toolbox.tools
+    assert "# Your team" not in specialist.messages[0]["content"]
+
+
+def test_a_specialist_that_names_a_non_helper_is_refused(tmp_path: Path) -> None:
+    _mason, client, _result = _helped_turn(
+        tmp_path,
+        [
+            _call("delegate", agent="worker", task="run the study"),
+            _call("finish", report="nobody to hand it to"),
+        ],
+    )
+    refusal = _tool_result(client.requests[2], "c_delegate")
+    assert refusal == (
+        "worker is not a helper; a specialist hands scripts to its helpers only. "
+        "your team: coding-expert"
+    )
+
+
+def test_a_helper_transcript_nests_under_its_specialist(tmp_path: Path) -> None:
+    from mason.session import session_header, transcript_groups, unrecognised_session_files
+
+    mason, _client, _result = _helped_turn(tmp_path, _fix_msd())
+    lead = mason.session.transcript_path
+    specialist = lead.with_name(f"{lead.stem}-md-expert-1.jsonl")
+    helper = lead.with_name(f"{lead.stem}-md-expert-1-coding-expert-1.jsonl")
+    assert helper.is_file()
+    # One conversation, both delegations its siblings; purge sweeps them together.
+    groups = transcript_groups(tmp_path / ".slab", include_orphans=True)
+    assert groups == [(lead, sorted([specialist, helper]))]
+    assert unrecognised_session_files(tmp_path / ".slab") == []
+    # The header says who spawned whom.
+    assert session_header(specialist)["agent"] == "md-expert"
+    assert session_header(specialist)["parent"] is None
+    assert session_header(helper)["agent"] == "coding-expert"
+    assert session_header(helper)["parent"] == "md-expert-1"
+
+
+def test_the_lead_reads_one_footer_line_per_helper_brief(tmp_path: Path) -> None:
+    _mason, client, result = _helped_turn(tmp_path, _fix_msd())
+    assert result.stop_reason == "answer"
+    # The specialist read the helper's report with its own footer.
+    to_specialist = _tool_result(client.requests[3], "c_delegate")
+    assert "msd.py fixed; the dry run passed" in to_specialist
+    assert "[coding-expert-1: finish after 1 step(s);" in to_specialist
+    # The lead reads the helper's cost under the specialist's footer.
+    to_lead = _tool_result(client.requests[-1], "c_delegate")
+    assert "[md-expert-1: finish after 2 step(s);" in to_lead
+    assert "\n[harness] helper coding-expert-1: 1 call, finished" in to_lead
+
+
+def test_the_fourth_helper_brief_of_a_turn_is_refused(tmp_path: Path) -> None:
+    briefs: list[ChatReply] = []
+    for n in range(3):
+        briefs += [
+            _call("delegate", agent="coding-expert", task=f"fix script {n}"),
+            _call("finish", report=f"script {n} fixed"),
+        ]
+    _mason, client, _result = _helped_turn(
+        tmp_path,
+        [
+            *briefs,
+            _call("delegate", agent="coding-expert", task="fix script 3"),
+            _call("finish", report="three scripts fixed"),
+        ],
+    )
+    refused = _tool_result(client.requests[-2], "c_delegate")
+    assert refused == "this brief has used its 3 helper calls; finish with what you have"
+    to_lead = _tool_result(client.requests[-1], "c_delegate")
+    assert to_lead.count("[harness] helper coding-expert-") == 3
+
+
+def test_helper_briefs_is_a_roster_override(tmp_path: Path) -> None:
+    _mason, client, _result = _helped_turn(
+        tmp_path,
+        [
+            _call("delegate", agent="coding-expert", task="fix it"),
+            _call("finish", report="fixed"),
+            _call("delegate", agent="coding-expert", task="fix it again"),
+            _call("finish", report="done"),
+        ],
+        roster={"md-expert": {"helper_briefs": 1}},
+    )
+    assert _tool_result(client.requests[-2], "c_delegate") == (
+        "this brief has used its 1 helper calls; finish with what you have"
+    )
+
+
+def test_a_helper_runs_no_longer_than_the_brief_that_called_it(tmp_path: Path) -> None:
+    mason, client, _result = _helped_turn(
+        tmp_path,
+        [
+            _call("delegate", agent="coding-expert", task="fix msd.py"),
+            _call("list_dir"),  # the helper's one call
+            _call("finish", report="the helper ran out; msd.py is still broken"),
+        ],
+        max_turns=2,
+    )
+    # md-expert delegated at its first of two calls, so one is left, and
+    # the helper stops there however large its own cap is.
+    to_specialist = _tool_result(client.requests[3], "c_delegate")
+    assert "[coding-expert-1: turn budget (1) after 1 step(s);" in to_specialist
+    assert (
+        "[harness] the helper stopped at 1 call(s), the calls this brief had left; "
+        "a helper cannot outlive the brief that called it"
+    ) in to_specialist
+    specialist = mason.session.transcript_path.with_name(
+        f"{mason.session.transcript_path.stem}-md-expert-1.jsonl"
+    )
+    events = [json.loads(line) for line in specialist.read_text().splitlines()]
+    (helped,) = [e for e in events if e["type"] == "delegate"]
+    assert helped["steps_budget"] == 1
+    assert helped["handle"] == "coding-expert-1"
+
+
+def test_a_helper_that_finishes_in_time_carries_no_calls_left_note(tmp_path: Path) -> None:
+    _mason, client, _result = _helped_turn(tmp_path, _fix_msd())
+    assert "calls this brief had left" not in _tool_result(client.requests[3], "c_delegate")
+
+
+def test_helper_tokens_reach_the_lead_total(tmp_path: Path) -> None:
+    mason, _client, _result = _helped_turn(tmp_path, _fix_msd())
+    # Five model calls of 100 + 10: lead twice, specialist twice, helper once.
+    assert (mason.session.prompt_tokens, mason.session.completion_tokens) == (500, 50)
+    specialist = next(iter(mason.session.children.values())).session
+    assert (specialist.prompt_tokens, specialist.completion_tokens) == (300, 30)
+
+
+def test_the_lead_cannot_continue_a_helper_directly(tmp_path: Path) -> None:
+    from mason.tools import live_handles
+
+    mason, _client, _result = _helped_turn(tmp_path, _fix_msd())
+    assert live_handles(mason.session) == ["md-expert-1"]
+    specialist = mason.session.children["md-expert-1"]
+    assert live_handles(specialist.session) == ["coding-expert-1"]

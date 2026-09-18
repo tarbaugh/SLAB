@@ -120,7 +120,8 @@ MECHANISMS: tuple[Mechanism, ...] = (
     Mechanism(
         "delegation",
         "A lead hands a separable task to a specialist card that runs its own "
-        "loop one level down and returns a report.",
+        "loop one level down and returns a report. A specialist may in turn "
+        "brief a helper card, one level further down.",
         "Anthropic's multi-agent research system: context isolation pays for "
         "separable subtasks only.",
     ),

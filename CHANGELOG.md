@@ -5,6 +5,28 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- A specialist may hand a script to a helper card, one level further
+  down. The new card flag `helper: true` marks a card that takes briefs
+  and never delegates, so the tree is at most lead, specialist, helper.
+  The first built-in helper is `coding-expert`, which writes, fixes, and
+  checks scripts and inputs and returns the file with the evidence it
+  ran. A specialist briefed by a lead gets a `delegate` tool whose team
+  is the helpers only, one brief at a time, and a helper gets none at any
+  depth. A lead's team takes the helper too. Each helper brief counts
+  against the specialist's own: the helper runs at most the calls the
+  brief has left, and one turn sends at most `[agent] helper_briefs` of
+  them (default 3, and a roster table may raise it). The lead reads one
+  `[harness] helper coding-expert-1: 7 calls, finished` line per helper
+  brief under the specialist's report. A helper's transcript is
+  `<stem>-<specialist handle>-<helper>-<n>.jsonl`, and every delegated
+  transcript now opens with a `session` header naming its `agent` and
+  its `parent`. `slab mason report` prints each helper under its
+  specialist, and `slab mason roster` tags it `[helper]`. The
+  `delegation` switch turns both depths off. md-expert, dft-expert,
+  analysis-expert, and worker brief coding-expert when the same script
+  fails the same way twice, or when a script the brief needs does not
+  exist.
+
 - The loop refuses a finish that cites no verified run once, and the
   evidence a lead needs is reachable without a worker's shell. Under `check-gating`,
   a lead's `finish` whose cited runs hold none in a passing state comes
