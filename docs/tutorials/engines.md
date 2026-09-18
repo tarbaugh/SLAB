@@ -940,6 +940,8 @@ The band-structure skill gives the procedure and the reporting rules, and
 its `bands_table.py` writes the json as a table or a plot. With
 `--projection Si-p` the table gains one weight column per band and the
 plot sizes its markers by the weight.
+The plot shows a window about the gap and not every band. Set the
+window with `--window LO HI`, or draw every band with `--all-bands`.
 
 ## Density of states
 

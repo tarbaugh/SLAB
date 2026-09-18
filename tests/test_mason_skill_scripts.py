@@ -2479,6 +2479,80 @@ def test_bands_table_draws_the_diagram_when_matplotlib_is_there(
     assert png.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
 
 
+def test_bands_table_draws_a_window_about_the_gap_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pytest.importorskip("matplotlib")
+    data = json.loads(SI_BANDS_JSON.read_text())
+    # A semicore band far below and an empty band far above, as a run with
+    # semicore states and a large nbands has.
+    data["energies"] = [[row[0] - 40.0, *row, row[-1] + 40.0] for row in data["energies"]]
+    data["n_bands"] += 2
+    deep = tmp_path / "deep.json"
+    deep.write_text(json.dumps(data))
+    code, out = _run(
+        BANDS_TABLE, str(deep), "--png", str(tmp_path / "a.png"),
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    report = json.loads(out)
+    gap = data["summary"]["gap"]
+    assert report["png_window_ev"] == [-8.0, round(gap + 8.0, 3)]
+    assert report["bands_outside_window"] == {"below": 1, "above": 1}
+
+
+def test_bands_table_cuts_the_default_window_to_the_energies_of_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pytest.importorskip("matplotlib")
+    code, out = _run(
+        BANDS_TABLE, str(AL_BANDS_JSON), "--png", str(tmp_path / "al.png"),
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    data = json.loads(AL_BANDS_JSON.read_text())
+    fermi = data["fermi"]
+    low, high = json.loads(out)["png_window_ev"]
+    assert low >= -8.0 and high <= 8.0
+    assert low >= min(min(r) for r in data["energies"]) - fermi - 0.5 - 1e-3
+
+
+def test_bands_table_takes_the_window_the_caller_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pytest.importorskip("matplotlib")
+    code, out = _run(
+        BANDS_TABLE, str(SI_BANDS_JSON), "--png", str(tmp_path / "w.png"), "--window", "-4", "6",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    assert json.loads(out)["png_window_ev"] == [-4.0, 6.0]
+    code, out = _run(
+        BANDS_TABLE, str(SI_BANDS_JSON), "--png", str(tmp_path / "all.png"), "--all-bands",
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 0
+    report = json.loads(out)
+    assert report["bands_outside_window"] == {"below": 0, "above": 0}
+    assert report["png_window_ev"][0] < -11.9 and report["png_window_ev"][1] > 10.0
+
+
+@pytest.mark.parametrize("window", [("6", "-4"), ("50", "60")])
+def test_bands_table_refuses_a_window_that_is_empty(
+    window: tuple[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    png = tmp_path / "w.png"
+    code, _ = _run(
+        BANDS_TABLE, str(SI_BANDS_JSON), "--png", str(png), "--window", *window,
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    assert code == 2
+    assert not png.exists()
+
+
 def test_bands_table_refuses_a_return_value_without_energies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

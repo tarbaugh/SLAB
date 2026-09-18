@@ -8,6 +8,7 @@ Fermi level, and the summary.
     bands_table.py si-bands.json
     bands_table.py si-bands.json --dat si-bands.dat
     bands_table.py si-bands.json --png si-bands.png
+    bands_table.py si-bands.json --png si-bands.png --window -4 6
     bands_table.py si-bands.json --projection Si-p --dat si-fat.dat
 
 With no option the script prints the summary as JSON. ``--projection``
@@ -22,6 +23,13 @@ to the Fermi level for a metal). Comment lines at the top give the
 reference energy and the x position of each special point. ``--png``
 draws the same diagram when matplotlib is installed and exits 2 when it
 is not.
+
+``--png`` draws an energy window, not every band. The default window
+runs from 8 eV below the reference to 8 eV above the conduction band
+minimum (above the Fermi level for a metal), cut to the energies the run
+has. ``--window LO HI`` sets the window in eV relative to the reference,
+and ``--all-bands`` draws every band. The report names the window and
+counts the bands that lie outside it. ``--dat`` always holds every band.
 """
 
 from __future__ import annotations
@@ -34,6 +42,12 @@ from typing import Any
 
 #: The labels ASE uses, as a band diagram prints them.
 _GREEK = {"G": "Γ"}
+
+#: The default plot window reaches this far below the reference and this
+#: far above the conduction band minimum (the Fermi level for a metal).
+_WINDOW_MARGIN_EV = 8.0
+#: Blank space between the outermost drawn energy and the frame.
+_WINDOW_PAD_EV = 0.5
 
 
 def load(path: Path) -> dict[str, Any]:
@@ -109,7 +123,51 @@ def write_dat(data: dict[str, Any], out: Path, group: str | None = None) -> None
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def write_png(data: dict[str, Any], out: Path, group: str | None = None) -> None:
+def plot_window(
+    data: dict[str, Any], window: tuple[float, float] | None, all_bands: bool
+) -> tuple[float, float]:
+    """The energy window of the diagram, in eV relative to the reference."""
+    zero, _ = reference(data)
+    rows = energies(data)
+    lowest = min(min(row) for row in rows) - zero - _WINDOW_PAD_EV
+    highest = max(max(row) for row in rows) - zero + _WINDOW_PAD_EV
+    if all_bands:
+        return lowest, highest
+    if window is not None:
+        low, high = window
+        if low >= high:
+            print(f"error: --window needs LO below HI, got {low:g} {high:g}", file=sys.stderr)
+            raise SystemExit(2)
+        if high < lowest or low > highest:
+            print(
+                f"error: --window {low:g} {high:g} holds no band; the bands span "
+                f"{lowest:.2f} to {highest:.2f} eV relative to the reference",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        return low, high
+    gap = data["summary"].get("gap") or 0.0
+    return max(lowest, -_WINDOW_MARGIN_EV), min(highest, gap + _WINDOW_MARGIN_EV)
+
+
+def bands_outside(data: dict[str, Any], window: tuple[float, float]) -> dict[str, int]:
+    """How many bands lie wholly below and wholly above the window."""
+    zero, _ = reference(data)
+    rows = energies(data)
+    below = above = 0
+    for band in range(len(rows[0])):
+        values = [row[band] - zero for row in rows]
+        below += max(values) < window[0]
+        above += min(values) > window[1]
+    return {"below": below, "above": above}
+
+
+def write_png(
+    data: dict[str, Any],
+    out: Path,
+    group: str | None = None,
+    window: tuple[float, float] | None = None,
+) -> None:
     try:
         import matplotlib
 
@@ -140,6 +198,8 @@ def write_png(data: dict[str, Any], out: Path, group: str | None = None) -> None
     ax.set_xticks([t["x"] for t in data["ticks"]])
     ax.set_xticklabels([_GREEK.get(t["label"], t["label"]) for t in data["ticks"]])
     ax.set_xlim(x[0], x[-1])
+    if window is not None:
+        ax.set_ylim(*window)
     ax.set_ylabel(f"E - E({'VBM' if name.startswith('the valence') else 'Fermi'}) (eV)")
     title = f"{data['lattice']} {data['path']}"
     ax.set_title(title if group is None else f"{title}, {group}")
@@ -158,7 +218,19 @@ def main(argv: list[str] | None = None) -> int:
         metavar="GROUP",
         help="add the weight of this group, such as Si-p, from a projected run",
     )
+    span = parser.add_mutually_exclusive_group()
+    span.add_argument(
+        "--window",
+        nargs=2,
+        type=float,
+        metavar=("LO", "HI"),
+        help="the energy window of --png in eV relative to the reference "
+        "(default: -8 to 8 above the conduction band minimum)",
+    )
+    span.add_argument("--all-bands", action="store_true", help="draw every band in --png")
     args = parser.parse_args(argv)
+    if (args.window is not None or args.all_bands) and args.png is None:
+        parser.error("--window and --all-bands set the window of --png; give --png")
 
     data = load(args.bands)
     summary = dict(data["summary"])
@@ -177,8 +249,11 @@ def main(argv: list[str] | None = None) -> int:
         write_dat(data, args.dat, args.projection)
         report["dat"] = str(args.dat)
     if args.png is not None:
-        write_png(data, args.png, args.projection)
+        window = plot_window(data, tuple(args.window) if args.window else None, args.all_bands)
+        write_png(data, args.png, args.projection, window)
         report["png"] = str(args.png)
+        report["png_window_ev"] = [round(window[0], 3), round(window[1], 3)]
+        report["bands_outside_window"] = bands_outside(data, window)
     print(json.dumps(report, indent=2))
     return 0
 
