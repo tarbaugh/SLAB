@@ -123,7 +123,7 @@ def test_band_structure_returns_the_verdict_and_keeps_three_artifacts(
     assert info["fermi"] == 6.188
     assert info["engine_version"] == "7.5"
     assert info["scf_energy"] < 0 and info["energy_unit"] == "eV"
-    assert (info["path"], info["lattice"], info["npoints"]) == ("GXWKGLUWLK,UX", "FCC", 60)
+    assert (info["path"], info["lattice"], info["npoints"]) == ("GXU,KGLWX", "cF2", 60)
     assert (info["n_bands"], info["n_atoms"], info["n_valence_bands"]) == (8, 2, 4)
     assert info["artifacts"] == ["si-scf.pwo", "si-bands.pwo", "si-bands.json"]
 
@@ -347,5 +347,36 @@ def test_fixed_occupations_still_read_si_as_an_insulator(
     with ws.start_run(name="si-fixed", intent="fixed occupations"):
         _, info = band_structure(_si(), calculator_options=options, npoints=60, label="si")
     assert info["is_metal"] is False
-    assert info["gap"] == 0.468 and info["gap_kind"] == "indirect"
+    assert info["gap"] == 0.4639 and info["gap_kind"] == "indirect"
     assert info["n_valence_bands"] == 4
+
+
+def test_a_conventional_cell_runs_as_its_standardized_primitive_cell(
+    ws: Workspace, tmp_path: Path
+) -> None:
+    # seekpath's path is written for its own primitive cell, so both pw.x
+    # steps run on that cell, and the 8-atom cell's mesh is replaced by one
+    # at least as dense on the 2-atom cell.
+    cubic = bulk("Si", "diamond", a=5.43, cubic=True)
+    options = _options(_fake_pw(tmp_path, SI_SCF, SI_BANDS), tmp_path)
+    options["kpts"] = [4, 4, 4]
+    with ws.start_run(name="si-cubic", intent="conventional cell"):
+        bands, info = band_structure(cubic, calculator_options=options, npoints=60, label="si")
+    assert options["kpts"] == [4, 4, 4]  # the caller's dict is a traced input
+    assert (info["n_atoms_input"], info["n_atoms"], info["cell_changed"]) == (8, 2, True)
+    assert info["scf_kpts"] == [7, 7, 7]
+    assert len(bands["primitive_cell"]["symbols"]) == 2
+    for step in ("scf", "bands"):
+        written = (tmp_path / "inputs" / f"{step}.pwi").read_text()
+        assert "nat              = 2" in written
+    scf = (tmp_path / "inputs" / "scf.pwi").read_text()
+    assert "K_POINTS automatic\n7 7 7" in scf
+    assert info["gap"] == 0.4639  # the same k-points as the primitive run
+
+
+def test_an_unchanged_lattice_keeps_the_callers_mesh(ws: Workspace, tmp_path: Path) -> None:
+    options = _options(_fake_pw(tmp_path, SI_SCF, SI_BANDS), tmp_path)
+    with ws.start_run(name="si-prim", intent="primitive cell"):
+        _, info = band_structure(_si(), calculator_options=options, npoints=60, label="si")
+    assert info["cell_changed"] is False and "scf_kpts" not in info
+    assert "K_POINTS automatic\n7 7 7" in (tmp_path / "inputs" / "scf.pwi").read_text()

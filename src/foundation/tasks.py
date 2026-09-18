@@ -512,6 +512,7 @@ def band_structure(
     npoints: int | None = None,
     density: float = 20.0,
     nbands: int | None = None,
+    symprec: float = 1e-5,
     label: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """The Kohn-Sham bands along a high-symmetry path, and the gap verdict.
@@ -519,11 +520,19 @@ def band_structure(
     Two pw.x executions share one slab-managed scratch directory: an SCF
     on the caller's mesh, then ``calculation='bands'`` on the path, which
     reads the SCF's charge density. Quantum ESPRESSO only. Relax the
-    structure first, and pass the primitive cell: a supercell folds its
-    bands and the diagram stops being readable.
+    structure first.
 
-    The path comes from :func:`slab.bands.band_path` (ASE's Bravais
-    analysis). The verdict comes from :func:`slab.bands.band_summary`
+    The path comes from seekpath through :func:`slab.bands.band_path`.
+    seekpath finds the space group, builds the standardized primitive
+    cell, and gives the recommended path in that cell's reciprocal basis.
+    The path is valid for that cell only, so both steps run on it and not
+    on *atoms*. A conventional cell or a supercell of a perfect crystal
+    reduces to the primitive cell. A cell with a defect has no smaller
+    cell, and its bands stay folded. When the standardized lattice differs
+    from the input's, an explicit ``kpts`` mesh no longer fits, and the
+    task replaces it with :func:`slab.bands.matching_mesh`, which is at
+    least as dense. ``info["scf_kpts"]`` then names the mesh it used. The
+    verdict comes from :func:`slab.bands.band_summary`
     against the SCF Fermi level. A band that crosses it makes the system a
     metal, and a metal has no gap. Under fixed occupations pw.x prints no
     Fermi energy, and the verdict counts the occupied bands. A semilocal functional (PBE, PBEsol)
@@ -531,16 +540,20 @@ def band_structure(
     one.
 
     Returns ``(bands, info)``. ``bands`` is the content of the kept
-    ``{label}-bands.json``: the path, the lattice, the special points and
-    their x positions, the distances, the k-points, the energies in eV,
-    the Fermi level, and the summary. When the listing holds more than
+    ``{label}-bands.json``: the path, the lattice, the space group, the
+    standardized primitive cell, the special points and their x
+    positions, the distances, the k-points, the energies in eV, the Fermi
+    level, and the summary. When the listing holds more than
     1000 eigenvalues the energies stay in the artifact and ``bands``
     carries ``energies_in``, its name. ``info`` carries ``engine``,
     ``engine_source``, ``engine_version``, ``scf_energy``,
     ``energy_unit``, ``fermi``, the summary fields (``is_metal``,
     ``vbm``, ``cbm``, ``gap``, ``direct_gap``, ``gap_kind``, ``vbm_at``,
-    ``cbm_at``, ``n_valence_bands``), ``path``, ``lattice``, ``npoints``,
-    ``n_bands``, ``n_atoms``, and ``artifacts``.
+    ``cbm_at``, ``n_valence_bands``), ``path``, ``lattice``,
+    ``spacegroup``, ``spacegroup_number``, ``npoints``, ``n_bands``,
+    ``n_atoms`` (of the standardized primitive cell), ``n_atoms_input``,
+    ``cell_changed``, ``scf_kpts`` when the task replaced the mesh, and
+    ``artifacts``.
 
     Inside a run the task keeps ``{label}-scf.pwo`` and
     ``{label}-bands.pwo`` as intermediates and ``{label}-bands.json`` as
@@ -551,15 +564,17 @@ def band_structure(
     every case.
 
     Args:
-        atoms: The relaxed primitive cell (calculator-free). Never mutated.
+        atoms: The relaxed structure (calculator-free). Never mutated. The
+            task runs on its standardized primitive cell.
         engine: ``"qe"`` or a registry alias built on
             ``slab.backends.qe_calculator``.
         calculator_options: The SCF's options, for example
             ``qe_protocol_options(atoms, protocol="balanced")``. They need
             a k-point mesh. ``calculation`` may be absent or ``"scf"``.
             Spin-polarized, noncollinear, and spin-orbit runs are refused.
-        path: A path in the lattice's own labels, such as ``"GXWKGLUWLK"``.
-            None takes ASE's default path for the lattice.
+        path: A path in seekpath's labels, such as ``"GXWKGLUWLK"``, with
+            ``G`` for GAMMA and underscores dropped (``Sigma0``). A comma
+            starts a new segment. None takes seekpath's recommended path.
         npoints: The number of k-points on the path. It wins over
             *density*.
         density: The k-points per inverse angstrom along the path.
@@ -567,6 +582,8 @@ def band_structure(
             the SCF's state count or the occupied bands plus 20 percent
             (at least 4 more), whichever is larger. A caller value must
             hold at least the occupied bands.
+        symprec: The symmetry tolerance seekpath and spglib use, in
+            angstrom. Raise it for a structure with numerical noise.
         label: Names the kept artifacts.
 
     Examples:
@@ -580,7 +597,14 @@ def band_structure(
     from math import ceil
 
     from slab.backends import engine_scratch
-    from slab.bands import band_path, band_summary, path_distances, read_bands, scf_levels
+    from slab.bands import (
+        band_path,
+        band_summary,
+        matching_mesh,
+        path_distances,
+        read_bands,
+        scf_levels,
+    )
 
     if not _qe_shaped(engine, calculator_options):
         raise ValueError(f"band_structure needs a Quantum ESPRESSO engine; {engine!r} is not one")
@@ -592,10 +616,17 @@ def band_structure(
     _guard_qe_kpoints(atoms, calculator_options, task="band_structure")
     _refuse_unsupported_bands(calculator_options)
     scf_options = _qe_scf_options(calculator_options, task="band_structure")
-    found = band_path(atoms, path=path, npoints=npoints, density=density)
+    found = band_path(atoms, path=path, npoints=npoints, density=density, symprec=symprec)
     described = describe_engine(engine, calculator_options)
     name = label or "bands"
-    system = atoms.copy()
+    # seekpath's path is written in the reciprocal basis of its own
+    # standardized primitive cell, so both steps run on that cell.
+    system = found["atoms"]
+    scf_kpts = None
+    mesh = scf_options.get("kpts")
+    if found["cell_changed"] and isinstance(mesh, (list, tuple)) and len(mesh) == 3:
+        scf_kpts = matching_mesh([int(n) for n in mesh], atoms.cell, system.cell)
+        scf_options["kpts"] = scf_kpts
     active = current_run()
     kept: list[str] = []
 
@@ -676,11 +707,21 @@ def band_structure(
             found["special_points"],
             n_occupied=occupied if fixed else None,
         )
-        axis = path_distances(found["kpts"], atoms.cell, found["special_points"])
+        axis = path_distances(found["kpts"], system.cell, found["special_points"])
         result: dict[str, Any] = {
             "path": found["path"],
             "lattice": found["lattice"],
+            "spacegroup": found["spacegroup"],
+            "spacegroup_number": found["spacegroup_number"],
+            "primitive_cell": {
+                "cell": [[float(c) for c in row] for row in system.cell[:]],
+                "symbols": system.get_chemical_symbols(),
+                "scaled_positions": [
+                    [float(c) for c in row] for row in system.get_scaled_positions()
+                ],
+            },
             "special_points": found["special_points"],
+            "seekpath_labels": found["seekpath_labels"],
             "ticks": [
                 {"label": tick, "x": x}
                 for tick, x in zip(axis["labels"], axis["special_x"], strict=True)
@@ -714,11 +755,17 @@ def band_structure(
         **summary,
         "path": found["path"],
         "lattice": found["lattice"],
+        "spacegroup": found["spacegroup"],
+        "spacegroup_number": found["spacegroup_number"],
         "npoints": found["npoints"],
         "n_bands": read["n_bands"],
-        "n_atoms": len(atoms),
+        "n_atoms": len(system),
+        "n_atoms_input": len(atoms),
+        "cell_changed": found["cell_changed"],
         "artifacts": kept,
     }
+    if scf_kpts is not None:
+        info["scf_kpts"] = list(scf_kpts)
     return bands, info
 
 

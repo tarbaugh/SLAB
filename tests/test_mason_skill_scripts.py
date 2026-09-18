@@ -2406,7 +2406,7 @@ def test_bands_table_prints_the_summary_of_the_real_si_run(
     code, out = _run(BANDS_TABLE, str(SI_BANDS_JSON), monkeypatch=monkeypatch, capsys=capsys)
     assert code == 0
     report = json.loads(out)
-    assert (report["path"], report["lattice"]) == ("GXWKGLUWLK,UX", "FCC")
+    assert (report["path"], report["lattice"]) == ("GXU,KGLWX", "cF2")
     assert (report["n_kpoints"], report["n_bands"]) == (60, 8)
     assert report["is_metal"] is False and report["gap_kind"] == "indirect"
     assert report["vbm_at"]["label"] == "G"
@@ -2425,8 +2425,8 @@ def test_bands_table_writes_a_table_relative_to_the_vbm(
     header = [line for line in lines if line.startswith("#")]
     rows = [line.split() for line in lines if not line.startswith("#")]
     assert header[1] == "# energies in eV relative to the valence band maximum (6.1597 eV)"
-    assert header[2].startswith("# special points (label x): G 0.000000 X 1.157124 W ")
-    assert header[2].endswith("K 7.018704 U 7.018704 X 7.427810")
+    assert header[2].startswith("# special points (label x): G 0.000000 X 1.157124 U ")
+    assert header[2].endswith("L 3.795644 W 4.613855 X 5.192417")
     assert len(rows) == 60 and all(len(row) == 9 for row in rows)  # x and 8 bands
     top_valence = max(float(row[4]) for row in rows)  # band 4 is the highest valence band
     assert top_valence == 0.0
@@ -2502,7 +2502,9 @@ def test_band_structure_skill_states_the_limits(tmp_path: Path) -> None:
     skill = discover_skills(tmp_path)["band-structure"]
     text = (skill.root / "SKILL.md").read_text()
     for phrase in (
-        "Use the primitive cell",
+        "the standardized primitive cell",
+        "A cell with a defect has no smaller cell",
+        "Cite seekpath",
         "is a lower bound",
         "the smearing does not",
         "A metal has no gap",

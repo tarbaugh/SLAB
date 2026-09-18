@@ -1,7 +1,8 @@
 """Band-structure helpers: the k-point path, the eigenvalues, and the gap.
 
-Pure functions over ASE and numpy. :func:`band_path` chooses the
-high-symmetry path for a cell, :func:`read_bands` reads the eigenvalues a
+Pure functions over ASE, seekpath, and numpy. :func:`band_path` asks
+seekpath for the standardized primitive cell and its high-symmetry
+path, :func:`read_bands` reads the eigenvalues a
 pw.x ``calculation='bands'`` run printed, :func:`band_summary` turns them
 into a gap verdict against the SCF Fermi level, and :func:`path_distances`
 gives the x axis a band diagram is drawn on. :func:`scf_levels` reads the
@@ -34,10 +35,15 @@ import numpy as np
 __all__ = [
     "band_path",
     "band_summary",
+    "matching_mesh",
     "path_distances",
     "read_bands",
     "scf_levels",
 ]
+
+#: The symmetry tolerance seekpath and spglib use, in angstrom. It is
+#: seekpath's own default, which also suits a relaxed structure.
+SYMPREC = 1e-5
 
 #: The gap below which an indirect gap is reported as direct, in eV. pw.x
 #: prints eigenvalues to 4 decimals, so two band edges closer than 1 meV
@@ -69,17 +75,33 @@ def band_path(
     path: str | None = None,
     npoints: int | None = None,
     density: float = 20.0,
+    symprec: float = SYMPREC,
 ) -> dict[str, Any]:
-    """The high-symmetry path for *atoms*, as ASE's Bravais analysis gives it.
+    """The high-symmetry path for *atoms*, as seekpath identifies it.
 
-    *npoints* wins over *density* when both are given; *density* is the
-    number of points per inverse angstrom along the path. A caller *path*
-    uses the lattice's own labels, and a comma starts a new segment.
+    seekpath finds the space group of *atoms* with spglib, builds the
+    standardized primitive cell of Hinuma et al. (Comput. Mater. Sci. 128,
+    140, 2017), and gives the recommended path with its special points in
+    that cell's reciprocal basis. The path is only valid for that cell, so
+    the calculation must run on the returned ``atoms``, not on the input.
+    A conventional cell or a supercell of a perfect crystal reduces to the
+    primitive cell.
 
-    Returns a dict with ``path`` (the string), ``lattice`` (ASE's Bravais
-    name), ``special_points`` (label to fractional coordinates), ``kpts``
-    (the fractional k-points ASE writes), ``npoints``, and ``bandpath``
-    (the :class:`ase.dft.kpoints.BandPath` itself, for the calculator).
+    Labels are seekpath's, written so a path string can hold them:
+    ``GAMMA`` is ``G``, and an underscore is dropped, so ``SIGMA_0`` is
+    ``Sigma0`` and ``W_2`` is ``W2``. A caller *path* uses these labels,
+    and a comma starts a new segment. *npoints* wins over *density* when
+    both are given; *density* is the number of points per inverse angstrom
+    along the path.
+
+    Returns a dict with ``path`` (the string), ``lattice`` (seekpath's
+    extended Bravais symbol, such as ``cF2``), ``spacegroup`` and
+    ``spacegroup_number``, ``special_points`` (label to fractional
+    coordinates), ``seekpath_labels`` (label to seekpath's own name),
+    ``kpts`` (the fractional k-points), ``npoints``, ``atoms`` (the
+    standardized primitive cell), ``cell_changed`` (True when its lattice
+    differs from the input's), and ``bandpath`` (the
+    :class:`ase.dft.kpoints.BandPath` itself, for the calculator).
 
     Raises:
         ValueError: the cell is not periodic in all three directions, or
@@ -88,49 +110,122 @@ def band_path(
     Examples:
         >>> from ase.build import bulk
         >>> found = band_path(bulk("Si", "diamond", a=5.43), npoints=60)
-        >>> found["path"], found["lattice"], found["npoints"]
-        ('GXWKGLUWLK,UX', 'FCC', 60)
+        >>> found["path"], found["lattice"], found["spacegroup"], found["npoints"]
+        ('GXU,KGLWX', 'cF2', 'Fd-3m', 60)
+        >>> cubic = band_path(bulk("Si", "diamond", a=5.43, cubic=True), npoints=60)
+        >>> len(cubic["atoms"]), cubic["cell_changed"]
+        (2, True)
         >>> try:
         ...     band_path(bulk("Si", "diamond", a=5.43), path="GXQ")
         ... except ValueError as e:
         ...     print(e)  # doctest: +NORMALIZE_WHITESPACE
-        path 'GXQ' names 'Q', which the FCC lattice does not have;
-        its labels are G, K, L, U, W, X
+        path 'GXQ' names 'Q', which the cF2 lattice does not have;
+        its labels are G, K, L, U, W, W2, X
     """
+    import seekpath
+    from ase import Atoms
+    from ase.dft.kpoints import parse_path_string
+
     if not bool(np.all(atoms.pbc)):
         raise ValueError(
             "a band structure needs a cell periodic in all three directions; "
             f"this one has pbc={[bool(p) for p in atoms.pbc]}"
         )
-    lattice = atoms.cell.get_bravais_lattice()
-    # The special points in this cell's own basis, which is the basis the
-    # path's k-points are written in.
-    special = atoms.cell.bandpath(npoints=0).special_points
-    if path is not None:
-        from ase.dft.kpoints import parse_path_string
-
+    structure = (atoms.cell[:], atoms.get_scaled_positions(), atoms.numbers)
+    found = seekpath.get_path(structure, with_time_reversal=True, symprec=symprec)
+    primitive = Atoms(
+        numbers=found["primitive_types"],
+        cell=found["primitive_lattice"],
+        scaled_positions=np.asarray(found["primitive_positions"], dtype=float) % 1.0,
+        pbc=True,
+    )
+    names = {_path_label(name): name for name in found["point_coords"]}
+    special = {
+        _path_label(name): np.asarray(coords, dtype=float)
+        for name, coords in found["point_coords"].items()
+    }
+    lattice = found["bravais_lattice_extended"]
+    if path is None:
+        path = _path_string(found["path"])
+    else:
         segments = parse_path_string(path)  # type: ignore[no-untyped-call]
         unknown = [label for segment in segments for label in segment if label not in special]
         if unknown:
             raise ValueError(
-                f"path {path!r} names {unknown[0]!r}, which the {lattice.name} "
+                f"path {path!r} names {unknown[0]!r}, which the {lattice} "
                 f"lattice does not have; its labels are {', '.join(sorted(special))}"
             )
     if npoints is not None:
-        bandpath = atoms.cell.bandpath(path, npoints=npoints)
+        bandpath = primitive.cell.bandpath(path, npoints=npoints, special_points=special)
     else:
-        bandpath = atoms.cell.bandpath(path, density=density)
+        bandpath = primitive.cell.bandpath(path, density=density, special_points=special)
+    used = {label for segment in parse_path_string(bandpath.path) for label in segment}  # type: ignore[no-untyped-call]
     return {
         "path": bandpath.path,
-        "lattice": lattice.name,
+        "lattice": lattice,
+        "spacegroup": found["spacegroup_international"],
+        "spacegroup_number": int(found["spacegroup_number"]),
         "special_points": {
             label: [float(c) for c in coords]
-            for label, coords in bandpath.special_points.items()
+            for label, coords in special.items()
+            if label in used
         },
+        "seekpath_labels": {label: names[label] for label in sorted(used)},
         "kpts": [[float(c) for c in k] for k in bandpath.kpts],
         "npoints": len(bandpath.kpts),
+        "atoms": primitive,
+        "cell_changed": not _same_lattice(atoms.cell[:], primitive.cell[:]),
         "bandpath": bandpath,
     }
+
+
+def _path_label(name: str) -> str:
+    """seekpath's point name as a label an ASE path string can hold."""
+    if name == "GAMMA":
+        return "G"
+    head, _, tail = name.partition("_")
+    return (head if len(head) == 1 else head.capitalize()) + tail
+
+
+def _path_string(segments: Sequence[tuple[str, str]]) -> str:
+    """seekpath's list of segments as one path string, a comma at each break."""
+    out = ""
+    previous = None
+    for start, stop in segments:
+        if start != previous:
+            out += ("," if out else "") + _path_label(start)
+        out += _path_label(stop)
+        previous = stop
+    return out
+
+
+def _same_lattice(one: np.ndarray, other: np.ndarray) -> bool:
+    return bool(np.allclose(one, other, atol=1e-6))
+
+
+def matching_mesh(
+    kpts: Sequence[int], cell: Any, new_cell: Any
+) -> tuple[int, int, int]:
+    """A Monkhorst-Pack mesh on *new_cell* at least as dense as *kpts* on *cell*.
+
+    The finest spacing of the old mesh along any reciprocal vector sets
+    the spacing of the new one. A mesh made for one cell is wrong for
+    another setting of the same crystal, where the axes are permuted or
+    the cell is smaller.
+
+    Examples:
+        >>> from ase.build import bulk
+        >>> cubic = bulk("Si", "diamond", a=5.43, cubic=True)
+        >>> matching_mesh((6, 6, 6), cubic.cell, bulk("Si", "diamond", a=5.43).cell)
+        (11, 11, 11)
+    """
+    from ase.cell import Cell
+
+    old = np.linalg.norm(Cell.new(cell).reciprocal()[:], axis=1)  # type: ignore[no-untyped-call]
+    new = np.linalg.norm(Cell.new(new_cell).reciprocal()[:], axis=1)  # type: ignore[no-untyped-call]
+    spacing = float(np.min(old / np.asarray(kpts, dtype=float)))
+    mesh = [max(1, int(np.ceil(length / spacing - 1e-6))) for length in new]
+    return (mesh[0], mesh[1], mesh[2])
 
 
 def scf_levels(pwo_text: str) -> dict[str, Any]:

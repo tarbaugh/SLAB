@@ -14,6 +14,7 @@ dependencies = [
     "pydantic>=2.5",
     "typer>=0.12",
     "ase>=3.23",
+    "seekpath>=2.1",
     "pyyaml>=6",
 ]
 
@@ -73,7 +74,7 @@ files = ["src"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["ase.*", "rootstock.*", "mcp.server.fastmcp.*"]
+module = ["ase.*", "seekpath.*", "rootstock.*", "mcp.server.fastmcp.*"]
 ignore_missing_imports = true
 
 # These two modules call into ASE, which is only partially typed; everything
