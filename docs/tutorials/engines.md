@@ -877,8 +877,163 @@ The task follows `single_point`'s contracts:
 - A repeat call with the same inputs is a cache hit, and the gpu build is
   chosen by the slice as for any `qe` calculation.
 
+### Projected bands
+
+`projected=True` adds a third execution. After the bands step,
+`projwfc.x` runs on the same save directory and projects every band onto
+the pseudo-atomic orbitals of the pseudopotentials. The result file then
+carries `projection_groups`, the group names, and `projections`, a weight
+per k-point and band for each group. A group is one element and one
+angular momentum, such as `Si-s` or `Si-p`. These are the numbers a
+fat-band diagram draws:
+
+<!-- no-verify -->
+```python
+from ase.build import bulk
+from foundation import check, within_bounds
+from foundation.tasks import band_structure
+from slab.protocols import qe_protocol_options
+
+atoms = bulk("Si", "diamond", a=5.43)
+options = qe_protocol_options(atoms, protocol="balanced")
+bands, info = band_structure(
+    atoms, calculator_options=options, npoints=20, projected=True, label="si"
+)
+weights = bands["projections"]
+top = info["n_valence_bands"] - 1
+print(f"groups {info['projection_groups']}, {info['npoints']} k-points, {info['n_bands']} bands")
+print(f"at G, valence band {top + 1}: "
+      f"Si-p {weights['Si-p'][0][top]:.3f}, Si-s {weights['Si-s'][0][top]:.3f}")
+print(f"at G, band 1: Si-p {weights['Si-p'][0][0]:.3f}, Si-s {weights['Si-s'][0][0]:.3f}")
+print("artifacts:", info["artifacts"])
+
+
+@check
+def the_valence_band_top_is_p():
+    return within_bounds(weights["Si-p"][0][top], lo=0.9, hi=1.0, label="Si-p weight at G")
+```
+
+Launched as a workflow with Quantum ESPRESSO 7.5, the script printed
+these lines, and the run reached verified:
+
+<!-- no-verify -->
+```text
+groups ['Si-p', 'Si-s'], 20 k-points, 8 bands
+at G, valence band 4: Si-p 0.961, Si-s 0.000
+at G, band 1: Si-p 0.000, Si-s 0.996
+artifacts: ['si-scf.pwo', 'si-bands.pwo', 'si-projwfc.out', 'si-bands.json']
+verified 1/1 checks passed
+```
+
+The valence band top of Si at Γ is p and the lowest band is s, which is
+what the sp3 bonding of the diamond structure says. The weights of one
+band sum to near one and not to one, because pseudo-atomic orbitals are
+neither a complete basis nor orthogonal between atoms. Report them as
+weights, never as charges. The step needs `lsym=.false.`, because
+`projwfc.x` cannot symmetrize a high-symmetry path, and the task sets it.
+`{label}-projwfc.out` is kept, and a failure keeps
+`{label}-projwfc-failed.out` with a note that names the step. The
+projections count against the same inline limit as the eigenvalues, so a
+long listing leaves both in the artifact.
+
 The band-structure skill gives the procedure and the reporting rules, and
-its `bands_table.py` writes the json as a table or a plot.
+its `bands_table.py` writes the json as a table or a plot. With
+`--projection Si-p` the table gains one weight column per band and the
+plot sizes its markers by the weight.
+
+## Density of states
+
+`density_of_states` answers how many states sit at an energy. It runs
+three or four executables in one scratch directory: an SCF on the
+options' mesh, an NSCF on a denser mesh that reads the SCF's charge
+density, `dos.x` on the NSCF eigenvalues, and with `projected=True` also
+`projwfc.x`. `dos.x` and `projwfc.x` are siblings of the resolved `pw.x`
+in the same install, so they follow the same build, the same launcher,
+and the same setup lines. Set `dos_command` or `projwfc_command` in
+`calculator_options` when an install puts them elsewhere.
+
+The task runs on the cell you give it. A density of states is an integral
+over the Brillouin zone and needs no high-symmetry path, so there is no
+standardized cell here and no seekpath. The curve is per cell.
+
+<!-- no-verify -->
+```python
+from ase.build import bulk
+from foundation import check, within_bounds
+from foundation.tasks import density_of_states
+from slab.protocols import qe_protocol_options
+
+atoms = bulk("Si", "diamond", a=5.43)
+options = qe_protocol_options(atoms, protocol="balanced")
+dos, info = density_of_states(
+    atoms, calculator_options=options, dos_kpts=[20, 20, 20],
+    delta_e=0.05, degauss=0.005, projected=True, label="si",
+)
+print(f"gap {info['gap']} eV ({info['gap_kind']}), is_metal={info['is_metal']}")
+print(f"dos at the Fermi level {info['dos_at_fermi']:.3g} states/eV/cell")
+print(f"meshes: scf {info['scf_kpts']}, dos {info['dos_kpts']}; "
+      f"Gaussian {info['degauss_ry']} Ry, step {info['delta_e']} eV")
+print(f"groups {info['projection_groups']}")
+print("artifacts:", info["artifacts"])
+
+
+@check
+def the_fermi_level_sits_in_the_gap():
+    return within_bounds(info["dos_at_fermi"], lo=0.0, hi=1e-3, label="dos at E_F")
+```
+
+Launched as a workflow with Quantum ESPRESSO 7.5 and the SSSP PBEsol
+efficiency family, the script printed these lines, and the run reached
+verified:
+
+<!-- no-verify -->
+```text
+gap 0.4739 eV (indirect), is_metal=False
+dos at the Fermi level 0.000497 states/eV/cell
+meshes: scf [14, 14, 14], dos [20, 20, 20]; Gaussian 0.005 Ry, step 0.05 eV
+groups ['Si-p', 'Si-s']
+artifacts: ['si-scf.pwo', 'si-nscf.pwo', 'si-dos.dat', 'si-dos.out', 'si-projwfc.out', 'si-dos.json']
+verified 1/1 checks passed
+```
+
+Read the verdict from the eigenvalues, never from the curve. The task
+computes `is_metal`, `gap`, `vbm`, and `cbm` with the same
+`slab.bands.band_summary` the band structure uses, on the NSCF
+eigenvalues of the dense mesh. `dos_at_fermi` is the broadened curve at
+the Fermi level, and a Gaussian wider than a gap puts states inside it.
+The two numbers above say it: the curve at the Fermi level is 5e-4
+states/eV/cell, three orders below the peak, and `is_metal` is False.
+
+The denser mesh and the broadening are the two settings that decide the
+answer:
+
+- `dos_kpts` or `dos_kspacing` names the NSCF mesh, and giving both is
+  refused. Without either, an explicit mesh is doubled in each direction
+  and a `kspacing` is halved.
+- `degauss` is the Gaussian width, in Ry as Quantum ESPRESSO takes it. It
+  defaults to the SCF's own `degauss`, which a protocol sets for the
+  total energy. 0.02 Ry is 0.27 eV, wide enough to fill a half-eV gap.
+- `delta_e` is the grid step in eV, and `emin` and `emax` are the window,
+  which otherwise covers every eigenvalue with three broadening widths of
+  margin. `dos.x` and `projwfc.x` are given the same window, so the
+  projected curves sit on the total's grid.
+
+With `projected=True` the result file also carries `projection_groups`
+and `projected_dos`, one curve per element and angular momentum on the
+same grid. The groups sum to near the total and not to it, for the same
+reason the band weights do.
+
+The task follows the same contracts as `band_structure`. It refuses a
+`calculation` other than `scf`, refuses `nspin=2`, `noncolin`, and
+`lspinorb`, never changes the caller's options, keeps every step's output
+as an artifact, and names the failed step in a note with
+`{label}-scf-failed.*`, `{label}-nscf-failed.*`, `{label}-dos-failed.out`,
+or `{label}-projwfc-failed.out`. `read_file` and `read_artifact` digest
+`dos.x` and `projwfc.x` output and the `.dat` table without their
+thousands of rows, and point at the json.
+
+The density-of-states skill gives the procedure and the reporting rules,
+and its `dos_table.py` writes the json as a table or a plot.
 
 ## Builders: atomsk
 

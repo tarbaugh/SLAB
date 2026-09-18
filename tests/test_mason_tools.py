@@ -394,6 +394,7 @@ def test_list_and_describe_task_expose_the_vocabulary(box: Toolbox) -> None:
     assert any(line.startswith("relax(atoms, ") for line in lines)
     assert any(line.startswith("single_point(atoms, ") for line in lines)
     assert any(line.startswith("band_structure(atoms, ") for line in lines)
+    assert any(line.startswith("density_of_states(atoms, ") for line in lines)
     import json as _json
 
     describe_bands = ToolCall(
@@ -402,6 +403,13 @@ def test_list_and_describe_task_expose_the_vocabulary(box: Toolbox) -> None:
         arguments_raw=_json.dumps({"name": "band_structure"}),
     )
     assert "the gap verdict" in box.dispatch(describe_bands)
+
+    describe_dos = ToolCall(
+        id="t", name="describe_task",
+        arguments={"name": "density_of_states"},
+        arguments_raw=_json.dumps({"name": "density_of_states"}),
+    )
+    assert "density of states" in box.dispatch(describe_dos)
 
     describe_relax = ToolCall(
         id="t", name="describe_task",

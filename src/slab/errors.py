@@ -58,6 +58,21 @@ class BuilderError(SlabError):
         self.log = log
 
 
+class QeToolError(SlabError):
+    """A Quantum ESPRESSO post-processing tool ran and failed.
+
+    ``dos.x`` and ``projwfc.x`` tell their failure story on their standard
+    output, in the same ``%%%%``-fenced block ``pw.x`` uses. The message
+    holds the extracted block or the tail of the output, and ``log``
+    carries the whole capture so a caller can keep it as evidence.
+    """
+
+    def __init__(self, message: str, *, tool: str = "", log: str = "") -> None:
+        super().__init__(message)
+        self.tool = tool
+        self.log = log
+
+
 class LammpsScriptError(SlabError):
     """A LAMMPS input script ran and failed, or was staged incorrectly.
 

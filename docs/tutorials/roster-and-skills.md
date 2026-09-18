@@ -395,7 +395,7 @@ max_reply_tokens = 32000
 A skill is a directory with a `SKILL.md` file, in the
 [Agent Skills format](https://agentskills.io/specification). Mason adds
 no dialect, so skills written for other tools load unmodified.
-Twenty-one skills ship built in:
+Twenty-two skills ship built in:
 
 ```bash
 slab mason skills
@@ -407,6 +407,7 @@ atomsk-interfaces          built-in  dft-expert md-expert         0 script(s)
 atomsk-structures          built-in  dft-expert md-expert         1 script(s)
 band-structure             built-in  dft-expert                   1 script(s)
 convergence-study          built-in  dft-expert                   1 script(s)
+density-of-states          built-in  dft-expert                   1 script(s)
 elastic-constants          built-in  analysis-expert dft-expert   1 script(s)
 equation-of-state          built-in  analysis-expert dft-expert   1 script(s)
 interface-adhesion         built-in  analysis-expert dft-expert   1 script(s)
@@ -432,8 +433,8 @@ potential training and fine-tuning with gracemaker, with the dataset
 rules for each (mlip-training), LAMMPS potential
 files, their pair styles, and the KOKKOS switches (lammps-potentials),
 LAMMPS input scripts run whole (lammps-scripting), the
-static side (equations of state, convergence, band structures, surfaces,
-elastic constants, interface adhesion), and the dynamic side (melt-quench
+static side (equations of state, convergence, band structures, densities
+of states, surfaces, elastic constants, interface adhesion), and the dynamic side (melt-quench
 glasses, thermal response, two-phase melting by either the NPH plateau
 or the interface-velocity ladder, NEMD transport, diffusion,
 nucleation), with the fits and unit conversions in tested scripts.
@@ -464,7 +465,8 @@ thermal-response           built-in  analysis-expert md-expert    1 script(s)
 two-phase-melting          built-in  md-expert                    2 script(s)
 ```
 
-The DFT specialist sees the static side, band structures included:
+The DFT specialist sees the static side, band structures and densities
+of states included:
 
 ```bash
 slab mason skills --agent dft-expert
@@ -476,6 +478,7 @@ atomsk-interfaces          built-in  dft-expert md-expert         0 script(s)
 atomsk-structures          built-in  dft-expert md-expert         1 script(s)
 band-structure             built-in  dft-expert                   1 script(s)
 convergence-study          built-in  dft-expert                   1 script(s)
+density-of-states          built-in  dft-expert                   1 script(s)
 elastic-constants          built-in  analysis-expert dft-expert   1 script(s)
 equation-of-state          built-in  analysis-expert dft-expert   1 script(s)
 interface-adhesion         built-in  analysis-expert dft-expert   1 script(s)

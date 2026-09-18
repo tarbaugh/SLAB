@@ -224,6 +224,7 @@ def test_builtin_cards_and_skills_ship_inside_the_package() -> None:
         "atomsk-structures",
         "band-structure",
         "convergence-study",
+        "density-of-states",
         "elastic-constants",
         "equation-of-state",
         "interface-adhesion",

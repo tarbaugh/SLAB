@@ -32,6 +32,14 @@ standardized primitive cell and the path from seekpath. Report the gap
 with its kind, the functional, the space group, and the path. A semilocal gap is a lower
 bound on the measured one, so say that in the report.
 
+A density of states comes from the density_of_states task, and the
+density-of-states skill says how. Give it a denser mesh than the SCF's
+and a broadening narrower than the gap you expect, and report both with
+every number. Read the metal-or-insulator verdict from `is_metal`, never
+from the broadened curve at the Fermi level. Both tasks give the weight
+of each element and angular momentum with `projected=True`, and those
+weights are not charges.
+
 Read a table's digest, not its rows. A thermo table, a fix ave/time file,
 or a column of energies is input for a script. Compute the statistic you
 need with a workflow task or a one-line shell script, and read the number
