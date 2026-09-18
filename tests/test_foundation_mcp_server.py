@@ -485,7 +485,9 @@ def test_hpc_tools_appear_only_with_partitions(root: Path, tmp_path: Path) -> No
 def test_tasks_are_listed_and_described(root: Path) -> None:
     server = build_server(root)
     names = {entry["name"] for entry in _call(server, "list_tasks")}
-    assert {"relax", "relax_cell", "single_point"} <= names
+    assert {"relax", "relax_cell", "single_point", "band_structure"} <= names
+    bands = _call(server, "describe_task", {"name": "band_structure"})
+    assert "npoints" in bands["signature"] and "gap verdict" in bands["doc"]
     described = _call(server, "describe_task", {"name": "relax"})
     assert described["name"] == "relax" and "engine" in described["signature"]
     assert described["doc"]

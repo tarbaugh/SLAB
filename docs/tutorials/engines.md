@@ -790,6 +790,81 @@ without re-invoking the MLIP or `pw.x`. Provenance links the chain by hash
 equality, because `single_point`'s `atoms` input hash is `relax`'s first
 output hash.
 
+## Band structure
+
+`band_structure` runs a Quantum ESPRESSO band structure as one traced
+task. It runs two `pw.x` executions in one scratch directory. The first
+is an SCF on the options' k-point mesh, and the second is
+`calculation='bands'` along a high-symmetry path, reading the SCF's
+charge density. The path comes from ASE's Bravais analysis of the cell,
+so pass the relaxed primitive cell:
+
+<!-- no-verify -->
+```python
+from ase.build import bulk
+from foundation import check, within_bounds
+from foundation.tasks import band_structure
+from slab.protocols import qe_protocol_options
+
+atoms = bulk("Si", "diamond", a=5.43)
+options = qe_protocol_options(atoms, protocol="balanced")
+bands, info = band_structure(atoms, calculator_options=options, npoints=60, label="si")
+print(f"gap {info['gap']} eV ({info['gap_kind']}), is_metal={info['is_metal']}")
+print(f"VBM {info['vbm']} eV at {info['vbm_at']['label']}, "
+      f"CBM {info['cbm']} eV at k={info['cbm_at']['k']} near {info['cbm_at']['label']}")
+print(f"path {info['path']} ({info['lattice']}), {info['npoints']} k-points, {info['n_bands']} bands")
+print("artifacts:", info["artifacts"])
+
+@check
+def si_has_a_semilocal_gap():
+    return within_bounds(info["gap"], lo=0.3, hi=0.8, label="gap (eV)")
+```
+
+Launched as a workflow with Quantum ESPRESSO 7.5 and the SSSP PBEsol
+efficiency family, the script printed these lines, and the run reached
+verified:
+
+<!-- no-verify -->
+```text
+gap 0.468 eV (indirect), is_metal=False
+VBM 6.1597 eV at G, CBM 6.6277 eV at k=[0.4375, 0.0, 0.4375] near X
+path GXWKGLUWLK,UX (FCC), 60 k-points, 8 bands
+artifacts: ['si-scf.pwo', 'si-bands.pwo', 'si-bands.json']
+verified 1/1 checks passed
+```
+
+The verdict reads band crossings against the SCF Fermi level. A band is
+valence when all its energies lie below the level, and conduction when
+all lie above it. A band that crosses the level makes the system a metal,
+and the gap fields are then None. With `occupations='fixed'` pw.x prints
+no Fermi energy, so the task counts the occupied bands. The PBEsol gap of Si is 0.468 eV here,
+and the measured gap is 1.17 eV, because a semilocal functional places
+the conduction bands too low. The conduction band minimum lies between
+two path points near X, so `cbm_at` gives the nearest special point with
+its distance.
+
+The task follows `single_point`'s contracts:
+
+- The caller's `calculator_options` are a traced input, and the task
+  never changes them. It refuses a `calculation` other than `scf`, and it
+  refuses `nspin=2`, `noncolin`, and `lspinorb`, because the verdict reads
+  one spin channel.
+- The run keeps `{label}-scf.pwo` and `{label}-bands.pwo` as
+  intermediates and `{label}-bands.json` as the result file. The json
+  holds every eigenvalue in eV, the path, and the x axis of the diagram.
+  `read_file` and `read_artifact` digest a bands output without its
+  eigenvalue rows and point at the json.
+- A failed step keeps its files as `{label}-scf-failed.*` or
+  `{label}-bands-failed.*`, and a note on the exception names the step.
+- The bands step sets `verbosity='high'`, because `pw.x` prints the bands
+  of more than 100 k-points only then. It sets `nbnd` to the occupied
+  bands plus 20 percent, at least 4 more, unless `nbands=` says otherwise.
+- A repeat call with the same inputs is a cache hit, and the gpu build is
+  chosen by the slice as for any `qe` calculation.
+
+The band-structure skill gives the procedure and the reporting rules, and
+its `bands_table.py` writes the json as a table or a plot.
+
 ## Builders: atomsk
 
 Some external codes produce inputs for calculations, not energies. SLAB

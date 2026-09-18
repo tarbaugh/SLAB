@@ -80,6 +80,33 @@ def test_pwscf_digest_summarises_a_relaxation_by_cycle() -> None:
     assert "bfgs converged in 3 scf cycles and 2 bfgs steps" in shown
 
 
+def test_pwscf_digest_reads_a_bands_run_without_its_rows() -> None:
+    text = (DATA / "qe-si-bands-bands.pwo").read_text()
+    out = digest("si-bands.pwo", text)
+    assert out is not None
+    lines = out.splitlines()
+    assert lines[0].startswith("pw.x output digest: si-bands.pwo (1295 lines, PWSCF v.7.5, ")
+    assert (
+        "bands: 60 k-points, 8 bands, eigenvalues -5.8319 to 16.2188 eV; the numbers "
+        "are in si-bands.json (band_structure's result file)"
+    ) in lines
+    assert not any(line.startswith(("scf:", "forces:", "fermi energy:")) for line in lines)
+    # No eigenvalue row reaches the reader: the first k-point's energies
+    # appear in the file and nowhere in the digest.
+    assert "6.1597   6.1597" in text and "6.1597" not in out
+    assert len(lines) < 10
+    other = digest("espresso.pwo", text)
+    assert other is not None and "the numbers are in the run's -bands.json" in other
+
+
+def test_pwscf_digest_of_the_bands_scf_is_an_ordinary_scf() -> None:
+    out = digest("si-scf.pwo", (DATA / "qe-si-bands-scf.pwo").read_text())
+    assert out is not None
+    assert "scf: 1 cycle (single point)" in out
+    assert "fermi energy: 6.1880 eV" in out
+    assert "bands:" not in out
+
+
 def test_lammps_log_digest_reads_the_ase_driven_capture() -> None:
     text = (DATA / "lammps-cu-relax-final.log").read_text()
     shown = lammps_log_digest("lammps-cu-relax-final.log", text)

@@ -5,6 +5,31 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- A Quantum ESPRESSO band structure is one traced task.
+  `band_structure(atoms, calculator_options=..., path=, npoints=,
+  density=, nbands=, label=)` in `foundation.tasks` runs an SCF and then
+  `calculation='bands'` in one scratch directory, with the same prefix
+  and outdir so the second step reads the first's charge density. It
+  returns the bands and a gap verdict: `is_metal`, `gap`, `direct_gap`,
+  `gap_kind`, the band edges, and where on the path they sit. The verdict
+  reads band crossings against the SCF Fermi level, so smearing on an
+  insulator does not change it. Under fixed occupations it counts the
+  occupied bands. The task keeps `{label}-scf.pwo`,
+  `{label}-bands.pwo`, and the result file `{label}-bands.json`. A failed
+  step keeps its files as `{label}-scf-failed.*` or
+  `{label}-bands-failed.*`, and a note names the step. It follows
+  `single_point`'s contracts for k-points, the scf pin, the cache, and the
+  gpu build, and it refuses a non-QE engine, `nspin=2`, `noncolin`,
+  `lspinorb`, and an `nbands` below the occupied bands. The new
+  `slab.bands` module holds the path, the reader, the verdict, and the x
+  axis as pure functions, and `slab.backends.engine_scratch` gives a task
+  a marked scratch directory for several engine calls. `read_file` and
+  `read_artifact` digest a bands output by its k-point and band counts
+  and its energy range, without the eigenvalue rows. The new
+  band-structure skill (dft-expert) gives the procedure and the reporting
+  rules, and its `bands_table.py` prints the verdict, writes a table, and
+  plots when matplotlib is installed. The test fixtures are real pw.x 7.5
+  runs on Si and Al.
 - A Materials Project snapshot may carry a second id column,
   `material_id_numeric`. When it does, `get_material`, `fetch_structure`,
   and `slab mp show` accept either id and resolve it to the canonical

@@ -394,8 +394,8 @@ max_reply_tokens = 32000
 
 A skill is a directory with a `SKILL.md` file, in the
 [Agent Skills format](https://agentskills.io/specification). Mason adds
-no dialect, so skills written for other tools load unmodified. Nineteen
-skills ship built in:
+no dialect, so skills written for other tools load unmodified.
+Twenty-one skills ship built in:
 
 ```bash
 slab mason skills
@@ -405,6 +405,7 @@ slab mason skills
 atomsk-defects             built-in  dft-expert md-expert         0 script(s)
 atomsk-interfaces          built-in  dft-expert md-expert         0 script(s)
 atomsk-structures          built-in  dft-expert md-expert         1 script(s)
+band-structure             built-in  dft-expert                   1 script(s)
 convergence-study          built-in  dft-expert                   1 script(s)
 elastic-constants          built-in  analysis-expert dft-expert   1 script(s)
 equation-of-state          built-in  analysis-expert dft-expert   1 script(s)
@@ -431,8 +432,8 @@ potential training and fine-tuning with gracemaker, with the dataset
 rules for each (mlip-training), LAMMPS potential
 files, their pair styles, and the KOKKOS switches (lammps-potentials),
 LAMMPS input scripts run whole (lammps-scripting), the
-static side (equations of state, convergence, surfaces, elastic
-constants, interface adhesion), and the dynamic side (melt-quench
+static side (equations of state, convergence, band structures, surfaces,
+elastic constants, interface adhesion), and the dynamic side (melt-quench
 glasses, thermal response, two-phase melting by either the NPH plateau
 or the interface-velocity ladder, NEMD transport, diffusion,
 nucleation), with the fits and unit conversions in tested scripts.
@@ -461,6 +462,26 @@ nucleation-cnt             built-in  analysis-expert md-expert    1 script(s)
 radial-distribution        built-in  analysis-expert md-expert    1 script(s)
 thermal-response           built-in  analysis-expert md-expert    1 script(s)
 two-phase-melting          built-in  md-expert                    2 script(s)
+```
+
+The DFT specialist sees the static side, band structures included:
+
+```bash
+slab mason skills --agent dft-expert
+```
+
+```text
+atomsk-defects             built-in  dft-expert md-expert         0 script(s)
+atomsk-interfaces          built-in  dft-expert md-expert         0 script(s)
+atomsk-structures          built-in  dft-expert md-expert         1 script(s)
+band-structure             built-in  dft-expert                   1 script(s)
+convergence-study          built-in  dft-expert                   1 script(s)
+elastic-constants          built-in  analysis-expert dft-expert   1 script(s)
+equation-of-state          built-in  analysis-expert dft-expert   1 script(s)
+interface-adhesion         built-in  analysis-expert dft-expert   1 script(s)
+mlip-training              built-in  dft-expert md-expert         0 script(s)
+mp-screening               built-in  dft-expert md-expert         0 script(s)
+surface-energy             built-in  dft-expert                   0 script(s)
 ```
 
 Skills load progressively. The system prompt carries one line per
