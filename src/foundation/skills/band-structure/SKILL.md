@@ -147,6 +147,16 @@ above:
 0.000000 -11.9916 0.0000 0.0000 0.0000 2.5225 2.5225 2.5225 3.3149
 ```
 
+`--png` draws an energy window and not every band, because semicore
+states and empty bands far from the gap flatten the part that matters.
+The default window runs from 8 eV below the reference to 8 eV above the
+conduction band minimum, or above the Fermi level for a metal. The report
+gives the window in `png_window_ev` and counts the bands outside it in
+`bands_outside_window`. Set your own window with `--window LO HI`, in eV
+relative to the reference, when the question needs it. A d-band study
+wants the d bands in view, and a gap figure wants about 4 eV each side.
+`--all-bands` draws every band. `--dat` always holds every band.
+
 ## 5. Report it honestly
 
 - Report the gap with its kind, the functional, the pseudopotential

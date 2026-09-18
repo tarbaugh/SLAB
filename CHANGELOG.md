@@ -5,6 +5,11 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 
 ## Unreleased
 
+- `bands_table.py --png` draws an energy window about the gap and not
+  every band. The default runs from 8 eV below the reference to 8 eV
+  above the conduction band minimum. `--window LO HI` sets it,
+  `--all-bands` draws every band, and the report names the window and
+  the bands outside it.
 - A Python bug in a script the agent wrote goes to the coding helper, and
   it never ends the session. The new `script-bug-handoff` mechanism
   classifies every run of such a script: a launch, a dry run, a
