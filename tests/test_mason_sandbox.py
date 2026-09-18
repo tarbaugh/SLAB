@@ -2130,3 +2130,20 @@ def test_the_qe_gpu_build_is_snapshotted_and_frozen(
     text, warnings = sandbox_toml(cfg, _agent(), tmp_path / "ws", {"qe.gpu": bad})
     assert "module load qe/7.4-gpu" in text
     assert any(w.startswith("[engines.qe.gpu] has setup lines") for w in warnings)
+
+    # The bin form resolves pw.x by its absolute path, probes mpirun, and
+    # binds the whole gpu install, as [engines.qe] bin does.
+    calls.clear()
+    cfg = _slab_cfg(
+        engines={
+            "qe": {
+                "bin": "/apps/qe-7.4/bin",
+                "gpu": {"bin": "/apps/qe-7.4-gpu/bin", "setup": ["module load cuda"]},
+            }
+        }
+    )
+    assert set(snapshot_engines(cfg)) == {"qe.gpu"}
+    assert calls == [("qe", ("module load cuda",), "/apps/qe-7.4-gpu/bin/pw.x", ("mpirun",))]
+    binds, _ = sandbox.default_binds(tmp_path / "p", tmp_path / "ws", cfg)
+    assert "/apps/qe-7.4-gpu:/apps/qe-7.4-gpu:ro" in binds
+    assert "/apps/qe-7.4:/apps/qe-7.4:ro" in binds

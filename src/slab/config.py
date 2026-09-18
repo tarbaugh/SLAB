@@ -127,17 +127,20 @@ ExpandedPath = Annotated[str, AfterValidator(_expand_path)]
 
 
 class QeBuild(BaseModel):
-    """The GPU build of Quantum ESPRESSO (``[engines.qe.gpu]``): its command and setup.
+    """The GPU build of Quantum ESPRESSO (``[engines.qe.gpu]``).
 
-    pw.x has no switch that asks for a GPU. A GPU-enabled build takes the
-    devices it can see, one per MPI rank. So this table is a second
-    install, a command such as ``mpirun -np {ntasks} pw.x`` and the setup
-    lines that load the GPU module.
+    The same keys as ``[engines.qe]`` name the code: ``bin`` (the install's
+    ``bin`` directory, from which the command ``mpirun -np {ntasks}
+    <bin>/pw.x`` is constructed) or ``command`` (the full invocation), and
+    the two are exclusive. ``setup`` holds the lines that load the GPU
+    module. pw.x has no switch that asks for a GPU. A GPU-enabled build
+    takes the devices it can see, one per MPI rank, so this table is a
+    second install.
 
     Examples:
-        >>> QeBuild.model_validate({"command": "mpirun -np {ntasks} pw.x"}).setup
+        >>> QeBuild.model_validate({"bin": "/opt/qe-gpu/bin"}).setup
         ()
-        >>> QeBuild.model_validate({"command": " "})
+        >>> QeBuild.model_validate({"command": "pw.x", "bin": "/opt/qe-gpu/bin"})
         Traceback (most recent call last):
         ...
         pydantic_core._pydantic_core.ValidationError: ...
@@ -145,15 +148,23 @@ class QeBuild(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    command: str
+    command: str | None = None
+    bin: ExpandedPath | None = None
     setup: tuple[str, ...] = ()
 
-    @field_validator("command")
-    @classmethod
-    def _names_a_program(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("[engines.qe.gpu] command is empty; name the GPU build's pw.x")
-        return value
+    @model_validator(mode="after")
+    def _one_way_to_name_the_code(self) -> QeBuild:
+        if self.command is not None and self.bin is not None:
+            raise ValueError(
+                "[engines.qe.gpu] sets both command and bin; pick one — command is "
+                "the full invocation, bin constructs it (mpirun -np N bin/pw.x)"
+            )
+        if self.bin is None and (self.command is None or not self.command.strip()):
+            raise ValueError(
+                "[engines.qe.gpu] names no pw.x; set bin to the GPU install's bin "
+                "directory, or command to the full invocation"
+            )
+        return self
 
 
 class QeEngineConfig(BaseModel):
@@ -959,8 +970,8 @@ schema_version = 1
 #                                      # the launch with gpus= and never names a
 #                                      # build. pw.x has no GPU switch: this is a
 #                                      # GPU-enabled install, one MPI rank per GPU
-# command = "mpirun -np {ntasks} pw.x" # {ntasks}, {threads}, {gpus} are filled
-#                                      # from the launch's reservation
+# bin = "/shared/sw/qe-7.4-gpu/bin"    # the GPU install, as [engines.qe] bin;
+#                                      # or command = "...", never both
 # setup = ["module purge", "module load qe/7.4-gpu"]
 
 [engines.lammps]

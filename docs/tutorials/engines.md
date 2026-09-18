@@ -160,25 +160,27 @@ launcher) still belongs in the registry below, under a distinct alias like
 A machine with a GPU-enabled `pw.x` declares it as a second build, the
 same way as [the LAMMPS gpu build](#lammps). `[engines.qe]` stays the
 plain build, and `[engines.qe.gpu]` names the GPU install and the module
-it needs:
+it needs. It takes the same keys as `[engines.qe]`:
 
 ```toml
 [engines.qe]
 bin = "/shared/sw/qe-7.4/bin"
 
 [engines.qe.gpu]
-command = "mpirun -np {ntasks} pw.x"
-setup = ["module purge", "module load qe/7.4-gpu"]
+bin = "/shared/sw/qe-7.4-gpu/bin"
+setup = ["module purge", "module load cuda"]
 ```
 
 | Table | Key | Meaning |
 |---|---|---|
-| `[engines.qe.gpu]` | `command` | The gpu build. It runs when a launch holds gpus. |
+| `[engines.qe.gpu]` | `bin` | The GPU install's bin directory. SLAB constructs `mpirun -np {ntasks} <bin>/pw.x`, as for `[engines.qe] bin`. |
+| `[engines.qe.gpu]` | `command` | The full invocation, in place of `bin`. Set one of the two, not both. |
 | `[engines.qe.gpu]` | `setup` | The lines the gpu build's subprocess runs first. |
 
 The build follows the slice. A launch whose reservation holds gpus runs
 the gpu build, and a launch without runs the plain build. The agent
-passes `engine="qe"` and never names a build. A per-call `command` in
+passes `engine="qe"` and never names a build. `slab mason sandbox render`
+binds the gpu install read-only, as it does the plain one. A per-call `command` in
 `calculator_options` still wins, and it runs under the chosen build's
 setup lines.
 

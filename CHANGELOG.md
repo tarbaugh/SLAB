@@ -6,9 +6,11 @@ All notable changes to SLAB, newest first. Dates are commit dates on
 ## Unreleased
 
 - Quantum ESPRESSO gains a gpu build, as LAMMPS has. `[engines.qe.gpu]`
-  takes a `command` and `setup` lines for a GPU-enabled `pw.x`, and a
-  launch whose reservation holds gpus runs it. An unsized launch runs the
-  plain build from `[engines.qe]`. The gpu build refuses more MPI ranks
+  names a GPU-enabled `pw.x` with the same keys as `[engines.qe]`: `bin`
+  (SLAB constructs `mpirun -np {ntasks} <bin>/pw.x`) or `command`, never
+  both, plus `setup` lines. A launch whose reservation holds gpus runs
+  it, and an unsized launch runs the plain build from `[engines.qe]`. The
+  sandbox render binds a gpu `bin` install read-only. The gpu build refuses more MPI ranks
   than gpus before `pw.x` starts, and its cache identity carries
   `build: gpu`. `list_engines` (Mason and MCP) lists a `qe` entry with
   both builds, `slab engines list` and `slab engines show qe` print them,

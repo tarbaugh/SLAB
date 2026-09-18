@@ -2331,11 +2331,29 @@ def _qe_gpu_build() -> tuple[str, tuple[str, ...]] | None:
     """
     from slab.config import config_value
 
-    command = config_value("engines.qe.gpu.command")
+    command = _qe_gpu_command()
     if command is None or not envelope().gpus:
         return None
     setup = config_value("engines.qe.gpu.setup") or ()
-    return str(command), tuple(str(line) for line in setup)
+    return command, tuple(str(line) for line in setup)
+
+
+def _qe_gpu_command() -> str | None:
+    """``[engines.qe.gpu]``'s command as written, constructed when it names ``bin``.
+
+    The same two forms as the plain build (:func:`_qe_config_command`):
+    ``command`` verbatim, or ``mpirun -np {ntasks} <bin>/pw.x``. None when
+    the table is not declared.
+    """
+    from slab.config import config_value
+
+    command = config_value("engines.qe.gpu.command")
+    if command is not None:
+        return str(command)
+    bin_dir = config_value("engines.qe.gpu.bin")
+    if bin_dir is not None:
+        return _qe_bin_command(str(bin_dir))
+    return None
 
 
 def _qe_gpu_chosen(options: dict[str, Any]) -> bool:
@@ -2372,7 +2390,8 @@ def qe_builds() -> dict[str, dict[str, Any]]:
 
     ``cpu`` is the plain build from ``[engines.qe]`` (``command``, or the
     one ``bin`` constructs, else ASE's ``[espresso]`` section, else
-    ``pw.x``). ``gpu`` follows when ``[engines.qe.gpu]`` is declared; a
+    ``pw.x``). ``gpu`` follows when ``[engines.qe.gpu]`` is declared, by
+    its ``command`` or the one its ``bin`` constructs; a
     launch that holds gpus runs it. No binary is probed.
 
     Examples:
@@ -2382,7 +2401,7 @@ def qe_builds() -> dict[str, dict[str, Any]]:
     from slab.config import config_value
     from slab.resources import placeholders
 
-    gpu_command = config_value("engines.qe.gpu.command")
+    gpu_command = _qe_gpu_command()
     entries: list[tuple[str, str, list[str]]] = []
     explicit = config_value("engines.qe.command")
     bin_dir = config_value("engines.qe.bin")
@@ -2393,7 +2412,7 @@ def qe_builds() -> dict[str, dict[str, Any]]:
     entries.append(("cpu", plain, list(_engine_setup(None, "qe"))))
     if gpu_command is not None:
         gpu_setup = [str(line) for line in (config_value("engines.qe.gpu.setup") or ())]
-        entries.append(("gpu", str(gpu_command), gpu_setup))
+        entries.append(("gpu", gpu_command, gpu_setup))
     return {
         name: {
             "source": "builtin",
