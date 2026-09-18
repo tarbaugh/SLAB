@@ -142,7 +142,7 @@ def write_png(data: dict[str, Any], out: Path, group: str | None = None) -> None
     ax.set_xlim(x[0], x[-1])
     ax.set_ylabel(f"E - E({'VBM' if name.startswith('the valence') else 'Fermi'}) (eV)")
     title = f"{data['lattice']} {data['path']}"
-    ax.set_title(title if group is None else f"{title} — {group}")
+    ax.set_title(title if group is None else f"{title}, {group}")
     fig.tight_layout()
     fig.savefig(out, dpi=150)
     plt.close(fig)
